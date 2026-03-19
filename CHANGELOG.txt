@@ -1,0 +1,66 @@
+welcome to changelog :D
+
+[Version 1.2.0] - 2026-03-21
+
+=== Added ===
+
+Separate volume controls for microphone and system audio
+
+PC Analytics panel showing CPU, RAM, and disk usage (requires psutil)
+
+Multi-language support (English and Russian)
+
+"Always on top" toggle function
+
+Fullscreen mode with F11 keyboard shortcut
+
+Monitor selection dropdown in advanced settings
+
+Custom output folder browser
+
+Custom message window with "Don't show again" option
+
+Hotkey support (F9 - Start/Stop, F10 - Pause/Resume, F11 - Fullscreen)
+
+=== Changed ===
+Complete UI redesign with Catppuccin-inspired color scheme
+
+Improved FFmpeg integration for better video encoding
+
+Settings dialog now uses tabbed interface (Video/Advanced)
+
+Enhanced recording stream synchronization for more stable FPS
+
+Optimized preview system for better performance
+
+Rewritten audio recording system for improved synchronization
+
+Detailed recording statistics now displayed in bottom status bar
+
+Updated file naming convention with timestamp format
+
+=== Fixed ===
+Audio desynchronization during long recordings
+
+Frame dropping issues during high-motion scenes
+
+Settings not saving after application restart
+
+Application crash when no microphone is present
+
+Memory leaks in recording stream
+
+Pause function now correctly stops frame capture
+
+Thread safety issues with shared resources
+
+=== Performance ===
+Optimized frame capture rate reducing CPU load by ~30%
+
+Improved FPS stability across all performance modes
+
+Preview updates throttled during recording to save resources
+
+Recording stream now uses precise timing calculations
+
+Reduced disk I/O through optimized frame compression
