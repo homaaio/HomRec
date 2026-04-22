@@ -19,6 +19,24 @@ import subprocess
 import shutil
 import platform
 
+import logging
+
+# ==================== LOGGING SETUP ====================
+def setup_logging() -> None:
+    log_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(log_dir, "homrec.log")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ]
+    )
+
+setup_logging()
+log = logging.getLogger("homrec")
+
 # For PC Analytics
 try:
     import psutil
@@ -29,7 +47,7 @@ except ImportError:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec (v1.2.0)",
+        "app_title": "HomRec (v1.3.0)",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -114,7 +132,7 @@ LANGUAGES = {
         "audio_file": "🎵 Audio file:",
     },
     "ru": {
-        "app_title": "HomRec (v1.2.0)",
+        "app_title": "HomRec (v1.3.0)",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -203,18 +221,36 @@ LANGUAGES = {
 # ==================== HELPER FUNCTIONS ====================
 
 def find_ffmpeg() -> str | None:
-    """Find FFmpeg in system or in program directory"""
-    if os.path.exists("ffmpeg.exe"):
-        return os.path.abspath("ffmpeg.exe")
-    if os.path.exists("ffmpeg"):
-        return os.path.abspath("ffmpeg")
+    """Find FFmpeg in system or in program directory.
+
+    When running as a PyInstaller .exe:
+      - __file__ points to the temp _MEIXXXXXX unpack folder, NOT the .exe folder
+      - os.getcwd() is wherever the user launched from, NOT the .exe folder
+      - sys.executable is always the actual .exe path, so its directory IS the
+        folder the user placed ffmpeg.exe next to the app.
+    """
+    # 1. Folder containing the running .exe (or .py script)
+    if getattr(sys, 'frozen', False):
+        # PyInstaller sets sys.frozen=True and sys.executable = path to .exe
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+
+    for name in ('ffmpeg.exe', 'ffmpeg'):
+        candidate = os.path.join(app_dir, name)
+        if os.path.exists(candidate):
+            return candidate
+
+    # 2. Same directory as cwd (fallback, works when running .py directly)
+    for name in ('ffmpeg.exe', 'ffmpeg'):
+        if os.path.exists(name):
+            return os.path.abspath(name)
+
+    # 3. System PATH
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:
         return ffmpeg_path
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    ffmpeg_in_script_dir = os.path.join(script_dir, "ffmpeg.exe")
-    if os.path.exists(ffmpeg_in_script_dir):
-        return ffmpeg_in_script_dir
+
     return None
 
 def optimize_for_performance() -> None:
@@ -729,9 +765,9 @@ class HomRecScreen:
         
         self.ffmpeg_path = find_ffmpeg()
         if self.ffmpeg_path:
-            print(f"[HomRec] FFmpeg found: {self.ffmpeg_path}")
+            log.info(f"FFmpeg found: {self.ffmpeg_path}")
         else:
-            print("[HomRec] FFmpeg NOT found!")
+            log.warning("FFmpeg NOT found!")
         
         self.create_menu()
         self.create_widgets()
@@ -743,7 +779,7 @@ class HomRecScreen:
         self.root.bind('<F11>', lambda e: self.toggle_fullscreen())
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        print(f"[HomRec v1.2.0] Started with language: {self.current_language}")
+        log.info("HomRec v1.3.0 started, language: %s", self.current_language)
     
     def update_ui_language(self) -> None:
         self.root.title(self.lang["app_title"])
@@ -765,6 +801,7 @@ class HomRecScreen:
                 '-i', audio_file,
                 '-c:v', 'copy',
                 '-c:a', 'aac',
+                '-af', 'aresample=async=1000',
                 '-map', '0:v:0',
                 '-map', '1:a:0',
                 '-shortest',
@@ -795,7 +832,7 @@ class HomRecScreen:
             icon_photo = ImageTk.PhotoImage(icon_image)
             self.root.iconphoto(True, icon_photo)
             if sys.platform == "win32":
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.2.0")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.3.0")
         except:
             pass
     
@@ -1057,8 +1094,7 @@ class HomRecScreen:
                 self.record_width -= 1
             if self.record_height % 2 != 0:
                 self.record_height -= 1
-                
-            print(f"[HomRec] Monitor {self.monitor_id}: {self.original_width}x{self.original_height} at ({self.monitor_left}, {self.monitor_top})")
+            log.debug(f"Monitor {self.monitor_id}: {self.original_width}x{self.original_height} at ({self.monitor_left}, {self.monitor_top}), record: {self.record_width}x{self.record_height}")
     
     def create_widgets(self) -> None:
         main_container = tk.Frame(self.root, bg=self.colors["bg"])
@@ -1074,7 +1110,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.2.0", 
+        tk.Label(title_frame, text="v1.3.0", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
@@ -1217,11 +1253,15 @@ class HomRecScreen:
     
     def start_audio_recording(self) -> None:
         try:
-            self.audio_p = pyaudio.PyAudio()
+            if self.audio_thread and self.audio_thread.is_alive():
+                self.audio_recording = False
+                self.audio_thread.join(timeout=2)
+            self.audio_thread = None
             self.audio_frames = []
-            
+
             self.audio_channels = self.get_audio_channels()
-            
+
+            self.audio_p = pyaudio.PyAudio()
             self.audio_stream = self.audio_p.open(
                 format=pyaudio.paInt16,
                 channels=self.audio_channels,
@@ -1233,26 +1273,33 @@ class HomRecScreen:
             self.audio_recording = True
             
             def record_audio() -> None:
+                silence = b'\x00' * 1024 * 2 * self.audio_channels  # 1024 samples of silence
                 while self.audio_recording and not self.stop_flag:
-                    if not self.paused and not self.audio_panel.mic_mute.get():
-                        try:
-                            data = self.audio_stream.read(1024, exception_on_overflow=False)
-                            self.audio_frames.append(data)
-                            
-                            rms = audioop.rms(data, 2)
-                            level = min(100, int(rms / 300))
-                            self.audio_panel.update_mic_level(level)
-                        except:
-                            pass
+                    if not self.paused:
+                        if not self.audio_panel.mic_mute.get():
+                            try:
+                                data = self.audio_stream.read(1024, exception_on_overflow=False)
+                                self.audio_frames.append(data)
+                                rms = audioop.rms(data, 2)
+                                level = min(100, int(rms / 300))
+                                self.audio_panel.update_mic_level(level)
+                            except:
+                                pass
+                        else:
+                            try:
+                                self.audio_stream.read(1024, exception_on_overflow=False)
+                            except:
+                                pass
+                            self.audio_frames.append(silence)
                     else:
-                        time.sleep(0.01)
-            
+                        self.audio_frames.append(silence)
+                        time.sleep(1024 / 44100)            
             self.audio_thread = threading.Thread(target=record_audio, daemon=True)
             self.audio_thread.start()
-            print(f"[HomRec] Audio recording started ({self.audio_channels} channel(s))")
+            log.info(f"Audio recording started ({self.audio_channels} channel(s))")
             
         except Exception as e:
-            print(f"[HomRec] Audio error: {e}")
+            log.error(f"Audio error: {e}")
             self.audio_recording = False
     
     def stop_audio_recording(self) -> str | None:
@@ -1260,6 +1307,7 @@ class HomRecScreen:
         
         if self.audio_thread and self.audio_thread.is_alive():
             self.audio_thread.join(timeout=2)
+        self.audio_thread = None
         
         if self.audio_stream:
             try:
@@ -1267,22 +1315,27 @@ class HomRecScreen:
                 self.audio_stream.close()
             except:
                 pass
+        self.audio_stream = None
         
         if self.audio_p:
             try:
                 self.audio_p.terminate()
             except:
                 pass
+        self.audio_p = None
         
-        if self.audio_frames and not self.audio_panel.mic_mute.get():
+        frames = self.audio_frames
+        self.audio_frames = []
+        
+        if frames and not self.audio_panel.mic_mute.get():
             audio_filename = self.filename.replace('.mp4', '_audio.wav')
             wf = wave.open(audio_filename, 'wb')
             wf.setnchannels(self.audio_channels)
             wf.setsampwidth(2)
             wf.setframerate(44100)
-            wf.writeframes(b''.join(self.audio_frames))
+            wf.writeframes(b''.join(frames))
             wf.close()
-            print(f"[HomRec] Audio saved: {audio_filename}")
+            log.info(f"Audio saved: {audio_filename}")
             return audio_filename
         return None
     
@@ -1333,7 +1386,8 @@ class HomRecScreen:
         try:
             screenshot = self.sct.grab(self.monitor)
             img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-            img.thumbnail((self.preview_width, self.preview_height), Image.Resampling.LANCZOS)
+            resample = Image.Resampling.NEAREST if self.recording else Image.Resampling.BILINEAR
+            img.thumbnail((self.preview_width, self.preview_height), resample)
             if self.recording and not self.paused:
                 draw = ImageDraw.Draw(img)
                 draw.ellipse([10, 10, 35, 35], fill=self.colors["error"])
@@ -1342,7 +1396,7 @@ class HomRecScreen:
             self.preview_label.image = photo
         except:
             pass
-        delay = 200 if self.recording else 100
+        delay = 333 if self.recording else 100
         self.root.after(delay, self.update_preview)
     
     def toggle_recording(self) -> None:
@@ -1356,32 +1410,37 @@ class HomRecScreen:
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.filename = f"{self.output_folder}/HomRec_{timestamp}.mp4"
-            
-            print(f"\n[HomRec] ========== STARTING RECORDING ==========")
-            print(f"[HomRec] Audio enabled: {self.audio_panel.audio_enabled.get()}")
-            print(f"[HomRec] FFmpeg available: {self.check_ffmpeg()}")
-            print(f"[HomRec] Recording monitor: {self.monitor_id} at position ({self.monitor_left}, {self.monitor_top})")
-            
+            log.info("========== STARTING RECORDING ==========")
+            log.info(f"File: {self.filename}")
+            log.info(f"Audio enabled: {self.audio_panel.audio_enabled.get()}, FFmpeg: {self.check_ffmpeg()}")
+            log.info(f"Monitor {self.monitor_id} at ({self.monitor_left}, {self.monitor_top})")
             if not self.ffmpeg_path:
                 raise Exception("FFmpeg not found!")
+            
+            self.stop_flag = False
+            self.paused = False
+            self.frame_count = 0
+            if hasattr(self, 'ffmpeg_reader_thread') and self.ffmpeg_reader_thread and self.ffmpeg_reader_thread.is_alive():
+                self.ffmpeg_reader_thread.join(timeout=2)
             
             width, height = self.record_width, self.record_height
             fps = self.target_fps
             
-            # IMPORTANT: Use actual monitor offsets from mss
             offset_x = self.monitor_left
             offset_y = self.monitor_top
             
+            vf_filter = f'scale={width}:{height}' if (width != self.original_width or height != self.original_height) else 'null'
             cmd = [
                 self.ffmpeg_path,
                 '-y',
                 '-f', 'gdigrab',
-                '-framerate', '60',
-                '-offset_x', str(offset_x),  # Use actual monitor X offset
-                '-offset_y', str(offset_y),  # Use actual monitor Y offset
+                '-framerate', str(fps),
+                '-offset_x', str(offset_x),
+                '-offset_y', str(offset_y),
                 '-video_size', f'{self.original_width}x{self.original_height}',
                 '-i', 'desktop',
-                '-vf', f'scale={width}:{height},fps={fps}',
+                '-vf', vf_filter,
+                '-r', str(fps),
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
                 '-tune', 'zerolatency',
@@ -1391,9 +1450,7 @@ class HomRecScreen:
                 '-an',
                 self.filename
             ]
-            
-            print(f"[HomRec] FFmpeg command: {' '.join(cmd)}")
-            
+            log.debug(f"FFmpeg command: {chr(32).join(cmd)}")
             self.ffmpeg_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -1410,10 +1467,7 @@ class HomRecScreen:
                 self.start_audio_recording()
             
             self.recording = True
-            self.paused = False
-            self.frame_count = 0
             self.start_time = time.time()
-            self.stop_flag = False
             
             self.record_btn.config(text=self.lang["recording_btn"], bg=self.colors["error"])
             self.pause_btn.config(state="normal")
@@ -1425,8 +1479,7 @@ class HomRecScreen:
             
         except Exception as e:
             messagebox.showerror(self.lang["error"], f"Failed to start recording:\n{str(e)}")
-            import traceback
-            traceback.print_exc()
+            log.exception("Failed to start recording")
     
     def _ffmpeg_reader(self) -> None:
         """Read ffmpeg stderr to get frame count"""
@@ -1450,7 +1503,7 @@ class HomRecScreen:
                         pass
             except:
                 break
-        print("[HomRec] FFmpeg reader stopped")
+        log.debug("FFmpeg reader stopped")
     
     def _update_stats(self) -> None:
         if self.recording:
@@ -1475,8 +1528,7 @@ class HomRecScreen:
     
     def stop_recording(self) -> None:
         """Stop recording"""
-        print("[HomRec] Stopping recording...")
-        
+        log.info("Stopping recording...")
         self.recording = False
         self.stop_flag = True
         
