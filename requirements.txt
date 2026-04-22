@@ -1,0 +1,6 @@
+opencv-python
+numpy
+Pillow
+mss
+pyaudio
+psutil
