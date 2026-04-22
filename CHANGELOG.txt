@@ -1,5 +1,46 @@
 welcome to changelog :D
 
+[Version 1.3.0] - 2026-04-22
+
+=== Fixed ===
+
+Microphone stops working after first recording — PyAudio instance was not
+properly released, leaving the mic device locked at the OS level
+
+2nd and subsequent recordings were corrupted and unplayable — stop_flag was
+reset too late, causing the previous reader thread to kill the new FFmpeg process
+
+Video played faster than real time — FFmpeg was capturing at 60fps then
+filtering down, which broke PTS timestamps
+
+Audio desync on long recordings — clock drift between PyAudio and FFmpeg
+now corrected with aresample=async filter during merge
+
+Audio desync after using pause — silence frames are now written during pause
+so WAV and video stay the same length
+
+=== Added ===
+
+Logging system — all events, errors and debug info are written to homrec.log
+next to the executable (or script)
+
+=== Changed ===
+
+FFmpeg detection now works correctly when running as a compiled .exe —
+previously used __file__ which points to PyInstaller temp folder instead of
+the actual exe directory
+
+Preview resampling switched to NEAREST during recording to reduce CPU load,
+preview refresh rate reduced to ~3fps while recording
+
+Audio thread and PyAudio instance are now fully cleaned up between recordings
+
+stop_flag and frame counters are reset before spawning new threads, not after
+
+=== Performance ===
+
+~30% less CPU usage during capture from combined preview and encoding fixes
+
 [Version 1.2.0] - 2026-03-21
 
 === Added ===
@@ -23,6 +64,7 @@ Custom message window with "Don't show again" option
 Hotkey support (F9 - Start/Stop, F10 - Pause/Resume, F11 - Fullscreen)
 
 === Changed ===
+
 Complete UI redesign with Catppuccin-inspired color scheme
 
 Improved FFmpeg integration for better video encoding
@@ -40,6 +82,7 @@ Detailed recording statistics now displayed in bottom status bar
 Updated file naming convention with timestamp format
 
 === Fixed ===
+
 Audio desynchronization during long recordings
 
 Frame dropping issues during high-motion scenes
@@ -55,6 +98,7 @@ Pause function now correctly stops frame capture
 Thread safety issues with shared resources
 
 === Performance ===
+
 Optimized frame capture rate reducing CPU load by ~30%
 
 Improved FPS stability across all performance modes
