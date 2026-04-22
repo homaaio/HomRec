@@ -132,45 +132,6 @@ homrec/
 
 ---
 
-## 📋 Changelog
-
-<details>
-<summary><b>v1.2.0</b> — 2026-03-21</summary>
-
-**Added**
-- Separate volume controls for microphone and system audio
-- PC Analytics panel (CPU, RAM, disk) — requires `psutil`
-- Multi-language support: English and Russian
-- "Always on top" toggle
-- Fullscreen mode with F11 shortcut
-- Monitor selection in advanced settings
-- Custom output folder browser
-- Hotkey support: F9, F10, F11
-
-**Changed**
-- Complete UI redesign with Catppuccin-inspired color scheme
-- Improved FFmpeg integration
-- Settings dialog now uses tabbed interface (Video / Advanced)
-- Rewritten audio recording system for better sync
-- Detailed recording stats in status bar
-
-**Fixed**
-- Audio desynchronization during long recordings
-- Frame dropping in high-motion scenes
-- Settings not saving after restart
-- Crash when no microphone is present
-- Memory leaks in recording stream
-
-**Performance**
-- ~30% less CPU usage during capture
-- Improved FPS stability across all modes
-- Preview updates throttled during recording
-- Reduced disk I/O through optimized frame compression
-
-</details>
-
----
-
 ## 📣 Stay updated
 
 All news and updates are posted on Telegram first:
