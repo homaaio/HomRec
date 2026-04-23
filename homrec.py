@@ -47,7 +47,7 @@ except ImportError:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec (v1.3.0)",
+        "app_title": "HomRec (v1.3.1)",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -132,7 +132,7 @@ LANGUAGES = {
         "audio_file": "🎵 Audio file:",
     },
     "ru": {
-        "app_title": "HomRec (v1.3.0)",
+        "app_title": "HomRec (v1.3.1)",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -779,7 +779,7 @@ class HomRecScreen:
         self.root.bind('<F11>', lambda e: self.toggle_fullscreen())
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        log.info("HomRec v1.3.0 started, language: %s", self.current_language)
+        log.info("HomRec v1.3.1 started, language: %s", self.current_language)
     
     def update_ui_language(self) -> None:
         self.root.title(self.lang["app_title"])
@@ -821,20 +821,32 @@ class HomRecScreen:
             return False
     
     def set_app_icon(self) -> None:
+        # Resolve icons folder relative to exe or script
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        icons_dir = os.path.join(base_dir, "icons")
+
+        # main.ico — icon shown inside the app window (tkinter iconbitmap)
+        main_ico = os.path.join(icons_dir, "main.ico")
         try:
-            icon_size = (64, 64)
-            icon_image = Image.new('RGBA', icon_size, (0, 0, 0, 0))
-            draw = ImageDraw.Draw(icon_image)
-            draw.rectangle([10, 20, 54, 44], fill="#89b4fa", outline="#cdd6f4", width=2)
-            draw.ellipse([25, 25, 39, 39], fill="#1e1e2e", outline="#cdd6f4", width=2)
-            draw.ellipse([29, 29, 35, 35], fill="#89b4fa")
-            draw.rectangle([45, 15, 50, 20], fill="#f9e2af")
-            icon_photo = ImageTk.PhotoImage(icon_image)
-            self.root.iconphoto(True, icon_photo)
-            if sys.platform == "win32":
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.3.0")
+            self.root.iconbitmap(main_ico)
         except:
-            pass
+            # fallback: generate a simple icon if file not found
+            try:
+                icon_image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(icon_image)
+                draw.rectangle([10, 20, 54, 44], fill="#89b4fa", outline="#cdd6f4", width=2)
+                draw.ellipse([25, 25, 39, 39], fill="#1e1e2e", outline="#cdd6f4", width=2)
+                draw.ellipse([29, 29, 35, 35], fill="#89b4fa")
+                icon_photo = ImageTk.PhotoImage(icon_image)
+                self.root.iconphoto(True, icon_photo)
+            except:
+                pass
+
+        if sys.platform == "win32":
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.3.1")
     
     def on_window_resize(self, event: tk.Event) -> None:
         if event.widget == self.root:
@@ -1110,7 +1122,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.3.0", 
+        tk.Label(title_frame, text="v1.3.1", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
