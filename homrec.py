@@ -44,10 +44,52 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
+# For system tray
+try:
+    import pystray
+    from pystray import MenuItem as TrayItem
+    HAS_TRAY = True
+except ImportError:
+    HAS_TRAY = False
+
+# ==================== VERSION & UPDATE CHECK ====================
+CURRENT_VERSION = "1.3.2"
+GITHUB_REPO = "homaaio/HomREC"
+
+def check_for_updates(callback) -> None:
+    """Fetch latest release tag from GitHub in a background thread.
+    Calls callback(latest_version: str) if a newer version is found.
+    """
+    def _fetch():
+        try:
+            import urllib.request
+            import json as _json
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "HomRec"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = _json.loads(resp.read().decode())
+            tag = data.get("tag_name", "").lstrip("v")
+            if tag and _version_gt(tag, CURRENT_VERSION):
+                log.info(f"Update available: v{tag}")
+                callback(tag)
+            else:
+                log.info("No updates found")
+        except Exception as e:
+            log.warning(f"Update check failed: {e}")
+
+    threading.Thread(target=_fetch, daemon=True).start()
+
+def _version_gt(a: str, b: str) -> bool:
+    """Return True if version string a is greater than b."""
+    try:
+        return tuple(int(x) for x in a.split(".")) > tuple(int(x) for x in b.split("."))
+    except:
+        return False
+
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec (v1.3.1)",
+        "app_title": "HomRec (v1.3.2)",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -132,7 +174,7 @@ LANGUAGES = {
         "audio_file": "🎵 Audio file:",
     },
     "ru": {
-        "app_title": "HomRec (v1.3.1)",
+        "app_title": "HomRec (v1.3.2)",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -760,6 +802,11 @@ class HomRecScreen:
         self.monitor_left = 0
         self.monitor_top = 0
         self.update_monitor_info()
+
+        # capture mode: "desktop" or "window"
+        self.capture_mode = "desktop"
+        self.capture_window_title = ""
+        self.tray_icon = None
         
         os.makedirs(self.output_folder, exist_ok=True)
         
@@ -779,7 +826,10 @@ class HomRecScreen:
         self.root.bind('<F11>', lambda e: self.toggle_fullscreen())
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        log.info("HomRec v1.3.1 started, language: %s", self.current_language)
+        self.setup_tray()
+        log.info("HomRec v1.3.2 started, language: %s", self.current_language)
+        # Check for updates 2 seconds after startup (non-blocking)
+        self.root.after(2000, self._start_update_check)
     
     def update_ui_language(self) -> None:
         self.root.title(self.lang["app_title"])
@@ -846,7 +896,7 @@ class HomRecScreen:
                 pass
 
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.3.1")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.3.2")
     
     def on_window_resize(self, event: tk.Event) -> None:
         if event.widget == self.root:
@@ -912,7 +962,7 @@ class HomRecScreen:
         menubar.add_cascade(label=self.lang["file_menu"], menu=file_menu)
         file_menu.add_command(label=self.lang["open_recordings"], command=self.open_recordings)
         file_menu.add_separator()
-        file_menu.add_command(label=self.lang["exit"], command=self.on_closing)
+        file_menu.add_command(label=self.lang["exit"], command=self.quit_app)
         
         view_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
         menubar.add_cascade(label=self.lang["view_menu"], menu=view_menu)
@@ -956,6 +1006,11 @@ class HomRecScreen:
         perf_menu.add_command(label=self.lang["turbo"], command=lambda: self.set_mode("turbo"))
         perf_menu.add_command(label=self.lang["balanced"], command=lambda: self.set_mode("balanced"))
         perf_menu.add_command(label=self.lang["eco"], command=lambda: self.set_mode("eco"))
+
+        capture_menu = tk.Menu(settings_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        settings_menu.add_cascade(label="Capture Source", menu=capture_menu)
+        capture_menu.add_command(label="Full Desktop", command=self.set_capture_desktop)
+        capture_menu.add_command(label="Select Window...", command=self.open_window_picker)
     
     def toggle_always_on_top(self) -> None:
         if self.always_on_top.get():
@@ -1122,7 +1177,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.3.1", 
+        tk.Label(title_frame, text="v1.3.2", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
@@ -1442,26 +1497,50 @@ class HomRecScreen:
             offset_y = self.monitor_top
             
             vf_filter = f'scale={width}:{height}' if (width != self.original_width or height != self.original_height) else 'null'
-            cmd = [
-                self.ffmpeg_path,
-                '-y',
-                '-f', 'gdigrab',
-                '-framerate', str(fps),
-                '-offset_x', str(offset_x),
-                '-offset_y', str(offset_y),
-                '-video_size', f'{self.original_width}x{self.original_height}',
-                '-i', 'desktop',
-                '-vf', vf_filter,
-                '-r', str(fps),
-                '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-tune', 'zerolatency',
-                '-crf', '28',
-                '-pix_fmt', 'yuv420p',
-                '-movflags', '+faststart',
-                '-an',
-                self.filename
-            ]
+
+            if self.capture_mode == "window" and self.capture_window_title:
+                # Record a specific window by title
+                log.info(f"Capture mode: window — '{self.capture_window_title}'")
+                cmd = [
+                    self.ffmpeg_path,
+                    '-y',
+                    '-f', 'gdigrab',
+                    '-framerate', str(fps),
+                    '-i', f'title={self.capture_window_title}',
+                    '-vf', vf_filter,
+                    '-r', str(fps),
+                    '-c:v', 'libx264',
+                    '-preset', 'ultrafast',
+                    '-tune', 'zerolatency',
+                    '-crf', '28',
+                    '-pix_fmt', 'yuv420p',
+                    '-movflags', '+faststart',
+                    '-an',
+                    self.filename
+                ]
+            else:
+                # Record full desktop (default)
+                log.info(f"Capture mode: desktop — monitor {self.monitor_id}")
+                cmd = [
+                    self.ffmpeg_path,
+                    '-y',
+                    '-f', 'gdigrab',
+                    '-framerate', str(fps),
+                    '-offset_x', str(offset_x),
+                    '-offset_y', str(offset_y),
+                    '-video_size', f'{self.original_width}x{self.original_height}',
+                    '-i', 'desktop',
+                    '-vf', vf_filter,
+                    '-r', str(fps),
+                    '-c:v', 'libx264',
+                    '-preset', 'ultrafast',
+                    '-tune', 'zerolatency',
+                    '-crf', '28',
+                    '-pix_fmt', 'yuv420p',
+                    '-movflags', '+faststart',
+                    '-an',
+                    self.filename
+                ]
             log.debug(f"FFmpeg command: {chr(32).join(cmd)}")
             self.ffmpeg_proc = subprocess.Popen(
                 cmd,
@@ -1656,7 +1735,57 @@ class HomRecScreen:
                 self.status_icon.config(fg=self.colors["success"])
                 self.status_label.config(text=self.lang["recording"])
     
+    # ── Update check ──────────────────────────────────────────────────────────
+
+    def _start_update_check(self) -> None:
+        check_for_updates(self._on_update_found)
+
+    def _on_update_found(self, latest: str) -> None:
+        """Called from background thread — schedule UI update on main thread."""
+        self.root.after(0, lambda: self._show_update_banner(latest))
+
+    def _show_update_banner(self, latest: str) -> None:
+        """Show a subtle update notification at the bottom of the window."""
+        try:
+            banner = tk.Frame(self.root, bg=self.colors["warning"], height=28)
+            banner.pack(side="bottom", fill="x", before=self.root.pack_slaves()[-1])
+            banner.pack_propagate(False)
+
+            msg = f"⬆  HomRec v{latest} is available!"
+            tk.Label(banner, text=msg,
+                     bg=self.colors["warning"], fg=self.colors["bg"],
+                     font=("Segoe UI", 9, "bold")).pack(side="left", padx=12)
+
+            def open_release():
+                import webbrowser
+                webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases/latest")
+
+            tk.Button(banner, text="Download",
+                      command=open_release,
+                      bg=self.colors["bg"], fg=self.colors["warning"],
+                      font=("Segoe UI", 9, "bold"), relief="flat",
+                      padx=10, pady=0, cursor="hand2").pack(side="left")
+
+            tk.Button(banner, text="✕",
+                      command=banner.destroy,
+                      bg=self.colors["warning"], fg=self.colors["bg"],
+                      font=("Segoe UI", 9), relief="flat",
+                      padx=8, pady=0, cursor="hand2").pack(side="right", padx=4)
+
+            log.info(f"Update banner shown for v{latest}")
+        except Exception as e:
+            log.warning(f"Failed to show update banner: {e}")
+
     def on_closing(self) -> None:
+        """Minimise to tray on close (if pystray available), otherwise quit."""
+        if HAS_TRAY and self.tray_icon:
+            self.root.withdraw()
+            log.info("Minimised to tray")
+        else:
+            self.quit_app()
+
+    def quit_app(self) -> None:
+        """Fully exit the application."""
         if self.recording:
             result = messagebox.askyesno(self.lang["warning"], "Recording in progress! Stop and exit?")
             if result:
@@ -1665,11 +1794,167 @@ class HomRecScreen:
             else:
                 return
         
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except:
+                pass
+
         self.stop_flag = True
         if hasattr(self, 'ffmpeg_reader_thread') and self.ffmpeg_reader_thread and self.ffmpeg_reader_thread.is_alive():
             self.ffmpeg_reader_thread.join(timeout=1)
         
         self.root.destroy()
+
+    # ── Tray ──────────────────────────────────────────────────────────────────
+
+    def setup_tray(self) -> None:
+        if not HAS_TRAY:
+            return
+        try:
+            if getattr(sys, 'frozen', False):
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            ico_path = os.path.join(base_dir, "icons", "main.ico")
+
+            if os.path.exists(ico_path):
+                img = Image.open(ico_path).convert("RGBA")
+                log.info("Tray icon loaded from main.ico")
+            else:
+                img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+                d = ImageDraw.Draw(img)
+                d.ellipse([4, 4, 60, 60], fill="#89b4fa")
+                d.ellipse([20, 20, 44, 44], fill="#1e1e2e")
+                d.ellipse([28, 28, 36, 36], fill="#f38ba8")
+                log.warning("main.ico not found, using generated tray icon")
+
+            menu = pystray.Menu(
+                TrayItem("Show HomRec", self._tray_show, default=True),
+                TrayItem("Start / Stop", self._tray_toggle),
+                pystray.Menu.SEPARATOR,
+                TrayItem("Quit", self._tray_quit),
+            )
+            self.tray_icon = pystray.Icon("HomRec", img, "HomRec", menu)
+            t = threading.Thread(target=self.tray_icon.run, daemon=True)
+            t.start()
+            log.info("Tray icon started")
+        except Exception as e:
+            log.warning(f"Tray setup failed: {e}")
+            self.tray_icon = None
+
+    def _tray_show(self, icon=None, item=None) -> None:
+        self.root.after(0, self.root.deiconify)
+
+    def _tray_toggle(self, icon=None, item=None) -> None:
+        self.root.after(0, self.toggle_recording)
+
+    def _tray_quit(self, icon=None, item=None) -> None:
+        self.root.after(0, self.quit_app)
+
+    # ── Window picker ─────────────────────────────────────────────────────────
+
+    def set_capture_desktop(self) -> None:
+        self.capture_mode = "desktop"
+        self.capture_window_title = ""
+        log.info("Capture source set to: desktop")
+
+    def get_open_windows(self) -> list[str]:
+        """Return titles of all visible, non-empty windows (Windows only)."""
+        titles = []
+        if sys.platform != "win32":
+            return titles
+        
+        import ctypes
+        EnumWindows = ctypes.windll.user32.EnumWindows
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+        GetWindowText = ctypes.windll.user32.GetWindowTextW
+        GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
+        IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+
+        def callback(hwnd, lparam):
+            if IsWindowVisible(hwnd):
+                length = GetWindowTextLength(hwnd)
+                if length > 0:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    GetWindowText(hwnd, buf, length + 1)
+                    title = buf.value.strip()
+                    if title and title not in titles:
+                        titles.append(title)
+            return True
+
+        EnumWindows(EnumWindowsProc(callback), 0)
+        return sorted(titles)
+
+    def open_window_picker(self) -> None:
+        """Show a dialog to pick a window to record."""
+        windows = self.get_open_windows()
+        if not windows:
+            messagebox.showinfo("Info", "No open windows found.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Select Window")
+        dlg.geometry("480x380")
+        dlg.configure(bg=self.colors["bg"])
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, True)
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + self.root.winfo_width() // 2 - 240
+        y = self.root.winfo_y() + self.root.winfo_height() // 2 - 190
+        dlg.geometry(f"+{x}+{y}")
+
+        tk.Label(dlg, text="Select a window to record:",
+                 bg=self.colors["bg"], fg=self.colors["text"],
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+
+        frame = tk.Frame(dlg, bg=self.colors["bg"])
+        frame.pack(fill="both", expand=True, padx=15, pady=5)
+
+        scrollbar = tk.Scrollbar(frame)
+        scrollbar.pack(side="right", fill="y")
+
+        listbox = tk.Listbox(frame, yscrollcommand=scrollbar.set,
+                             bg=self.colors["surface"], fg=self.colors["text"],
+                             selectbackground=self.colors["accent"],
+                             font=("Segoe UI", 10), relief="flat",
+                             activestyle="none", borderwidth=0)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        for w in windows:
+            listbox.insert(tk.END, w)
+
+        # Pre-select current window if already set
+        if self.capture_window_title in windows:
+            idx = windows.index(self.capture_window_title)
+            listbox.selection_set(idx)
+            listbox.see(idx)
+
+        btn_frame = tk.Frame(dlg, bg=self.colors["bg"])
+        btn_frame.pack(fill="x", padx=15, pady=12)
+
+        def on_select():
+            sel = listbox.curselection()
+            if sel:
+                self.capture_window_title = windows[sel[0]]
+                self.capture_mode = "window"
+                log.info(f"Capture source set to window: '{self.capture_window_title}'")
+                dlg.destroy()
+
+        def on_desktop():
+            self.set_capture_desktop()
+            dlg.destroy()
+
+        tk.Button(btn_frame, text="Record this window", command=on_select,
+                  bg=self.colors["accent"], fg=self.colors["bg"],
+                  font=("Segoe UI", 10, "bold"), relief="flat",
+                  padx=16, pady=6).pack(side="left", padx=(0, 8))
+        tk.Button(btn_frame, text="Use full desktop", command=on_desktop,
+                  bg=self.colors["surface"], fg=self.colors["text"],
+                  font=("Segoe UI", 10), relief="flat",
+                  padx=16, pady=6).pack(side="left")
 
 if __name__ == "__main__":
     root = tk.Tk()
