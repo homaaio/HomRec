@@ -32,9 +32,9 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | Feature | Details |
 |---|---|
 | 🎞️ **Screen recording** | Full desktop or specific window |
-| 🎙️ **Audio capture** | Microphone with separate volume control |
+| 🎙️ **Audio capture** | Microphone + Desktop audio (via WASAPI loopback) |
 | 🖥️ **Multi-monitor** | Select which monitor to record |
-| 📊 **PC Analytics** | Live CPU, RAM and disk usage panel |
+| 📊 **PC Analytics** | CPU, RAM and disk in one combined window |
 | ⌨️ **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
 | 🌍 **Languages** | English and Russian UI |
 | 🎨 **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
@@ -43,6 +43,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | 🔼 **Always on top** | Keep the window above everything else |
 | 🔔 **System tray** | Minimise to tray, control recording from tray menu |
 | 🔄 **Auto update check** | Notifies you when a new version is out |
+| ❓ **Help menu** | Check for updates and report issues directly from the app |
 
 ---
 
@@ -77,7 +78,9 @@ HomRec/
 ├── icons/
 │   ├── main.ico
 │   └── ico.ico
-└── recordings/     ← created automatically on first launch
+├── config.ini      ← auto-generated
+├── homrec.log      ← auto-generated
+└── recordings/     ← auto-generated
 ```
 
 > **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus — the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
@@ -126,10 +129,10 @@ python homrec.py
 opencv-python
 Pillow
 mss
-pyaudio
+pyaudio-wasapi   # fork of pyaudio with WASAPI loopback support (desktop audio)
 numpy
-psutil      # optional — PC Analytics panel
-pystray     # optional — system tray support
+psutil           # optional — PC Analytics panel
+pystray          # optional — system tray support
 ```
 
 Install all at once:
@@ -137,34 +140,37 @@ Install all at once:
 pip install -r requirements.txt
 ```
 
----
-
-## 📁 Project structure
-
-```
-homrec/
-├── homrec.py        # main application
-├── config.ini       # saved settings (auto-generated)
-├── homrec.log       # log file (auto-generated)
-├── CHANGELOG.txt    # version history
-├── requirements.txt
-├── icons/
-│   ├── main.ico
-│   └── ico.ico
-└── README.md
-```
+> **Desktop audio capture** requires `pyaudio-wasapi` instead of the standard `pyaudio`.  
+> Standard `pyaudio` does **not** support WASAPI loopback, so desktop audio will not be recorded.  
+> Install it with: `pip install pyaudio-wasapi`
 
 ---
 
 ## 📋 Changelog
 
 <details>
-<summary><b>v1.3.2</b> - 2026-04-25</summary>
+<summary><b>v1.4.0</b> — 2026-04-24</summary>
+
+**Added**
+- Help menu — Check for Updates and Report Issue directly from the app
+- Option to disable "minimize to tray on close" in Settings
+
+**Changed**
+- PC Analytics combined into one window with CPU, RAM and Disk sections
+- Start/Stop merged into one button that changes on recording; Pause and Stop are now compact and side by side
+
+**Fixed**
+- FFmpeg console window no longer appears in front of the app after stopping a long recording
+
+</details>
+
+<details>
+<summary><b>v1.3.2</b> — 2026-04-23</summary>
 
 **Added**
 - System tray — minimise to tray instead of closing, control recording from tray menu
-- Window capture — record a specific window instead of full desktop (Settings → Capture Source)
-- Auto update check — checks GitHub on startup and shows a banner if a new version is available
+- Window capture — record a specific window (Settings → Capture Source)
+- Auto update check — banner appears when a new version is available
 
 **Fixed**
 - Microphone stops working after first recording
@@ -180,15 +186,15 @@ homrec/
 </details>
 
 <details>
-<summary><b>v1.3.1</b> - 2026-04-23</summary>
+<summary><b>v1.3.1</b></summary>
 
 - Updated app icons
-- Reduced .zip file size by ~2x
+- Reduced .exe file size by ~2x
 
 </details>
 
 <details>
-<summary><b>v1.3.0</b> - 2026-04-22</summary>
+<summary><b>v1.3.0</b></summary>
 
 - Added logging to homrec.log
 - Fixed FFmpeg not found in .exe builds
@@ -196,7 +202,7 @@ homrec/
 </details>
 
 <details>
-<summary><b>v1.2.0</b> - 2026-03-22</summary>
+<summary><b>v1.2.0</b> — 2026-03-21</summary>
 
 **Added**
 - Separate volume controls for microphone and system audio

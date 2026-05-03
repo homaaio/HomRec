@@ -1,52 +1,144 @@
 welcome to changelog :D
 
-[Version 1.3.1] - 2026-04-23
+[Version 1.4.0] - 2026-04-30
 
 === Added ===
 
-Icons for hr.exe and the application itself has been updated.
+Help menu in the top menu bar with two options:
+- Check for Updates — checks GitHub and shows result in a dialog
+- Report Issue — opens GitHub Issues page in the browser
 
+Desktop audio (system sound) capture via WASAPI loopback
+(requires pyaudio-wasapi — see README for setup details)
 
-[Version 1.3.0] - 2026-04-22
+Option to disable "minimize to tray on close" in Settings menu
 
-=== Fixed ===
+Codec selector in Settings → Video tab — choose between:
+- libx264 (CPU, H.264, universal default)
+- libx265 (CPU, H.265, smaller files)
+- h264_nvenc / hevc_nvenc (Nvidia GPU)
+- h264_amf / hevc_amf (AMD GPU)
+- h264_qsv / hevc_qsv (Intel GPU)
 
-Microphone stops working after first recording — PyAudio instance was not
-properly released, leaving the mic device locked at the OS level
+Hardware acceleration selector — auto-detects GPU decoder
+(cuda for Nvidia, dxva2 for Intel, d3d11va for AMD)
 
-2nd and subsequent recordings were corrupted and unplayable — stop_flag was
-reset too late, causing the previous reader thread to kill the new FFmpeg process
+Advanced Settings window (Settings → Preferences → Advanced Settings)
+— separate window aimed at power users with full customization:
 
-Video played faster than real time — FFmpeg was capturing at 60fps then
-filtering down, which broke PTS timestamps
+  Video: codec, bitrate, CRF, preset, pixel format, hardware acceleration
+  Audio: sample rate, AAC bitrate, channel count
+  Interface: theme (dark/light/custom with color picker), UI scale, font
+  Recording: replay buffer duration, auto-stop by time or file size,
+             output folder, file naming template
 
-Audio desync on long recordings — clock drift between PyAudio and FFmpeg
-now corrected with aresample=async filter during merge
-
-Audio desync after using pause — silence frames are now written during pause
-so WAV and video stay the same length
-
-=== Added ===
-
-Logging system — all events, errors and debug info are written to homrec.log
-next to the executable (or script)
+Import / Export profile as .hrc file — save and share your full
+configuration in a single file
 
 === Changed ===
 
-FFmpeg detection now works correctly when running as a compiled .exe —
-previously used __file__ which points to PyInstaller temp folder instead of
-the actual exe directory
+PC Analytics is now a single combined window with CPU, RAM and Disk
+sections and a Refresh button — instead of three separate dialogs
 
-Preview resampling switched to NEAREST during recording to reduce CPU load,
-preview refresh rate reduced to ~3fps while recording
+Start/Stop buttons merged into one button that changes text and color
+when recording starts. Pause and Stop are now compact and sit side by side
 
-Audio thread and PyAudio instance are now fully cleaned up between recordings
+System audio capture chain now tries three methods in order:
+1. WASAPI loopback with as_loopback=True (requires pyaudio-wasapi)
+2. PyAudio direct open of Stereo Mix device (works with standard pyaudio)
+3. ffmpeg dshow as last resort
 
-stop_flag and frame counters are reset before spawning new threads, not after
+Version bumped to 1.4.0
+
+=== Fixed ===
+
+FFmpeg console window no longer appears in front of the app after stopping
+a long recording
+
+Desktop audio not recording — _find_wasapi_loopback was implemented but
+never called; dshow fallback only worked if Stereo Mix was enabled in
+Windows, which is off by default on most modern PCs
+
+Stereo Mix not detected — PyAudio on Windows returns device names as
+UTF-8 bytes decoded as cp1251, causing Cyrillic names like "Стерео микшер"
+to appear garbled. Fixed by re-encoding: name.encode('cp1251').decode('utf-8')
+
+System audio not saved to final file — ffmpeg dshow process was not
+receiving a proper stop signal (missing newline after 'q'), causing the
+WAV file to be left unclosed and skipped during merge
+
+WAV header written with wrong channel count when Stereo Mix device is
+mono — channel count is now detected at open time and stored correctly
+
+Fallback to first dshow device removed — previously if Stereo Mix was
+not found the code silently fell back to devices[0] which was usually
+the microphone, causing mic audio to be recorded twice
+
+check_updates key missing from English language dictionary — caused
+KeyError on startup when language was set to English
+
+Volume multiplier condition was vol != 2.0 instead of vol != 1.0 —
+volume scaling was always applied even at 100%
+
+stop_audio_recording returned None instead of audio file path in
+mic-only mode — caused merge_audio_video to be skipped entirely,
+resulting in video with no audio track
+
+merge_audio_video silently swallowed all exceptions — now logs ffmpeg
+stderr so failures are visible in homrec.log
+
+[Version 1.3.2] - 2026-04-23
+
+=== Added ===
+
+System tray — the app minimises to tray instead of closing.
+Start/stop recording from the tray menu
+
+Window capture — record a specific window instead of the full desktop
+(Settings → Capture Source → Select Window)
+
+Auto update check — HomRec checks GitHub on startup and shows a
+notification banner if a new version is available
+
+=== Fixed ===
+
+Microphone stops working after first recording
+
+2nd and subsequent recordings were corrupted and unplayable
+
+Video played faster than real time
+
+Audio desync on long recordings
+
+Audio desync after using pause
+
+FFmpeg not found when running as .exe
 
 === Performance ===
 
-~30% less CPU usage during capture from combined preview and encoding fixes
+~30% less CPU usage during capture
+
+Preview uses fast resampling while recording
+
+[Version 1.3.1] - 2026-04-23
+
+=== Changed ===
+
+Updated app icons
+
+Reduced .exe file size by ~2x
+
+[Version 1.3.0] - 2026-04-22
+
+=== Added ===
+
+Logging system — all events and errors written to homrec.log
+next to the executable
+
+=== Fixed ===
+
+FFmpeg not found in .exe builds due to wrong path resolution (__file__
+points to PyInstaller temp folder, not the .exe directory)
 
 [Version 1.2.0] - 2026-03-21
 
@@ -79,8 +171,6 @@ Improved FFmpeg integration for better video encoding
 Settings dialog now uses tabbed interface (Video/Advanced)
 
 Enhanced recording stream synchronization for more stable FPS
-
-Optimized preview system for better performance
 
 Rewritten audio recording system for improved synchronization
 
