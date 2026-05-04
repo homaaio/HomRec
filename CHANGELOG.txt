@@ -1,123 +1,123 @@
 welcome to changelog :D
 
+[Version 1.4.2] - 2026-05-03
+
+=== Fixed ===
+
+Duplicate tray icon on second launch — added Windows single-instance
+mutex (CreateMutexW). If HomRec is already running, second launch exits
+immediately instead of creating another tray icon.
+
+Microphone [Errno -9999] Unanticipated host error — now retries with
+multiple channel/sample rate combinations (stereo/mono × 44100/48000/22050)
+before giving up. Handles devices that only support specific configurations.
+
+System audio [Errno -9999] — same retry logic applied to Stereo Mix device
+open attempts.
+
+Settings window not closing after Save — messagebox was shown after
+dialog.destroy(), causing the window to become unresponsive. Fixed order:
+show message first, then destroy.
+
+Advanced Settings window blocking Settings from closing — added
+grab_release() before destroy() so the parent window regains focus.
+
+Version bumped to 1.4.2
+
 [Version 1.4.0] - 2026-04-30
 
 === Added ===
 
-Help menu in the top menu bar with two options:
+Help menu in the top menu bar:
 - Check for Updates — checks GitHub and shows result in a dialog
 - Report Issue — opens GitHub Issues page in the browser
 
-Desktop audio (system sound) capture via WASAPI loopback
-(requires pyaudio-wasapi — see README for setup details)
+Desktop audio (system sound) capture. Capture chain tries in order:
+1. WASAPI loopback (requires pyaudio-wasapi)
+2. PyAudio direct open of Stereo Mix device
+3. ffmpeg dshow as last resort
 
 Option to disable "minimize to tray on close" in Settings menu
 
-Codec selector in Settings → Video tab — choose between:
-- libx264 (CPU, H.264, universal default)
-- libx265 (CPU, H.265, smaller files)
-- h264_nvenc / hevc_nvenc (Nvidia GPU)
-- h264_amf / hevc_amf (AMD GPU)
-- h264_qsv / hevc_qsv (Intel GPU)
+Advanced Settings window (Settings → ⚙ Advanced → Open Advanced Settings)
+for power users — codec, HW accel, CRF, preset, pixel format, audio
+bitrate, theme, UI scale, font, file template, auto-stop, replay buffer
 
-Hardware acceleration selector — auto-detects GPU decoder
-(cuda for Nvidia, dxva2 for Intel, d3d11va for AMD)
+Custom hotkeys — reassign F9/F10/F11 to any key in Advanced Settings
 
-Advanced Settings window (Settings → Preferences → Advanced Settings)
-— separate window aimed at power users with full customization:
+Auto-save settings profile on exit
 
-  Video: codec, bitrate, CRF, preset, pixel format, hardware acceleration
-  Audio: sample rate, AAC bitrate, channel count
-  Interface: theme (dark/light/custom with color picker), UI scale, font
-  Recording: replay buffer duration, auto-stop by time or file size,
-             output folder, file naming template
+Notifications — sound and flash on recording start/stop
 
-Import / Export profile as .hrc file — save and share your full
-configuration in a single file
+Drag-and-drop support — drop .hrc, .hrl or .hrt onto the app window
+to instantly import a profile, language or theme
+
+Binary file formats with magic headers and gzip compression:
+  .hrc (HRC + 0x01) — settings profile
+  .hrl (HRL + 0x01) — custom language
+  .hrt (HRT + 0x01) — custom theme
+
+Built-in Language Editor (Advanced Settings → Interface → Language Editor)
+
+Built-in Theme Editor with live color pickers (Advanced Settings → Interface → Theme Editor)
+
+Delete theme/language buttons in Advanced Settings
+
+App icon on all dialog windows
 
 === Changed ===
 
-PC Analytics is now a single combined window with CPU, RAM and Disk
-sections and a Refresh button — instead of three separate dialogs
+PC Analytics is now a single combined window (CPU + RAM + Disk + Refresh)
 
-Start/Stop buttons merged into one button that changes text and color
-when recording starts. Pause and Stop are now compact and sit side by side
+Start/Stop merged into one toggle button
 
-System audio capture chain now tries three methods in order:
-1. WASAPI loopback with as_loopback=True (requires pyaudio-wasapi)
-2. PyAudio direct open of Stereo Mix device (works with standard pyaudio)
-3. ffmpeg dshow as last resort
+Codec and HW Accel moved from Video tab to Advanced Settings
 
-Version bumped to 1.4.0
+System audio capture now uses PyAudio directly (same path as microphone)
+instead of spawning a separate ffmpeg process
 
 === Fixed ===
 
-FFmpeg console window no longer appears in front of the app after stopping
-a long recording
+Stereo Mix not detected on Russian Windows — UTF-8/cp1251 encoding fix
 
-Desktop audio not recording — _find_wasapi_loopback was implemented but
-never called; dshow fallback only worked if Stereo Mix was enabled in
-Windows, which is off by default on most modern PCs
+System audio WAV not closed — ffmpeg dshow missing newline after stop signal
 
-Stereo Mix not detected — PyAudio on Windows returns device names as
-UTF-8 bytes decoded as cp1251, causing Cyrillic names like "Стерео микшер"
-to appear garbled. Fixed by re-encoding: name.encode('cp1251').decode('utf-8')
+WAV written with wrong channel count for mono devices
 
-System audio not saved to final file — ffmpeg dshow process was not
-receiving a proper stop signal (missing newline after 'q'), causing the
-WAV file to be left unclosed and skipped during merge
+Fallback to devices[0] removed — was recording mic twice
 
-WAV header written with wrong channel count when Stereo Mix device is
-mono — channel count is now detected at open time and stored correctly
+check_updates missing from English language dict — KeyError on startup
 
-Fallback to first dshow device removed — previously if Stereo Mix was
-not found the code silently fell back to devices[0] which was usually
-the microphone, causing mic audio to be recorded twice
+Volume condition vol != 2.0 → vol != 1.0
 
-check_updates key missing from English language dictionary — caused
-KeyError on startup when language was set to English
+stop_audio_recording returned None in mic-only mode — merge was skipped
 
-Volume multiplier condition was vol != 2.0 instead of vol != 1.0 —
-volume scaling was always applied even at 100%
+merge_audio_video swallowed all exceptions silently
 
-stop_audio_recording returned None instead of audio file path in
-mic-only mode — caused merge_audio_video to be skipped entirely,
-resulting in video with no audio track
+Codec duplicated in Video tab and Advanced Settings
 
-merge_audio_video silently swallowed all exceptions — now logs ffmpeg
-stderr so failures are visible in homrec.log
+PC Analytics missing app icon
 
 [Version 1.3.2] - 2026-04-23
 
 === Added ===
 
-System tray — the app minimises to tray instead of closing.
-Start/stop recording from the tray menu
-
-Window capture — record a specific window instead of the full desktop
-(Settings → Capture Source → Select Window)
-
-Auto update check — HomRec checks GitHub on startup and shows a
-notification banner if a new version is available
+System tray — minimises to tray on close
+Start/stop from tray menu
+Window capture (Settings → Capture Source → Select Window)
+Auto update check on startup
 
 === Fixed ===
 
-Microphone stops working after first recording
-
-2nd and subsequent recordings were corrupted and unplayable
-
-Video played faster than real time
-
-Audio desync on long recordings
-
-Audio desync after using pause
-
+Microphone stops after first recording
+2nd+ recordings corrupted
+Video faster than real time
+Audio desync on long recordings and after pause
 FFmpeg not found when running as .exe
 
 === Performance ===
 
-~30% less CPU usage during capture
-
+~30% less CPU during capture
 Preview uses fast resampling while recording
 
 [Version 1.3.1] - 2026-04-23
@@ -125,83 +125,40 @@ Preview uses fast resampling while recording
 === Changed ===
 
 Updated app icons
-
-Reduced .exe file size by ~2x
+Reduced .exe size by ~2x
 
 [Version 1.3.0] - 2026-04-22
 
 === Added ===
 
-Logging system — all events and errors written to homrec.log
-next to the executable
+Logging system — events written to homrec.log
 
 === Fixed ===
 
-FFmpeg not found in .exe builds due to wrong path resolution (__file__
-points to PyInstaller temp folder, not the .exe directory)
+FFmpeg not found in .exe builds
 
 [Version 1.2.0] - 2026-03-21
 
 === Added ===
 
-Separate volume controls for microphone and system audio
-
-PC Analytics panel showing CPU, RAM, and disk usage (requires psutil)
-
-Multi-language support (English and Russian)
-
-"Always on top" toggle function
-
-Fullscreen mode with F11 keyboard shortcut
-
-Monitor selection dropdown in advanced settings
-
-Custom output folder browser
-
-Custom message window with "Don't show again" option
-
-Hotkey support (F9 - Start/Stop, F10 - Pause/Resume, F11 - Fullscreen)
+Separate volume controls for mic and desktop audio
+PC Analytics (requires psutil)
+Multi-language support (English + Russian)
+Always on top, Fullscreen F11
+Monitor selection, custom output folder
+Hotkeys F9 / F10 / F11
 
 === Changed ===
 
-Complete UI redesign with Catppuccin-inspired color scheme
-
-Improved FFmpeg integration for better video encoding
-
-Settings dialog now uses tabbed interface (Video/Advanced)
-
-Enhanced recording stream synchronization for more stable FPS
-
-Rewritten audio recording system for improved synchronization
-
-Detailed recording statistics now displayed in bottom status bar
-
-Updated file naming convention with timestamp format
+Complete UI redesign (Catppuccin-inspired)
+Tabbed settings dialog
+Rewritten audio recording system
 
 === Fixed ===
 
-Audio desynchronization during long recordings
-
-Frame dropping issues during high-motion scenes
-
-Settings not saving after application restart
-
-Application crash when no microphone is present
-
-Memory leaks in recording stream
-
-Pause function now correctly stops frame capture
-
-Thread safety issues with shared resources
+Audio desync, frame drops, settings not saving, crash without mic,
+memory leaks, pause issues, thread safety
 
 === Performance ===
 
-Optimized frame capture rate reducing CPU load by ~30%
-
-Improved FPS stability across all performance modes
-
-Preview updates throttled during recording to save resources
-
-Recording stream now uses precise timing calculations
-
-Reduced disk I/O through optimized frame compression
+~30% less CPU, stable FPS, throttled preview, precise timing

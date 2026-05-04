@@ -59,7 +59,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.4.0"
+CURRENT_VERSION = "1.4.2"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -3912,6 +3912,14 @@ class HomRecScreen:
                   padx=16, pady=6).pack(side="left")
 
 if __name__ == "__main__":
+    # Prevent duplicate tray icons — use a mutex on Windows
+    import platform as _platform
+    if _platform.system() == "Windows":
+        import ctypes
+        _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "HomRec_SingleInstance_142")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            import sys
+            sys.exit(0)
     root = tk.Tk()
     app = HomRecScreen(root)
     root.mainloop()
