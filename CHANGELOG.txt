@@ -1,5 +1,13 @@
 welcome to changelog :D
 
+[Version 1.4.3] - 2026-05-04
+
+=== Fixed ===
+
+Minor interface errors have been fixed.
+
+Version bumped to 1.4.3
+
 [Version 1.4.2] - 2026-05-03
 
 === Fixed ===

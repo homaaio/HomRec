@@ -59,7 +59,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.4.2"
+CURRENT_VERSION = "1.4.3"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -95,7 +95,7 @@ def _version_gt(a: str, b: str) -> bool:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec (v1.4.0)",
+        "app_title": "HomRec (v1.4.3)",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -187,7 +187,7 @@ LANGUAGES = {
         "audio_file": "🎵 Audio file:",
     },
     "ru": {
-        "app_title": "HomRec (v1.4.0)",
+        "app_title": "HomRec (v1.4.3)",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -1890,7 +1890,7 @@ class HomRecScreen:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_tray()
-        log.info("HomRec v1.4.0 started, language: %s", self.current_language)
+        log.info("HomRec v1.4.3 started, language: %s", self.current_language)
         # Check for updates 2 seconds after startup (non-blocking)
         self.root.after(2000, self._start_update_check)
     
@@ -1998,7 +1998,7 @@ class HomRecScreen:
                 pass
 
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.4.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.4.3")
     
     def on_window_resize(self, event: tk.Event) -> None:
         if event.widget == self.root:
@@ -2469,7 +2469,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.4.0", 
+        tk.Label(title_frame, text="v1.4.3", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
