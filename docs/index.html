@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HomRec Project | homaaio</title>
+    <style>
+        :root {
+            --bg: #0d0d0d;
+            --card: #161616;
+            --accent: #3d5afe; 
+            --text-main: #ffffff;
+            --text-dim: #888888;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--text-main);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        
+        .announcement {
+            background: var(--accent);
+            width: 100%;
+            padding: 12px 0;
+            text-align: center;
+            font-weight: 600;
+            font-size: 0.9rem;
+            letter-spacing: 0.5px;
+        }
+
+        .container {
+            max-width: 800px;
+            width: 90%;
+            margin-top: 80px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 4rem;
+            margin: 0;
+            font-weight: 850;
+            letter-spacing: -2px;
+        }
+
+        .tagline {
+            color: var(--text-dim);
+            font-size: 1.3rem;
+            margin: 20px 0 40px 0;
+        }
+
+        .main-card {
+            background: var(--card);
+            border-radius: 28px;
+            padding: 40px;
+            border: 1px solid #222;
+            box-shadow: 0 40px 100px rgba(0,0,0,0.5);
+        }
+
+        .btn-download {
+            display: inline-block;
+            background: #fff;
+            color: #000;
+            text-decoration: none;
+            padding: 18px 45px;
+            border-radius: 16px;
+            font-weight: 700;
+            font-size: 1.1rem;
+            transition: 0.3s;
+            margin-bottom: 40px;
+        }
+
+        .btn-download:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(255,255,255,0.2);
+        }
+
+        /*2.0.0 */
+        .v2-preview {
+            text-align: left;
+            background: #1d1d1d;
+            border-radius: 20px;
+            padding: 25px;
+            border-left: 4px solid var(--accent);
+        }
+
+        .v2-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .v2-title {
+            font-weight: 800;
+            font-size: 1.1rem;
+            color: var(--accent);
+        }
+
+        .progress-bg {
+            background: #333;
+            height: 6px;
+            border-radius: 10px;
+            margin: 15px 0;
+        }
+
+        .progress-fill {
+            background: var(--accent);
+            width: 44%; /* Твой прогресс */
+            height: 100%;
+            border-radius: 10px;
+            box-shadow: 0 0 15px rgba(61, 90, 254, 0.4);
+        }
+
+        .features-list {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .feature {
+            font-size: 0.85rem;
+            color: #aaa;
+            padding: 10px;
+            background: #252525;
+            border-radius: 10px;
+        }
+
+        footer {
+            margin: 50px 0;
+            color: #444;
+            font-size: 0.9rem;
+        }
+
+        b { color: #fff; }
+    </style>
+</head>
+<body>
+
+    <div class="announcement">
+        NEXT GENERATION: HomRec 2.0.0 IS COMING
+    </div>
+
+    <div class="container">
+        <h1>HomRec</h1>
+        <p class="tagline">by homaaio</p>
+
+        <div class="main-card">
+            <a href="#" class="btn-download">Download v1.4.3 (Stable)</a>
+            
+            <div class="v2-preview">
+                <div class="v2-header">
+                    <span class="v2-title">ROAD TO 2.0.0</span>
+                    <span style="font-size: 0.8rem; opacity: 0.6;">STAGE: ACTIVE DEV</span>
+                </div>
+                <p style="font-size: 0.9rem; color: #ccc; margin: 5px 0;">Adding and correcting <b>plugin-related</b> errors and console.</p>
+                
+                <div class="progress-bg">
+                    <div class="progress-fill"></div>
+                </div>
+
+                <div class="features-list">
+                    <div class="feature">40+ new commands</div>
+                    <div class="feature">HomCode Editor</div>
+                    <div class="feature">Plugins</div>
+                    <div class="feature">Zero-lag core</div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            made with ❤️ by <b>homaaio</b> | 2026-2026 (XD)
+        </footer>
+    </div>
+
+</body>
+</html>
