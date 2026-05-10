@@ -1,1 +1,11 @@
+{
+  "_comment": "HomRec verified plugin authors. Hosted at homaaio/HomREC/main/verified_authors.json",
+  "_schema": 1,
 
+  "homa4ella": {
+    "display": "Homa4ella",
+    "github":  "homaaio",
+    "since":   "2024-01-01",
+    "tier":    "core"
+  }
+}
