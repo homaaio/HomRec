@@ -1,5 +1,11 @@
 welcome to changelog :D
 
+[Version 1.4.4] - 2026-05-15
+
+=== Changed ===
+
+Added new icons
+
 [Version 1.4.3] - 2026-05-04
 
 === Fixed ===
