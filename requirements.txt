@@ -5,3 +5,4 @@ mss
 pyaudio
 psutil
 pystray
+lupa
