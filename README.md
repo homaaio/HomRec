@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/homaaio/homrec/main/icons/hom.png" alt="HomRec Logo" width="100" />
+<img src="https://raw.githubusercontent.com/homaaio/homrec/main/icons/hom.png" alt="HomRec Logo" width="200" />
 
 # 🎥 HomRec
 
