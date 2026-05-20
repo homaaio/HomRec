@@ -1,16 +1,15 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/homaaio/homrec/main/icons/main.ico" alt="HomRec Logo" width="100" />
+<img src="https://raw.githubusercontent.com/homaaio/homrec/main/icons/hom.png" alt="HomRec Logo" width="200" />
 
-# 🎥 HomRec
+# HomRec - Legacy
 
 **Screen recorder built for weak PCs.**  
 No lags. No bloat. No GPU required.
 
-[![Version](https://img.shields.io/badge/version-1.4.3-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
+[![Version](https://img.shields.io/badge/version-1.4.4-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
 [![Python](https://img.shields.io/badge/python-3.8+-yellow?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/homaaio/homrec/releases)
-[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Telegram-@homaexe-2aabee?style=flat-square&logo=telegram)](https://t.me/homaexe)
 
 </div>
@@ -66,22 +65,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 **2.** Unzip anywhere you want — no installer needed
 
-**3.** Download `ffmpeg.exe` from [ffmpeg.org](https://ffmpeg.org/download.html) and place it in the HomRec folder
-
-**4.** Launch `hr.exe`
-
-Your folder should look like this:
-```
-HomRec/
-├── hr.exe          ← main executable
-├── ffmpeg.exe      ← required for recording
-├── icons/
-│   ├── main.ico
-│   └── ico.ico
-├── config.ini      ← auto-generated
-├── homrec.log      ← auto-generated
-└── recordings/     ← auto-generated
-```
+**3.** Launch `hr.exe`
 
 > **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus — the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
 
@@ -99,19 +83,6 @@ cd homrec
 ```bash
 pip install -r requirements.txt
 ```
-
-**3. Place ffmpeg**
-
-Download from [ffmpeg.org](https://ffmpeg.org/download.html) and either:
-- Place `ffmpeg.exe` in the HomRec folder, **or**
-- Add FFmpeg to your system PATH
-
-**4. Run**
-```bash
-python homrec.py
-```
-
----
 
 ## ⌨️ Keyboard shortcuts
 
