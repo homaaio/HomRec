@@ -649,7 +649,7 @@ class HomRecApp:
         self.ffmpeg_path = find_ffmpeg()
 
         import mss as _mss_init
-        self.sct = _mss_init.mss()
+        self.sct = _mss_init.MSS()
         self.update_monitor_info()   # теперь sct уже существует
 
         # Restart preview after monitor info is ready
@@ -961,7 +961,7 @@ class HomRecApp:
                 self.monitor_left, self.monitor_top,
                 self.original_width, self.original_height,
                 self.preview_width, self.preview_height,
-                fps_limit=10
+                10
             )
             log.info("C++ preview started")
         else:
