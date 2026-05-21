@@ -1,10 +1,5 @@
 # HomRec 1.4.4 (Legacy)
 
-> Lightweight screen recorder for old and weak PCs.  
-> Built with Python + C++ native engine (Win32 / WASAPI / gdigrab).
-
----
-
 ## Features
 
 - Screen recording via FFmpeg (gdigrab)

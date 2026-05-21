@@ -1,4 +1,4 @@
-# HomRec 1.4.4 (Legacy) — Python dependencies
+# HomRec 1.4.4 (Legacy) - Python dependencies
 # Install: pip install -r requirements.txt
 pillow>=10.0
 mss>=9.0
@@ -6,3 +6,12 @@ psutil>=5.9
 pystray>=0.19
 pyaudio>=0.2.14   # for fallback audio (not needed if DLL is compiled)
 pyinstaller>=6.0  # only needed to build .exe
+=======
+opencv-python
+numpy
+Pillow
+mss
+pyaudio
+psutil
+pystray
+lupa
