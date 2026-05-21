@@ -90,7 +90,6 @@ HomRec_Legacy/
 ├── engine.py                -- Python ctypes bridge to DLL
 ├── CMakeLists.txt           -- optional CMake build
 ├── requirements.txt
-├── BUILD.md                 -- detailed build instructions
 └── README.md
 ```
 
