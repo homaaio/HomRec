@@ -1,3 +1,6 @@
+# homrec.py -- HomRec 1.4.4 (Legacy)
+# Optimised for old/weak PCs. C++ engine handles capture/preview/audio.
+
 from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -9,11 +12,13 @@ import threading
 import queue
 import subprocess
 import shutil
-import platform
 import logging
 import ctypes
+import warnings
 from datetime import datetime
 from PIL import Image, ImageTk, ImageDraw
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # -- Logging ------------------------------------------------------------------
 def _setup_logging() -> None:
@@ -33,9 +38,9 @@ log = logging.getLogger("homrec")
 import engine as _eng
 ENGINE_OK = _eng.load_engine()
 if ENGINE_OK:
-    log.info("C++ engine loaded - using native capture/preview/audio.")
+    log.info("C++ engine loaded -- using native capture/preview/audio.")
 else:
-    log.warning("C++ engine NOT loaded - falling back to Python capture.")
+    log.warning("C++ engine NOT loaded -- falling back to Python capture.")
 
 # -- Optional deps ------------------------------------------------------------
 try:
@@ -69,7 +74,7 @@ SETTINGS_PATH = os.path.join(
 )
 GITHUB_REPO = "homaaio/homrec"
 
-# -- Language strings ----------------------------------------------------------
+# -- Language strings ---------------------------------------------------------
 LANGUAGES = {
     "en": {
         "app_title":       f"HomRec ({APP_VERSION})",
@@ -79,11 +84,11 @@ LANGUAGES = {
         "paused":          "Paused",
         "fps":             "FPS:",
         "resolution":      "Resolution:",
-        "start":           "▶ START",
-        "pause":           "⏸ PAUSE",
-        "stop":            "■ STOP",
-        "resume":          "▶ RESUME",
-        "recording_btn":   "⏺ RECORDING",
+        "start":           "START",
+        "pause":           "PAUSE",
+        "stop":            "STOP",
+        "resume":          "RESUME",
+        "recording_btn":   "RECORDING",
         "audio_mixer":     "Audio Mixer",
         "microphone":      "Microphone",
         "desktop_audio":   "Desktop Audio",
@@ -92,8 +97,8 @@ LANGUAGES = {
         "vol":             "Vol:",
         "level":           "Level:",
         "enable_audio":    "Enable Audio",
-        "ffmpeg_found":    "FFmpeg: ✅ Found",
-        "ffmpeg_not_found":"FFmpeg: ❌ Not Found",
+        "ffmpeg_found":    "FFmpeg: OK",
+        "ffmpeg_not_found":"FFmpeg: Not Found",
         "file_menu":       "File",
         "open_recordings": "Open Recordings Folder",
         "exit":            "Exit",
@@ -109,11 +114,7 @@ LANGUAGES = {
         "select_window":   "Select Window...",
         "minimize_tray":   "Minimize to tray on close",
         "language":        "Language",
-        "english":         "English",
-        "russian":         "Русский",
         "theme":           "Theme",
-        "dark":            "Dark",
-        "light":           "Light",
         "settings_menu":   "Settings",
         "preferences":     "Preferences...",
         "performance_menu":"Performance",
@@ -121,24 +122,20 @@ LANGUAGES = {
         "turbo":           "Turbo (30 FPS)",
         "balanced":        "Balanced (15 FPS)",
         "eco":             "Eco (8 FPS)",
-        "stats":           "STATS",
-        "time":            "TIME",
-        "status":          "STATUS",
         "warning":         "Warning",
         "error":           "Error",
         "info":            "Info",
         "folder_not_exist":"Folder doesn't exist!",
         "recording_failed":"Recording failed!",
         "settings_saved":  "Settings saved!",
-        "recording_saved": "✅ Recording Saved!",
+        "recording_saved": "Recording Saved!",
         "open_folder":     "Open folder?",
-        "ffmpeg_not_found_msg": "⚠️ FFmpeg not found",
-        "saved":           "✅ Saved: {size:.1f} MB | {duration:.1f}s",
+        "saved":           "Saved: {size:.1f} MB | {duration:.1f}s",
         "recording_status":"Recording: {frames} frames",
-        "file":            "📁 File:",
-        "size":            "📊 Size:",
-        "duration":        "⏱️ Duration:",
-        "audio":           "🎤 Audio:",
+        "file":            "File:",
+        "size":            "Size:",
+        "duration":        "Duration:",
+        "audio":           "Audio:",
         "merged":          "Merged",
         "separate":        "Separate",
         "no_audio":        "No",
@@ -147,17 +144,13 @@ LANGUAGES = {
         "browse":          "Browse",
         "output_folder":   "Output folder:",
         "settings_title":  "Settings",
-        "video_settings":  "Video",
-        "quality":         "Quality:",
         "mode":            "Mode:",
         "monitor":         "Monitor:",
-        "output":          "Output:",
         "countdown":       "Countdown (3s)",
         "timestamp":       "Timestamp",
         "cursor":          "Cursor",
         "notification":    "Show summary",
         "made_by":         "Homa4ella",
-        "audio_file":      "🎵 Audio file:",
         "codec":           "Codec:",
         "preset":          "Preset:",
         "crf":             "CRF:",
@@ -178,11 +171,11 @@ LANGUAGES = {
         "paused":          "Пауза",
         "fps":             "FPS:",
         "resolution":      "Разрешение:",
-        "start":           "▶ СТАРТ",
-        "pause":           "⏸ ПАУЗА",
-        "stop":            "■ СТОП",
-        "resume":          "▶ ПРОДОЛЖИТЬ",
-        "recording_btn":   "⏺ ЗАПИСЬ",
+        "start":           "СТАРТ",
+        "pause":           "ПАУЗА",
+        "stop":            "СТОП",
+        "resume":          "ПРОДОЛЖИТЬ",
+        "recording_btn":   "ЗАПИСЬ",
         "audio_mixer":     "Аудио Микшер",
         "microphone":      "Микрофон",
         "desktop_audio":   "Системный звук",
@@ -191,8 +184,8 @@ LANGUAGES = {
         "vol":             "Громк:",
         "level":           "Уровень:",
         "enable_audio":    "Запись звука",
-        "ffmpeg_found":    "FFmpeg: ✅ Найден",
-        "ffmpeg_not_found":"FFmpeg: ❌ Не найден",
+        "ffmpeg_found":    "FFmpeg: OK",
+        "ffmpeg_not_found":"FFmpeg: Не найден",
         "file_menu":       "Файл",
         "open_recordings": "Открыть папку",
         "exit":            "Выход",
@@ -208,11 +201,7 @@ LANGUAGES = {
         "select_window":   "Выбрать окно...",
         "minimize_tray":   "Сворачивать в трей",
         "language":        "Язык",
-        "english":         "English",
-        "russian":         "Русский",
         "theme":           "Тема",
-        "dark":            "Темная",
-        "light":           "Светлая",
         "settings_menu":   "Настройки",
         "preferences":     "Параметры...",
         "performance_menu":"Производительность",
@@ -220,24 +209,20 @@ LANGUAGES = {
         "turbo":           "Турбо (30 FPS)",
         "balanced":        "Средний (15 FPS)",
         "eco":             "Эко (8 FPS)",
-        "stats":           "СТАТИСТИКА",
-        "time":            "ВРЕМЯ",
-        "status":          "СТАТУС",
         "warning":         "Предупреждение",
         "error":           "Ошибка",
         "info":            "Информация",
         "folder_not_exist":"Папка не существует!",
         "recording_failed":"Ошибка записи!",
         "settings_saved":  "Настройки сохранены!",
-        "recording_saved": "✅ Запись сохранена!",
+        "recording_saved": "Запись сохранена!",
         "open_folder":     "Открыть папку?",
-        "ffmpeg_not_found_msg": "⚠️ FFmpeg не найден",
-        "saved":           "✅ Сохранено: {size:.1f} МБ | {duration:.1f}с",
+        "saved":           "Сохранено: {size:.1f} МБ | {duration:.1f}с",
         "recording_status":"Запись: {frames} кадров",
-        "file":            "📁 Файл:",
-        "size":            "📊 Размер:",
-        "duration":        "⏱️ Длительность:",
-        "audio":           "🎤 Аудио:",
+        "file":            "Файл:",
+        "size":            "Размер:",
+        "duration":        "Длительность:",
+        "audio":           "Аудио:",
         "merged":          "Объединено",
         "separate":        "Отдельно",
         "no_audio":        "Нет",
@@ -246,17 +231,13 @@ LANGUAGES = {
         "browse":          "Обзор",
         "output_folder":   "Папка записей:",
         "settings_title":  "Настройки",
-        "video_settings":  "Видео",
-        "quality":         "Качество:",
         "mode":            "Режим:",
         "monitor":         "Монитор:",
-        "output":          "Папка:",
         "countdown":       "Отсчет (3с)",
         "timestamp":       "Время",
         "cursor":          "Курсор",
         "notification":    "Показывать сводку",
         "made_by":         "Homa4ella",
-        "audio_file":      "🎵 Аудио файл:",
         "codec":           "Кодек:",
         "preset":          "Пресет:",
         "crf":             "CRF:",
@@ -271,7 +252,7 @@ LANGUAGES = {
     },
 }
 
-# -- Built-in themes -----------------------------------------------------------
+# -- Built-in themes ----------------------------------------------------------
 BUILTIN_THEMES = {
     "dark": {
         "bg":"#1e1e2e","fg":"#cdd6f4","accent":"#89b4fa",
@@ -305,7 +286,7 @@ BUILTIN_THEMES = {
     },
 }
 
-# -- Helpers -------------------------------------------------------------------
+# -- Helpers ------------------------------------------------------------------
 def find_ffmpeg() -> str | None:
     base = os.path.dirname(sys.executable if getattr(sys,"frozen",False)
                            else os.path.abspath(__file__))
@@ -323,9 +304,9 @@ def _version_gt(a: str, b: str) -> bool:
     except Exception:
         return False
 
-# ----------------------- Audio Level Meter -----------------------------------
+# -- Audio Level Meter --------------------------------------------------------
 class AudioLevelMeter(tk.Canvas):
-    def __init__(self, parent, width=180, height=20, **kw):
+    def __init__(self, parent, width=180, height=16, **kw):
         super().__init__(parent, width=width, height=height,
                          highlightthickness=0, **kw)
         self.w, self.h = width, height
@@ -339,15 +320,14 @@ class AudioLevelMeter(tk.Canvas):
         if bw > 0:
             c = "#a6e3a1" if self.level < 70 else "#f9e2af" if self.level < 90 else "#f38ba8"
             self.create_rectangle(2,2,bw,self.h-2, fill=c, outline="")
-        for i in range(0,101,25):
-            x = int((i/100)*self.w)
-            self.create_line(x,0,x,self.h, fill="#1e1e2e", width=1)
 
     def set_level(self, v: float):
-        self.level = max(0, min(100, v))
-        self._draw()
+        new = max(0, min(100, v))
+        if abs(new - self.level) > 1:
+            self.level = new
+            self._draw()
 
-# ----------------------- Settings Dialog (all settings) ----------------------
+# -- Settings Dialog ----------------------------------------------------------
 class SettingsDialog:
     def __init__(self, parent, app):
         self.app = app
@@ -355,7 +335,7 @@ class SettingsDialog:
         d = tk.Toplevel(parent)
         self.d = d
         d.title(app.lang["settings_title"])
-        d.geometry("520x640")
+        d.geometry("520x620")
         d.resizable(False, True)
         d.configure(bg=c["bg"])
         d.transient(parent)
@@ -363,13 +343,13 @@ class SettingsDialog:
         app._set_icon(d)
         d.update_idletasks()
         x = parent.winfo_x() + parent.winfo_width()//2 - 260
-        y = parent.winfo_y() + parent.winfo_height()//2 - 320
+        y = parent.winfo_y() + parent.winfo_height()//2 - 310
         d.geometry(f"+{x}+{y}")
 
         nb = ttk.Notebook(d)
         nb.pack(fill="both", expand=True, padx=12, pady=10)
 
-        # -- Video tab ------------------------------------------------
+        # Video tab
         vt = tk.Frame(nb, bg=c["bg"]); nb.add(vt, text="Video")
         self._mode_v = tk.StringVar(value=app.recording_mode)
         self._row(vt, app.lang["mode"],
@@ -407,7 +387,7 @@ class SettingsDialog:
                                values=["auto","none","cuda","dxva2","d3d11va"],
                                width=10, state="readonly"))
 
-        # -- Audio tab ------------------------------------------------
+        # Audio tab
         at = tk.Frame(nb, bg=c["bg"]); nb.add(at, text="Audio")
         self._sr_v = tk.StringVar(value=str(getattr(app,"audio_sample_rate",44100)))
         self._row(at, app.lang["sample_rate"],
@@ -420,7 +400,7 @@ class SettingsDialog:
                                values=["96k","128k","192k","256k"],
                                width=8, state="readonly"))
 
-        # -- Recording tab --------------------------------------------
+        # Recording tab
         rt = tk.Frame(nb, bg=c["bg"]); nb.add(rt, text="Recording")
         self._folder_v = tk.StringVar(value=app.output_folder)
         frow = tk.Frame(rt, bg=c["bg"])
@@ -452,8 +432,7 @@ class SettingsDialog:
                            bg=c["bg"], fg=c["text"],
                            selectcolor=c["surface"],
                            font=("Segoe UI",10)).grid(
-                row=r, column=0, columnspan=2,
-                sticky="w", padx=12, pady=3)
+                row=r, column=0, columnspan=2, sticky="w", padx=12, pady=3)
 
         self._as_v = tk.StringVar(value=str(getattr(app,"auto_stop_min",0)))
         self._row(rt, app.lang["auto_stop"],
@@ -461,7 +440,7 @@ class SettingsDialog:
                              from_=0, to=480, width=6,
                              bg=c["surface"], fg=c["text"], relief="flat"))
 
-        # -- Hotkeys tab ----------------------------------------------
+        # Hotkeys tab
         ht = tk.Frame(nb, bg=c["bg"]); nb.add(ht, text="Hotkeys")
         tk.Label(ht, text="Click a field and press any key combination",
                  bg=c["bg"], fg=c["text_secondary"],
@@ -479,7 +458,7 @@ class SettingsDialog:
             e.bind("<FocusOut>", lambda ev, en=e: en.config(state="readonly"))
             self._row(ht, label, e)
 
-        # -- Appearance tab -------------------------------------------
+        # Appearance tab
         apt = tk.Frame(nb, bg=c["bg"]); nb.add(apt, text="Appearance")
         self._theme_v = tk.StringVar(value=app.current_theme)
         self._row(apt, app.lang["theme"],
@@ -499,19 +478,19 @@ class SettingsDialog:
                            bg=c["bg"], fg=c["text"],
                            selectcolor=c["surface"],
                            font=("Segoe UI",10)).grid(
-                row=r, column=0, columnspan=2,
-                sticky="w", padx=12, pady=3)
+                row=r, column=0, columnspan=2, sticky="w", padx=12, pady=3)
 
-        # -- Bottom ---------------------------------------------------
-        sep = tk.Frame(d, bg=c["surface"], height=1)
-        sep.pack(fill="x", padx=12)
+        # Bottom buttons
+        sep = tk.Frame(d, bg=c["surface"], height=1); sep.pack(fill="x", padx=12)
         bot = tk.Frame(d, bg=c["bg"]); bot.pack(fill="x", padx=12, pady=8)
         tk.Button(bot, text=app.lang["cancel"], command=d.destroy,
                   bg=c["surface"], fg=c["text"],
-                  font=("Segoe UI",9), relief="flat", padx=12, pady=6).pack(side="right",padx=(4,0))
+                  font=("Segoe UI",9), relief="flat", padx=12, pady=6
+                  ).pack(side="right",padx=(4,0))
         tk.Button(bot, text=app.lang["save"], command=self._save,
                   bg=c["success"], fg=c["bg"],
-                  font=("Segoe UI",9,"bold"), relief="flat", padx=16, pady=6).pack(side="right")
+                  font=("Segoe UI",9,"bold"), relief="flat", padx=16, pady=6
+                  ).pack(side="right")
 
     def _row(self, parent, label, widget):
         r = parent.grid_size()[1]
@@ -578,7 +557,7 @@ class SettingsDialog:
         self.d.destroy()
         messagebox.showinfo(a.lang["info"], a.lang["settings_saved"])
 
-# ----------------------- Main Application ------------------------------------
+# -- Main Application ---------------------------------------------------------
 class HomRecApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -586,7 +565,7 @@ class HomRecApp:
         self.root.geometry("960x620")
         self.root.minsize(780, 520)
 
-        # Defaults
+        # State
         self.recording        = False
         self.paused           = False
         self.stop_flag        = False
@@ -626,7 +605,6 @@ class HomRecApp:
         self.timestamp_var    = tk.BooleanVar(value=False)
         self.cursor_var       = tk.BooleanVar(value=False)
         self.minimize_to_tray = tk.BooleanVar(value=True)
-        self.language_var     = tk.StringVar(value="en")
         self.theme_var        = tk.StringVar(value="dark")
         self.mic_vol_var      = tk.DoubleVar(value=1.0)
         self.sys_vol_var      = tk.DoubleVar(value=1.0)
@@ -634,25 +612,24 @@ class HomRecApp:
         self.sys_muted        = False
         self.audio_enabled    = tk.BooleanVar(value=True)
 
-        # Preview
+        # Preview state
         self._preview_running = False
         self._preview_queue: queue.Queue = queue.Queue(maxsize=1)
         self._rec_frames: list = []
         self._rec_frame_idx   = 0
-        self.preview_width    = 640
-        self.preview_height   = 360
+        self._last_preview_img = None
 
+        # Load settings first, then init mss
         self.load_settings()
         self.lang   = LANGUAGES[self.current_language]
         self.colors = BUILTIN_THEMES.get(self.current_theme, BUILTIN_THEMES["dark"])
-
         self.ffmpeg_path = find_ffmpeg()
 
+        # Init mss for monitor info
         import mss as _mss_init
-        self.sct = _mss_init.MSS()
-        self.update_monitor_info()   # теперь sct уже существует
-
-        # Restart preview after monitor info is ready
+        self._mss_init = _mss_init
+        self.sct = _mss_init.mss()
+        self.update_monitor_info()
 
         self.set_app_icon()
         self.apply_theme()
@@ -661,40 +638,39 @@ class HomRecApp:
 
         self._rec_frames = self._make_rec_frames()
         self._start_preview()
-        self.update_preview()
+        self.root.after(1000, self.update_preview)
 
         if HAS_TRAY: self.setup_tray()
         self.root.bind("<F11>", lambda e: self.toggle_fullscreen())
         self.root.bind("<Configure>", self.on_window_resize)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        # Check for updates in background
         threading.Thread(target=self._bg_update_check, daemon=True).start()
 
     # -- Monitor info ---------------------------------------------------------
     def update_monitor_info(self):
         try:
-            monitors = self.sct.monitors  # index 0 = all, 1+ = individual
-            idx = self.monitor_id + 1  # mss: 1-based
+            monitors = self.sct.monitors
+            idx = self.monitor_id + 1
             if idx >= len(monitors): idx = 1
             m = monitors[idx]
-            self.monitor       = m
-            self.monitor_left  = m["left"]
-            self.monitor_top   = m["top"]
+            self.monitor         = m
+            self.monitor_left    = m["left"]
+            self.monitor_top     = m["top"]
             self.original_width  = m["width"]
             self.original_height = m["height"]
-            self.record_width  = int(self.original_width  * self.scale_factor)
-            self.record_height = int(self.original_height * self.scale_factor)
-            # keep even
-            self.record_width  -= self.record_width  % 2
-            self.record_height -= self.record_height % 2
+            self.record_width    = int(self.original_width  * self.scale_factor)
+            self.record_height   = int(self.original_height * self.scale_factor)
+            self.record_width   -= self.record_width  % 2
+            self.record_height  -= self.record_height % 2
         except Exception as e:
             log.warning(f"update_monitor_info: {e}")
             self.monitor_left = self.monitor_top = 0
             self.original_width = self.record_width  = 1920
             self.original_height= self.record_height = 1080
+            self.monitor = {"left":0,"top":0,"width":1920,"height":1080}
 
-    # -- Theme / icon ----------------------------------------------------------
+    # -- Theme / icons --------------------------------------------------------
     def apply_theme(self):
         self.root.configure(bg=self.colors["bg"])
         style = ttk.Style()
@@ -714,31 +690,24 @@ class HomRecApp:
         icons = os.path.join(base, "icons")
         self._main_ico = os.path.join(icons, "main.ico")
         self._rec_ico  = os.path.join(icons, "rec.ico")
-        try:
-            self.root.iconbitmap(self._main_ico)
-        except Exception:
-            pass
+        try: self.root.iconbitmap(self._main_ico)
+        except Exception: pass
         if sys.platform == "win32":
             try:
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
                     "homrec.144.legacy")
-            except Exception:
-                pass
+            except Exception: pass
 
     def _set_icon(self, win):
         try:
-            if os.path.exists(self._main_ico):
-                win.iconbitmap(self._main_ico)
-        except Exception:
-            pass
+            if os.path.exists(self._main_ico): win.iconbitmap(self._main_ico)
+        except Exception: pass
 
     def _set_taskbar_icon(self, recording: bool):
         try:
             ico = self._rec_ico if recording else self._main_ico
-            if os.path.exists(ico):
-                self.root.iconbitmap(ico)
-        except Exception:
-            pass
+            if os.path.exists(ico): self.root.iconbitmap(ico)
+        except Exception: pass
 
     def _make_rec_frames(self):
         frames = []
@@ -763,7 +732,7 @@ class HomRecApp:
             frames.append(img)
         return frames
 
-    # -- Menu ------------------------------------------------------------------
+    # -- Menu -----------------------------------------------------------------
     def create_menu(self):
         c = self.colors
         mb = tk.Menu(self.root, bg=c["surface"], fg=c["fg"])
@@ -784,8 +753,6 @@ class HomRecApp:
         if HAS_PSUTIL:
             vm.add_separator()
             vm.add_command(label=self.lang["pc_analytics"], command=self.show_analytics)
-
-        # Theme sub-menu
         tm = tk.Menu(vm, tearoff=0, bg=c["surface"], fg=c["fg"])
         vm.add_cascade(label=self.lang["theme"], menu=tm)
         for tid, tlbl in [("dark","Dark"),("light","Light"),
@@ -814,16 +781,15 @@ class HomRecApp:
         hm.add_separator()
         hm.add_command(label=self.lang["report_issue"], command=self._open_issues)
 
-    # -- Widgets ---------------------------------------------------------------
+    # -- Widgets --------------------------------------------------------------
     def create_widgets(self):
         c = self.colors
-        # Main layout: left panel | preview
         main = tk.Frame(self.root, bg=c["bg"]); main.pack(fill="both", expand=True)
         left = tk.Frame(main, bg=c["bg"], width=260)
         left.pack(side="left", fill="y", padx=(8,0), pady=8)
         left.pack_propagate(False)
 
-        # Preview
+        # Preview area
         prev_frame = tk.Frame(main, bg=c["preview_bg"])
         prev_frame.pack(side="left", fill="both", expand=True, padx=8, pady=8)
         tk.Label(prev_frame, text=self.lang["live_preview"],
@@ -832,9 +798,9 @@ class HomRecApp:
         self.preview_label = tk.Label(prev_frame, bg=c["preview_bg"])
         self.preview_label.pack(fill="both", expand=True)
 
-        # Status bar
+        # Status
         sb = tk.Frame(left, bg=c["surface"]); sb.pack(fill="x", pady=(0,6))
-        self.status_icon  = tk.Label(sb, text="●", fg=c["warning"],
+        self.status_icon  = tk.Label(sb, text="*", fg=c["warning"],
                                      bg=c["surface"], font=("Segoe UI",14))
         self.status_icon.pack(side="left", padx=6)
         self.status_label = tk.Label(sb, text=self.lang["ready"],
@@ -856,7 +822,7 @@ class HomRecApp:
                                    text=f"{self.lang['resolution']} {self.record_width}x{self.record_height}",
                                    bg=c["surface"], fg=c["text_secondary"],
                                    font=("Segoe UI",9))
-        self.res_label.pack(anchor="center", pady=(0,4))
+        self.res_label.pack(anchor="center", pady=(0,2))
         self.file_label = tk.Label(stats, text="",
                                    bg=c["surface"], fg=c["text_secondary"],
                                    font=("Segoe UI",8), wraplength=230)
@@ -868,7 +834,7 @@ class HomRecApp:
         tk.Label(left, text=ff_text, bg=c["bg"], fg=ff_color,
                  font=("Segoe UI",9)).pack(anchor="w", pady=2)
 
-        # Record / Pause / Stop buttons
+        # Buttons
         btn_frame = tk.Frame(left, bg=c["bg"]); btn_frame.pack(fill="x", pady=4)
         self.record_btn = tk.Button(btn_frame,
                                     text=self.lang["start"],
@@ -884,31 +850,30 @@ class HomRecApp:
                                    font=("Segoe UI",9,"bold"),
                                    relief="flat", pady=6, state="disabled")
         self.pause_btn.pack(side="left", fill="x", expand=True, padx=(0,2))
+        self.stop_btn  = tk.Button(bf2, text=self.lang["stop"],
+                                   command=self.stop_recording,
+                                   bg=c["error"], fg=c["bg"],
+                                   font=("Segoe UI",9,"bold"),
+                                   relief="flat", pady=6, state="disabled")
+        self.stop_btn.pack(side="left", fill="x", expand=True, padx=(2,0))
 
         # Audio mixer
         audio_lf = tk.LabelFrame(left, text=self.lang["audio_mixer"],
                                   bg=c["bg"], fg=c["accent"],
                                   font=("Segoe UI",9,"bold"))
         audio_lf.pack(fill="x", pady=4)
-
-        # Enable audio checkbox
         tk.Checkbutton(audio_lf, text=self.lang["enable_audio"],
                        variable=self.audio_enabled,
                        bg=c["bg"], fg=c["text"],
                        selectcolor=c["surface"],
                        font=("Segoe UI",9)).pack(anchor="w", padx=6)
-
-        # Mic
         self._build_channel(audio_lf, self.lang["microphone"], "mic")
-        # System audio
         self._build_channel(audio_lf, self.lang["desktop_audio"], "sys")
 
-        # Made by
         tk.Label(left, text=f"by {self.lang['made_by']}",
                  bg=c["bg"], fg=c["text_secondary"],
                  font=("Segoe UI",8)).pack(side="bottom", pady=2)
 
-        # Start level meter polling
         self._poll_audio_levels()
 
     def _build_channel(self, parent, label_text, kind):
@@ -922,19 +887,15 @@ class HomRecApp:
                              command=lambda: self._toggle_mute(kind, mute_btn))
         mute_btn.pack(side="right")
         vol_var = self.mic_vol_var if kind=="mic" else self.sys_vol_var
-        vol_scale = tk.Scale(parent, variable=vol_var,
-                             from_=0, to=1, resolution=0.01,
-                             orient="horizontal", length=220,
-                             bg=c["bg"], fg=c["text"], highlightthickness=0,
-                             troughcolor=c["surface"],
-                             showvalue=False)
-        vol_scale.pack(fill="x", padx=6)
+        tk.Scale(parent, variable=vol_var, from_=0, to=1, resolution=0.01,
+                 orient="horizontal", length=220,
+                 bg=c["bg"], fg=c["text"], highlightthickness=0,
+                 troughcolor=c["surface"], showvalue=False
+                 ).pack(fill="x", padx=6)
         meter = AudioLevelMeter(parent, bg=c["surface_light"])
         meter.pack(fill="x", padx=6, pady=(0,4))
-        if kind == "mic":
-            self.mic_meter = meter
-        else:
-            self.sys_meter = meter
+        if kind == "mic": self.mic_meter = meter
+        else:             self.sys_meter = meter
 
     def _toggle_mute(self, kind, btn):
         if kind == "mic":
@@ -945,84 +906,99 @@ class HomRecApp:
             btn.config(text=self.lang["unmute"] if self.sys_muted else self.lang["mute"])
 
     def _poll_audio_levels(self):
-        """Update audio level meters from C++ engine or fallback."""
         if ENGINE_OK and self.audio_recording:
             ml = 0.0 if self.mic_muted else _eng.audio_mic_level()
             sl = 0.0 if self.sys_muted else _eng.audio_sys_level()
             self.mic_meter.set_level(ml)
             self.sys_meter.set_level(sl)
-        self.root.after(100, self._poll_audio_levels)
+        self.root.after(200, self._poll_audio_levels)
 
-    # -- Preview ---------------------------------------------------------------
+    # -- Preview --------------------------------------------------------------
     def _start_preview(self):
         self._preview_running = True
         if ENGINE_OK:
             _eng.preview_start(
                 self.monitor_left, self.monitor_top,
                 self.original_width, self.original_height,
-                self.preview_width, self.preview_height,
-                10
+                640, 360,
+                2  # 2 FPS idle -- very low CPU
             )
             log.info("C++ preview started")
         else:
-            # Python fallback preview
-            t = threading.Thread(target=self._py_preview_loop, daemon=True)
-            t.start()
+            threading.Thread(target=self._py_preview_loop, daemon=True).start()
+
+    def _stop_preview(self):
+        self._preview_running = False
+        if ENGINE_OK: _eng.preview_stop()
 
     def _py_preview_loop(self):
-        """Fallback preview loop using mss (Python) - used if DLL missing."""
         import mss as _mss_loc
-        sct = _mss_loc.mss()
-        while self._preview_running:
-            try:
-                mon = getattr(self, "monitor", None)
-                pw  = self.preview_width
-                ph  = self.preview_height
-                if mon is None:
-                    time.sleep(0.1); continue
-                shot = sct.grab(mon)
-                img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-                img.thumbnail((pw, ph), Image.Resampling.NEAREST
-                              if self.recording else Image.Resampling.BILINEAR)
-                if self.recording and not self.paused and self._rec_frames:
-                    badge = self._rec_frames[self._rec_frame_idx % 2]
-                    self._rec_frame_idx += 1
-                    img.paste(badge, (10,10), badge)
+        with _mss_loc.mss() as sct:
+            while self._preview_running:
                 try:
-                    self._preview_queue.get_nowait()
-                except queue.Empty:
-                    pass
-                self._preview_queue.put_nowait(img)
-            except Exception as e:
-                log.debug(f"py_preview_loop: {e}")
-            time.sleep(0.2 if self.recording else 0.12)
+                    # Skip if window minimised
+                    if self.root.state() == "iconic":
+                        time.sleep(1.0); continue
+                    mon = getattr(self, "monitor", None)
+                    if mon is None:
+                        time.sleep(1.0); continue
+                    shot = sct.grab(mon)
+                    img  = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                    img.thumbnail((640, 360), Image.Resampling.NEAREST)
+                    try:    self._preview_queue.get_nowait()
+                    except queue.Empty: pass
+                    self._preview_queue.put_nowait(img)
+                except Exception as e:
+                    log.debug(f"py_preview_loop: {e}")
+                # 2 FPS idle, 5 FPS while recording
+                time.sleep(0.2 if self.recording else 0.5)
 
     def update_preview(self):
+        if not self._preview_running:
+            return
+
+        # Свёрнуто -- ничего не делаем
+        if self.root.state() == "iconic":
+            self.root.after(1000, self.update_preview)
+            return
+
+        # Во время записи preview отключён -- экономим CPU
+        if self.recording:
+            self.root.after(2000, self.update_preview)
+            return
+
         try:
+            got = False
             if ENGINE_OK:
                 buf = _eng.preview_get_frame()
                 if buf:
                     raw, pw, ph = buf
                     img = Image.frombytes("RGB", (pw, ph), raw)
-                    if self.recording and not self.paused and self._rec_frames:
-                        badge = self._rec_frames[self._rec_frame_idx % 2]
-                        self._rec_frame_idx += 1
-                        img.paste(badge, (10,10), badge)
-                    photo = ImageTk.PhotoImage(img)
-                    self.preview_label.config(image=photo)
-                    self.preview_label.image = photo
+                    got = True
             else:
-                img = self._preview_queue.get_nowait()
-                photo = ImageTk.PhotoImage(img)
-                self.preview_label.config(image=photo)
-                self.preview_label.image = photo
-        except queue.Empty:
-            pass
-        except Exception:
-            pass
-        self.root.after(100, self.update_preview)
+                try:
+                    img = self._preview_queue.get_nowait()
+                    got = True
+                except queue.Empty:
+                    pass
 
-    # -- Recording -------------------------------------------------------------
+            if got:
+                lw = self.preview_label.winfo_width()
+                lh = self.preview_label.winfo_height()
+                if lw > 10 and lh > 10:
+                    iw, ih = img.size
+                    ratio = min(lw / iw, lh / ih)
+                    nw, nh = int(iw * ratio), int(ih * ratio)
+                    img = img.resize((nw, nh), Image.Resampling.BILINEAR)
+                self._last_preview_img = ImageTk.PhotoImage(img)
+                self.preview_label.config(image=self._last_preview_img)
+
+        except Exception as e:
+            log.debug(f"update_preview: {e}")
+
+        self.root.after(500, self.update_preview)
+
+    # -- Recording ------------------------------------------------------------
     def start_with_countdown(self):
         if not self.recording:
             if self.countdown_var.get(): self.show_countdown()
@@ -1052,9 +1028,9 @@ class HomRecApp:
         tick(3)
 
     def _build_codec_args(self) -> list[str]:
-        codec = getattr(self, "video_codec", "libx264")
-        preset= getattr(self, "enc_preset",  "ultrafast")
-        crf   = getattr(self, "enc_crf",     18)
+        codec  = getattr(self, "video_codec", "libx264")
+        preset = getattr(self, "enc_preset",  "ultrafast")
+        crf    = getattr(self, "enc_crf",     18)
         if codec in ("h264_nvenc","hevc_nvenc","h264_amf","hevc_amf","h264_qsv","hevc_qsv"):
             return ["-c:v", codec, "-preset", "fast", "-rc", "vbr", "-cq", str(crf)]
         return ["-c:v", codec, "-preset", preset, "-crf", str(crf)]
@@ -1063,18 +1039,17 @@ class HomRecApp:
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             os.makedirs(self.output_folder, exist_ok=True)
-            self.filename  = os.path.join(self.output_folder, f"HomRec_{ts}.mp4")
-            self.stop_flag = False
-            self.paused    = False
+            self.filename    = os.path.join(self.output_folder, f"HomRec_{ts}.mp4")
+            self.stop_flag   = False
+            self.paused      = False
             self.frame_count = 0
 
             if not self.ffmpeg_path:
                 raise RuntimeError("FFmpeg not found. Place ffmpeg.exe next to homrec.py.")
 
-            log.info(f"START recording → {self.filename}")
+            log.info(f"START recording -> {self.filename}")
 
             if ENGINE_OK:
-                # Use C++ engine to launch FFmpeg
                 ok = _eng.record_start(
                     self.ffmpeg_path, self.filename,
                     self.monitor_left, self.monitor_top,
@@ -1091,7 +1066,6 @@ class HomRecApp:
                 if not ok:
                     raise RuntimeError("C++ engine failed to start recording.")
             else:
-                # Python fallback: spawn ffmpeg directly
                 vf = (f"scale={self.record_width}:{self.record_height}"
                       if self.scale_factor != 1.0 else "null")
                 cmd = [
@@ -1114,12 +1088,8 @@ class HomRecApp:
                     stdin=subprocess.PIPE,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=="win32" else 0
                 )
-                self.stop_flag = False
-                self.ffmpeg_reader_thread = threading.Thread(
-                    target=self._ffmpeg_stderr_reader, daemon=True)
-                self.ffmpeg_reader_thread.start()
+                threading.Thread(target=self._ffmpeg_stderr_reader, daemon=True).start()
 
-            # Audio
             if self.audio_enabled.get():
                 self._start_audio_capture(ts)
 
@@ -1134,14 +1104,11 @@ class HomRecApp:
             self.status_icon.config(fg=self.colors["success"])
             self.status_label.config(text=self.lang["recording"])
             self._update_stats()
-
-            if self.notify_flash:
-                self._flash_border()
+            if self.notify_flash: self._flash_border()
 
         except Exception as e:
             log.exception("start_recording failed")
-            messagebox.showerror(self.lang["error"],
-                                 f"Failed to start recording:\n{e}")
+            messagebox.showerror(self.lang["error"], f"Failed to start recording:\n{e}")
 
     def _ffmpeg_stderr_reader(self):
         while not self.stop_flag and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
@@ -1154,12 +1121,9 @@ class HomRecApp:
                         parts = line.split()
                         for i, p in enumerate(parts):
                             if p == "frame=":
-                                self.frame_count = int(parts[i+1])
-                                break
-                    except Exception:
-                        pass
-            except Exception:
-                break
+                                self.frame_count = int(parts[i+1]); break
+                    except Exception: pass
+            except Exception: break
 
     def _flash_border(self):
         colors = [self.colors["success"], self.colors["bg"]] * 3
@@ -1178,23 +1142,18 @@ class HomRecApp:
         sys_vol = 0.0 if self.sys_muted else float(self.sys_vol_var.get())
         if ENGINE_OK:
             _eng.audio_start(mic_path, sys_path,
-                             self.audio_sample_rate, 2,
-                             mic_vol, sys_vol)
+                             self.audio_sample_rate, 2, mic_vol, sys_vol)
             self.audio_recording = True
         elif HAS_PYAUDIO:
-            # fallback Python mic capture
             self.audio_recording = True
-            self._py_audio_frames: list = []
-            self._py_audio_stop   = threading.Event()
+            self._py_audio_stop  = threading.Event()
             threading.Thread(target=self._py_mic_capture,
-                             args=(mic_path, mic_vol),
-                             daemon=True).start()
+                             args=(mic_path, mic_vol), daemon=True).start()
         else:
             self.audio_recording = False
             log.warning("No audio capture available.")
 
     def _py_mic_capture(self, path: str, vol: float):
-        """Python fallback mic capture via PyAudio."""
         pa = pyaudio.PyAudio()
         sr = self.audio_sample_rate
         frames: list = []
@@ -1203,9 +1162,7 @@ class HomRecApp:
                              rate=sr, input=True, frames_per_buffer=1024)
             while not self._py_audio_stop.is_set():
                 data = stream.read(1024, exception_on_overflow=False)
-                if vol != 1.0:
-                    arr = audioop.mul(data, 2, vol)
-                    data = arr
+                if vol != 1.0: data = audioop.mul(data, 2, vol)
                 rms = audioop.rms(data, 2)
                 self.mic_meter.set_level(min(100, rms / 327))
                 frames.append(data)
@@ -1215,21 +1172,18 @@ class HomRecApp:
         pa.terminate()
         try:
             wf = wave.open(path, "wb")
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sr)
-            wf.writeframes(b"".join(frames))
-            wf.close()
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(sr)
+            wf.writeframes(b"".join(frames)); wf.close()
         except Exception as e:
             log.warning(f"py_mic_capture WAV write: {e}")
 
     def stop_recording(self):
         if not self.recording: return
-        log.info("Stopping recording…")
-        self.recording  = False
-        self.stop_flag  = True
-        saved_filename  = self.filename
-        saved_start     = self.start_time
+        log.info("Stopping recording...")
+        self.recording = False
+        self.stop_flag = True
+        saved_filename = self.filename
+        saved_start    = self.start_time
 
         self._set_taskbar_icon(recording=False)
         self.record_btn.config(text=self.lang["start"],
@@ -1238,12 +1192,11 @@ class HomRecApp:
         self.pause_btn.config(state="disabled", text=self.lang["pause"])
         self.stop_btn.config(state="disabled")
         self.status_icon.config(fg=self.colors["warning"])
-        self.status_label.config(text="Saving…")
+        self.status_label.config(text="Saving...")
         self.time_label.config(text="00:00:00")
-        self.file_label.config(text="Processing…")
+        self.file_label.config(text="Processing...")
 
         def _finalize():
-            # Stop C++ engine recording
             if ENGINE_OK:
                 _eng.record_stop()
             elif self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
@@ -1255,7 +1208,6 @@ class HomRecApp:
                     try: self.ffmpeg_proc.kill()
                     except Exception: pass
 
-            # Stop audio
             audio_mic = None; audio_sys = None
             if self.audio_recording:
                 if ENGINE_OK:
@@ -1263,15 +1215,13 @@ class HomRecApp:
                     audio_mic = getattr(self,"_audio_mic_path","")
                     audio_sys = getattr(self,"_audio_sys_path","")
                 else:
-                    if hasattr(self,"_py_audio_stop"):
-                        self._py_audio_stop.set()
+                    if hasattr(self,"_py_audio_stop"): self._py_audio_stop.set()
                     time.sleep(0.4)
                     audio_mic = getattr(self,"_audio_mic_path","")
                 self.audio_recording = False
 
             time.sleep(0.3)
 
-            # Merge audio
             audio_merged = False
             if audio_mic and os.path.exists(audio_mic) and self.ffmpeg_path:
                 audio_merged = self._merge_audio(saved_filename, audio_mic, audio_sys)
@@ -1279,26 +1229,22 @@ class HomRecApp:
             duration = time.time() - saved_start
             size_mb  = (os.path.getsize(saved_filename)/1024/1024
                         if os.path.exists(saved_filename) else 0)
-
             self.root.after(0, lambda: self._finalize_ui(
-                saved_filename, duration, size_mb,
-                audio_mic, audio_merged))
+                saved_filename, duration, size_mb, audio_mic, audio_merged))
 
         threading.Thread(target=_finalize, daemon=True).start()
 
     def _merge_audio(self, video: str, mic: str, sys_wav: str | None) -> bool:
-        """Merge WAV audio(s) into the MP4 video using FFmpeg."""
         try:
             merged = video.replace(".mp4","_merged.mp4")
             inputs = ["-i", video, "-i", mic]
             if sys_wav and os.path.exists(sys_wav):
                 inputs += ["-i", sys_wav]
                 filter_cx = "[1:a][2:a]amix=inputs=2:duration=first[aout]"
-                amap      = ["-filter_complex", filter_cx, "-map","0:v","-map","[aout]"]
+                amap = ["-filter_complex", filter_cx, "-map","0:v","-map","[aout]"]
             else:
                 amap = ["-map","0:v","-map","1:a"]
-            cmd = [self.ffmpeg_path, "-y",
-                   *inputs, *amap,
+            cmd = [self.ffmpeg_path, "-y", *inputs, *amap,
                    "-c:v","copy","-c:a","aac",
                    "-b:a", getattr(self,"audio_aac_bitrate","128k"),
                    "-movflags","+faststart", merged]
@@ -1310,7 +1256,6 @@ class HomRecApp:
                                  if sys.platform=="win32" else 0)
             if ret.returncode == 0 and os.path.exists(merged):
                 os.replace(merged, video)
-                # Clean up WAV files
                 for w in (mic, sys_wav):
                     if w and os.path.exists(w):
                         try: os.remove(w)
@@ -1322,10 +1267,9 @@ class HomRecApp:
         return False
 
     def _finalize_ui(self, filename, duration, size_mb, audio_file, audio_merged):
-        exists = os.path.exists(filename)
         self.status_icon.config(fg=self.colors["warning"])
         self.status_label.config(text=self.lang["ready"])
-        if exists:
+        if os.path.exists(filename):
             self.file_label.config(
                 text=self.lang["saved"].format(size=size_mb, duration=duration))
             if self.show_summary:
@@ -1336,7 +1280,8 @@ class HomRecApp:
                         f"{self.lang['size']} {size_mb:.1f} MB\n"
                         f"{self.lang['duration']} {duration:.1f}s\n"
                         f"{self.lang['audio']} {audio_text}")
-                if messagebox.askyesno(self.lang["recording_saved"], info + "\n\n" + self.lang["open_folder"]):
+                if messagebox.askyesno(self.lang["recording_saved"],
+                                       info + "\n\n" + self.lang["open_folder"]):
                     self.open_recordings()
         else:
             self.file_label.config(text=self.lang["recording_failed"])
@@ -1353,9 +1298,8 @@ class HomRecApp:
                 self.fps_label.config(text=f"{self.lang['fps']} {fc/elapsed:.1f}")
             self.file_label.config(
                 text=self.lang["recording_status"].format(frames=fc))
-        except Exception:
-            pass
-        self.root.after(500, self._update_stats)
+        except Exception: pass
+        self.root.after(1000, self._update_stats)
 
     def toggle_pause(self):
         if not self.recording: return
@@ -1367,7 +1311,7 @@ class HomRecApp:
             self.pause_btn.config(text=self.lang["pause"], bg=self.colors["warning"])
             self.status_label.config(text=self.lang["recording"])
 
-    # -- Settings / mode -------------------------------------------------------
+    # -- Settings / mode ------------------------------------------------------
     def open_settings(self): SettingsDialog(self.root, self)
 
     def set_mode(self, mode: str):
@@ -1384,7 +1328,7 @@ class HomRecApp:
             self.target_fps=30; self.quality=90; self.scale_factor=1.0
         elif self.recording_mode == "balanced":
             self.target_fps=15; self.quality=70; self.scale_factor=0.75
-        else:  # eco
+        else:
             self.target_fps=8;  self.quality=50; self.scale_factor=0.5
         self.update_monitor_info()
 
@@ -1454,8 +1398,7 @@ class HomRecApp:
 
     def recreate_widgets(self):
         was_rec = self.recording; was_paused = self.paused
-        for w in self.root.winfo_children():
-            w.destroy()
+        for w in self.root.winfo_children(): w.destroy()
         self.create_menu(); self.create_widgets()
         if was_rec:
             self.record_btn.config(text=self.lang["stop"],
@@ -1473,42 +1416,36 @@ class HomRecApp:
         self.apply_theme(); self.recreate_widgets()
         self.save_settings(silent=True)
 
-    # -- Misc UI ---------------------------------------------------------------
+    # -- Misc UI --------------------------------------------------------------
     def toggle_always_on_top(self):
         self.root.attributes("-topmost", self.always_on_top.get())
         self.save_settings(silent=True)
 
     def toggle_fullscreen(self):
-        fs = self.root.attributes("-fullscreen")
-        self.root.attributes("-fullscreen", not fs)
+        self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen"))
 
     def on_window_resize(self, event):
         if event.widget == self.root:
             pw = max(400, self.root.winfo_width() - 270)
             ph = max(280, self.root.winfo_height() - 80)
-            self.preview_width  = min(pw, 1280)
-            self.preview_height = min(ph,  720)
+            # No need to restart C++ preview -- it always captures 640x360
+            # and update_preview scales to the label size at draw time
 
     def open_recordings(self):
         if os.path.exists(self.output_folder):
-            if sys.platform == "win32":
-                os.startfile(self.output_folder)
-            else:
-                subprocess.Popen(["xdg-open", self.output_folder])
+            if sys.platform == "win32": os.startfile(self.output_folder)
+            else: subprocess.Popen(["xdg-open", self.output_folder])
         else:
-            messagebox.showwarning(self.lang["warning"],
-                                   self.lang["folder_not_exist"])
+            messagebox.showwarning(self.lang["warning"], self.lang["folder_not_exist"])
 
     # -- PC Analytics ---------------------------------------------------------
     def show_analytics(self):
         if not HAS_PSUTIL:
-            messagebox.showinfo("PC Analytics", "psutil not installed.")
-            return
-        dlg = tk.Toplevel(self.root)
-        self._set_icon(dlg)
-        dlg.title("PC Analytics"); dlg.geometry("320x360")
-        dlg.configure(bg=self.colors["bg"]); dlg.resizable(False,True)
+            messagebox.showinfo("PC Analytics", "psutil not installed."); return
         c = self.colors
+        dlg = tk.Toplevel(self.root); self._set_icon(dlg)
+        dlg.title("PC Analytics"); dlg.geometry("300x340")
+        dlg.configure(bg=c["bg"]); dlg.resizable(False, True)
         def refresh():
             for w in dlg.winfo_children(): w.destroy()
             tk.Label(dlg, text="PC Analytics", bg=c["bg"], fg=c["accent"],
@@ -1519,9 +1456,9 @@ class HomRecApp:
                     ("Usage", f"{psutil.cpu_percent(interval=0.2):.1f}%"),
                 ]),
                 ("RAM", c["success"], [
-                    ("Total",  f"{psutil.virtual_memory().total/1e9:.1f} GB"),
-                    ("Free",   f"{psutil.virtual_memory().available/1e9:.1f} GB"),
-                    ("Used",   f"{psutil.virtual_memory().percent}%"),
+                    ("Total", f"{psutil.virtual_memory().total/1e9:.1f} GB"),
+                    ("Free",  f"{psutil.virtual_memory().available/1e9:.1f} GB"),
+                    ("Used",  f"{psutil.virtual_memory().percent}%"),
                 ]),
             ]:
                 f = tk.Frame(dlg, bg=c["surface"], pady=6, padx=10)
@@ -1536,24 +1473,23 @@ class HomRecApp:
                              font=("Consolas",9)).pack(side="left")
             tk.Button(dlg, text="Refresh", command=refresh,
                       bg=c["surface"], fg=c["text"],
-                      font=("Segoe UI",9), relief="flat",
-                      padx=14, pady=4).pack(pady=8)
+                      font=("Segoe UI",9), relief="flat", padx=14, pady=4).pack(pady=8)
         refresh()
 
-    # -- Window picker ---------------------------------------------------------
+    # -- Window picker --------------------------------------------------------
     def set_capture_desktop(self):
         self.capture_mode = "desktop"; self.capture_window_title = ""
 
     def get_open_windows(self) -> list[str]:
         if sys.platform != "win32": return []
         titles = []
-        EnumWindows = ctypes.windll.user32.EnumWindows
-        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool,
-                                              ctypes.POINTER(ctypes.c_int),
-                                              ctypes.POINTER(ctypes.c_int))
-        GetWindowText = ctypes.windll.user32.GetWindowTextW
+        EnumWindows      = ctypes.windll.user32.EnumWindows
+        EnumWindowsProc  = ctypes.WINFUNCTYPE(ctypes.c_bool,
+                                               ctypes.POINTER(ctypes.c_int),
+                                               ctypes.POINTER(ctypes.c_int))
+        GetWindowText       = ctypes.windll.user32.GetWindowTextW
         GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
-        IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+        IsWindowVisible     = ctypes.windll.user32.IsWindowVisible
         def cb(hwnd, _):
             if IsWindowVisible(hwnd):
                 n = GetWindowTextLength(hwnd)
@@ -1603,19 +1539,14 @@ class HomRecApp:
                   font=("Segoe UI",9), relief="flat",
                   padx=12, pady=5).pack(side="left")
 
-    # -- Tray ------------------------------------------------------------------
+    # -- Tray -----------------------------------------------------------------
     def setup_tray(self):
         try:
-            # Рисуем иконку 64x64: красный круг с белой буквой R
             img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
             d = ImageDraw.Draw(img)
-            # Фон - тёмно-красный круг
             d.ellipse([2, 2, 62, 62], fill="#c0392b", outline="#e74c3c", width=2)
-            # Белый круг внутри (имитация кнопки записи)
             d.ellipse([18, 18, 46, 46], fill="#ffffff")
-            # Красная точка в центре
             d.ellipse([26, 26, 38, 38], fill="#c0392b")
-
             menu = pystray.Menu(
                 TrayItem("Show HomRec", lambda: self.root.after(0, self.root.deiconify), default=True),
                 TrayItem("Start/Stop",  lambda: self.root.after(0, self.toggle_recording)),
@@ -1644,21 +1575,17 @@ class HomRecApp:
             tag = data.get("tag_name","").lstrip("v")
             if tag and _version_gt(tag, "1.4.4"):
                 self.root.after(0, lambda: self._show_update_btn(tag))
-        except Exception:
-            pass
+        except Exception: pass
 
     def _show_update_btn(self, ver: str):
         try:
-            btn = tk.Button(self.root,
-                            text=f"⬇ v{ver} available",
+            btn = tk.Button(self.root, text=f"v{ver} available",
                             bg="#a6e3a1", fg="#1e1e2e",
                             font=("Segoe UI",8,"bold"),
-                            relief="flat", padx=8, pady=3,
-                            cursor="hand2",
+                            relief="flat", padx=8, pady=3, cursor="hand2",
                             command=lambda: self._open_release(ver))
             btn.place(relx=1.0, rely=1.0, anchor="se", x=-10, y=-10)
-        except Exception:
-            pass
+        except Exception: pass
 
     def _open_release(self, ver: str):
         import webbrowser
@@ -1688,7 +1615,7 @@ class HomRecApp:
         import webbrowser
         webbrowser.open(f"https://github.com/{GITHUB_REPO}/issues")
 
-    # -- Lifecycle -------------------------------------------------------------
+    # -- Lifecycle ------------------------------------------------------------
     def on_closing(self):
         if HAS_TRAY and self.tray_icon and self.minimize_to_tray.get():
             self.root.withdraw()
@@ -1701,9 +1628,8 @@ class HomRecApp:
                                        "Recording in progress! Stop and exit?"):
                 return
             self.stop_recording(); time.sleep(0.6)
-        self._preview_running = False
+        self._stop_preview()
         if ENGINE_OK:
-            _eng.preview_stop()
             _eng.record_stop()
             _eng.audio_stop()
         if self.tray_icon:
@@ -1711,10 +1637,9 @@ class HomRecApp:
             except Exception: pass
         self.root.destroy()
 
-# ----------------------- Entry point -----------------------------------------
+# -- Entry point --------------------------------------------------------------
 if __name__ == "__main__":
     if sys.platform == "win32":
-        # Single instance mutex
         _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "HomRec_Legacy_144")
         if ctypes.windll.kernel32.GetLastError() == 183:
             sys.exit(0)
