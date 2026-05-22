@@ -1,5 +1,4 @@
-
-<img src="https://raw.githubusercontent.com/homaaio/homrec/main/icons/main.ico" alt="HomRec Logo" width="100" />
+# HomRec
 
 **Screen recorder built for weak PCs.**  
 No lags. No bloat. No GPU required.
