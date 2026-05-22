@@ -1,146 +1,236 @@
-# HomRec 1.4.4 (Legacy)
+<div align="center">
 
-## Features
+<img src="https://raw.githubusercontent.com/homaaio/homrec/main/icons/main.ico" alt="HomRec Logo" width="100" />
 
-- Screen recording via FFmpeg (gdigrab)
-- C++ native engine for capture, preview and audio — minimal CPU usage
-- WASAPI system audio + microphone capture
-- Audio level meters with mute/volume controls
-- Live preview (disabled during recording to save CPU)
-- 5 built-in themes: Dark, Light, Catppuccin, Nord, Dracula
-- 2 languages: English, Русский
-- Performance modes: Ultra (60fps) / Turbo (30fps) / Balanced (15fps) / Eco (8fps)
-- Hardware acceleration: NVENC, AMF, QSV
-- Window capture or full desktop
-- Minimize to system tray
-- Single settings window — no hidden menus
-- Auto-stop timer, countdown, hotkeys
-- Single instance (mutex)
+# 🎥 HomRec
+
+**Screen recorder built for weak PCs.**  
+No lags. No bloat. No GPU required.
+
+[![Version](https://img.shields.io/badge/version-1.4.0-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
+[![Python](https://img.shields.io/badge/python-3.8+-yellow?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/homaaio/homrec/releases)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![Telegram](https://img.shields.io/badge/Telegram-@homaexe-2aabee?style=flat-square&logo=telegram)](https://t.me/homaexe)
+
+</div>
 
 ---
 
-## Requirements
+## 🤔 What is HomRec?
 
-- Windows 7 / 8 / 10 / 11 (64-bit)
-- Python 3.11+
-- FFmpeg (place `ffmpeg.exe` next to `homrec.py`)
-- MinGW-w64 GCC 13+ (to build the C++ engine DLL)
+If you've ever tried recording your screen with OBS or Bandicam on an old laptop or office PC — and everything lagged — **HomRec is made for you.**
 
-> **Linux is not supported.** The engine uses gdigrab and WASAPI which are Windows-only.
+Written from the ground up to use the minimum possible CPU and RAM. No fancy effects, no GPU requirement, no background services. Just open, record, done.
+
+> Tested on machines where other recorders are completely unusable.
 
 ---
 
-## Quick Start
+## ✨ Features
 
-### 1. Install Python dependencies
+| Feature | Details |
+|---|---|
+| 🎞️ **Screen recording** | Full desktop or specific window |
+| 🎙️ **Audio capture** | Microphone + Desktop audio (via WASAPI loopback) |
+| 🖥️ **Multi-monitor** | Select which monitor to record |
+| 📊 **PC Analytics** | CPU, RAM and disk in one combined window |
+| ⌨️ **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
+| 🌍 **Languages** | English and Russian UI |
+| 🎨 **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
+| 📁 **Custom output folder** | Choose where recordings are saved |
+| 📈 **Recording stats** | Live FPS, duration, frame count in status bar |
+| 🔼 **Always on top** | Keep the window above everything else |
+| 🔔 **System tray** | Minimise to tray, control recording from tray menu |
+| 🔄 **Auto update check** | Notifies you when a new version is out |
+| ❓ **Help menu** | Check for updates and report issues directly from the app |
 
+---
+
+## ⚡ Performance modes
+
+| Mode | FPS | Best for |
+|---|---|---|
+| 🟢 Eco | 8 fps | Very old hardware, office PCs |
+| 🔵 Balanced | 15 fps | Default — works on almost anything |
+| 🟡 Turbo | 30 fps | Mid-range machines |
+| 🔴 Ultra | 60 fps | Modern hardware |
+
+---
+
+## 🚀 Installation
+
+### Option A — .exe (recommended)
+
+**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip`
+
+**2.** Unzip anywhere you want — no installer needed
+
+**3.** Download `ffmpeg.exe` from [ffmpeg.org](https://ffmpeg.org/download.html) and place it in the HomRec folder
+
+**4.** Launch `hr.exe`
+
+Your folder should look like this:
 ```
-pip install pillow mss psutil pystray
+HomRec/
+├── hr.exe          ← main executable
+├── ffmpeg.exe      ← required for recording
+├── icons/
+│   ├── main.ico
+│   └── ico.ico
+├── config.ini      ← auto-generated
+├── homrec.log      ← auto-generated
+└── recordings/     ← auto-generated
 ```
 
-### 2. Build the C++ engine
+> **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus — the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
 
+---
+
+### Option B — Run from source
+
+**1. Clone the repo**
+```bash
+git clone https://github.com/homaaio/homrec.git
+cd homrec
 ```
-g++ -O2 -shared -o homrec_engine.dll src/capture_engine.cpp -lgdi32 -luser32 -lwinmm -lole32 -static-libgcc -static-libstdc++ -std=c++17
+
+**2. Install dependencies**
+```bash
+pip install -r requirements.txt
 ```
 
-> If you skip this step the app will still work using a Python fallback (higher CPU usage).
+**3. Place ffmpeg**
 
-### 3. Place FFmpeg
+Download from [ffmpeg.org](https://ffmpeg.org/download.html) and either:
+- Place `ffmpeg.exe` in the HomRec folder, **or**
+- Add FFmpeg to your system PATH
 
-Download from https://ffmpeg.org and put `ffmpeg.exe` in the project folder.
-
-### 4. Run
-
-```
+**4. Run**
+```bash
 python homrec.py
 ```
 
 ---
 
-## Build .exe
+## ⌨️ Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `F9` | Start / Stop recording |
+| `F10` | Pause / Resume recording |
+| `F11` | Toggle fullscreen |
+
+---
+
+## 📦 Dependencies
 
 ```
-pip install pyinstaller
-
-pyinstaller --onefile --windowed --name "HomRec_Legacy" --add-binary "homrec_engine.dll;." --add-data "icons;icons" --icon "icons/main.ico" homrec.py
+opencv-python
+Pillow
+mss
+pyaudio-wasapi   # fork of pyaudio with WASAPI loopback support (desktop audio)
+numpy
+psutil           # optional — PC Analytics panel
+pystray          # optional — system tray support
 ```
 
-Output: `dist/HomRec_Legacy.exe`  
-Copy `ffmpeg.exe` next to the `.exe` before distributing.
-
----
-
-## Project Structure
-
-```
-HomRec_Legacy/
-├── src/
-│   ├── capture_engine.hpp   -- C++ engine header
-│   └── capture_engine.cpp   -- C++ engine (capture / record / audio)
-├── icons/
-│   ├── main.ico
-│   └── rec.ico
-├── homrec.py                -- main application
-├── engine.py                -- Python ctypes bridge to DLL
-├── CMakeLists.txt           -- optional CMake build
-├── requirements.txt
-└── README.md
+Install all at once:
+```bash
+pip install -r requirements.txt
 ```
 
----
-
-## Performance
-
-| Mode | FPS | Scale | Recommended for |
-|------|-----|-------|-----------------|
-| Ultra | 60 | 100% | Modern PC |
-| Turbo | 30 | 100% | Mid-range PC |
-| Balanced | 15 | 75% | Old PC (default) |
-| Eco | 8 | 50% | Very weak PC |
-
-**CPU usage on i3-1005G1:**
-
-| State | CPU |
-|-------|-----|
-| Idle (window open) | ~1-2% |
-| Window minimised | ~0% |
-| Recording (Balanced) | ~11% |
+> **Desktop audio capture** requires `pyaudio-wasapi` instead of the standard `pyaudio`.  
+> Standard `pyaudio` does **not** support WASAPI loopback, so desktop audio will not be recorded.  
+> Install it with: `pip install pyaudio-wasapi`
 
 ---
 
-## Settings
+## 📋 Changelog
 
-All settings are in one window (`Settings → Preferences`):
+<details>
+<summary><b>v1.4.0</b> — 2026-04-24</summary>
 
-| Tab | Options |
-|-----|---------|
-| Video | Mode, Monitor, Codec, Preset, CRF, HW Accel |
-| Audio | Sample rate, AAC bitrate |
-| Recording | Output folder, Countdown, Cursor, Auto-stop |
-| Hotkeys | Start/Stop, Pause |
-| Appearance | Theme, Language, Notifications |
+**Added**
+- Help menu — Check for Updates and Report Issue directly from the app
+- Option to disable "minimize to tray on close" in Settings
+
+**Changed**
+- PC Analytics combined into one window with CPU, RAM and Disk sections
+- Start/Stop merged into one button that changes on recording; Pause and Stop are now compact and side by side
+
+**Fixed**
+- FFmpeg console window no longer appears in front of the app after stopping a long recording
+
+</details>
+
+<details>
+<summary><b>v1.3.2</b> — 2026-04-23</summary>
+
+**Added**
+- System tray — minimise to tray instead of closing, control recording from tray menu
+- Window capture — record a specific window (Settings → Capture Source)
+- Auto update check — banner appears when a new version is available
+
+**Fixed**
+- Microphone stops working after first recording
+- 2nd and subsequent recordings were corrupted and unplayable
+- Video played faster than real time
+- Audio desync on long recordings and after using pause
+- FFmpeg not found when running as .exe
+
+**Performance**
+- ~30% less CPU usage during capture
+- Preview uses fast resampling while recording
+
+</details>
+
+<details>
+<summary><b>v1.3.1</b></summary>
+
+- Updated app icons
+- Reduced .exe file size by ~2x
+
+</details>
+
+<details>
+<summary><b>v1.3.0</b></summary>
+
+- Added logging to homrec.log
+- Fixed FFmpeg not found in .exe builds
+
+</details>
+
+<details>
+<summary><b>v1.2.0</b> — 2026-03-21</summary>
+
+**Added**
+- Separate volume controls for microphone and system audio
+- PC Analytics panel (CPU, RAM, disk)
+- Multi-language support: English and Russian
+- Always on top toggle, fullscreen mode, monitor selection
+- Custom output folder, hotkeys F9 / F10 / F11
+
+**Fixed**
+- Audio desync on long recordings
+- Frame dropping in high-motion scenes
+- Settings not saving after restart
+- Crash when no microphone is present
+
+</details>
 
 ---
 
-## Changelog
+## 📣 Stay updated
 
-### 1.4.4 (Legacy)
-- C++ engine for capture, preview and audio
-- Removed Advanced Settings — everything merged into main Settings
-- Removed custom themes (.hrt) and custom languages (.hrl / .hrc)
-- Preview disabled during recording to reduce CPU load
-- Integer-only bilinear scaling in C++ (no floating point)
-- 1ms Windows timer resolution via timeBeginPeriod
-- Static linking — no MSVC runtime dependency
-- Version string updated to `1.4.4 (Legacy)`
+All news and updates are posted on Telegram first:
+
+**[t.me/homaexe](https://t.me/homaexe)**
 
 ---
 
-## License
+<div align="center">
 
-MIT — see LICENSE file.
+Made with ❤️ by **homaaio**
 
----
-
-*by Homa4ella*
+</div>
