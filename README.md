@@ -23,8 +23,6 @@ If you've ever tried recording your screen with OBS or Bandicam on an old laptop
 
 Written from the ground up to use the minimum possible CPU and RAM. No fancy effects, no GPU requirement, no background services. Just open, record, done.
 
-> Tested on machines where other recorders are completely unusable.
-
 ---
 
 ## ✨ Features
