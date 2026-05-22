@@ -1,0 +1,11 @@
+{
+  "name": "Folders",
+  "version": "1.0.0",
+  "author": "homa4ella",
+  "description": "Browse .hrp plugin packages and extract/install them from inside the app.",
+  "entry": "main.lua",
+  "homrec_min_version": "2.0.0",
+  "permissions": ["ui"],
+  "bundled": true
+}
+
