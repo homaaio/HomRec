@@ -976,7 +976,7 @@ class LanguageEditorDialog:
         self._update_status()
         if missing:
             messagebox.showwarning("Validation",
-                f"{len(missing)} keys are empty:\\n" + ", ".join(missing[:10]) +
+                f"{len(missing)} keys are empty:\n" + ", ".join(missing[:10]) +
                 ("..." if len(missing) > 10 else ""))
         else:
             messagebox.showinfo("Validation", "✅ All keys are filled in!")
@@ -994,7 +994,7 @@ class LanguageEditorDialog:
         missing = [k for k, v in data.items() if isinstance(v, str) and not v.strip() and k not in ("schema_version", "lang_name")]
         if missing:
             if not messagebox.askyesno("Missing keys",
-                f"{len(missing)} keys are empty. Save anyway?\\n"
+                f"{len(missing)} keys are empty. Save anyway?\n"
                 "Missing keys will use English as fallback."):
                 return
 
@@ -1157,7 +1157,7 @@ class ThemeEditorDialog:
             self._vars[key].set(val)
             self._swatches[key].config(bg=val)
         except Exception:
-            pass  # invalid hex — ignore
+            pass  # invalid hex - ignore
 
     def _delete_asset(self, name: str, kind: str, combo: ttk.Combobox) -> None:
         """Delete a custom theme or language file."""
@@ -1224,7 +1224,7 @@ class ThemeEditorDialog:
         data = self._collect()
         self.app.colors = {**self.app.BUILTIN_THEMES["dark"], **data}
         self.app.apply_theme()
-        messagebox.showinfo("Preview", "Theme applied temporarily.\\nSave to keep it.")
+        messagebox.showinfo("Preview", "Theme applied temporarily.\nSave to keep it.")
 
     def _save(self) -> None:
         data = self._collect()
@@ -1256,7 +1256,7 @@ class ThemeEditorDialog:
             os.makedirs(themes_dir, exist_ok=True)
             import shutil
             shutil.copy2(path, os.path.join(themes_dir, os.path.basename(path)))
-            messagebox.showinfo("Saved", f"Theme saved and installed:\\n{path}")
+            messagebox.showinfo("Saved", f"Theme saved and installed:\n{path}")
             log.info(f"Theme saved: {path}")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
@@ -1919,7 +1919,7 @@ class SettingsDialog:
         # Save disable_preview and apply immediately
         if hasattr(self, 'disable_preview_var'):
             self.app.disable_preview = self.disable_preview_var.get()
-        # codec_var / hw_var live in AdvancedSettingsDialog, not here — guard safely
+        # codec_var / hw_var live in AdvancedSettingsDialog, not here - guard safely
         if hasattr(self, 'codec_var'):
             self.app.video_codec = self.codec_var.get()
         if hasattr(self, 'hw_var'):
@@ -2040,7 +2040,7 @@ class HomRecScreen:
         
         self.create_menu()
         self.create_widgets()
-        # Start background capture thread now — monitor and preview_width are ready
+        # Start background capture thread now - monitor and preview_width are ready
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
         self.update_preview()
@@ -2145,7 +2145,7 @@ class HomRecScreen:
             base_dir = os.path.dirname(os.path.abspath(__file__))
         self._icons_dir = os.path.join(base_dir, "icons")
 
-        # main.ico — icon shown in taskbar and window
+        # main.ico - icon shown in taskbar and window
         self._main_ico = os.path.join(self._icons_dir, "main.ico")
         self._rec_ico  = os.path.join(self._icons_dir, "rec.ico")
 
@@ -2165,7 +2165,7 @@ class HomRecScreen:
                 pass
 
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.4.5")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.5.0")
 
         # Pre-render two frames of the REC badge (for a simple pulse animation)
         self._rec_icon_img = None
@@ -2656,7 +2656,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.4.5", 
+        tk.Label(title_frame, text="v1.5.0", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
@@ -2664,7 +2664,7 @@ class HomRecScreen:
         btn_frame = tk.Frame(left_panel, bg=self.colors["surface"])
         btn_frame.pack(pady=25, padx=15, fill="x")
         
-        # Start/Stop — single button that toggles
+        # Start/Stop - single button that toggles
         self.record_btn = tk.Button(btn_frame, text=self.lang["start"],
                                    command=self.start_with_countdown,
                                    bg=self.colors["success"], fg=self.colors["bg"],
@@ -2820,7 +2820,7 @@ class HomRecScreen:
                 continue
             name = dev.get('name', '').lower()
             log.debug(f"WASAPI device [{i}]: {dev.get('name')} in={dev.get('maxInputChannels')} out={dev.get('maxOutputChannels')}")
-            # Explicit loopback / Stereo Mix device — best option
+            # Explicit loopback / Stereo Mix device - best option
             if dev.get('maxInputChannels', 0) >= 1:
                 if any(k in name for k in ('loopback', 'stereo mix', 'what u hear',
                                            'стерео микшер', 'что слышит')):
@@ -2954,7 +2954,7 @@ class HomRecScreen:
                     self._import_hrt(path)
             except ValueError as e:
                 messagebox.showerror("Invalid file", str(e))
-                log.warning(f"Drop rejected: {path} — {e}")
+                log.warning(f"Drop rejected: {path} - {e}")
 
     def _import_hrc(self, path: str) -> None:
         """Import a .hrc profile file (binary format)."""
@@ -2971,7 +2971,7 @@ class HomRecScreen:
             messagebox.showerror("Import failed", str(e))
 
     def _import_hrl(self, path: str) -> None:
-        """Import a .hrl language file — copy to Assets/L/ folder."""
+        """Import a .hrl language file - copy to Assets/L/ folder."""
         try:
             langs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), LANGS_DIR)
             os.makedirs(langs_dir, exist_ok=True)
@@ -2986,7 +2986,7 @@ class HomRecScreen:
             messagebox.showerror("Import failed", str(e))
 
     def _import_hrt(self, path: str) -> None:
-        """Import a .hrt theme file (binary format) — copy to Assets/Themes/ folder and apply."""
+        """Import a .hrt theme file (binary format) - copy to Assets/Themes/ folder and apply."""
         try:
             themes_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR)
             os.makedirs(themes_dir, exist_ok=True)
@@ -3008,7 +3008,7 @@ class HomRecScreen:
     def _setup_drag_drop(self) -> None:
         """Register drag-and-drop on the main window if tkinterdnd2 is available."""
         if not _DND_AVAILABLE:
-            log.debug("tkinterdnd2 not available — drag-and-drop disabled")
+            log.debug("tkinterdnd2 not available - drag-and-drop disabled")
             return
         try:
             self.root.drop_target_register(DND_FILES)
@@ -3060,16 +3060,16 @@ class HomRecScreen:
             except Exception:
                 pass
 
-        log.info("No GPU encoder found — will use libx264")
+        log.info("No GPU encoder found - will use libx264")
         self._gpu_encoder_cache = None
         return None
 
     def _build_codec_args(self) -> list:
         """
         v1.5.0: Return ffmpeg codec arguments.
-        Key changes vs v1.4.5:
+        Improvements in v1.5.0:
           • Auto-selects GPU encoder (NVENC/AMF/QSV) when codec='libx264' and
-            a GPU encoder is available — offloads encoding from CPU entirely.
+            a GPU encoder is available - offloads encoding from CPU entirely.
           • Default CRF raised from 18 → 23 (visually identical, ~40% less CPU).
           • libx264 CPU thread count capped at half of logical cores to avoid
             starving the OS and preview thread.
@@ -3087,7 +3087,7 @@ class HomRecScreen:
                 codec = gpu
                 log.info(f"Auto-upgraded codec: libx264 → {codec}")
 
-        # CRF / QP — user can override via Advanced Settings enc_crf
+        # CRF / QP - user can override via Advanced Settings enc_crf
         # Default raised to 23: visually near-lossless for screen content,
         # roughly 35-45% less CPU than crf=18.
         if getattr(self, 'enc_crf', None) is not None:
@@ -3103,7 +3103,7 @@ class HomRecScreen:
         args = []
 
         # hwaccel on input side only makes sense for GPU decode (not needed for gdigrab)
-        # so we skip it — it caused errors with some drivers anyway.
+        # so we skip it - it caused errors with some drivers anyway.
 
         args += ['-c:v', codec]
 
@@ -3293,7 +3293,7 @@ class HomRecScreen:
                                 continue
 
                         if stereo_mix_idx is None:
-                            log.warning("PyAudio Stereo Mix not found by keyword — trying dshow")
+                            log.warning("PyAudio Stereo Mix not found by keyword - trying dshow")
 
                         if stereo_mix_idx is not None:
                             opened2 = False
@@ -3339,10 +3339,10 @@ class HomRecScreen:
                                 self.sys_audio_thread = threading.Thread(target=record_sys_mix, daemon=True)
                                 self.sys_audio_thread.start()
                                 log.info("System audio recording started via PyAudio Stereo Mix")
-                                loopback_idx = "pyaudio_mix"  # mark as handled — skip dshow
+                                loopback_idx = "pyaudio_mix"  # mark as handled - skip dshow
 
                     if loopback_idx is None:
-                        # Step 3: last resort — dshow ffmpeg
+                        # Step 3: last resort - dshow ffmpeg
                         log.warning("WASAPI loopback device not found, trying dshow fallback")
                         try:
                             self.sys_audio_p.terminate()
@@ -3454,7 +3454,7 @@ class HomRecScreen:
                     except Exception:
                         pass
         self.sys_ffmpeg_proc = None
-        import time as _t; _t.sleep(0.5)  # let OS flush file to disk
+        time.sleep(0.5)  # let OS flush file to disk
 
         mic_frames = self.audio_frames
         sys_frames = self.sys_audio_frames
@@ -3607,7 +3607,7 @@ class HomRecScreen:
             dot_color = (232, 66, 86, 255) if bright else (160, 40, 55, 200)
             d.ellipse([8, 8, 20, 20], fill=dot_color)
 
-            # "REC" text — try a small font, fall back to default
+            # "REC" text - try a small font, fall back to default
             try:
                 font = ImageFont.truetype("segoeui.ttf", 13)
             except Exception:
@@ -3622,7 +3622,7 @@ class HomRecScreen:
 
     def _capture_loop(self) -> None:
         """
-        v1.5.0 — Background capture thread.
+        v1.5.0 - Background capture thread.
         Hot path uses native C extension (homrec_native) when available:
           • BGRX→RGB via hr_bgrx_to_rgb  (avoids Pillow "raw" overhead)
           • Resize     via hr_resize_*    (bilinear preview / nearest recording)
@@ -3713,7 +3713,7 @@ class HomRecScreen:
                         self._rec_frame_idx += 1
                         img.paste(badge, (10, 10), badge)
 
-                # 5. Push to UI queue (latest-wins — drop stale frames)
+                # 5. Push to UI queue (latest-wins - drop stale frames)
                 try:
                     self._preview_queue.get_nowait()
                 except queue.Empty:
@@ -3736,10 +3736,10 @@ class HomRecScreen:
             self.preview_label.config(image=photo)
             self.preview_label.image = photo
         except queue.Empty:
-            pass   # no new frame yet — skip, don't block
+            pass   # no new frame yet - skip, don't block
         except Exception:
             pass
-        # Poll every 100 ms — this call is now near-instant so UI stays responsive
+        # Poll every 100 ms - this call is now near-instant so UI stays responsive
         self.root.after(100, self.update_preview)
     
     def toggle_recording(self) -> None:
@@ -3781,7 +3781,7 @@ class HomRecScreen:
 
             if self.capture_mode == "window" and self.capture_window_title:
                 # Record a specific window by title
-                log.info(f"Capture mode: window — '{self.capture_window_title}'")
+                log.info(f"Capture mode: window - '{self.capture_window_title}'")
                 draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
                 cmd = [
                     self.ffmpeg_path,
@@ -3800,7 +3800,7 @@ class HomRecScreen:
                 ]
             else:
                 # Record full desktop (default)
-                log.info(f"Capture mode: desktop — monitor {self.monitor_id}")
+                log.info(f"Capture mode: desktop - monitor {self.monitor_id}")
                 draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
                 cmd = [
                     self.ffmpeg_path,
@@ -3864,13 +3864,11 @@ class HomRecScreen:
                 # Parse frame count from ffmpeg output
                 if 'frame=' in line:
                     try:
-                        parts = line.split()
-                        for i, part in enumerate(parts):
-                            if part == 'frame=':
-                                frame_str = parts[i+1]
-                                self.frame_count = int(frame_str)
-                                break
-                    except:
+                        import re as _re
+                        m = _re.search(r'frame=\s*(\d+)', line)
+                        if m:
+                            self.frame_count = int(m.group(1))
+                    except Exception:
                         pass
             except:
                 break
@@ -3898,7 +3896,7 @@ class HomRecScreen:
             self.root.after(500, self._update_stats)
     
     def stop_recording(self) -> None:
-        """Stop recording — heavy finalization runs in a background thread to avoid UI freeze."""
+        """Stop recording - heavy finalization runs in a background thread to avoid UI freeze."""
         log.info("Stopping recording...")
         self.recording = False
         self.stop_flag = True
@@ -3910,7 +3908,7 @@ class HomRecScreen:
         saved_record_height = self.record_height
         saved_target_fps = self.target_fps
 
-        # Update UI immediately — user sees "Ready" right away
+        # Update UI immediately - user sees "Ready" right away
         self._set_taskbar_icon(recording=False)
         self.record_btn.config(text=self.lang["start"], bg=self.colors["success"], command=self.start_with_countdown)
         self.pause_btn.config(state="disabled", text=self.lang["pause"])
@@ -4044,7 +4042,7 @@ class HomRecScreen:
         WelcomeDialog.show(self)
 
     def _manual_update_check(self) -> None:
-        """Triggered from Help menu — shows result in a messagebox."""
+        """Triggered from Help menu - shows result in a messagebox."""
         def on_found(latest):
             self.root.after(0, lambda: messagebox.showinfo(
                 "Update available",
@@ -4076,7 +4074,7 @@ class HomRecScreen:
         check_for_updates(self._on_update_found)
 
     def _on_update_found(self, latest: str) -> None:
-        """Called from background thread — schedule UI update on main thread."""
+        """Called from background thread - schedule UI update on main thread."""
         self.root.after(0, lambda: self._show_update_banner(latest))
 
     def _show_update_banner(self, latest: str) -> None:
@@ -4117,7 +4115,7 @@ class HomRecScreen:
                                 command=lambda: _os.startfile(dest)))
                             log.info(f"Update downloaded: {dest}")
                         else:
-                            # No direct asset — open releases page
+                            # No direct asset - open releases page
                             self.root.after(0, lambda: (
                                 webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases/latest"),
                                 self._update_btn.config(text="⬇ Download", bg="#a6e3a1", state="normal")
@@ -4148,40 +4146,6 @@ class HomRecScreen:
             log.info(f"Update button shown for v{latest}")
         except Exception as e:
             log.warning(f"Failed to show update button: {e}")
-
-    def on_closing(self) -> None:
-        if getattr(self, 'auto_save_profile', False):
-            try:
-                profile_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "autosave.hrc")
-                data = {
-                    "hrc_version": 1,
-                    "video_codec": getattr(self, "video_codec", "libx264"),
-                    "hw_accel": getattr(self, "hw_accel", "auto"),
-                    "enc_preset": getattr(self, "enc_preset", "ultrafast"),
-                    "enc_crf": getattr(self, "enc_crf", 18),
-                    "pix_fmt": getattr(self, "pix_fmt", "yuv420p"),
-                    "audio_sample_rate": getattr(self, "audio_sample_rate", 44100),
-                    "audio_aac_bitrate": getattr(self, "audio_aac_bitrate", "192k"),
-                    "audio_out_channels": getattr(self, "audio_out_channels", 2),
-                    "ui_theme": getattr(self, "ui_theme", "dark"),
-                    "ui_scale": getattr(self, "ui_scale", 1.0),
-                    "ui_font": getattr(self, "ui_font", "Segoe UI"),
-                    "filename_template": getattr(self, "filename_template", "HomRec_{date}_{time}"),
-                    "auto_stop_min": getattr(self, "auto_stop_min", 0),
-                    "replay_buffer_sec": getattr(self, "replay_buffer_sec", 0),
-                    "hotkey_start_stop": getattr(self, "hotkey_start_stop", "F9"),
-                    "hotkey_pause": getattr(self, "hotkey_pause", "F10"),
-                    "hotkey_fullscreen": getattr(self, "hotkey_fullscreen", "F11"),
-                    "notify_sound": getattr(self, "notify_sound", True),
-                    "notify_flash": getattr(self, "notify_flash", True),
-                    "disable_preview": getattr(self, "disable_preview", False),
-                }
-                with open(profile_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                log.info(f"Auto-saved profile to {profile_path}")
-            except Exception as e:
-                log.warning(f"Auto-save profile failed: {e}")
 
     def on_closing(self) -> None:
         """Minimise to tray on close (if enabled and pystray available), otherwise quit."""
@@ -4375,7 +4339,7 @@ class HomRecScreen:
                   padx=16, pady=6).pack(side="left")
 
 if __name__ == "__main__":
-    # Prevent duplicate tray icons — use a mutex on Windows
+    # Prevent duplicate tray icons - use a mutex on Windows
     import platform as _platform
     if _platform.system() == "Windows":
         import ctypes
