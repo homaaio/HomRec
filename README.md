@@ -3,7 +3,7 @@
 **Screen recorder built for weak PCs.**  
 No lags. No bloat. No GPU required.
 
-[![Version](https://img.shields.io/badge/version-1.4.0-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
 [![Python](https://img.shields.io/badge/python-3.8+-yellow?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/homaaio/homrec/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-@homaexe-2aabee?style=flat-square&logo=telegram)](https://t.me/homaexe)
@@ -11,7 +11,7 @@ No lags. No bloat. No GPU required.
 
 ---
 
-## 🤔 What is HomRec?
+## What is HomRec?
 
 If you've ever tried recording your screen with OBS or Bandicam on an old laptop or office PC — and everything lagged — **HomRec is made for you.**
 
@@ -28,7 +28,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | 🖥️ **Multi-monitor** | Select which monitor to record |
 | 📊 **PC Analytics** | CPU, RAM and disk in one combined window |
 | ⌨️ **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
-| 🌍 **Languages** | English and Russian UI |
+| 🌍 **Languages** | English and Russian UI (You can add more with .hrl files!)|
 | 🎨 **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
 | 📁 **Custom output folder** | Choose where recordings are saved |
 | 📈 **Recording stats** | Live FPS, duration, frame count in status bar |
@@ -36,17 +36,6 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | 🔔 **System tray** | Minimise to tray, control recording from tray menu |
 | 🔄 **Auto update check** | Notifies you when a new version is out |
 | ❓ **Help menu** | Check for updates and report issues directly from the app |
-
----
-
-## ⚡ Performance modes
-
-| Mode | FPS | Best for |
-|---|---|---|
-| 🟢 Eco | 8 fps | Very old hardware, office PCs |
-| 🔵 Balanced | 15 fps | Default — works on almost anything |
-| 🟡 Turbo | 30 fps | Mid-range machines |
-| 🔴 Ultra | 60 fps | Modern hardware |
 
 ---
 
@@ -61,19 +50,6 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 **3.** Download `ffmpeg.exe` from [ffmpeg.org](https://ffmpeg.org/download.html) and place it in the HomRec folder
 
 **4.** Launch `hr.exe`
-
-Your folder should look like this:
-```
-HomRec/
-├── hr.exe          ← main executable
-├── ffmpeg.exe      ← required for recording
-├── icons/
-│   ├── main.ico
-│   └── ico.ico
-├── config.ini      ← auto-generated
-├── homrec.log      ← auto-generated
-└── recordings/     ← auto-generated
-```
 
 > **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus — the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
 
@@ -138,10 +114,7 @@ pip install -r requirements.txt
 
 ## 📣 Stay updated
 
-All news and updates are posted on Telegram first:
-
-**[t.me/homaexe](https://t.me/homaexe)**
-
+### **[t.me/homaexe](https://t.me/homaexe)** / **[x.com/homrec_dev](https://x.com/homrec_dev)**
 ---
 
 <div align="center">
