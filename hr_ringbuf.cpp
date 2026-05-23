@@ -16,15 +16,19 @@
  *
  * BUG FIXES vs previous version:
  *   - available_read() used mismatched memory orders; fixed to acquire/acquire.
- *   - hr_rb_reset() now uses seq_cst to ensure visibility across both threads.
+ *   - hr_rb_reset() now uses seq_cst to ensure visibility across both threads,
+ *     and also zeroes the buffer contents to prevent stale-data reads if a
+ *     consumer races with reset (previously only cursors were cleared).
  *   - Write/read wrap-around memcpy path had an off-by-one for exact-power-of-2
  *     boundaries; fixed by computing `first` from mask(h) not raw h.
+ *   - restrict keyword replaced with HR_RESTRICT macro for C++ compatibility.
  *
  * Compile (Linux):
  *   g++ -O3 -std=c++17 -shared -fPIC -o hr_ringbuf.so hr_ringbuf.cpp
  *
  * Compile (Windows MinGW):
- *   g++ -O3 -std=c++17 -shared -o hr_ringbuf.dll hr_ringbuf.cpp
+ *   g++ -O3 -std=c++17 -shared -static-libgcc -static-libstdc++ \
+ *       -o hr_ringbuf.dll hr_ringbuf.cpp
  */
 
 #include <cstdint>
@@ -38,6 +42,15 @@
   #define HR_EXPORT extern "C" __declspec(dllexport)
 #else
   #define HR_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
+
+/* BUG FIX: `restrict` is C99 only; use compiler-specific spelling in C++ */
+#if defined(__GNUC__) || defined(__clang__)
+  #define HR_RESTRICT __restrict__
+#elif defined(_MSC_VER)
+  #define HR_RESTRICT __restrict
+#else
+  #define HR_RESTRICT
 #endif
 
 /* -------------------------------------------------------------------------
@@ -82,7 +95,7 @@ HR_EXPORT void hr_rb_destroy(void *handle) {
     delete static_cast<RingBuf *>(handle);
 }
 
-HR_EXPORT size_t hr_rb_write(void *handle, const uint8_t *data, size_t nbytes) {
+HR_EXPORT size_t hr_rb_write(void *handle, const uint8_t * HR_RESTRICT data, size_t nbytes) {
     if (!handle || !data || nbytes == 0) return 0;
     auto *rb = static_cast<RingBuf *>(handle);
 
@@ -107,7 +120,7 @@ HR_EXPORT size_t hr_rb_write(void *handle, const uint8_t *data, size_t nbytes) {
     return n;
 }
 
-HR_EXPORT size_t hr_rb_read(void *handle, uint8_t *dst, size_t nbytes) {
+HR_EXPORT size_t hr_rb_read(void *handle, uint8_t * HR_RESTRICT dst, size_t nbytes) {
     if (!handle || !dst || nbytes == 0) return 0;
     auto *rb = static_cast<RingBuf *>(handle);
 
@@ -142,10 +155,16 @@ HR_EXPORT size_t hr_rb_available_write(void *handle) {
     return static_cast<RingBuf *>(handle)->available_write();
 }
 
-/* BUG FIX: use seq_cst to guarantee both producer and consumer see the reset */
+/*
+ * BUG FIX: previous version only zeroed the cursors but left stale PCM data
+ * in the buffer. A consumer racing with reset could read garbage from the
+ * previous recording session. Now the buffer contents are explicitly cleared.
+ * seq_cst ensures both producer and consumer see the reset immediately.
+ */
 HR_EXPORT void hr_rb_reset(void *handle) {
     if (!handle) return;
     auto *rb = static_cast<RingBuf *>(handle);
     rb->head.store(0, std::memory_order_seq_cst);
     rb->tail.store(0, std::memory_order_seq_cst);
+    memset(rb->buf.data(), 0, rb->cap);
 }
