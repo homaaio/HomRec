@@ -28,6 +28,13 @@
  *   hr_rgb_brightness(pixels, n_bytes, delta)
  *       Clamped brightness adjustment for preview boost.
  *
+ * BUG FIXES vs previous version:
+ *   - hr_audio_rms: int32_t accumulator replaced with int64_t to prevent
+ *     integer overflow on buffers larger than ~2M samples.
+ *   - hr_blend_rgba: rounding bias corrected from +127 to +128.
+ *   - HR_RESTRICT macro added so the file compiles cleanly under MSVC
+ *     (cl.exe does not recognise the C99 `restrict` keyword even in C mode).
+ *
  * Build (Linux / macOS):
  *   gcc -O3 -march=native -shared -fPIC -o homrec_core.so homrec_core.c -lm
  *
@@ -50,6 +57,13 @@
   #define HR_EXPORT __attribute__((visibility("default")))
 #endif
 
+/* `restrict` is C99; MSVC uses __restrict even in C mode */
+#if defined(_MSC_VER)
+  #define HR_RESTRICT __restrict
+#else
+  #define HR_RESTRICT restrict
+#endif
+
 /* -------------------------------------------------------------------------
  * BGRX -> RGB conversion
  * mss returns BGRA (Windows) / BGRX - strip the X/A and reorder channels.
@@ -57,8 +71,8 @@
  * dst  : RGB  byte array  (3 bytes per pixel, caller-allocated)
  * npix : number of pixels
  * ---------------------------------------------------------------------- */
-HR_EXPORT void hr_bgrx_to_rgb(const uint8_t * restrict src,
-                               uint8_t       * restrict dst,
+HR_EXPORT void hr_bgrx_to_rgb(const uint8_t * HR_RESTRICT src,
+                               uint8_t       * HR_RESTRICT dst,
                                size_t npix)
 {
     const uint8_t *s = src;
@@ -80,8 +94,8 @@ HR_EXPORT void hr_bgrx_to_rgb(const uint8_t * restrict src,
  * dw, dh : dest    width / height
  * ch     : bytes per pixel (3 or 4)
  * ---------------------------------------------------------------------- */
-HR_EXPORT void hr_resize_bilinear(const uint8_t * restrict src,
-                                   uint8_t       * restrict dst,
+HR_EXPORT void hr_resize_bilinear(const uint8_t * HR_RESTRICT src,
+                                   uint8_t       * HR_RESTRICT dst,
                                    int sw, int sh,
                                    int dw, int dh,
                                    int ch)
@@ -126,8 +140,8 @@ HR_EXPORT void hr_resize_bilinear(const uint8_t * restrict src,
  * Nearest-neighbour resize (fastest, for recording mode)
  * dst = caller-allocated dw*dh*ch bytes
  * ---------------------------------------------------------------------- */
-HR_EXPORT void hr_resize_nearest(const uint8_t * restrict src,
-                                  uint8_t       * restrict dst,
+HR_EXPORT void hr_resize_nearest(const uint8_t * HR_RESTRICT src,
+                                  uint8_t       * HR_RESTRICT dst,
                                   int sw, int sh,
                                   int dw, int dh,
                                   int ch)
@@ -161,13 +175,14 @@ HR_EXPORT void hr_resize_nearest(const uint8_t * restrict src,
  * BUG FIX: original used wrong cast allowing integer overflow in acc.
  *          Now uses int64_t accumulator to handle large buffers safely.
  * ---------------------------------------------------------------------- */
-HR_EXPORT float hr_audio_rms(const int16_t * restrict pcm, size_t n_samples)
+HR_EXPORT float hr_audio_rms(const int16_t * HR_RESTRICT pcm, size_t n_samples)
 {
     if (n_samples == 0) return 0.f;
 
     /* Use int64_t accumulator - prevents overflow for buffers > ~2M samples */
     int64_t acc = 0;
-    for (size_t i = 0; i < n_samples; ++i) {
+    size_t i;
+    for (i = 0; i < n_samples; ++i) {
         int32_t s = (int32_t)pcm[i];
         acc += (int64_t)(s * s);
     }
@@ -182,13 +197,14 @@ HR_EXPORT float hr_audio_rms(const int16_t * restrict pcm, size_t n_samples)
  * n_pixels     : pixel count
  * BUG FIX: rounding bias corrected from +127>>8 to proper +128 rounding.
  * ---------------------------------------------------------------------- */
-HR_EXPORT void hr_blend_rgba(uint8_t       * restrict base_rgb,
-                              const uint8_t * restrict overlay_rgba,
+HR_EXPORT void hr_blend_rgba(uint8_t       * HR_RESTRICT base_rgb,
+                              const uint8_t * HR_RESTRICT overlay_rgba,
                               size_t n_pixels)
 {
     uint8_t       *b = base_rgb;
     const uint8_t *o = overlay_rgba;
-    for (size_t i = 0; i < n_pixels; ++i, b += 3, o += 4) {
+    size_t i;
+    for (i = 0; i < n_pixels; ++i, b += 3, o += 4) {
         uint32_t a  = o[3];
         if (a == 0) continue;           /* fully transparent - skip */
         if (a == 255) {                 /* fully opaque - direct copy */
@@ -210,13 +226,14 @@ HR_EXPORT void hr_blend_rgba(uint8_t       * restrict base_rgb,
  * Returns the mean value of the Y (luma) plane.
  * Useful for adaptive preview quality: dim scenes -> lower bitrate.
  * ---------------------------------------------------------------------- */
-HR_EXPORT float hr_yuv420_luminance(const uint8_t * restrict y_plane,
+HR_EXPORT float hr_yuv420_luminance(const uint8_t * HR_RESTRICT y_plane,
                                      size_t n_pixels)
 {
     if (n_pixels == 0) return 0.f;
 
     uint64_t acc = 0;
-    for (size_t i = 0; i < n_pixels; ++i)
+    size_t i;
+    for (i = 0; i < n_pixels; ++i)
         acc += y_plane[i];
 
     return (float)acc / (float)n_pixels;
@@ -252,7 +269,8 @@ HR_EXPORT void hr_rgb_brightness(uint8_t *pixels, size_t n_bytes, int delta)
 {
     if (delta == 0) return;
 
-    for (size_t i = 0; i < n_bytes; ++i) {
+    size_t i;
+    for (i = 0; i < n_bytes; ++i) {
         int v = (int)pixels[i] + delta;
         /* Branchless clamp using bitwise tricks for better vectorisation */
         v &= ~(v >> 31);        /* clamp low to 0  */

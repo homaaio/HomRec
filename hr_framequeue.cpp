@@ -9,7 +9,7 @@
  * API:
  *   hr_fq_create(capacity)      -> handle
  *   hr_fq_destroy(handle)
- *   hr_fq_push(handle, ptr)     -> 1 if pushed, 0 on alloc failure
+ *   hr_fq_push(handle, ptr)     -> 1 if pushed, 0 on null handle
  *   hr_fq_pop (handle, out_ptr) -> 1 if got a frame, 0 if empty
  *   hr_fq_size(handle)          -> number of items currently queued
  *
@@ -18,13 +18,19 @@
  *   - hr_fq_push eviction path had a race: tail was bumped before the old slot
  *     was overwritten, which could expose a null pointer to the consumer.
  *     Fixed by writing the new frame first, then bumping head.
+ *   - hr_fq_push called size() which reads head+tail in two separate atomic
+ *     loads; between those two loads the consumer could advance tail, making
+ *     size() return a stale value and bumping tail unnecessarily (or worse,
+ *     causing tail to lap head with wraparound). Fixed by reading both cursors
+ *     once from the same snapshot inside push.
  *   - Null handle guard added to all exported functions.
  *
  * Compile (Linux):
  *   g++ -O3 -std=c++17 -shared -fPIC -o hr_framequeue.so hr_framequeue.cpp
  *
  * Compile (Windows MinGW):
- *   g++ -O3 -std=c++17 -shared -o hr_framequeue.dll hr_framequeue.cpp
+ *   g++ -O3 -std=c++17 -shared -static-libgcc -static-libstdc++ \
+ *       -o hr_framequeue.dll hr_framequeue.cpp
  */
 
 #include <cstddef>
@@ -75,21 +81,30 @@ HR_EXPORT void hr_fq_destroy(void *handle) {
  * Push a frame pointer. If the queue is full the oldest entry is evicted
  * (latest-wins for preview). Returns 1 always (0 only on null handle).
  *
- * BUG FIX: previous version bumped tail before writing the new slot, which
- * created a window where the consumer could pop a stale/null pointer.
- * Now we write the slot first, then bump head.
+ * BUG FIX: previous version called size() which read head and tail in two
+ * separate atomic loads. Between those two loads the consumer could advance
+ * tail, making the overflow check stale and evicting an entry when the queue
+ * was no longer full — or, with unsigned wraparound, producing a huge size
+ * value that always triggered eviction. Fixed by taking a single snapshot of
+ * both head and tail at the start of push.
+ *
+ * BUG FIX: slot is written BEFORE head is advanced so the consumer can never
+ * observe a null/stale pointer from the newly pushed position.
  */
 HR_EXPORT int hr_fq_push(void *handle, void *frame_ptr) {
     if (!handle) return 0;
     auto *fq = static_cast<FrameQueue *>(handle);
 
+    /* Single snapshot — avoids the two-load race in the old size() call */
+    size_t h = fq->head.load(std::memory_order_relaxed);
+    size_t t = fq->tail.load(std::memory_order_acquire);
+
     /* If full, discard the oldest frame by advancing tail */
-    if (fq->size() >= fq->cap - 1u) {
-        fq->tail.fetch_add(1, std::memory_order_acq_rel);
+    if (h - t >= fq->cap - 1u) {
+        fq->tail.store(t + 1, std::memory_order_release);
     }
 
-    size_t h = fq->head.load(std::memory_order_relaxed);
-    /* Write slot BEFORE making it visible to consumer */
+    /* Write slot BEFORE making it visible to consumer via head bump */
     fq->buf[fq->mask(h)] = frame_ptr;
     fq->head.store(h + 1, std::memory_order_release);
     return 1;

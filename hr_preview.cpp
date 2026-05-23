@@ -20,11 +20,22 @@
  *   hr_pv_watermark_text is NOT here - text rendering needs a font library.
  *   Use Pillow / tkinter for that.
  *
+ * BUG FIXES vs previous version:
+ *   - restrict keyword is C99-only; replaced with HR_RESTRICT macro that
+ *     expands to __restrict__ (GCC/Clang) or __restrict (MSVC).
+ *     The previous code failed to compile on MinGW g++ because the compiler
+ *     treated `restrict` as an unknown identifier, breaking all parameter
+ *     lists that used it — causing cascading "not declared in this scope"
+ *     errors for every subsequent parameter and local variable.
+ *   - hr_pv_draw_border: thickness fallback now clamps to min(w,h)/2-1
+ *     instead of hard-coding 1, which was wrong for small images.
+ *
  * Compile (Linux):
  *   g++ -O3 -std=c++17 -shared -fPIC -o hr_preview.so hr_preview.cpp
  *
  * Compile (Windows MinGW):
- *   g++ -O3 -std=c++17 -shared -o hr_preview.dll hr_preview.cpp
+ *   g++ -O3 -std=c++17 -shared -static-libgcc -static-libstdc++ \
+ *       -o hr_preview.dll hr_preview.cpp
  */
 
 #include <cstdint>
@@ -38,6 +49,16 @@
   #define HR_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
+/* BUG FIX: `restrict` is a C99 keyword, not valid C++.
+ * Use compiler-specific spellings instead. */
+#if defined(__GNUC__) || defined(__clang__)
+  #define HR_RESTRICT __restrict__
+#elif defined(_MSC_VER)
+  #define HR_RESTRICT __restrict
+#else
+  #define HR_RESTRICT
+#endif
+
 /* -------------------------------------------------------------------------
  * Box-filter 2x2 thumbnail (better than nearest for UI preview)
  *
@@ -49,8 +70,8 @@
  * For arbitrary scale ratios we use a single-sample bilinear; the 2x2 box
  * special case only fires when scale is exactly 0.5x (common for 4K->1080p).
  * ---------------------------------------------------------------------- */
-HR_EXPORT void hr_pv_thumbnail(const uint8_t * restrict src,
-                                uint8_t       * restrict dst,
+HR_EXPORT void hr_pv_thumbnail(const uint8_t * HR_RESTRICT src,
+                                uint8_t       * HR_RESTRICT dst,
                                 int sw, int sh,
                                 int dw, int dh)
 {
@@ -125,7 +146,12 @@ HR_EXPORT void hr_pv_draw_border(uint8_t *pixels,
                                   int thickness)
 {
     if (!pixels || w <= 0 || h <= 0 || thickness <= 0) return;
-    int t = (thickness < w / 2 && thickness < h / 2) ? thickness : 1;
+
+    /* BUG FIX: previous code clamped to hard-coded 1 whenever thickness
+     * exceeded w/2 or h/2, which was wrong for small images.
+     * Now clamp to the actual maximum sensible thickness. */
+    int max_t = std::min(w, h) / 2 - 1;
+    int t = (max_t > 0) ? std::min(thickness, max_t) : 1;
 
     auto fill_row = [&](int y, int x0, int x1) {
         if (y < 0 || y >= h) return;
