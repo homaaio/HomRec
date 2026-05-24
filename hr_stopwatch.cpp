@@ -1,5 +1,5 @@
 /*
- * hr_stopwatch.cpp  -  HomRec v1.6.0  high-precision frame-pacing timer
+ * hr_stopwatch.cpp  -  HomRec v1.5.0  high-precision frame-pacing timer
  *
  * Provides nanosecond-resolution monotonic timers used by the capture loop
  * to maintain accurate frame intervals. Python's time.sleep() has ~15 ms
