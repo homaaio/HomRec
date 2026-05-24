@@ -60,7 +60,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.6.0"
+CURRENT_VERSION = "1.5.0"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -96,7 +96,7 @@ def _version_gt(a: str, b: str) -> bool:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.6.0",
+        "app_title": "HomRec v1.5.0",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -188,7 +188,7 @@ LANGUAGES = {
         "audio_file": "🎵 Audio file:",
     },
     "ru": {
-        "app_title": "HomRec v1.6.0",
+        "app_title": "HomRec v1.5.0",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -318,7 +318,7 @@ def find_ffmpeg() -> str | None:
 
 def optimize_for_performance() -> None:
     """v1.5.0: Apply multi-level performance optimizations."""
-    # ── Process priority ────────────────────────────────────────────────────
+    # -- Process priority ----------------------------------------------------
     try:
         import psutil, platform as _plat
         p = psutil.Process()
@@ -329,7 +329,7 @@ def optimize_for_performance() -> None:
     except Exception:
         pass
 
-    # ── OpenCV: use all logical cores for resize/encode helpers ─────────────
+    # -- OpenCV: use all logical cores for resize/encode helpers -------------
     try:
         cpu_count = os.cpu_count() or 4
         cv2.setNumThreads(max(2, cpu_count - 1))   # leave 1 core for OS/UI
@@ -337,11 +337,11 @@ def optimize_for_performance() -> None:
     except Exception:
         pass
 
-    # ── Garbage-collector tuning: fewer Gen-0 collections during recording ──
+    # -- Garbage-collector tuning: fewer Gen-0 collections during recording --
     import gc
     gc.set_threshold(1200, 15, 15)  # default is (700, 10, 10)
 
-    # ── Pre-import native extension (loads DLL / .so into process) ──────────
+    # -- Pre-import native extension (loads DLL / .so into process) ----------
     try:
         from homrec_native import NATIVE_OK, RINGBUF_OK
         log.info(f"Native extensions: core={NATIVE_OK} ringbuf={RINGBUF_OK}")
@@ -479,8 +479,6 @@ class CustomMessageBox:
 
 
 class WelcomeDialog:
-    """Beautiful redesigned first-launch welcome window (v1.6.0)."""
-
     @staticmethod
     def show(app) -> None:
         import webbrowser
@@ -520,7 +518,7 @@ class WelcomeDialog:
         sh = dlg.winfo_screenheight()
         dlg.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
 
-        # ── Animated canvas header ─────────────────────────────────────────
+        # -- Animated canvas header -----------------------------------------
         hdr_canvas = tk.Canvas(dlg, width=W, height=110, bg=CARD,
                                highlightthickness=0)
         hdr_canvas.pack(fill="x")
@@ -563,7 +561,7 @@ class WelcomeDialog:
         # Accent bar
         tk.Frame(dlg, bg=ACCENT, height=2).pack(fill="x")
 
-        # ── Feature pills ──────────────────────────────────────────────────
+        # -- Feature pills --------------------------------------------------
         pills_frame = tk.Frame(dlg, bg=BG)
         pills_frame.pack(fill="x", padx=24, pady=(14, 6))
 
@@ -582,7 +580,7 @@ class WelcomeDialog:
         # Divider
         tk.Frame(dlg, bg=DIM, height=1).pack(fill="x", padx=24, pady=(6, 0))
 
-        # ── Message body ──────────────────────────────────────────────────
+        # -- Message body --------------------------------------------------
         body = tk.Frame(dlg, bg=BG)
         body.pack(fill="both", expand=True, padx=28, pady=14)
 
@@ -602,7 +600,7 @@ class WelcomeDialog:
         tk.Label(body, text=msg, font=("Segoe UI", 10),
                  bg=BG, fg=SUB, justify="left").pack(anchor="w", pady=(6, 0))
 
-        # ── Quick tips ─────────────────────────────────────────────────────
+        # -- Quick tips -----------------------------------------------------
         tips_frame = tk.Frame(dlg, bg=CARD, pady=8)
         tips_frame.pack(fill="x", padx=24, pady=(6, 0))
         tips_lbl = "Quick tips:" if not is_ru else "Быстрые подсказки:"
@@ -612,7 +610,7 @@ class WelcomeDialog:
         tk.Label(tips_frame, text=tips_text, bg=CARD, fg=SUB,
                  font=("Segoe UI", 9)).pack(anchor="w", padx=12)
 
-        # ── Buttons ───────────────────────────────────────────────────────
+        # -- Buttons -------------------------------------------------------
         btn_row = tk.Frame(dlg, bg=BG)
         btn_row.pack(fill="x", padx=24, pady=14)
 
@@ -690,7 +688,7 @@ class AudioPanel:
         """Horizontal layout: Mic on left, Desktop Audio on right, controls at bottom."""
         c = self.app.colors
 
-        # ── top row: two channel strips side by side ──────────────────────
+        # -- top row: two channel strips side by side ----------------------
         channels = tk.Frame(self.frame, bg=c["surface"])
         channels.pack(fill='x', pady=(0, 4))
 
@@ -786,7 +784,7 @@ class AudioPanel:
                                           bg=c["surface"])
         self.sys_meter.pack(side='left', padx=4)
 
-        # ── bottom row: enable audio + ffmpeg status ───────────────────────
+        # -- bottom row: enable audio + ffmpeg status -----------------------
         bottom = tk.Frame(self.frame, bg=c["surface"])
         bottom.pack(fill='x', pady=(4, 0))
 
@@ -836,7 +834,7 @@ class AudioPanel:
         self.sys_mute_btn.config(text=self.app.lang["unmute"] if self.sys_mute.get() else self.app.lang["mute"])
 
 
-# ── Schema versioning ────────────────────────────────────────────────────────
+# -- Schema versioning --------------------------------------------------------
 # Bump LANG_SCHEMA_VERSION when new language keys are added
 # Bump THEME_SCHEMA_VERSION when new theme color keys are added
 LANG_SCHEMA_VERSION  = 1
@@ -870,7 +868,7 @@ SETTINGS_PATH = os.path.join(_SCRIPT_DIR, "homrec_settings.json")
 THEMES_DIR   = os.path.join(ASSETS_DIR, "Themes")
 LANGS_DIR    = os.path.join(ASSETS_DIR, "L")
 
-# ── HomRec binary file format helpers ────────────────────────────────────────
+# -- HomRec binary file format helpers ----------------------------------------
 # Format: 4-byte magic header + gzip-compressed JSON body
 # HRC = profile, HRL = language, HRT = theme
 
@@ -1416,7 +1414,7 @@ class AdvancedSettingsDialog:
         notebook = ttk.Notebook(self.dialog)
         notebook.pack(fill="both", expand=True, padx=16, pady=12)
 
-        # ── Video tab ────────────────────────────────────────────────
+        # -- Video tab ------------------------------------------------
         vt = tk.Frame(notebook, bg=c["bg"])
         notebook.add(vt, text="Video")
         self._cv = tk.StringVar(value=getattr(a, "video_codec", "libx264"))
@@ -1447,7 +1445,7 @@ class AdvancedSettingsDialog:
                                values=["yuv420p","yuv444p","rgb24"],
                                width=12, state="readonly"))
 
-        # ── Audio tab ────────────────────────────────────────────────
+        # -- Audio tab ------------------------------------------------
         at = tk.Frame(notebook, bg=c["bg"])
         notebook.add(at, text="Audio")
         self._srv = tk.StringVar(value=str(getattr(a, "audio_sample_rate", 44100)))
@@ -1466,7 +1464,7 @@ class AdvancedSettingsDialog:
                                values=["1","2"],
                                width=6, state="readonly"))
 
-        # ── Interface tab ────────────────────────────────────────────
+        # -- Interface tab --------------------------------------------
         it = tk.Frame(notebook, bg=c["bg"])
         notebook.add(it, text="Interface")
         self._thv = tk.StringVar(value=getattr(a, "ui_theme", "dark"))
@@ -1537,7 +1535,7 @@ class AdvancedSettingsDialog:
                                values=["Segoe UI","Consolas","Arial","Calibri"],
                                width=14, state="readonly"))
 
-        # ── Recording tab ────────────────────────────────────────────
+        # -- Recording tab --------------------------------------------
         rt = tk.Frame(notebook, bg=c["bg"])
         notebook.add(rt, text="Recording")
         self._ftv = tk.StringVar(value=getattr(a, "filename_template", "HomRec_{date}_{time}"))
@@ -1564,7 +1562,7 @@ class AdvancedSettingsDialog:
                  fg=c["text_secondary"], font=("Segoe UI", 8)).grid(
                      row=row, column=1, sticky="w", padx=(0, 20))
 
-        # ── Hotkeys tab ──────────────────────────────────────────────
+        # -- Hotkeys tab ----------------------------------------------
         ht = tk.Frame(notebook, bg=c["bg"])
         notebook.add(ht, text="Hotkeys")
         tk.Label(ht, text="Click a field and press any key combination",
@@ -1584,7 +1582,7 @@ class AdvancedSettingsDialog:
             entry.bind("<FocusOut>", lambda e, en=entry: en.config(state="readonly"))
             self._row(ht, label, entry)
 
-        # ── Notifications tab ────────────────────────────────────────
+        # -- Notifications tab ----------------------------------------
         nt = tk.Frame(notebook, bg=c["bg"])
         notebook.add(nt, text="Notifications")
         self._notif_sound = tk.BooleanVar(value=getattr(a, "notify_sound", True))
@@ -1603,7 +1601,7 @@ class AdvancedSettingsDialog:
                                row=row, column=0, columnspan=2,
                                sticky="w", padx=20, pady=4)
 
-        # ── Bottom buttons ───────────────────────────────────────────
+        # -- Bottom buttons -------------------------------------------
         sep = tk.Frame(self.dialog, bg=c["surface"], height=1)
         sep.pack(fill="x", padx=16, pady=(4, 0))
 
@@ -1935,7 +1933,7 @@ class SettingsDialog:
                       variable=self.minimize_tray_var, bg=c["bg"], fg=c["text"],
                       selectcolor=c["surface"], font=("Segoe UI", 10)).pack(anchor="w", pady=2)
 
-        # ── Disable Preview (Performance) ──────────────────────────────────
+        # -- Disable Preview (Performance) ----------------------------------
         tk.Frame(adv_inner, bg=c["surface"], height=1).pack(fill="x", pady=(10, 6))
         perf_label = tk.Label(adv_inner, text="⚡ Performance",
                               bg=c["bg"], fg=c["accent"],
@@ -3296,7 +3294,7 @@ class HomRecScreen:
             self.audio_channels = self.get_audio_channels()
             silence = b'\x00' * 1024 * 2 * self.audio_channels
 
-            # ── Microphone stream ──────────────────────────────────────────
+            # -- Microphone stream ------------------------------------------
             self.audio_p = pyaudio.PyAudio()
             self.audio_stream = self.audio_p.open(
                 format=pyaudio.paInt16,
@@ -3342,7 +3340,7 @@ class HomRecScreen:
             self.audio_thread.start()
             log.info(f"Mic recording started ({self.audio_channels} channel(s))")
 
-            # ── System audio via WASAPI loopback (PyAudio) ───────────────
+            # -- System audio via WASAPI loopback (PyAudio) ---------------
             try:
                 if not self.audio_panel.sys_mute.get():
                     self.sys_audio_p = pyaudio.PyAudio()
@@ -3549,63 +3547,66 @@ class HomRecScreen:
             self.audio_recording = False
     
     def stop_audio_recording(self) -> str | None:
-        # ── Stop mic ──────────────────────────────────────────────────────
+        # v1.5.0 FIX: non-blocking teardown — no more 30s hangs ---------
+
+        # Step 1: signal all threads to stop (instant)
         self.audio_recording = False
-        if self.audio_thread and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=2)
-        self.audio_thread = None
+        self.sys_audio_recording = False
+
+        # Step 2: close PyAudio streams first so threads unblock on .read()
         if self.audio_stream:
             try:
                 self.audio_stream.stop_stream()
                 self.audio_stream.close()
-            except:
+            except Exception:
                 pass
         self.audio_stream = None
-        if self.audio_p:
-            try:
-                self.audio_p.terminate()
-            except:
-                pass
-        self.audio_p = None
-
-        # ── Stop system audio (WASAPI loopback thread) ────────────────────
-        self.sys_audio_recording = False
-        if hasattr(self, 'sys_audio_thread') and self.sys_audio_thread and self.sys_audio_thread.is_alive():
-            self.sys_audio_thread.join(timeout=2)
-        self.sys_audio_thread = None
         if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
             try:
                 self.sys_audio_stream.stop_stream()
                 self.sys_audio_stream.close()
-            except:
+            except Exception:
                 pass
             self.sys_audio_stream = None
+
+        # Step 3: join audio threads with SHORT timeout (streams closed → they exit fast)
+        if self.audio_thread and self.audio_thread.is_alive():
+            self.audio_thread.join(timeout=1)
+        self.audio_thread = None
+        if hasattr(self, 'sys_audio_thread') and self.sys_audio_thread and self.sys_audio_thread.is_alive():
+            self.sys_audio_thread.join(timeout=1)
+        self.sys_audio_thread = None
+
+        # Step 4: terminate PyAudio instances
+        if self.audio_p:
+            try:
+                self.audio_p.terminate()
+            except Exception:
+                pass
+        self.audio_p = None
         if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
             try:
                 self.sys_audio_p.terminate()
-            except:
+            except Exception:
                 pass
             self.sys_audio_p = None
 
-        # ── Stop system audio (dshow ffmpeg fallback) ─────────────────────
+        # Step 5: stop dshow ffmpeg fallback — KILL immediately, don't wait
         if self.sys_ffmpeg_proc and self.sys_ffmpeg_proc.poll() is None:
             try:
                 self.sys_ffmpeg_proc.stdin.write(b'q\n')
                 self.sys_ffmpeg_proc.stdin.flush()
-                self.sys_ffmpeg_proc.wait(timeout=8)
-                log.debug("dshow sys audio ffmpeg stopped gracefully")
-            except Exception as e:
-                log.warning(f"dshow ffmpeg stop error: {e}")
+            except Exception:
+                pass
+            try:
+                self.sys_ffmpeg_proc.wait(timeout=3)  # brief grace period
+            except Exception:
                 try:
-                    self.sys_ffmpeg_proc.terminate()
-                    self.sys_ffmpeg_proc.wait(timeout=3)
+                    self.sys_ffmpeg_proc.kill()  # don't wait → instant
                 except Exception:
-                    try:
-                        self.sys_ffmpeg_proc.kill()
-                    except Exception:
-                        pass
+                    pass
         self.sys_ffmpeg_proc = None
-        time.sleep(0.5)  # let OS flush file to disk
+        time.sleep(0.15)  # minimal OS flush (was 0.5)
 
         mic_frames = self.audio_frames
         sys_frames = self.sys_audio_frames
@@ -3630,7 +3631,9 @@ class HomRecScreen:
                 wf.setnchannels(sys_ch)
                 wf.setsampwidth(2)
                 wf.setframerate(44100)
-                wf.writeframes(b''.join(sys_frames))
+                CHUNK = 256
+                for _ci in range(0, len(sys_frames), CHUNK):
+                    wf.writeframes(b''.join(sys_frames[_ci:_ci+CHUNK]))
                 wf.close()
                 has_sys_file = True
                 log.info(f"System audio (WASAPI) written: {sys_wav}")
@@ -3662,9 +3665,12 @@ class HomRecScreen:
                 wf.setnchannels(self.audio_channels)
                 wf.setsampwidth(2)
                 wf.setframerate(44100)
-                wf.writeframes(b''.join(mic_frames))
+                CHUNK = 256
+                for _ci in range(0, len(mic_frames), CHUNK):
+                    wf.writeframes(b''.join(mic_frames[_ci:_ci+CHUNK]))
                 wf.close()
-                subprocess.run(mix_cmd, capture_output=True, timeout=30,
+                # mix timeout reduced: 60 s is pathological, 20 s is enough
+                subprocess.run(mix_cmd, capture_output=True, timeout=20,
                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0)
                 try:
                     os.remove(mic_tmp)
@@ -3685,15 +3691,21 @@ class HomRecScreen:
             except:
                 return sys_wav
 
-        # Only mic
-        wf = wave.open(audio_filename, 'wb')
-        wf.setnchannels(self.audio_channels)
-        wf.setsampwidth(2)
-        wf.setframerate(44100)
-        wf.writeframes(b''.join(mic_frames))
-        wf.close()
-        log.info(f"Mic audio saved: {audio_filename}")
-        return audio_filename  # ← was returning None! audio_filename
+        # Only mic — chunked write to avoid b''.join() OOM on long recordings
+        try:
+            wf = wave.open(audio_filename, 'wb')
+            wf.setnchannels(self.audio_channels)
+            wf.setsampwidth(2)
+            wf.setframerate(44100)
+            CHUNK = 256  # write 256 frames at a time
+            for i in range(0, len(mic_frames), CHUNK):
+                wf.writeframes(b''.join(mic_frames[i:i+CHUNK]))
+            wf.close()
+            log.info(f"Mic audio saved: {audio_filename}")
+        except Exception as e:
+            log.warning(f"Mic WAV write failed: {e}")
+            return None
+        return audio_filename
     
     def select_folder(self) -> None:
         folder = filedialog.askdirectory(initialdir=self.output_folder)
@@ -3848,7 +3860,7 @@ class HomRecScreen:
                     time.sleep(0.1)
                     continue
 
-                # ── Disable Preview mode: skip all capture work ──────────────
+                # -- Disable Preview mode: skip all capture work --------------
                 if getattr(self, 'disable_preview', False):
                     # Signal UI thread to show the placeholder (only when needed)
                     try:
@@ -3863,7 +3875,7 @@ class HomRecScreen:
                 sw, sh = screenshot.size
 
                 if _have_native and _native_core is not None:
-                    # ── Native fast path ────────────────────────────────────
+                    # -- Native fast path ------------------------------------
                     # 1. BGRX → RGB numpy array via ctypes (no extra Python copy)
                     rgb_np = _native_core.bgrx_to_rgb_np(screenshot.bgra, sw, sh)
 
@@ -3884,7 +3896,7 @@ class HomRecScreen:
                     img = Image.frombuffer("RGB", (pw, ph), small_np, "raw", "RGB", 0, 1)
 
                 else:
-                    # ── Original Pillow fallback path ───────────────────────
+                    # -- Original Pillow fallback path -----------------------
                     img = Image.frombytes("RGB", screenshot.size,
                                          screenshot.bgra, "raw", "BGRX")
                     resample = (Image.Resampling.NEAREST if recording
@@ -3928,7 +3940,7 @@ class HomRecScreen:
 
     def update_preview(self) -> None:
         """UI thread: converts PIL→PhotoImage and updates the label.
-        FIX v1.6.0: None in queue means preview is disabled - show placeholder
+        FIX v1.5.0: None in queue means preview is disabled - show placeholder
         instead of freezing on the last captured frame.
         """
         try:
@@ -4102,8 +4114,11 @@ class HomRecScreen:
             log.exception("Failed to start recording")
     
     def _ffmpeg_reader(self) -> None:
-        """Read ffmpeg stderr to get frame count"""
-        while not self.stop_flag and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
+        """Read ffmpeg stderr to get frame count.
+        v1.5.0: exits cleanly when stop_ffmpeg_reader is set or ffmpeg terminates.
+        readline() unblocks naturally when the pipe closes (ffmpeg exits).
+        """
+        while not self.stop_flag and not self.stop_ffmpeg_reader               and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
             try:
                 line = self.ffmpeg_proc.stderr.readline()
                 if not line:
@@ -4168,7 +4183,10 @@ class HomRecScreen:
         self.file_label.config(text="Processing…")
 
         def _finalize():
-            # ── v1.6.0: improved finalization with better timeouts ─────────
+            # -- v1.5.0: improved finalization with better timeouts ---------
+            # Signal ffmpeg reader thread to stop (in case ffmpeg is already dead)
+            self.stop_ffmpeg_reader = True
+
             # Step 1: Terminate ffmpeg gracefully with 'q', fallback to kill
             if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
                 try:
@@ -4299,7 +4317,7 @@ class HomRecScreen:
                 self.status_icon.config(fg=self.colors["success"])
                 self.status_label.config(text=self.lang["recording"])
     
-    # ── Update check ──────────────────────────────────────────────────────────
+    # -- Update check ----------------------------------------------------------
 
     def _show_welcome_and_save(self) -> None:
         """Show welcome dialog then immediately save settings so it only shows once."""
@@ -4450,7 +4468,7 @@ class HomRecScreen:
         # Non-blocking: threads are daemons so they die with the process
         self.root.after(100, self.root.destroy)
 
-    # ── Tray ──────────────────────────────────────────────────────────────────
+    # -- Tray ------------------------------------------------------------------
 
     def setup_tray(self) -> None:
         if not HAS_TRAY:
@@ -4503,7 +4521,7 @@ class HomRecScreen:
     def _tray_quit(self, icon=None, item=None) -> None:
         self.root.after(0, self.quit_app)
 
-    # ── Window picker ─────────────────────────────────────────────────────────
+    # -- Window picker ---------------------------------------------------------
 
     def set_capture_desktop(self) -> None:
         self.capture_mode = "desktop"

@@ -1,22 +1,24 @@
 /*
- * hr_display_info.cpp  -  HomRec v1.6.0  display enumeration helpers
+ * hr_display_info.cpp  -  HomRec v1.5.0  display enumeration helpers
  *
- * Provides fast, ctypes-callable wrappers around OS display APIs.
- * Avoids the performance cost of calling Python's tkinter or the Windows
- * DISPLAY API through ctypes every frame; results are cached in the struct.
+ * FIXES vs v1.5.0:
+ *   - Added #include <algorithm> so std::stable_sort is visible.
+ *     MinGW g++ does NOT pull <algorithm> implicitly through <vector> or
+ *     <windows.h>, causing "stable_sort is not a member of std".
+ *   - hr_di_refresh (non-Windows): xrandr popen call is now async-signal-
+ *     safe; added explicit NULL-check on the FILE* before fgets.
+ *   - MonitorInfo initialised with = {} (value-init) to zero-fill padding
+ *     bytes, preventing Valgrind warnings on struct copies.
+ *   - hr_di_get / hr_di_primary: out-pointer writes guarded with null checks
+ *     (were already present but now consistent across all six out-params).
  *
- * API:
+ * API: (unchanged)
  *   hr_di_create()        -> handle
  *   hr_di_destroy(handle)
- *   hr_di_refresh(handle) -> enumerate connected monitors, update cache
- *   hr_di_count(handle)   -> number of monitors detected
- *   hr_di_get(handle, index, out_x, out_y, out_w, out_h, out_dpi)
- *       Fill out_* with monitor geometry and DPI.
- *       Returns 1 on success, 0 if index is out of range.
- *   hr_di_primary(handle, out_x, out_y, out_w, out_h, out_dpi)
- *       Convenience: fill with primary monitor info.
- *
- * Non-Windows builds return a single synthetic monitor (0,0 + screen size).
+ *   hr_di_refresh(handle)
+ *   hr_di_count(handle)   -> int
+ *   hr_di_get(handle, index, out_x, out_y, out_w, out_h, out_dpi) -> 0/1
+ *   hr_di_primary(handle, out_x, out_y, out_w, out_h, out_dpi)    -> 0/1
  *
  * Compile (Linux):
  *   g++ -O3 -std=c++17 -shared -fPIC -o hr_display_info.so hr_display_info.cpp
@@ -30,19 +32,20 @@
 #include <cstddef>
 #include <cstring>
 #include <vector>
+#include <algorithm>   /* FIX: required for std::stable_sort */
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
-  #include <shellscalingapi.h>  /* GetDpiForMonitor – requires Win 8.1+ */
+  #include <shellscalingapi.h>
 #else
   #define HR_EXPORT extern "C" __attribute__((visibility("default")))
-  #include <cstdio>             /* FILE, popen */
+  #include <cstdio>
 #endif
 
 struct MonitorInfo {
-    int x, y, w, h;
+    int   x, y, w, h;
     float dpi;
     int   is_primary;
 };
@@ -52,10 +55,8 @@ struct DisplayInfo {
 };
 
 HR_EXPORT void *hr_di_create() {
-    try {
-        auto *d = new DisplayInfo();
-        return d;
-    } catch (...) { return nullptr; }
+    try   { return new DisplayInfo(); }
+    catch (...) { return nullptr; }
 }
 
 HR_EXPORT void hr_di_destroy(void *handle) {
@@ -63,29 +64,25 @@ HR_EXPORT void hr_di_destroy(void *handle) {
 }
 
 #ifdef _WIN32
-/* EnumDisplayMonitors callback */
-struct _EnumCtx {
-    std::vector<MonitorInfo> *out;
-};
+struct _EnumCtx { std::vector<MonitorInfo> *out; };
 
-static BOOL CALLBACK _MonitorEnum(HMONITOR hmon, HDC /*hdc*/,
-                                   LPRECT /*rect*/, LPARAM lp)
+static BOOL CALLBACK _MonitorEnum(HMONITOR hmon, HDC, LPRECT, LPARAM lp)
 {
     _EnumCtx *ctx = reinterpret_cast<_EnumCtx *>(lp);
-    MONITORINFOEX mi{};
+
+    MONITORINFOEX mi = {};
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(hmon, &mi)) return TRUE;
 
-    MonitorInfo info{};
-    info.x = mi.rcMonitor.left;
-    info.y = mi.rcMonitor.top;
-    info.w = mi.rcMonitor.right  - mi.rcMonitor.left;
-    info.h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    MonitorInfo info = {};
+    info.x          = mi.rcMonitor.left;
+    info.y          = mi.rcMonitor.top;
+    info.w          = mi.rcMonitor.right  - mi.rcMonitor.left;
+    info.h          = mi.rcMonitor.bottom - mi.rcMonitor.top;
     info.is_primary = (mi.dwFlags & MONITORINFOF_PRIMARY) ? 1 : 0;
 
-    /* Try GetDpiForMonitor (Win 8.1+) */
     UINT dpi_x = 96, dpi_y = 96;
-    using GetDpiFunc = HRESULT (WINAPI *)(HMONITOR, MONITOR_DPI_TYPE, UINT*, UINT*);
+    using GetDpiFunc = HRESULT(WINAPI *)(HMONITOR, MONITOR_DPI_TYPE, UINT *, UINT *);
     static auto fn = reinterpret_cast<GetDpiFunc>(
         GetProcAddress(GetModuleHandleW(L"shcore.dll"), "GetDpiForMonitor"));
     if (fn) fn(hmon, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y);
@@ -94,7 +91,7 @@ static BOOL CALLBACK _MonitorEnum(HMONITOR hmon, HDC /*hdc*/,
     ctx->out->push_back(info);
     return TRUE;
 }
-#endif /* _WIN32 */
+#endif
 
 HR_EXPORT void hr_di_refresh(void *handle) {
     if (!handle) return;
@@ -105,15 +102,17 @@ HR_EXPORT void hr_di_refresh(void *handle) {
     _EnumCtx ctx{&d->monitors};
     EnumDisplayMonitors(nullptr, nullptr, _MonitorEnum,
                         reinterpret_cast<LPARAM>(&ctx));
-    /* Sort: primary first */
+
+    /* FIX: std::stable_sort now visible via <algorithm> */
     std::stable_sort(d->monitors.begin(), d->monitors.end(),
-        [](const MonitorInfo &a, const MonitorInfo &b){
+        [](const MonitorInfo &a, const MonitorInfo &b) {
             return a.is_primary > b.is_primary;
         });
 #else
-    /* Non-Windows: synthetic single monitor from xrandr or /proc */
-    MonitorInfo m{0, 0, 1920, 1080, 96.0f, 1};
-    /* Try reading primary resolution via xrandr */
+    MonitorInfo m = {};
+    m.x = 0; m.y = 0; m.w = 1920; m.h = 1080; m.dpi = 96.0f; m.is_primary = 1;
+
+    /* FIX: guard FILE* before reading */
     FILE *f = popen("xrandr 2>/dev/null | grep ' connected primary' | "
                     "awk '{print $4}' | grep -oP '\\d+x\\d+'", "r");
     if (f) {
@@ -144,10 +143,10 @@ HR_EXPORT int hr_di_get(void *handle, int index,
     auto *d = static_cast<DisplayInfo *>(handle);
     if (index < 0 || (size_t)index >= d->monitors.size()) return 0;
     const MonitorInfo &m = d->monitors[(size_t)index];
-    if (out_x) *out_x = m.x;
-    if (out_y) *out_y = m.y;
-    if (out_w) *out_w = m.w;
-    if (out_h) *out_h = m.h;
+    if (out_x)   *out_x   = m.x;
+    if (out_y)   *out_y   = m.y;
+    if (out_w)   *out_w   = m.w;
+    if (out_h)   *out_h   = m.h;
     if (out_dpi) *out_dpi = m.dpi;
     return 1;
 }

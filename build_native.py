@@ -1,148 +1,130 @@
 #!/usr/bin/env python3
 """
-build_native.py  —  HomRec v1.5.0
-Compiles the C / C++ native performance extensions.
+build_native.py  -  HomRec v1.5.0  one-click native library builder
 
-Usage:
-    python build_native.py          # auto-detect compiler
-    python build_native.py --check  # just check if already built
-    python build_native.py --clean  # remove built files then rebuild
+Run this script once from the HomRec folder to compile all C/C++ libraries:
+
+    python build_native.py
+
+Requirements:
+  - Windows: MinGW-w64 (gcc/g++ in PATH)  or  MSVC (cl in PATH)
+  - Linux/macOS: gcc and g++ installed
+
+Output: homrec_core.dll/.so, hr_ringbuf.dll/.so, hr_framequeue.dll/.so,
+        hr_preview.dll/.so, hr_encoder_helpers.dll/.so,
+        hr_stopwatch.dll/.so, hr_display_info.dll/.so
+
+FIXES vs v1.5.0:
+  - hr_stopwatch: added -lwinmm to linker flags on Windows.
+    Without it, timeGetDevCaps / timeBeginPeriod / timeEndPeriod are
+    undefined references (they live in winmm.dll, not the default libs).
+  - hr_encoder_helpers: added -msse2 flag so MinGW defines __SSE2__ and
+    pulls in <emmintrin.h>, making _mm_sfence and _mm_storeu_si128 resolve.
+  - hr_display_info: (source fix — see hr_display_info.cpp; no build change).
+  - Linux rt library: hr_stopwatch links -lrt on Linux for clock_gettime.
 """
 
-from __future__ import annotations
-import os, sys, subprocess, platform, shutil, argparse
-from pathlib import Path
+import subprocess
+import sys
+import os
+import platform
 
-HERE    = Path(__file__).parent
-IS_WIN  = platform.system() == "Windows"
-EXT     = ".dll" if IS_WIN else ".so"
-TARGETS = [
-    # (source,           output,              compiler, extra_flags)
-    ("homrec_core.c",    f"homrec_core{EXT}", "gcc",
-     ["-O3", "-march=native", "-shared",
-      *([] if IS_WIN else ["-fPIC"]),
-      "-lm"]),
-    ("hr_ringbuf.cpp",   f"hr_ringbuf{EXT}",  "g++",
-     ["-O3", "-std=c++17", "-shared",
-      *([] if IS_WIN else ["-fPIC"])]),
-    ("hr_framequeue.cpp",f"hr_framequeue{EXT}","g++",
-     ["-O3", "-std=c++17", "-shared",
-      *([] if IS_WIN else ["-fPIC"])]),
-]
+HERE = os.path.dirname(os.path.abspath(__file__))
 
-ANSI_GREEN  = "\033[32m"
-ANSI_RED    = "\033[31m"
-ANSI_YELLOW = "\033[33m"
-ANSI_RESET  = "\033[0m"
-
-def ok(msg):   print(f"{ANSI_GREEN}  ✓ {msg}{ANSI_RESET}")
-def err(msg):  print(f"{ANSI_RED}  ✗ {msg}{ANSI_RESET}")
-def warn(msg): print(f"{ANSI_YELLOW}  ! {msg}{ANSI_RESET}")
-
-
-def check_compiler(name: str) -> bool:
-    return shutil.which(name) is not None
-
-
-def build_target(src: str, out: str, compiler: str, flags: list[str]) -> bool:
-    src_path = HERE / src
-    out_path = HERE / out
-    if not src_path.exists():
-        err(f"Source not found: {src_path}")
-        return False
-    cmd = [compiler, *flags, "-o", str(out_path), str(src_path)]
-    print(f"  Building {out} …  ", end="", flush=True)
+def run(cmd, label):
+    print(f"  Building {label}...", end=" ", flush=True)
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, timeout=120, cwd=str(HERE)
-        )
-        if result.returncode == 0:
-            size_kb = out_path.stat().st_size // 1024
-            ok(f"{out}  ({size_kb} KB)")
+        r = subprocess.run(cmd, capture_output=True, cwd=HERE, timeout=120)
+        if r.returncode == 0:
+            print("OK")
             return True
         else:
-            err(f"{out} FAILED")
-            stderr = result.stderr.decode(errors="replace")
-            print(f"      {stderr[:600]}")
+            print("FAILED")
+            print(f"    stderr: {r.stderr.decode(errors='replace')[-800:]}")
             return False
-    except FileNotFoundError:
-        err(f"Compiler '{compiler}' not found in PATH")
+    except FileNotFoundError as e:
+        print(f"FAILED (compiler not found: {e})")
         return False
-    except subprocess.TimeoutExpired:
-        err(f"Build timeout for {src}")
+    except Exception as e:
+        print(f"ERROR: {e}")
         return False
-
-
-def all_built() -> bool:
-    return all((HERE / out).exists() for _, out, *_ in TARGETS)
-
-
-def clean():
-    for _, out, *_ in TARGETS:
-        p = HERE / out
-        if p.exists():
-            p.unlink()
-            print(f"  Removed {out}")
-
 
 def main():
-    parser = argparse.ArgumentParser(description="Build HomRec native extensions")
-    parser.add_argument("--check", action="store_true",
-                        help="Report status without building")
-    parser.add_argument("--clean", action="store_true",
-                        help="Remove built files then rebuild")
-    args = parser.parse_args()
+    is_win  = platform.system() == "Windows"
+    is_mac  = platform.system() == "Darwin"
+    so      = ".dll" if is_win else ".so"
+    fPIC    = [] if is_win else ["-fPIC"]
+    # FIX: -lwinmm is required for timeGetDevCaps/timeBeginPeriod/timeEndPeriod
+    WINMM   = ["-lwinmm"] if is_win else []
+    # FIX: clock_gettime lives in -lrt on older Linux glibc (no-op on macOS)
+    LRT     = [] if (is_win or is_mac) else ["-lrt"]
+    LNKST   = ["-static-libgcc", "-static-libstdc++"] if is_win else []
+    # FIX: explicit -msse2 ensures MinGW defines __SSE2__ and finds emmintrin.h
+    SSE2    = ["-msse2"] if is_win else []
 
-    print(f"\nHomRec v1.5.0 — Native Extension Builder")
-    print(f"Platform: {platform.system()} {platform.machine()}  Python {sys.version.split()[0]}\n")
+    print(f"\nHomRec v1.5.0 — Native Library Builder")
+    print(f"Platform: {platform.system()} | Output dir: {HERE}\n")
 
-    if args.check:
-        for _, out, *_ in TARGETS:
-            p = HERE / out
-            if p.exists():
-                ok(f"{out} exists ({p.stat().st_size // 1024} KB)")
-            else:
-                warn(f"{out} missing")
-        return 0
+    targets = [
+        (
+            ["gcc", "-O3", "-march=native", *SSE2, "-shared", *fPIC, "-lm",
+             "-o", f"homrec_core{so}", "homrec_core.c"],
+            "homrec_core  (pixel ops, audio RMS, resize)"
+        ),
+        (
+            ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
+             "-o", f"hr_ringbuf{so}", "hr_ringbuf.cpp"],
+            "hr_ringbuf   (lock-free audio ring buffer)"
+        ),
+        (
+            ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
+             "-o", f"hr_framequeue{so}", "hr_framequeue.cpp"],
+            "hr_framequeue (lock-free frame pointer queue)"
+        ),
+        (
+            ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
+             "-o", f"hr_preview{so}", "hr_preview.cpp"],
+            "hr_preview   (thumbnail, border, gray overlay)"
+        ),
+        (
+            # FIX: added -msse2 so <emmintrin.h> / _mm_sfence resolve in MinGW
+            ["gcc", "-O3", "-march=native", *SSE2, "-shared", *fPIC, "-lm",
+             "-o", f"hr_encoder_helpers{so}", "hr_encoder_helpers.c"],
+            "hr_encoder_helpers (BGRA->YUV420p, gamma, box thumbnail)"
+        ),
+        (
+            # FIX: -lwinmm must come AFTER the source file on MinGW's linker.
+            # GCC/ld resolves symbols left-to-right; a -l flag placed before
+            # the .o has no unresolved symbols yet so winmm is silently dropped.
+            ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
+             "-o", f"hr_stopwatch{so}", "hr_stopwatch.cpp", *WINMM],
+            "hr_stopwatch (sub-ms frame pacing timer)"
+        ),
+        (
+            ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
+             "-o", f"hr_display_info{so}", "hr_display_info.cpp"],
+            "hr_display_info (monitor enumeration)"
+        ),
+    ]
 
-    if args.clean:
-        print("Cleaning previous build …")
-        clean()
-        print()
+    ok = 0
+    for cmd, label in targets:
+        if run(cmd, label):
+            ok += 1
 
-    # Check compilers
-    missing = []
-    for _, _, compiler, _ in TARGETS:
-        if not check_compiler(compiler):
-            missing.append(compiler)
-    missing = list(dict.fromkeys(missing))  # deduplicate
-    if missing:
-        err(f"Required compiler(s) not found: {', '.join(missing)}")
-        print("\n  Install GCC / G++:")
-        if IS_WIN:
-            print("    winget install MSYS2.MSYS2  →  pacman -S mingw-w64-x86_64-gcc")
-        else:
-            print("    Ubuntu/Debian:  sudo apt install build-essential")
-            print("    Fedora:         sudo dnf install gcc gcc-c++")
-            print("    macOS:          xcode-select --install")
-        return 1
-
-    # Build
-    results = []
-    for src, out, compiler, flags in TARGETS:
-        ok_flag = build_target(src, out, compiler, flags)
-        results.append(ok_flag)
-
-    print()
-    if all(results):
-        ok("All extensions built successfully!")
-        print("\n  Run HomRec normally — it will load them automatically.\n")
-        return 0
+    print(f"\n{'='*52}")
+    print(f"Built {ok}/{len(targets)} libraries successfully.")
+    if ok == len(targets):
+        print("All native libraries compiled! HomRec will use them automatically.")
     else:
-        n_fail = results.count(False)
-        warn(f"{n_fail} extension(s) failed — HomRec will use Python fallbacks.")
-        return 1
-
+        print("Some libraries failed. HomRec will use Python fallbacks for those.")
+        print("\nTroubleshooting:")
+        print("  Windows — install MinGW-w64 via MSYS2:")
+        print("    https://www.msys2.org/")
+        print("    pacman -S mingw-w64-x86_64-gcc")
+        print("    Add C:\\msys64\\mingw64\\bin to PATH")
+        print("  Linux   — sudo apt install gcc g++  (or equivalent)")
+    print()
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
