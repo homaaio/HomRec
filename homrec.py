@@ -60,7 +60,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.5.0"
+CURRENT_VERSION = "1.6.0"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -96,7 +96,7 @@ def _version_gt(a: str, b: str) -> bool:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec (v1.5.0)",
+        "app_title": "HomRec v1.6.0",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -188,7 +188,7 @@ LANGUAGES = {
         "audio_file": "🎵 Audio file:",
     },
     "ru": {
-        "app_title": "HomRec (v1.5.0)",
+        "app_title": "HomRec v1.6.0",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -351,59 +351,99 @@ def optimize_for_performance() -> None:
     log.info("Performance optimizations applied (v1.5.0)")
 
 class AudioLevelMeter(tk.Canvas):
-    def __init__(self, parent, width: int = 180, height: int = 24, **kwargs) -> None:
+    """Improved audio level meter with segmented display and peak indicator."""
+    def __init__(self, parent, width: int = 180, height: int = 20, **kwargs) -> None:
         super().__init__(parent, width=width, height=height, highlightthickness=0, **kwargs)
-        self.width = width
-        self.height = height
+        self.meter_width = width
+        self.meter_height = height
         self.level = 0
+        self._peak = 0
+        self._peak_decay = 0
         self.draw_meter()
-    
+
     def draw_meter(self) -> None:
         self.delete("all")
-        self.create_rectangle(0, 0, self.width, self.height, fill='#45475a', outline='')
-        bar_width = int((self.level / 100) * (self.width - 4))
-        if bar_width > 0:
-            color = '#a6e3a1' if self.level < 70 else '#f9e2af' if self.level < 90 else '#f38ba8'
-            self.create_rectangle(2, 2, bar_width, self.height-2, fill=color, outline='')
-        for i in range(0, 101, 20):
-            x = int((i / 100) * self.width)
-            self.create_line(x, 0, x, self.height, fill='#1e1e2e', width=1)
-    
+        # Background
+        self.create_rectangle(0, 0, self.meter_width, self.meter_height,
+                              fill='#2a2a3e', outline='#45475a', width=1)
+        # Segments (20 total)
+        n_seg = 20
+        seg_w = (self.meter_width - 4) / n_seg
+        active = int(self.level / 100 * n_seg)
+        for i in range(n_seg):
+            x0 = int(2 + i * seg_w) + 1
+            x1 = int(2 + (i + 1) * seg_w) - 1
+            if i < active:
+                if i < 14:       color = '#a6e3a1'  # green
+                elif i < 17:     color = '#f9e2af'  # yellow
+                else:            color = '#f38ba8'  # red
+            else:
+                if i < 14:       color = '#1e3a26'
+                elif i < 17:     color = '#3a2e10'
+                else:            color = '#3a1420'
+            self.create_rectangle(x0, 2, x1, self.meter_height - 2,
+                                  fill=color, outline='')
+        # Peak indicator
+        if self._peak > 0:
+            px = int(2 + self._peak / 100 * (self.meter_width - 4))
+            pcol = '#f38ba8' if self._peak > 90 else '#f9e2af' if self._peak > 70 else '#a6e3a1'
+            self.create_line(px, 2, px, self.meter_height - 2, fill=pcol, width=2)
+
     def set_level(self, level: int) -> None:
         self.level = max(0, min(100, level))
+        if self.level > self._peak:
+            self._peak = self.level
+            self._peak_decay = 15
+        else:
+            if self._peak_decay > 0:
+                self._peak_decay -= 1
+            else:
+                self._peak = max(0, self._peak - 2)
         self.draw_meter()
 
 class CustomMessageBox:
     @staticmethod
     def show(app, title_key: str, message_key: str, info_text: str, dont_show_var: tk.BooleanVar) -> bool:
+        c = app.colors
         dialog = tk.Toplevel()
         dialog.title(app.lang[title_key])
-        dialog.geometry("500x400")
-        dialog.configure(bg=app.colors["bg"])
+        dialog.geometry("520x420")
+        dialog.configure(bg=c["bg"])
         dialog.transient()
         dialog.grab_set()
         dialog.resizable(False, False)
-        
+
         dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - 250
-        y = (dialog.winfo_screenheight() // 2) - 200
+        x = (dialog.winfo_screenwidth() // 2) - 260
+        y = (dialog.winfo_screenheight() // 2) - 210
         dialog.geometry(f"+{x}+{y}")
-        
-        icon_label = tk.Label(dialog, text="✅", font=("Segoe UI", 48), bg=app.colors["bg"], fg='#a6e3a1')
-        icon_label.pack(pady=(20, 10))
-        
-        tk.Label(dialog, text=app.lang[message_key], font=("Segoe UI", 14, "bold"),
-                bg=app.colors["bg"], fg=app.colors["fg"]).pack(pady=(0, 10))
-        
-        info_frame = tk.Frame(dialog, bg=app.colors["surface"], relief='flat', bd=2)
-        info_frame.pack(pady=10, padx=20, fill='both', expand=True)
-        info_label = tk.Label(info_frame, text=info_text, justify='left',
-                              bg=app.colors["surface"], fg=app.colors["text"],
-                              font=("Consolas", 10))
-        info_label.pack(pady=15, padx=15)
-        
-        check_frame = tk.Frame(dialog, bg=app.colors["bg"])
-        check_frame.pack(pady=10)
+
+        # Top banner
+        banner = tk.Frame(dialog, bg=c["success"] if "success" in c else "#a6e3a1", height=6)
+        banner.pack(fill="x")
+
+        # Icon + title row
+        top_row = tk.Frame(dialog, bg=c["bg"])
+        top_row.pack(fill="x", padx=24, pady=(20, 6))
+        tk.Label(top_row, text="✅", font=("Segoe UI", 36), bg=c["bg"],
+                 fg=c.get("success", "#a6e3a1")).pack(side="left", padx=(0, 16))
+        title_col = tk.Frame(top_row, bg=c["bg"])
+        title_col.pack(side="left", fill="y")
+        tk.Label(title_col, text=app.lang[message_key], font=("Segoe UI", 14, "bold"),
+                 bg=c["bg"], fg=c["text"]).pack(anchor="w")
+        tk.Label(title_col, text="Recording complete", font=("Segoe UI", 9),
+                 bg=c["bg"], fg=c.get("text_secondary", "#a6adc8")).pack(anchor="w")
+
+        # Info card
+        info_frame = tk.Frame(dialog, bg=c.get("surface", "#313244"),
+                              relief="flat", padx=16, pady=12)
+        info_frame.pack(pady=8, padx=20, fill="both", expand=True)
+        tk.Label(info_frame, text=info_text, justify="left",
+                 bg=c.get("surface", "#313244"), fg=c["text"],
+                 font=("Consolas", 10), anchor="w").pack(anchor="w")
+
+        check_frame = tk.Frame(dialog, bg=c["bg"])
+        check_frame.pack(pady=8)
         dont_show_text = "Don't show again" if app.current_language == "en" else "Больше не показывать"
         dont_show_check = tk.Checkbutton(check_frame, text=dont_show_text,
                                          variable=dont_show_var,
@@ -439,18 +479,30 @@ class CustomMessageBox:
 
 
 class WelcomeDialog:
-    """Beautiful first-launch welcome window."""
+    """Beautiful redesigned first-launch welcome window (v1.6.0)."""
 
     @staticmethod
     def show(app) -> None:
         import webbrowser
 
+        W, H = 580, 440
+        BG      = "#0f0f17"
+        CARD    = "#1a1a2e"
+        ACCENT  = "#89b4fa"
+        ACCENT2 = "#cba6f7"
+        GREEN   = "#a6e3a1"
+        GOLD    = "#f9e2af"
+        TEXT    = "#cdd6f4"
+        SUB     = "#a6adc8"
+        DIM     = "#45475a"
+
         dlg = tk.Toplevel()
         dlg.withdraw()
         dlg.title("Welcome to HomRec")
-        dlg.geometry("520x380")
+        dlg.geometry(f"{W}x{H}")
         dlg.resizable(False, False)
-        dlg.configure(bg="#1e1e2e")
+        dlg.configure(bg=BG)
+        dlg.overrideredirect(False)  # keep window decorations
 
         try:
             if getattr(sys, 'frozen', False):
@@ -466,75 +518,140 @@ class WelcomeDialog:
         dlg.update_idletasks()
         sw = dlg.winfo_screenwidth()
         sh = dlg.winfo_screenheight()
-        dlg.geometry(f"520x380+{(sw-520)//2}+{(sh-380)//2}")
+        dlg.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
 
-        # ── Gradient-style header ─────────────────────────────────────────
-        header = tk.Frame(dlg, bg="#181825", height=90)
-        header.pack(fill="x")
-        header.pack_propagate(False)
+        # ── Animated canvas header ─────────────────────────────────────────
+        hdr_canvas = tk.Canvas(dlg, width=W, height=110, bg=CARD,
+                               highlightthickness=0)
+        hdr_canvas.pack(fill="x")
 
-        tk.Label(header, text="HomRec", font=("Segoe UI", 30, "bold"),
-                 bg="#181825", fg="#89b4fa").pack(side="left", padx=28, pady=18)
+        # Draw subtle grid lines
+        for xi in range(0, W, 30):
+            hdr_canvas.create_line(xi, 0, xi, 110, fill="#1e1e30", width=1)
+        for yi in range(0, 110, 30):
+            hdr_canvas.create_line(0, yi, W, yi, fill="#1e1e30", width=1)
 
-        ver_frame = tk.Frame(header, bg="#181825")
-        ver_frame.pack(side="left", pady=30)
-        tk.Label(ver_frame, text=f"v{CURRENT_VERSION}", font=("Segoe UI", 11),
-                 bg="#181825", fg="#6c7086").pack(anchor="w")
-        tk.Label(ver_frame, text="Screen Recorder", font=("Segoe UI", 9),
-                 bg="#181825", fg="#45475a").pack(anchor="w")
+        # Glow circle behind logo
+        hdr_canvas.create_oval(18, 18, 92, 92, fill="#181830", outline=ACCENT, width=2)
+        hdr_canvas.create_oval(28, 28, 82, 82, fill="#0f0f20", outline=ACCENT2, width=1)
+        # Record dot
+        hdr_canvas.create_oval(43, 43, 67, 67, fill="#f38ba8", outline="")
 
-        # ── Thin accent line ──────────────────────────────────────────────
-        tk.Frame(dlg, bg="#89b4fa", height=2).pack(fill="x")
+        # Title text
+        hdr_canvas.create_text(110, 38, text="HomRec", anchor="w",
+                               font=("Segoe UI", 28, "bold"), fill=ACCENT)
+        hdr_canvas.create_text(110, 68, text=f"Screen Recorder  v{CURRENT_VERSION}",
+                               anchor="w", font=("Segoe UI", 11), fill=SUB)
+        hdr_canvas.create_text(110, 88, text="by homaaio",
+                               anchor="w", font=("Segoe UI", 9), fill=DIM)
+
+        # Pulse animation on the record dot
+        _pulse_state = [True]
+        def _pulse():
+            if not dlg.winfo_exists():
+                return
+            col = "#f38ba8" if _pulse_state[0] else "#a0203a"
+            hdr_canvas.itemconfig(hdr_canvas.find_all()[-1] if False else
+                                  [i for i in hdr_canvas.find_all()
+                                   if hdr_canvas.coords(i) == [43.0, 43.0, 67.0, 67.0]
+                                  ][0] if False else 3,
+                                  fill=col)
+            _pulse_state[0] = not _pulse_state[0]
+            dlg.after(600, _pulse)
+        dlg.after(300, _pulse)
+
+        # Accent bar
+        tk.Frame(dlg, bg=ACCENT, height=2).pack(fill="x")
+
+        # ── Feature pills ──────────────────────────────────────────────────
+        pills_frame = tk.Frame(dlg, bg=BG)
+        pills_frame.pack(fill="x", padx=24, pady=(14, 6))
+
+        features = [
+            ("⚡", "Native C/C++ core", ACCENT),
+            ("🎙", "Audio mixer",       ACCENT2),
+            ("🖥", "Multi-monitor",      GREEN),
+            ("🎨", "Themes & langs",    GOLD),
+        ]
+        for icon, label, color in features:
+            pill = tk.Frame(pills_frame, bg="#1e1e2e", padx=10, pady=5)
+            pill.pack(side="left", padx=(0, 8))
+            tk.Label(pill, text=f"{icon} {label}", bg="#1e1e2e", fg=color,
+                     font=("Segoe UI", 9, "bold")).pack()
+
+        # Divider
+        tk.Frame(dlg, bg=DIM, height=1).pack(fill="x", padx=24, pady=(6, 0))
 
         # ── Message body ──────────────────────────────────────────────────
-        body = tk.Frame(dlg, bg="#1e1e2e")
-        body.pack(fill="both", expand=True, padx=32, pady=22)
+        body = tk.Frame(dlg, bg=BG)
+        body.pack(fill="both", expand=True, padx=28, pady=14)
 
-        tk.Label(body,
-                 text="Hello,",
-                 font=("Segoe UI", 15, "bold"),
-                 bg="#1e1e2e", fg="#cdd6f4").pack(anchor="w")
+        tk.Label(body, text="Hello,", font=("Segoe UI", 14, "bold"),
+                 bg=BG, fg=TEXT).pack(anchor="w")
 
-        msg = ("I am sincerely glad that you downloaded my software.\n"
-               "If you encounter any difficulties, you can always write\n"
-               "about it on the GitHub page.\n\n"
-               "Thank you.\n"
-               "homaaio")
-        tk.Label(body, text=msg,
-                 font=("Segoe UI", 10),
-                 bg="#1e1e2e", fg="#a6adc8",
-                 justify="left").pack(anchor="w", pady=(6, 0))
+        is_ru = getattr(app, 'current_language', 'en') == 'ru'
+        if is_ru:
+            msg = ("Я искренне рад, что вы скачали мою программу.\n"
+                   "Если у вас возникнут трудности — напишите на GitHub.\n\n"
+                   "Спасибо.   homaaio")
+        else:
+            msg = ("I am sincerely glad that you downloaded my software.\n"
+                   "If you encounter any difficulties, you can always write\n"
+                   "about it on the GitHub page.\n\n"
+                   "Thank you.   homaaio")
+        tk.Label(body, text=msg, font=("Segoe UI", 10),
+                 bg=BG, fg=SUB, justify="left").pack(anchor="w", pady=(6, 0))
+
+        # ── Quick tips ─────────────────────────────────────────────────────
+        tips_frame = tk.Frame(dlg, bg=CARD, pady=8)
+        tips_frame.pack(fill="x", padx=24, pady=(6, 0))
+        tips_lbl = "Quick tips:" if not is_ru else "Быстрые подсказки:"
+        tk.Label(tips_frame, text=tips_lbl, bg=CARD, fg=ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=12)
+        tips_text = "F9 = Start/Stop   F10 = Pause   F11 = Fullscreen" if not is_ru else "F9 = Старт/Стоп   F10 = Пауза   F11 = Полный экран"
+        tk.Label(tips_frame, text=tips_text, bg=CARD, fg=SUB,
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=12)
 
         # ── Buttons ───────────────────────────────────────────────────────
-        btn_row = tk.Frame(dlg, bg="#1e1e2e")
-        btn_row.pack(fill="x", padx=24, pady=(0, 20))
+        btn_row = tk.Frame(dlg, bg=BG)
+        btn_row.pack(fill="x", padx=24, pady=14)
 
         def _open(url):
             webbrowser.open(url)
 
-        tk.Button(btn_row, text="📋 View Changelog",
-                  command=lambda: _open("https://github.com/homaaio/HomREC/blob/main/CHANGELOG.txt"),
-                  bg="#313244", fg="#cdd6f4",
-                  font=("Segoe UI", 9), relief="flat",
-                  padx=12, pady=7, cursor="hand2").pack(side="left", padx=(0, 6))
+        def _btn(parent, text, cmd, bg, fg, bold=False, side="left", padx=(0,8)):
+            font = ("Segoe UI", 9, "bold") if bold else ("Segoe UI", 9)
+            b = tk.Button(parent, text=text, command=cmd,
+                          bg=bg, fg=fg, font=font, relief="flat",
+                          padx=12, pady=8, cursor="hand2", bd=0,
+                          activebackground=bg, activeforeground=fg)
+            b.pack(side=side, padx=padx)
+            # Hover effect
+            b.bind("<Enter>", lambda e: b.config(bg=_lighten(bg)))
+            b.bind("<Leave>", lambda e: b.config(bg=bg))
+            return b
 
-        tk.Button(btn_row, text="⭐ Star on GitHub",
-                  command=lambda: (_open("https://github.com/homaaio/HomREC"), dlg.destroy()),
-                  bg="#f9e2af", fg="#1e1e2e",
-                  font=("Segoe UI", 9, "bold"), relief="flat",
-                  padx=12, pady=7, cursor="hand2").pack(side="left", padx=(0, 6))
+        def _lighten(hex_color):
+            try:
+                r = int(hex_color[1:3], 16); g = int(hex_color[3:5], 16); b = int(hex_color[5:7], 16)
+                r = min(255, r+20); g = min(255, g+20); b = min(255, b+20)
+                return f"#{r:02x}{g:02x}{b:02x}"
+            except Exception:
+                return hex_color
 
-        tk.Button(btn_row, text="🌐 Visit Site",
-                  command=lambda: _open("https://homaaio.github.io/HomREC/"),
-                  bg="#313244", fg="#89b4fa",
-                  font=("Segoe UI", 9), relief="flat",
-                  padx=12, pady=7, cursor="hand2").pack(side="left", padx=(0, 6))
+        _btn(btn_row, "📋 Changelog",
+             lambda: _open("https://github.com/homaaio/HomREC/blob/main/CHANGELOG.txt"),
+             "#313244", TEXT)
+        _btn(btn_row, "⭐ GitHub",
+             lambda: _open("https://github.com/homaaio/HomREC"),
+             "#313244", GOLD)
+        _btn(btn_row, "🌐 Website",
+             lambda: _open("https://homaaio.github.io/HomREC/"),
+             "#313244", ACCENT)
 
-        tk.Button(btn_row, text="Get Started →",
-                  command=dlg.destroy,
-                  bg="#89b4fa", fg="#1e1e2e",
-                  font=("Segoe UI", 9, "bold"), relief="flat",
-                  padx=14, pady=7, cursor="hand2").pack(side="right")
+        start_text = "Get Started →" if not is_ru else "Начать →"
+        _btn(btn_row, start_text, dlg.destroy,
+             ACCENT, "#1e1e2e", bold=True, side="right", padx=(8, 0))
 
         dlg.transient()
         dlg.grab_set()
@@ -1270,9 +1387,10 @@ class AdvancedSettingsDialog:
     def __init__(self, parent: tk.Tk, app) -> None:
         self.app = app
         self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Advanced Settings")
-        self.dialog.geometry("560x640")
-        self.dialog.resizable(False, False)
+        self.dialog.title("⚙ Advanced Settings")
+        self.dialog.geometry("600x680")
+        self.dialog.resizable(True, True)
+        self.dialog.minsize(560, 600)
         self.dialog.configure(bg=app.colors["bg"])
         self.dialog.grab_set()
         try:
@@ -1665,14 +1783,15 @@ class SettingsDialog:
         self.app = app
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(app.lang["settings_title"])
-        self.dialog.geometry("500x500")
+        self.dialog.geometry("560x560")
         self.dialog.configure(bg=app.colors["bg"])
         self.dialog.transient(parent)
         self.dialog.grab_set()
-        
+        self.dialog.resizable(False, False)
+
         self.dialog.update_idletasks()
-        x = (self.dialog.winfo_screenwidth() // 2) - 250
-        y = (self.dialog.winfo_screenheight() // 2) - 250
+        x = (self.dialog.winfo_screenwidth() // 2) - 280
+        y = (self.dialog.winfo_screenheight() // 2) - 280
         self.dialog.geometry(f"+{x}+{y}")
 
         # Apply app icon
@@ -2733,11 +2852,19 @@ class HomRecScreen:
         preview_container = tk.Frame(right_panel, bg=self.colors["surface_light"], relief="flat", bd=2)
         preview_container.pack(fill="both", expand=True, pady=(0, 15))
         
-        preview_label_title = tk.Label(preview_container, text=self.lang["live_preview"], 
-                                      bg=self.colors["surface_light"], 
-                                      fg=self.colors["text_secondary"],
-                                      font=("Segoe UI", 10, "bold"))
-        preview_label_title.pack(anchor="nw", padx=8, pady=5)
+        # Preview header bar
+        preview_header = tk.Frame(preview_container, bg=self.colors.get("surface_light", "#45475a"), height=30)
+        preview_header.pack(fill="x")
+        preview_header.pack_propagate(False)
+        tk.Label(preview_header, text="● " + self.lang["live_preview"],
+                 bg=self.colors.get("surface_light", "#45475a"),
+                 fg=self.colors["accent"],
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=10, pady=5)
+        self._preview_fps_lbl = tk.Label(preview_header, text="",
+                 bg=self.colors.get("surface_light", "#45475a"),
+                 fg=self.colors.get("text_secondary", "#a6adc8"),
+                 font=("Segoe UI", 8))
+        self._preview_fps_lbl.pack(side="right", padx=10, pady=5)
         
         preview_frame = tk.Frame(preview_container, bg=self.colors["preview_bg"])
         preview_frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -2751,17 +2878,41 @@ class HomRecScreen:
         
         self.audio_panel = AudioPanel(bottom_panel, self)
         
-        bottom_bar = tk.Frame(self.root, bg=self.colors["surface"], height=30)
+        bottom_bar = tk.Frame(self.root, bg=self.colors["surface"], height=32)
         bottom_bar.pack(side="bottom", fill="x")
-        
-        self.file_label = tk.Label(bottom_bar, text=self.lang["ready"], 
+        bottom_bar.pack_propagate(False)
+
+        # Status dot
+        self._status_dot = tk.Label(bottom_bar, text="●",
+                                    bg=self.colors["surface"], fg=self.colors.get("success", "#a6e3a1"),
+                                    font=("Segoe UI", 9))
+        self._status_dot.pack(side="left", padx=(10, 2), pady=6)
+
+        self.file_label = tk.Label(bottom_bar, text=self.lang["ready"],
                                    bg=self.colors["surface"], fg=self.colors["text_secondary"],
-                                   font=("Segoe UI", 10))
-        self.file_label.pack(side="left", padx=15)
-        
-        tk.Label(bottom_bar, text=self.lang["made_by"], 
+                                   font=("Segoe UI", 9))
+        self.file_label.pack(side="left", padx=(0, 10), pady=6)
+
+        # Native libs indicator
+        try:
+            from homrec_native import NATIVE_OK, ENCODER_OK
+            native_txt = "⚡ Native" if NATIVE_OK else "🐍 Python"
+            native_col = self.colors.get("success", "#a6e3a1") if NATIVE_OK else self.colors.get("warning", "#f9e2af")
+        except Exception:
+            native_txt = "🐍 Python"
+            native_col = self.colors.get("text_secondary", "#a6adc8")
+        tk.Label(bottom_bar, text=native_txt,
+                 bg=self.colors["surface"], fg=native_col,
+                 font=("Segoe UI", 8)).pack(side="left", padx=4, pady=6)
+
+        tk.Label(bottom_bar, text=self.lang["made_by"],
                 bg=self.colors["surface"], fg=self.colors["accent"],
-                font=("Segoe UI", 10, "bold")).pack(side="right", padx=15)
+                font=("Segoe UI", 9, "bold")).pack(side="right", padx=12, pady=6)
+
+        # Version badge
+        tk.Label(bottom_bar, text=f"v{CURRENT_VERSION}",
+                 bg=self.colors["surface"], fg=self.colors.get("text_secondary", "#6c7086"),
+                 font=("Segoe UI", 8)).pack(side="right", padx=(0, 4), pady=6)
         
         self.update_preview_size()
     
@@ -3569,22 +3720,53 @@ class HomRecScreen:
     def show_countdown(self) -> None:
         w = tk.Toplevel(self.root)
         self._set_icon(w)
-        w.geometry("350x180")
-        w.configure(bg=self.colors["bg"])
+        W, H = 300, 200
+        w.geometry(f"{W}x{H}")
+        w.configure(bg="#0f0f17")
         w.overrideredirect(True)
+        # Slightly transparent if supported
+        try:
+            w.attributes("-alpha", 0.92)
+        except Exception:
+            pass
         w.update_idletasks()
-        w.geometry(f"+{w.winfo_screenwidth()//2-175}+{w.winfo_screenheight()//2-90}")
-        label = tk.Label(w, text="3", font=("Segoe UI", 56, "bold"),
-                        bg=self.colors["bg"], fg=self.colors["success"])
-        label.pack(expand=True)
-        
+        sw = w.winfo_screenwidth()
+        sh = w.winfo_screenheight()
+        w.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
+        w.lift()
+        w.attributes("-topmost", True)
+
+        # Outer ring canvas
+        cv = tk.Canvas(w, width=W, height=H, bg="#0f0f17", highlightthickness=0)
+        cv.pack(fill="both", expand=True)
+
+        cx, cy, r = W//2, H//2 - 10, 60
+        ring_id  = cv.create_oval(cx-r, cy-r, cx+r, cy+r, outline="#313244", width=6)
+        arc_id   = cv.create_arc(cx-r, cy-r, cx+r, cy+r, start=90, extent=0,
+                                  outline=self.colors.get("success","#a6e3a1"), width=6, style="arc")
+        num_id   = cv.create_text(cx, cy, text="3", font=("Segoe UI", 42, "bold"),
+                                   fill=self.colors.get("success","#a6e3a1"))
+        hint_id  = cv.create_text(cx, cy + r + 22, text="Starting recording…",
+                                   font=("Segoe UI", 10), fill="#6c7086")
+
+        _n = [3]
         def tick(n: int) -> None:
+            _n[0] = n
             if n > 0:
-                label.config(text=str(n))
+                extent = -(n / 3) * 360
+                cv.itemconfig(arc_id, extent=extent,
+                              outline=self.colors.get("success","#a6e3a1"))
+                cv.itemconfig(num_id, text=str(n),
+                              fill=self.colors.get("success","#a6e3a1"))
                 w.after(1000, lambda: tick(n - 1))
             else:
-                label.config(text=self.lang["recording_btn"], fg=self.colors["error"])
-                w.after(500, w.destroy)
+                cv.itemconfig(arc_id, extent=-360,
+                              outline=self.colors.get("error","#f38ba8"))
+                cv.itemconfig(num_id, text="●",
+                              fill=self.colors.get("error","#f38ba8"))
+                cv.itemconfig(hint_id, text=self.lang["recording_btn"],
+                              fill=self.colors.get("error","#f38ba8"))
+                w.after(400, w.destroy)
                 self.start_recording()
         tick(3)
     
@@ -3720,6 +3902,22 @@ class HomRecScreen:
                     pass
                 self._preview_queue.put_nowait(img)
 
+                # Track preview FPS for status display
+                _now = time.time()
+                if not hasattr(self, '_pv_last_t'):
+                    self._pv_last_t = _now
+                    self._pv_frame_acc = 0
+                self._pv_frame_acc += 1
+                if _now - self._pv_last_t >= 2.0:
+                    fps_val = self._pv_frame_acc / (_now - self._pv_last_t)
+                    self._pv_last_t = _now
+                    self._pv_frame_acc = 0
+                    if hasattr(self, '_preview_fps_lbl'):
+                        try:
+                            self._preview_fps_lbl.config(text=f"{fps_val:.0f} fps")
+                        except Exception:
+                            pass
+
             except Exception as e:
                 log.debug(f"_capture_loop error: {e}")
 
@@ -3729,18 +3927,69 @@ class HomRecScreen:
             time.sleep(0.25 if getattr(self, 'recording', False) else 0.067)
 
     def update_preview(self) -> None:
-        """UI thread: only converts PIL→PhotoImage and updates the label. No heavy work here."""
+        """UI thread: converts PIL→PhotoImage and updates the label.
+        FIX v1.6.0: None in queue means preview is disabled - show placeholder
+        instead of freezing on the last captured frame.
+        """
         try:
             img = self._preview_queue.get_nowait()
-            photo = ImageTk.PhotoImage(img)
-            self.preview_label.config(image=photo)
-            self.preview_label.image = photo
+            if img is None:
+                # Preview disabled - show grey placeholder with text
+                self._show_preview_placeholder()
+            else:
+                photo = ImageTk.PhotoImage(img)
+                self.preview_label.config(image=photo, text="")
+                self.preview_label.image = photo
         except queue.Empty:
             pass   # no new frame yet - skip, don't block
         except Exception:
             pass
-        # Poll every 100 ms - this call is now near-instant so UI stays responsive
-        self.root.after(100, self.update_preview)
+        # Poll every 80 ms for smoother UI
+        self.root.after(80, self.update_preview)
+
+    def _show_preview_placeholder(self) -> None:
+        """Show a grey placeholder when preview is disabled."""
+        try:
+            pw = getattr(self, 'preview_width', 640)
+            ph = getattr(self, 'preview_height', 360)
+            # Only regenerate if size changed (cache by size)
+            cache_key = (pw, ph)
+            if getattr(self, '_placeholder_key', None) != cache_key:
+                img = Image.new("RGB", (pw, ph), color="#181825")
+                draw = ImageDraw.Draw(img)
+                # Dashed border
+                for x in range(0, pw, 20):
+                    draw.rectangle([x, 0, x+10, 2], fill="#45475a")
+                    draw.rectangle([x, ph-2, x+10, ph], fill="#45475a")
+                for y in range(0, ph, 20):
+                    draw.rectangle([0, y, 2, y+10], fill="#45475a")
+                    draw.rectangle([pw-2, y, pw, y+10], fill="#45475a")
+                # Camera icon (simple circle + lens)
+                cx, cy, r = pw//2, ph//2 - 20, 40
+                draw.ellipse([cx-r, cy-r, cx+r, cy+r], outline="#45475a", width=3)
+                draw.ellipse([cx-15, cy-15, cx+15, cy+15], outline="#45475a", width=2)
+                # Text
+                try:
+                    from PIL import ImageFont
+                    font = ImageFont.truetype("segoeui.ttf", 16)
+                except Exception:
+                    font = None
+                msg = "Preview disabled"
+                if hasattr(self, 'lang'):
+                    msg = "Preview disabled" if self.current_language == "en" else "Предпросмотр выключен"
+                tw, th = (len(msg)*8, 20)
+                try:
+                    bbox = draw.textbbox((0,0), msg, font=font)
+                    tw = bbox[2]-bbox[0]; th = bbox[3]-bbox[1]
+                except Exception:
+                    pass
+                draw.text((pw//2 - tw//2, cy + r + 16), msg, fill="#6c7086", font=font)
+                self._placeholder_photo = ImageTk.PhotoImage(img)
+                self._placeholder_key = cache_key
+            self.preview_label.config(image=self._placeholder_photo, text="")
+            self.preview_label.image = self._placeholder_photo
+        except Exception:
+            pass
     
     def toggle_recording(self) -> None:
         if not self.recording:
@@ -3919,35 +4168,50 @@ class HomRecScreen:
         self.file_label.config(text="Processing…")
 
         def _finalize():
-            # Stop ffmpeg gracefully
+            # ── v1.6.0: improved finalization with better timeouts ─────────
+            # Step 1: Terminate ffmpeg gracefully with 'q', fallback to kill
             if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
                 try:
                     self.ffmpeg_proc.stdin.write(b'q')
                     self.ffmpeg_proc.stdin.flush()
-                    self.ffmpeg_proc.wait(timeout=10)
+                except Exception:
+                    pass
+                try:
+                    self.ffmpeg_proc.wait(timeout=15)
                 except Exception:
                     try:
-                        self.ffmpeg_proc.kill()
+                        self.ffmpeg_proc.terminate()
+                        self.ffmpeg_proc.wait(timeout=3)
+                    except Exception:
+                        try:
+                            self.ffmpeg_proc.kill()
+                        except Exception:
+                            pass
+                finally:
+                    # Drain stderr so reader thread can finish
+                    try:
+                        self.ffmpeg_proc.stderr.read()
                     except Exception:
                         pass
 
-            # Stop audio recording
+            # Step 2: Stop audio recording (fast - just sets flag)
             audio_file = None
             if self.audio_recording:
                 audio_file = self.stop_audio_recording()
 
-            # Short wait for OS to flush file to disk
-            time.sleep(0.3)
+            # Step 3: Brief OS flush wait
+            time.sleep(0.25)
 
-            # Merge audio if available
+            # Step 4: Merge audio+video
             has_ffmpeg = self.check_ffmpeg()
             audio_merged = False
-
             if audio_file and os.path.exists(saved_filename) and self.audio_panel.audio_enabled.get():
                 if has_ffmpeg:
+                    # Update status before slow merge
+                    self.root.after(0, lambda: self.file_label.config(text="Merging audio…"))
                     audio_merged = self.merge_audio_video(saved_filename, audio_file)
 
-            # Schedule UI update back on main thread
+            # Step 5: Return to UI thread
             self.root.after(0, lambda: self._finalize_ui(
                 saved_filename, saved_start_time,
                 saved_record_width, saved_record_height, saved_target_fps,
@@ -3968,8 +4232,9 @@ class HomRecScreen:
 
             try:
                 probe_cmd = [self.ffmpeg_path, '-i', filename, '-f', 'null', '-']
-                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True,
-                                              creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0)
+                probe_result = subprocess.run(
+                    probe_cmd, capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0)
                 for line in probe_result.stderr.split('\n'):
                     if 'Duration:' in line:
                         import re
@@ -4160,8 +4425,15 @@ class HomRecScreen:
         if self.recording:
             result = messagebox.askyesno(self.lang["warning"], "Recording in progress! Stop and exit?")
             if result:
-                self.stop_recording()
-                time.sleep(0.5)
+                # Kill ffmpeg immediately on exit - no need for graceful stop
+                if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
+                    try:
+                        self.ffmpeg_proc.kill()
+                    except Exception:
+                        pass
+                self.recording = False
+                self.audio_recording = False
+                self.sys_audio_recording = False
             else:
                 return
 
@@ -4171,14 +4443,12 @@ class HomRecScreen:
         if self.tray_icon:
             try:
                 self.tray_icon.stop()
-            except:
+            except Exception:
                 pass
 
         self.stop_flag = True
-        if hasattr(self, 'ffmpeg_reader_thread') and self.ffmpeg_reader_thread and self.ffmpeg_reader_thread.is_alive():
-            self.ffmpeg_reader_thread.join(timeout=1)
-
-        self.root.destroy()
+        # Non-blocking: threads are daemons so they die with the process
+        self.root.after(100, self.root.destroy)
 
     # ── Tray ──────────────────────────────────────────────────────────────────
 
@@ -4276,20 +4546,29 @@ class HomRecScreen:
 
         dlg = tk.Toplevel(self.root)
         self._set_icon(dlg)
-        dlg.title("Select Window")
-        dlg.geometry("480x380")
+        dlg.title("🖥  Select Window to Record")
+        dlg.geometry("520x420")
         dlg.configure(bg=self.colors["bg"])
         dlg.transient(self.root)
         dlg.grab_set()
         dlg.resizable(False, True)
+        dlg.minsize(480, 360)
         dlg.update_idletasks()
-        x = self.root.winfo_x() + self.root.winfo_width() // 2 - 240
-        y = self.root.winfo_y() + self.root.winfo_height() // 2 - 190
+        x = self.root.winfo_x() + self.root.winfo_width() // 2 - 260
+        y = self.root.winfo_y() + self.root.winfo_height() // 2 - 210
         dlg.geometry(f"+{x}+{y}")
 
-        tk.Label(dlg, text="Select a window to record:",
-                 bg=self.colors["bg"], fg=self.colors["text"],
-                 font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+        # Header
+        hdr = tk.Frame(dlg, bg=self.colors.get("surface", "#313244"), pady=12)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="🖥  Select a window to record",
+                 bg=self.colors.get("surface", "#313244"), fg=self.colors["accent"],
+                 font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=16)
+        tk.Label(hdr, text=f"{len(windows)} windows found",
+                 bg=self.colors.get("surface", "#313244"),
+                 fg=self.colors.get("text_secondary", "#a6adc8"),
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=16)
+        tk.Frame(dlg, bg=self.colors["accent"], height=2).pack(fill="x")
 
         frame = tk.Frame(dlg, bg=self.colors["bg"])
         frame.pack(fill="both", expand=True, padx=15, pady=5)
