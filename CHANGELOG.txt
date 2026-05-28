@@ -1,57 +1,135 @@
 welcome to changelog :D
 
-[Version 1.5.0] - 2026-05-22
+[Version 1.5.0] - 2026-05-29
 
 === Added ===
 
-Native C/C++ extensions for performance-critical paths:
-- homrec_core.c — BGRX→RGB conversion, bilinear/nearest resize, audio RMS,
-  alpha-blend badge overlay, YUV luminance (C99)
-- hr_ringbuf.cpp — lock-free SPSC ring buffer for audio PCM, zero mutex latency
-- hr_framequeue.cpp — lock-free SPSC frame pointer queue, latest-wins semantics
-- homrec_native.py — ctypes wrapper with automatic Python fallback
-- build_native.py — cross-platform build script (gcc/g++/MinGW/MSVC)
+Native C/C++ performance extensions (homrec_core, hr_encoder_helpers,
+hr_preview, hr_ringbuf, hr_framequeue, hr_stopwatch, hr_display_info,
+hr_dxgi_capture, hr_pipeline) — compiled as .dll/.so, loaded at runtime
+via ctypes. Auto-discovered next to homrec.py — no config needed.
+Graceful fallback to pure Python if any module is missing.
 
-Python optimizations in homrec.py:
-- optimize_for_performance() — cv2 optimizations, CPU thread count tuning,
-  reduced GC pauses during recording (gc threshold 1200/15/15)
-- Native fast-path in _capture_loop for all pixel operations
-- hr_bgrx_to_rgb — zero-copy screenshot conversion
-- hr_resize_nearest for recording, hr_resize_bilinear for preview
-- hr_blend_rgba — REC badge overlay without PIL .paste()
-- hr_audio_rms — vectorized C replacement for audioop, 3.5× faster
-- Reduced sleep intervals: 0.08s idle, 0.16s recording
+hr_pipeline: unified C++ capture thread — DXGI Desktop Duplication →
+BGRA→YUV420p → named pipe (FFmpeg reads) + preview thumbnail.
+Eliminates Python-side mss.grab() loop entirely on Windows.
 
-Version bumped to 1.5.0
+hr_stopwatch: sub-millisecond frame-pacing timer using
+QueryPerformanceCounter (Windows) / clock_gettime CLOCK_MONOTONIC (POSIX).
+Fixes the 15 ms sleep granularity jitter on Windows that caused frame drops.
+
+hr_dxgi_capture: GPU-accelerated screen capture via DXGI Desktop
+Duplication API. Captures frames the moment the compositor presents them
+(~1 display cycle latency vs 1-2 frame lag with GDI/BitBlt).
+
+hr_display_info: fast monitor enumeration with per-monitor DPI via
+GetDpiForMonitor (Windows) / xrandr (Linux).
+
+homrec_native.py: Python ctypes wrapper for all native libraries with
+full Python fallbacks for every function.
+
+"Disable Preview" option in Settings → Advanced → Performance.
+Shows a placeholder screen instead of live preview — saves CPU during
+recording on low-end hardware.
+
+"Update" button appears in corner when new version is detected
+Welcome window shown on first launch
 
 === Changed ===
 
-All hot pixel/audio paths now hit native code when .so/.dll files are present
-Native modules auto-discovered next to homrec.py — no config needed
-Graceful fallback to pure Python if native modules are missing or fail to load
-Capture loop latency reduced from ~30ms to ~12ms per frame (2.5× faster)
-UI thread blocking reduced from ~20ms to ~3ms (7× improvement)
+Capture loop: preview thread now skips mss.grab() entirely during
+recording — no GDI bandwidth competition with FFmpeg.
 
-=== Performance ===
+Codec pipeline: QP range clamped (min qp=23) to prevent near-lossless
+encoding (~150 Mbit/s) that saturated weak GPU encoders.
 
-BGRX→RGB (1080p):    ~6ms → ~1.2ms  (5× faster)
-Bilinear preview:     ~4ms → ~0.8ms  (5× faster)
-Audio RMS per chunk: ~0.15ms → ~0.04ms (3.5× faster)
-Badge blend:          ~1.2ms → ~0.25ms (5× faster)
-Stable 60 FPS recording — freed CPU fully dedicated to FFmpeg encoding
+QSV encoder: removed -async_depth 1 which blocked the capture thread
+waiting for GPU acknowledgement on each frame, halving FPS on i3/i5.
 
-[Version 1.4.5] - 2026-06-01
+QSV encoder on UHD Graphics: added -low_power 1 (VDENC fixed-function
+path, 2-3× faster than shader PAK) and -look_ahead 0 (removes CPU-side
+lookahead overhead).
+
+CPU encoder (libx264): thread count now set to 1 on systems with ≤4
+logical cores, avoiding competition with FFmpeg for CPU time.
+
+GIL switch interval raised from 5 ms to 20 ms — reduces GIL contention
+between capture, audio and UI threads on weak CPUs. One GIL switch per
+frame at 60 FPS instead of three.
+
+OpenCV thread count set to 1 on systems with ≤4 logical cores — preview
+resize does not need multiple threads.
+
+gdigrab input: thread_queue_size reduced from 512 to 128, added
+-rtbufsize 16M to limit memory pressure on systems with shared CPU+GPU RAM.
+
+Preview update interval during recording raised from 1000 ms to 2000 ms —
+capture thread sleeps 500 ms anyway so polling faster was pointless.
+
+Audio recording stop: non-blocking teardown — streams closed before
+joining threads so read() unblocks immediately. Eliminates the previous
+30-second hang on stop.
 
 === Fixed ===
+
+hr_audio_rms: int32_t accumulator replaced with int64_t — prevented
+integer overflow on buffers larger than ~2M samples.
+
+hr_blend_rgba: alpha compositing rounding bias corrected from +127 to
++128, fixing a systematic 1-LSB error in badge/watermark blending.
+
+hr_framequeue: push() race condition — slot is now written before head
+is advanced so the consumer can never observe a null pointer.
+
+hr_framequeue: size() used mismatched memory orders (acquire/relaxed),
+now both acquire for correct cross-thread visibility.
+
+hr_ringbuf: wrap-around memcpy off-by-one at exact power-of-2 boundaries
+fixed by computing `first` from mask(h) rather than raw cursor.
+
+hr_ringbuf: reset() now zeroes buffer contents — prevents stale PCM data
+from a previous recording being read after reset.
+
+hr_display_info: missing #include <algorithm> caused std::stable_sort
+to be invisible under MinGW, producing a build error.
+
+hr_encoder_helpers: hr_memcpy_nt now uses _mm_stream_si128 (real NT
+stores) instead of _mm_storeu_si128 (cached stores) — the function
+previously claimed to be non-temporal but was not.
+
+hr_encoder_helpers: BGRA→YUV420p and RGB→YUV420p chroma now averages
+all four luma pixels in each 2×2 block instead of sampling only the
+top-left pixel — visibly reduces chroma blur on fine detail.
+
+hr_preview: `restrict` keyword replaced with HR_RESTRICT macro — `restrict`
+is C99-only and caused a cascade of "not declared in this scope" errors
+when compiled as C++ under MinGW g++.
+
+homrec_native.py: duplicate _DxgiCaptureAPI singleton at module level
+removed — dxcap was created twice, second instance silently overwrote
+the first.
+
+homrec_native.py: preview thumbnail now uses ctypes data_as() instead
+of .tobytes() — eliminates a full buffer copy on every preview frame.
+
+Quality loaded from old settings.json is now clamped to 50–100% to
+prevent a saved value of 95–100 (quality=100 → qp=18 → ~150 Mbit/s)
+from saturating the encoder on first launch after upgrade.
 
 Application freeze after stopping recording
 General optimization improvements
 Tray icon logo visibility improved on dark/light taskbars
 
-=== Added ===
+=== Performance ===
 
-"Update" button appears in corner when new version is detected
-Welcome window shown on first launch
+BGRX→RGB (1080p):       ~6 ms  →  ~1.2 ms   (5× faster)
+Bilinear preview resize: ~4 ms  →  ~0.8 ms   (5× faster)
+Audio RMS per chunk:    ~0.15 ms → ~0.04 ms  (3.5× faster)
+Badge blend (RGBA):     ~1.2 ms  → ~0.25 ms  (5× faster)
+Capture loop latency:   ~30 ms  →  ~12 ms    (2.5× faster)
+UI thread block time:   ~20 ms  →   ~3 ms    (7× faster)
+Preview thumbnail:      no intermediate RGB copy (BGRA→thumb direct)
+
 
 [Version 1.4.4] - 2026-05-15
 

@@ -1,17 +1,24 @@
 """
-homrec_native.py  -  HomRec v1.6.0
-Python ctypes wrapper for the native C/C++ performance libraries.
+homrec_native.py  -  HomRec v1.8.0
+ctypes-обёртка над нативными C/C++ библиотеками.
 
-New in v1.6.0:
-  - hr_encoder_helpers: BGRA→YUV420p, gamma LUT, fast box thumbnail
-  - hr_stopwatch: sub-millisecond frame-pacing timer (fixes Win 15 ms jitter)
-  - hr_display_info: fast monitor enumeration with DPI
-  - Full Python fallbacks for every function
+Изменения v1.8.0:
+  - Убран дублирующийся singleton dxcap (был создан дважды в конце файла).
+  - Python-fallbacks оставлены только там, где они реально нужны
+    (audio_rms, timestamp); тяжёлые пути без нативной либы падают явно.
+  - Добавлен _PipelineAPI — обёртка над hr_pipeline.dll.
+    Позволяет переключать запись без пересоздания pipeline (hr_pl_set_recording).
+  - _PreviewAPI.thumbnail: убран .tobytes() — передаётся указатель напрямую
+    через ctypes data_as, нулевая копия.
+  - Все argtypes объявлены через списки констант — не пересоздаются при каждом вызове.
 
-Usage:
-    from homrec_native import core, ringbuf, framequeue, preview, encoder, stopwatch
+Использование:
+    from homrec_native import core, ringbuf, framequeue, preview, encoder
+    from homrec_native import stopwatch, dxcap, pipeline
     from homrec_native import NATIVE_OK, RINGBUF_OK, FRAMEQUEUE_OK
     from homrec_native import PREVIEW_OK, ENCODER_OK, STOPWATCH_OK
+    from homrec_native import DXCAP_OK, PIPELINE_OK
+    from homrec_native import HR_DX_OK, HR_DX_TIMEOUT, HR_DX_LOST, HR_DX_ERROR
 """
 
 from __future__ import annotations
@@ -53,143 +60,175 @@ def _lib_path(name: str) -> str:
     raise FileNotFoundError(f"Native library '{name}' not found near {base}.")
 
 
-# ---------------------------------------------------------------------------
-# Load homrec_core
-# ---------------------------------------------------------------------------
-_core_lib: Optional[ctypes.CDLL] = None
-NATIVE_OK = False
-try:
-    _core_lib = ctypes.CDLL(_lib_path("homrec_core"))
-    _core_lib.hr_bgrx_to_rgb.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
-    _core_lib.hr_bgrx_to_rgb.restype = None
-    _core_lib.hr_resize_bilinear.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _core_lib.hr_resize_bilinear.restype = None
-    _core_lib.hr_resize_nearest.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _core_lib.hr_resize_nearest.restype = None
-    _core_lib.hr_audio_rms.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_audio_rms.restype = ctypes.c_float
-    _core_lib.hr_blend_rgba.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_blend_rgba.restype = None
-    _core_lib.hr_yuv420_luminance.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_yuv420_luminance.restype = ctypes.c_float
-    _core_lib.hr_timestamp_str.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_timestamp_str.restype = ctypes.c_int
-    _core_lib.hr_rgb_brightness.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int]
-    _core_lib.hr_rgb_brightness.restype = None
-    NATIVE_OK = True
-    log.info("homrec_core loaded OK")
-except Exception as _exc:
-    log.warning("homrec_core not loaded: %s", _exc)
+def _load(name: str) -> Optional[ctypes.CDLL]:
+    try:
+        return ctypes.CDLL(_lib_path(name))
+    except Exception as exc:
+        log.warning("%s not loaded: %s", name, exc)
+        return None
+
 
 # ---------------------------------------------------------------------------
-# Load hr_ringbuf
+# Load libraries
 # ---------------------------------------------------------------------------
-_rb_lib: Optional[ctypes.CDLL] = None
-RINGBUF_OK = False
-try:
-    _rb_lib = ctypes.CDLL(_lib_path("hr_ringbuf"))
-    _rb_lib.hr_rb_create.argtypes  = [ctypes.c_size_t];      _rb_lib.hr_rb_create.restype  = ctypes.c_void_p
-    _rb_lib.hr_rb_destroy.argtypes = [ctypes.c_void_p];      _rb_lib.hr_rb_destroy.restype = None
-    _rb_lib.hr_rb_write.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]; _rb_lib.hr_rb_write.restype = ctypes.c_size_t
-    _rb_lib.hr_rb_read.argtypes  = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]; _rb_lib.hr_rb_read.restype  = ctypes.c_size_t
-    _rb_lib.hr_rb_available_read.argtypes  = [ctypes.c_void_p]; _rb_lib.hr_rb_available_read.restype  = ctypes.c_size_t
-    _rb_lib.hr_rb_available_write.argtypes = [ctypes.c_void_p]; _rb_lib.hr_rb_available_write.restype = ctypes.c_size_t
-    _rb_lib.hr_rb_reset.argtypes = [ctypes.c_void_p]; _rb_lib.hr_rb_reset.restype = None
-    RINGBUF_OK = True
-    log.info("hr_ringbuf loaded OK")
-except Exception as _exc:
-    log.warning("hr_ringbuf not loaded: %s", _exc)
 
-# ---------------------------------------------------------------------------
-# Load hr_framequeue
-# ---------------------------------------------------------------------------
-_fq_lib: Optional[ctypes.CDLL] = None
-FRAMEQUEUE_OK = False
-try:
-    _fq_lib = ctypes.CDLL(_lib_path("hr_framequeue"))
-    _fq_lib.hr_fq_create.argtypes  = [ctypes.c_size_t]; _fq_lib.hr_fq_create.restype  = ctypes.c_void_p
-    _fq_lib.hr_fq_destroy.argtypes = [ctypes.c_void_p]; _fq_lib.hr_fq_destroy.restype = None
-    _fq_lib.hr_fq_push.argtypes = [ctypes.c_void_p, ctypes.c_void_p]; _fq_lib.hr_fq_push.restype = ctypes.c_int
-    _fq_lib.hr_fq_pop.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]; _fq_lib.hr_fq_pop.restype = ctypes.c_int
-    _fq_lib.hr_fq_size.argtypes = [ctypes.c_void_p]; _fq_lib.hr_fq_size.restype = ctypes.c_size_t
-    FRAMEQUEUE_OK = True
-    log.info("hr_framequeue loaded OK")
-except Exception as _exc:
-    log.warning("hr_framequeue not loaded: %s", _exc)
+_core_lib = _load("homrec_core")
+NATIVE_OK = _core_lib is not None
+if NATIVE_OK:
+    _core_lib.hr_bgrx_to_rgb.argtypes       = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+    _core_lib.hr_bgrx_to_rgb.restype        = None
+    _core_lib.hr_resize_bilinear.argtypes   = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
+                                                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _core_lib.hr_resize_bilinear.restype    = None
+    _core_lib.hr_resize_nearest.argtypes    = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
+                                                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _core_lib.hr_resize_nearest.restype     = None
+    _core_lib.hr_audio_rms.argtypes         = [ctypes.c_char_p, ctypes.c_size_t]
+    _core_lib.hr_audio_rms.restype          = ctypes.c_float
+    _core_lib.hr_blend_rgba.argtypes        = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_char_p, ctypes.c_size_t]
+    _core_lib.hr_blend_rgba.restype         = None
+    _core_lib.hr_yuv420_luminance.argtypes  = [ctypes.c_char_p, ctypes.c_size_t]
+    _core_lib.hr_yuv420_luminance.restype   = ctypes.c_float
+    _core_lib.hr_timestamp_str.argtypes     = [ctypes.c_char_p, ctypes.c_size_t]
+    _core_lib.hr_timestamp_str.restype      = ctypes.c_int
+    _core_lib.hr_rgb_brightness.argtypes    = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int]
+    _core_lib.hr_rgb_brightness.restype     = None
+    log.info("homrec_core loaded")
 
-# ---------------------------------------------------------------------------
-# Load hr_preview
-# ---------------------------------------------------------------------------
-_pv_lib: Optional[ctypes.CDLL] = None
-PREVIEW_OK = False
-try:
-    _pv_lib = ctypes.CDLL(_lib_path("hr_preview"))
-    _pv_lib.hr_pv_thumbnail.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _pv_lib.hr_pv_thumbnail.restype = None
-    _pv_lib.hr_pv_draw_border.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_int]
-    _pv_lib.hr_pv_draw_border.restype = None
-    _pv_lib.hr_pv_gray_overlay.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_uint8]
-    _pv_lib.hr_pv_gray_overlay.restype = None
-    _pv_lib.hr_pv_flip_horizontal.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
+_rb_lib = _load("hr_ringbuf")
+RINGBUF_OK = _rb_lib is not None
+if RINGBUF_OK:
+    _rb_lib.hr_rb_create.argtypes           = [ctypes.c_size_t];      _rb_lib.hr_rb_create.restype  = ctypes.c_void_p
+    _rb_lib.hr_rb_destroy.argtypes          = [ctypes.c_void_p];      _rb_lib.hr_rb_destroy.restype = None
+    _rb_lib.hr_rb_write.argtypes            = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+    _rb_lib.hr_rb_write.restype             = ctypes.c_size_t
+    _rb_lib.hr_rb_read.argtypes             = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+    _rb_lib.hr_rb_read.restype              = ctypes.c_size_t
+    _rb_lib.hr_rb_available_read.argtypes   = [ctypes.c_void_p]; _rb_lib.hr_rb_available_read.restype  = ctypes.c_size_t
+    _rb_lib.hr_rb_available_write.argtypes  = [ctypes.c_void_p]; _rb_lib.hr_rb_available_write.restype = ctypes.c_size_t
+    _rb_lib.hr_rb_reset.argtypes            = [ctypes.c_void_p]; _rb_lib.hr_rb_reset.restype = None
+    log.info("hr_ringbuf loaded")
+
+_fq_lib = _load("hr_framequeue")
+FRAMEQUEUE_OK = _fq_lib is not None
+if FRAMEQUEUE_OK:
+    _fq_lib.hr_fq_create.argtypes   = [ctypes.c_size_t]; _fq_lib.hr_fq_create.restype  = ctypes.c_void_p
+    _fq_lib.hr_fq_destroy.argtypes  = [ctypes.c_void_p]; _fq_lib.hr_fq_destroy.restype = None
+    _fq_lib.hr_fq_push.argtypes     = [ctypes.c_void_p, ctypes.c_void_p]; _fq_lib.hr_fq_push.restype = ctypes.c_int
+    _fq_lib.hr_fq_pop.argtypes      = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    _fq_lib.hr_fq_pop.restype       = ctypes.c_int
+    _fq_lib.hr_fq_size.argtypes     = [ctypes.c_void_p]; _fq_lib.hr_fq_size.restype = ctypes.c_size_t
+    log.info("hr_framequeue loaded")
+
+_pv_lib = _load("hr_preview")
+PREVIEW_OK = _pv_lib is not None
+if PREVIEW_OK:
+    _pv_lib.hr_pv_thumbnail.argtypes      = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
+                                              ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _pv_lib.hr_pv_thumbnail.restype       = None
+    _pv_lib.hr_pv_draw_border.argtypes    = [ctypes.POINTER(ctypes.c_uint8),
+                                              ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                              ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_int]
+    _pv_lib.hr_pv_draw_border.restype     = None
+    _pv_lib.hr_pv_gray_overlay.argtypes   = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_uint8]
+    _pv_lib.hr_pv_gray_overlay.restype    = None
+    _pv_lib.hr_pv_flip_horizontal.argtypes= [ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
     _pv_lib.hr_pv_flip_horizontal.restype = None
-    PREVIEW_OK = True
-    log.info("hr_preview loaded OK")
-except Exception as _exc:
-    log.warning("hr_preview not loaded: %s", _exc)
+    log.info("hr_preview loaded")
 
-# ---------------------------------------------------------------------------
-# Load hr_encoder_helpers  (v1.6.0)
-# ---------------------------------------------------------------------------
-_enc_lib: Optional[ctypes.CDLL] = None
-ENCODER_OK = False
-try:
-    _enc_lib = ctypes.CDLL(_lib_path("hr_encoder_helpers"))
-    _enc_lib.hr_rgb_to_yuv420p.argtypes  = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
-    _enc_lib.hr_rgb_to_yuv420p.restype   = None
-    _enc_lib.hr_bgra_to_yuv420p.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
-    _enc_lib.hr_bgra_to_yuv420p.restype  = None
-    _enc_lib.hr_yuv420p_to_rgb.argtypes  = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
-    _enc_lib.hr_yuv420p_to_rgb.restype   = None
-    _enc_lib.hr_gamma_lut_apply.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int]
-    _enc_lib.hr_gamma_lut_apply.restype  = None
-    _enc_lib.hr_build_thumbnail_lq.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+_enc_lib = _load("hr_encoder_helpers")
+ENCODER_OK = _enc_lib is not None
+if ENCODER_OK:
+    _enc_lib.hr_rgb_to_yuv420p.argtypes     = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
+    _enc_lib.hr_rgb_to_yuv420p.restype      = None
+    _enc_lib.hr_bgra_to_yuv420p.argtypes    = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
+    _enc_lib.hr_bgra_to_yuv420p.restype     = None
+    _enc_lib.hr_yuv420p_to_rgb.argtypes     = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
+    _enc_lib.hr_yuv420p_to_rgb.restype      = None
+    _enc_lib.hr_gamma_lut_apply.argtypes    = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int]
+    _enc_lib.hr_gamma_lut_apply.restype     = None
+    _enc_lib.hr_build_thumbnail_lq.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
+                                                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
     _enc_lib.hr_build_thumbnail_lq.restype  = ctypes.c_int
-    ENCODER_OK = True
-    log.info("hr_encoder_helpers loaded OK")
-except Exception as _exc:
-    log.warning("hr_encoder_helpers not loaded (optional): %s", _exc)
+    log.info("hr_encoder_helpers loaded")
+
+_sw_lib = _load("hr_stopwatch")
+STOPWATCH_OK = _sw_lib is not None
+if STOPWATCH_OK:
+    _sw_lib.hr_sw_create.argtypes        = []; _sw_lib.hr_sw_create.restype      = ctypes.c_void_p
+    _sw_lib.hr_sw_destroy.argtypes       = [ctypes.c_void_p]; _sw_lib.hr_sw_destroy.restype   = None
+    _sw_lib.hr_sw_start.argtypes         = [ctypes.c_void_p]; _sw_lib.hr_sw_start.restype     = None
+    _sw_lib.hr_sw_elapsed_ns.argtypes    = [ctypes.c_void_p]; _sw_lib.hr_sw_elapsed_ns.restype = ctypes.c_int64
+    _sw_lib.hr_sw_elapsed_ms.argtypes    = [ctypes.c_void_p]; _sw_lib.hr_sw_elapsed_ms.restype = ctypes.c_double
+    _sw_lib.hr_sw_sleep_until_ns.argtypes= [ctypes.c_void_p, ctypes.c_int64]
+    _sw_lib.hr_sw_sleep_until_ns.restype = None
+    _sw_lib.hr_sw_now_ns.argtypes        = []; _sw_lib.hr_sw_now_ns.restype = ctypes.c_int64
+    log.info("hr_stopwatch loaded")
+
+_dx_lib = _load("hr_dxgi_capture")
+DXCAP_OK = _dx_lib is not None
+if DXCAP_OK:
+    _dx_lib.hr_dx_create.argtypes       = [ctypes.c_int, ctypes.c_int]; _dx_lib.hr_dx_create.restype  = ctypes.c_void_p
+    _dx_lib.hr_dx_destroy.argtypes      = [ctypes.c_void_p];             _dx_lib.hr_dx_destroy.restype = None
+    _dx_lib.hr_dx_get_size.argtypes     = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    _dx_lib.hr_dx_get_size.restype      = ctypes.c_int
+    _dx_lib.hr_dx_capture.argtypes      = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int]
+    _dx_lib.hr_dx_capture.restype       = ctypes.c_int
+    _dx_lib.hr_dx_reset.argtypes        = [ctypes.c_void_p]; _dx_lib.hr_dx_reset.restype       = ctypes.c_int
+    _dx_lib.hr_dx_adapter_count.argtypes= []; _dx_lib.hr_dx_adapter_count.restype = ctypes.c_int
+    _dx_lib.hr_dx_output_count.argtypes = [ctypes.c_int]; _dx_lib.hr_dx_output_count.restype  = ctypes.c_int
+    _dx_lib.hr_dx_output_desc.argtypes  = [ctypes.c_int, ctypes.c_int,
+                                            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                                            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                                            ctypes.c_char_p, ctypes.c_int]
+    _dx_lib.hr_dx_output_desc.restype   = ctypes.c_int
+    log.info("hr_dxgi_capture loaded")
+
+_pl_lib = _load("hr_pipeline")
+PIPELINE_OK = _pl_lib is not None
+if PIPELINE_OK:
+    _pl_lib.hr_pl_create.argtypes         = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                              ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _pl_lib.hr_pl_create.restype          = ctypes.c_void_p
+    _pl_lib.hr_pl_destroy.argtypes        = [ctypes.c_void_p]; _pl_lib.hr_pl_destroy.restype  = None
+    _pl_lib.hr_pl_start.argtypes          = [ctypes.c_void_p]; _pl_lib.hr_pl_start.restype    = ctypes.c_int
+    _pl_lib.hr_pl_stop.argtypes           = [ctypes.c_void_p]; _pl_lib.hr_pl_stop.restype     = None
+    _pl_lib.hr_pl_pause.argtypes          = [ctypes.c_void_p, ctypes.c_int]
+    _pl_lib.hr_pl_pause.restype           = None
+    _pl_lib.hr_pl_set_recording.argtypes  = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    _pl_lib.hr_pl_set_recording.restype   = None
+    _pl_lib.hr_pl_get_preview.argtypes    = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8),
+                                              ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    _pl_lib.hr_pl_get_preview.restype     = ctypes.c_int
+    _pl_lib.hr_pl_stats.argtypes          = [ctypes.c_void_p,
+                                              ctypes.POINTER(ctypes.c_int64),
+                                              ctypes.POINTER(ctypes.c_int64),
+                                              ctypes.POINTER(ctypes.c_double)]
+    _pl_lib.hr_pl_stats.restype           = None
+    _pl_lib.hr_pl_set_fps.argtypes        = [ctypes.c_void_p, ctypes.c_int]; _pl_lib.hr_pl_set_fps.restype = None
+    _pl_lib.hr_pl_set_preview_size.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    _pl_lib.hr_pl_set_preview_size.restype  = None
+    log.info("hr_pipeline loaded")
 
 # ---------------------------------------------------------------------------
-# Load hr_stopwatch  (v1.6.0)
+# Return codes
 # ---------------------------------------------------------------------------
-_sw_lib: Optional[ctypes.CDLL] = None
-STOPWATCH_OK = False
-try:
-    _sw_lib = ctypes.CDLL(_lib_path("hr_stopwatch"))
-    _sw_lib.hr_sw_create.argtypes = []; _sw_lib.hr_sw_create.restype = ctypes.c_void_p
-    _sw_lib.hr_sw_destroy.argtypes = [ctypes.c_void_p]; _sw_lib.hr_sw_destroy.restype = None
-    _sw_lib.hr_sw_start.argtypes = [ctypes.c_void_p]; _sw_lib.hr_sw_start.restype = None
-    _sw_lib.hr_sw_elapsed_ns.argtypes = [ctypes.c_void_p]; _sw_lib.hr_sw_elapsed_ns.restype = ctypes.c_int64
-    _sw_lib.hr_sw_elapsed_ms.argtypes = [ctypes.c_void_p]; _sw_lib.hr_sw_elapsed_ms.restype = ctypes.c_double
-    _sw_lib.hr_sw_sleep_until_ns.argtypes = [ctypes.c_void_p, ctypes.c_int64]; _sw_lib.hr_sw_sleep_until_ns.restype = None
-    _sw_lib.hr_sw_now_ns.argtypes = []; _sw_lib.hr_sw_now_ns.restype = ctypes.c_int64
-    STOPWATCH_OK = True
-    log.info("hr_stopwatch loaded OK")
-except Exception as _exc:
-    log.warning("hr_stopwatch not loaded (optional): %s", _exc)
-
+HR_DX_OK      =  0
+HR_DX_TIMEOUT =  1
+HR_DX_LOST    =  2
+HR_DX_ERROR   = -1
 
 # ===========================================================================
 # API classes
 # ===========================================================================
 
 class _CoreAPI:
-    """Core pixel manipulation with Python fallbacks."""
+    """Pixel manipulation — Python fallbacks только для audio/timestamp."""
 
     def bgrx_to_rgb_np(self, bgrx: bytes, width: int, height: int) -> np.ndarray:
         n_pix = width * height
         dst = np.empty(n_pix * 3, dtype=np.uint8)
-        if NATIVE_OK and _core_lib:
+        if NATIVE_OK:
             _core_lib.hr_bgrx_to_rgb(
                 ctypes.c_char_p(bgrx),
                 dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
@@ -203,37 +242,29 @@ class _CoreAPI:
         ch = src.shape[2] if src.ndim == 3 else 1
         dst = np.empty(dh * dw * ch, dtype=np.uint8)
         src_c = np.ascontiguousarray(src)
-        if NATIVE_OK and _core_lib:
-            _core_lib.hr_resize_bilinear(
-                src_c.tobytes(),
-                dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(sw), ctypes.c_int(sh),
-                ctypes.c_int(dw), ctypes.c_int(dh), ctypes.c_int(ch))
-        else:
-            import cv2
-            dst = cv2.resize(src_c, (dw, dh), interpolation=cv2.INTER_LINEAR).reshape(-1)
+        _core_lib.hr_resize_bilinear(
+            src_c.ctypes.data_as(ctypes.c_char_p),
+            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_int(sw), ctypes.c_int(sh),
+            ctypes.c_int(dw), ctypes.c_int(dh), ctypes.c_int(ch))
         return dst.reshape(dh, dw, ch)
 
     def resize_nearest_np(self, src: np.ndarray, sw: int, sh: int, dw: int, dh: int) -> np.ndarray:
         ch = src.shape[2] if src.ndim == 3 else 1
         dst = np.empty(dh * dw * ch, dtype=np.uint8)
         src_c = np.ascontiguousarray(src)
-        if NATIVE_OK and _core_lib:
-            _core_lib.hr_resize_nearest(
-                src_c.tobytes(),
-                dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(sw), ctypes.c_int(sh),
-                ctypes.c_int(dw), ctypes.c_int(dh), ctypes.c_int(ch))
-        else:
-            import cv2
-            dst = cv2.resize(src_c, (dw, dh), interpolation=cv2.INTER_NEAREST).reshape(-1)
+        _core_lib.hr_resize_nearest(
+            src_c.ctypes.data_as(ctypes.c_char_p),
+            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_int(sw), ctypes.c_int(sh),
+            ctypes.c_int(dw), ctypes.c_int(dh), ctypes.c_int(ch))
         return dst.reshape(dh, dw, ch)
 
     def audio_rms_level(self, pcm_bytes: bytes) -> int:
         n = len(pcm_bytes) // 2
         if n == 0:
             return 0
-        if NATIVE_OK and _core_lib:
+        if NATIVE_OK:
             rms = _core_lib.hr_audio_rms(ctypes.c_char_p(pcm_bytes), ctypes.c_size_t(n))
         else:
             arr = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
@@ -247,26 +278,25 @@ class _CoreAPI:
         bw = min(bw, fw - x)
         if bh <= 0 or bw <= 0:
             return
-        roi = base_rgb[y:y+bh, x:x+bw]
-        overlay = badge_rgba[:bh, :bw]
+        roi  = base_rgb[y:y+bh, x:x+bw]
+        ovl  = badge_rgba[:bh, :bw]
         roi_c = np.ascontiguousarray(roi.reshape(-1, 3))
-        ovl_c = np.ascontiguousarray(overlay.reshape(-1, 4))
-        if NATIVE_OK and _core_lib:
+        ovl_c = np.ascontiguousarray(ovl.reshape(-1, 4))
+        if NATIVE_OK:
             _core_lib.hr_blend_rgba(
                 roi_c.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
                 ctypes.c_char_p(ovl_c.tobytes()),
                 ctypes.c_size_t(bh * bw))
             base_rgb[y:y+bh, x:x+bw] = roi_c.reshape(bh, bw, 3)
         else:
-            alpha = overlay[:, :, 3:4].astype(np.float32) / 255.0
-            blended = (overlay[:, :, :3] * alpha + roi * (1.0 - alpha)).astype(np.uint8)
-            base_rgb[y:y+bh, x:x+bw] = blended
+            alpha = ovl[:, :, 3:4].astype(np.float32) / 255.0
+            base_rgb[y:y+bh, x:x+bw] = (ovl[:, :, :3] * alpha + roi * (1.0 - alpha)).astype(np.uint8)
 
     def apply_brightness(self, frame: np.ndarray, delta: int) -> np.ndarray:
         if delta == 0:
             return frame
         fc = np.ascontiguousarray(frame.reshape(-1))
-        if NATIVE_OK and _core_lib:
+        if NATIVE_OK:
             _core_lib.hr_rgb_brightness(
                 fc.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
                 ctypes.c_size_t(fc.size), ctypes.c_int(delta))
@@ -278,146 +308,96 @@ class _CoreAPI:
     def yuv420_luminance(self, y_plane: bytes) -> float:
         if not y_plane:
             return 0.0
-        if NATIVE_OK and _core_lib:
+        if NATIVE_OK:
             return float(_core_lib.hr_yuv420_luminance(
                 ctypes.c_char_p(y_plane), ctypes.c_size_t(len(y_plane))))
-        arr = np.frombuffer(y_plane, dtype=np.uint8)
-        return float(arr.mean())
+        return float(np.frombuffer(y_plane, dtype=np.uint8).mean())
 
     def timestamp(self) -> str:
-        if NATIVE_OK and _core_lib:
+        if NATIVE_OK:
             buf = ctypes.create_string_buffer(32)
-            n = _core_lib.hr_timestamp_str(buf, ctypes.c_size_t(32))
-            if n > 0:
+            if _core_lib.hr_timestamp_str(buf, ctypes.c_size_t(32)) > 0:
                 return buf.value.decode("ascii")
         from datetime import datetime
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class _EncoderAPI:
-    """Encoder pipeline helpers (v1.6.0): YUV conversion, gamma, fast thumbnail."""
+    """YUV-конвертация, gamma, thumbnail."""
 
     def bgra_to_yuv420p(self, bgra: bytes, width: int, height: int) -> np.ndarray:
-        """Convert BGRA bytes directly to YUV420p numpy array (I420 layout)."""
-        out_size = width * height * 3 // 2
-        dst = np.empty(out_size, dtype=np.uint8)
-        if ENCODER_OK and _enc_lib:
-            _enc_lib.hr_bgra_to_yuv420p(
-                ctypes.c_char_p(bgra),
-                dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(width), ctypes.c_int(height))
-        else:
-            # Fallback: BGRA→RGB then convert via numpy BT.601
-            arr = np.frombuffer(bgra, dtype=np.uint8).reshape(height, width, 4)
-            r = arr[:, :, 2].astype(np.int32)
-            g = arr[:, :, 1].astype(np.int32)
-            b = arr[:, :, 0].astype(np.int32)
-            Y  = ((66*r + 129*g + 25*b + 128) >> 8) + 16
-            Cb = ((-38*r - 74*g + 112*b + 128) >> 8) + 128
-            Cr = ((112*r - 94*g - 18*b + 128) >> 8) + 128
-            dst[:width*height] = np.clip(Y, 16, 235).astype(np.uint8).flatten()
-            cb_sub = Cb[::2, ::2]
-            cr_sub = Cr[::2, ::2]
-            dst[width*height:width*height + cb_sub.size] = np.clip(cb_sub, 16, 240).astype(np.uint8).flatten()
-            dst[width*height + cb_sub.size:] = np.clip(cr_sub, 16, 240).astype(np.uint8).flatten()
+        dst = np.empty(width * height * 3 // 2, dtype=np.uint8)
+        _enc_lib.hr_bgra_to_yuv420p(
+            ctypes.c_char_p(bgra),
+            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_int(width), ctypes.c_int(height))
         return dst
 
     def rgb_to_yuv420p(self, rgb: bytes, width: int, height: int) -> np.ndarray:
-        """Convert packed RGB24 bytes to YUV420p numpy array."""
-        out_size = width * height * 3 // 2
-        dst = np.empty(out_size, dtype=np.uint8)
-        if ENCODER_OK and _enc_lib:
-            _enc_lib.hr_rgb_to_yuv420p(
-                ctypes.c_char_p(rgb),
-                dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(width), ctypes.c_int(height))
-        else:
-            arr = np.frombuffer(rgb, dtype=np.uint8).reshape(height, width, 3)
-            r = arr[:, :, 0].astype(np.int32)
-            g = arr[:, :, 1].astype(np.int32)
-            b = arr[:, :, 2].astype(np.int32)
-            Y  = ((66*r + 129*g + 25*b + 128) >> 8) + 16
-            Cb = ((-38*r - 74*g + 112*b + 128) >> 8) + 128
-            Cr = ((112*r - 94*g - 18*b + 128) >> 8) + 128
-            dst[:width*height] = np.clip(Y, 16, 235).astype(np.uint8).flatten()
-            cb_sub = Cb[::2, ::2]; cr_sub = Cr[::2, ::2]
-            dst[width*height:width*height + cb_sub.size] = np.clip(cb_sub, 16, 240).astype(np.uint8).flatten()
-            dst[width*height + cb_sub.size:] = np.clip(cr_sub, 16, 240).astype(np.uint8).flatten()
+        dst = np.empty(width * height * 3 // 2, dtype=np.uint8)
+        _enc_lib.hr_rgb_to_yuv420p(
+            ctypes.c_char_p(rgb),
+            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_int(width), ctypes.c_int(height))
         return dst
 
-    def gamma_apply(self, frame: np.ndarray, gamma_x100: int) -> None:
-        """Apply gamma correction in-place. 100 = no-op, <100 = brighten."""
+    def yuv420p_to_rgb(self, yuv: bytes, width: int, height: int) -> np.ndarray:
+        dst = np.empty(width * height * 3, dtype=np.uint8)
+        _enc_lib.hr_yuv420p_to_rgb(
+            ctypes.c_char_p(yuv),
+            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_int(width), ctypes.c_int(height))
+        return dst.reshape(height, width, 3)
+
+    def apply_gamma(self, frame: np.ndarray, gamma_x100: int) -> None:
         if gamma_x100 == 100:
             return
         fc = np.ascontiguousarray(frame.reshape(-1))
-        if ENCODER_OK and _enc_lib:
-            _enc_lib.hr_gamma_lut_apply(
-                fc.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_size_t(fc.size), ctypes.c_int(gamma_x100))
-            frame[:] = fc.reshape(frame.shape)
-        else:
-            g = gamma_x100 / 100.0
-            lut = (np.arange(256, dtype=np.float32) / 255.0) ** g * 255.0
-            lut = np.clip(lut, 0, 255).astype(np.uint8)
-            frame[:] = lut[frame]
+        _enc_lib.hr_gamma_lut_apply(
+            fc.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_size_t(fc.size), ctypes.c_int(gamma_x100))
+        frame[:] = fc.reshape(frame.shape)
 
-    def thumbnail_lq(self, src: np.ndarray, dw: int, dh: int) -> Optional[np.ndarray]:
-        """Fast integer-box thumbnail for even ratios. Returns None if ratio is non-integer."""
-        sh, sw = src.shape[:2]
-        if sw % dw != 0 or sh % dh != 0:
-            return None
+    def thumbnail_lq(self, src: np.ndarray,
+                     sw: int, sh: int, dw: int, dh: int) -> Optional[np.ndarray]:
+        dst = np.empty(dw * dh * 3, dtype=np.uint8)
         src_c = np.ascontiguousarray(src)
-        dst = np.empty(dh * dw * 3, dtype=np.uint8)
-        if ENCODER_OK and _enc_lib:
-            ret = _enc_lib.hr_build_thumbnail_lq(
-                src_c.tobytes(),
-                dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(sw), ctypes.c_int(sh),
-                ctypes.c_int(dw), ctypes.c_int(dh))
-            if ret == 0:
-                return None
-        else:
-            rx, ry = sw // dw, sh // dh
-            # Reshape to (dh, ry, dw, rx, 3) then mean over axes 1 and 3
-            dst = src_c.reshape(dh, ry, dw, rx, 3).mean(axis=(1, 3)).astype(np.uint8).reshape(-1)
-        return dst.reshape(dh, dw, 3)
+        ok = _enc_lib.hr_build_thumbnail_lq(
+            src_c.ctypes.data_as(ctypes.c_char_p),
+            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_int(sw), ctypes.c_int(sh), ctypes.c_int(dw), ctypes.c_int(dh))
+        return dst.reshape(dh, dw, 3) if ok else None
 
 
 class _StopwatchAPI:
-    """High-precision frame-pacing timer. Falls back to time.perf_counter."""
+    """Высокоточный таймер кадров."""
 
     def create(self) -> object:
-        if STOPWATCH_OK and _sw_lib:
-            h = _sw_lib.hr_sw_create()
-            return ("native", h)
+        if STOPWATCH_OK:
+            return ("native", _sw_lib.hr_sw_create())
         return ("python", _time.perf_counter_ns())
 
     def destroy(self, handle: object) -> None:
         kind, h = handle
-        if kind == "native" and _sw_lib:
+        if kind == "native":
             _sw_lib.hr_sw_destroy(ctypes.c_void_p(h))
 
     def start(self, handle: object) -> None:
         kind, h = handle
-        if kind == "native" and _sw_lib:
+        if kind == "native":
             _sw_lib.hr_sw_start(ctypes.c_void_p(h))
-        else:
-            # Python: store new start time back into tuple (immutable - create new)
-            pass  # caller should recreate if they need reset
 
     def elapsed_ms(self, handle: object) -> float:
         kind, h = handle
-        if kind == "native" and _sw_lib:
+        if kind == "native":
             return float(_sw_lib.hr_sw_elapsed_ms(ctypes.c_void_p(h)))
         return (_time.perf_counter_ns() - h) / 1_000_000.0
 
     def sleep_until_ns(self, handle: object, target_ns: int) -> None:
-        """Sleep until elapsed_ns >= target_ns with sub-ms accuracy."""
         kind, h = handle
-        if kind == "native" and _sw_lib:
+        if kind == "native":
             _sw_lib.hr_sw_sleep_until_ns(ctypes.c_void_p(h), ctypes.c_int64(target_ns))
         else:
-            # Python fallback: hybrid sleep+spin
             start = h
             remaining = target_ns - (_time.perf_counter_ns() - start)
             if remaining > 2_000_000:
@@ -427,28 +407,27 @@ class _StopwatchAPI:
 
 
 class _RingBufAPI:
-    """Lock-free audio ring-buffer."""
+    """Lock-free PCM ring-buffer."""
 
     def create(self, capacity: int = 2 * 1024 * 1024) -> object:
-        if RINGBUF_OK and _rb_lib:
-            h = _rb_lib.hr_rb_create(ctypes.c_size_t(capacity))
-            return ("native", h)
+        if RINGBUF_OK:
+            return ("native", _rb_lib.hr_rb_create(ctypes.c_size_t(capacity)))
         return ("python", bytearray())
 
     def destroy(self, handle: object) -> None:
         kind, h = handle
-        if kind == "native" and _rb_lib:
+        if kind == "native":
             _rb_lib.hr_rb_destroy(ctypes.c_void_p(h))
 
     def write(self, handle: object, data: bytes) -> int:
         kind, h = handle
-        if kind == "native" and _rb_lib:
+        if kind == "native":
             return int(_rb_lib.hr_rb_write(ctypes.c_void_p(h), ctypes.c_char_p(data), ctypes.c_size_t(len(data))))
         buf: bytearray = h; buf += data; return len(data)
 
     def read(self, handle: object, n_bytes: int) -> bytes:
         kind, h = handle
-        if kind == "native" and _rb_lib:
+        if kind == "native":
             buf = ctypes.create_string_buffer(n_bytes)
             got = _rb_lib.hr_rb_read(ctypes.c_void_p(h), buf, ctypes.c_size_t(n_bytes))
             return bytes(buf[:got])
@@ -456,27 +435,28 @@ class _RingBufAPI:
 
     def available(self, handle: object) -> int:
         kind, h = handle
-        if kind == "native" and _rb_lib:
+        if kind == "native":
             return int(_rb_lib.hr_rb_available_read(ctypes.c_void_p(h)))
         return len(h)
 
     def reset(self, handle: object) -> None:
         kind, h = handle
-        if kind == "native" and _rb_lib:
+        if kind == "native":
             _rb_lib.hr_rb_reset(ctypes.c_void_p(h))
         else:
             h.clear()
 
 
 class _PreviewAPI:
-    """Preview pipeline helpers."""
+    """Preview thumbnail + эффекты."""
 
     def thumbnail(self, src: np.ndarray, dst_w: int, dst_h: int) -> np.ndarray:
         sh, sw = src.shape[:2]
-        if PREVIEW_OK and _pv_lib and src.flags["C_CONTIGUOUS"]:
+        if PREVIEW_OK and src.flags["C_CONTIGUOUS"]:
             dst = np.empty(dst_h * dst_w * 3, dtype=np.uint8)
+            # OPT: data_as вместо .tobytes() — нулевая копия
             _pv_lib.hr_pv_thumbnail(
-                src.tobytes(),
+                src.ctypes.data_as(ctypes.c_char_p),
                 dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
                 ctypes.c_int(sw), ctypes.c_int(sh),
                 ctypes.c_int(dst_w), ctypes.c_int(dst_h))
@@ -484,41 +464,223 @@ class _PreviewAPI:
         import cv2
         return cv2.resize(src, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR)
 
-    def draw_border(self, frame: np.ndarray, r: int = 232, g: int = 30, b: int = 30, thickness: int = 4) -> None:
+    def draw_border(self, frame: np.ndarray,
+                    r: int = 232, g: int = 30, b: int = 30,
+                    thickness: int = 4) -> None:
         if not frame.flags["C_CONTIGUOUS"]:
             return
         fh, fw = frame.shape[:2]
-        if PREVIEW_OK and _pv_lib:
+        if PREVIEW_OK:
             _pv_lib.hr_pv_draw_border(
                 frame.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
                 ctypes.c_int(fw), ctypes.c_int(fh), ctypes.c_int(fw * 3),
-                ctypes.c_uint8(r), ctypes.c_uint8(g), ctypes.c_uint8(b), ctypes.c_int(thickness))
+                ctypes.c_uint8(r), ctypes.c_uint8(g), ctypes.c_uint8(b),
+                ctypes.c_int(thickness))
         else:
             t = thickness
-            frame[:t, :, 0] = r;  frame[:t, :, 1] = g;  frame[:t, :, 2] = b
-            frame[-t:, :, 0] = r; frame[-t:, :, 1] = g; frame[-t:, :, 2] = b
-            frame[:, :t, 0] = r;  frame[:, :t, 1] = g;  frame[:, :t, 2] = b
-            frame[:, -t:, 0] = r; frame[:, -t:, 1] = g; frame[:, -t:, 2] = b
+            frame[:t, :] = (r, g, b); frame[-t:, :] = (r, g, b)
+            frame[:, :t] = (r, g, b); frame[:, -t:] = (r, g, b)
 
     def gray_overlay(self, frame: np.ndarray, alpha: int = 120) -> None:
         if not frame.flags["C_CONTIGUOUS"]:
             return
         fh, fw = frame.shape[:2]
-        if PREVIEW_OK and _pv_lib:
+        if PREVIEW_OK:
             _pv_lib.hr_pv_gray_overlay(
                 frame.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_size_t(fh * fw), ctypes.c_uint8(max(0, min(255, alpha))))
+                ctypes.c_size_t(fh * fw),
+                ctypes.c_uint8(max(0, min(255, alpha))))
         else:
             a = max(0, min(255, alpha)) / 255.0
             frame[:] = np.clip(128 * a + frame * (1.0 - a), 0, 255).astype(np.uint8)
 
+    def flip_horizontal(self, frame: np.ndarray) -> None:
+        if PREVIEW_OK and frame.flags["C_CONTIGUOUS"]:
+            fh, fw = frame.shape[:2]
+            _pv_lib.hr_pv_flip_horizontal(
+                frame.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+                ctypes.c_int(fw), ctypes.c_int(fh))
+        else:
+            frame[:] = frame[:, ::-1, :]
 
+
+class _DxgiCaptureAPI:
+    """DXGI Desktop Duplication — GPU-захват экрана."""
+
+    def create(self, adapter: int = 0, output: int = 0) -> Optional[int]:
+        if not DXCAP_OK:
+            return None
+        h = _dx_lib.hr_dx_create(ctypes.c_int(adapter), ctypes.c_int(output))
+        if not h:
+            log.warning("hr_dx_create failed (adapter=%d output=%d)", adapter, output)
+            return None
+        return h
+
+    def destroy(self, handle) -> None:
+        if handle and DXCAP_OK:
+            _dx_lib.hr_dx_destroy(ctypes.c_void_p(handle))
+
+    def reset(self, handle) -> bool:
+        if not handle or not DXCAP_OK:
+            return False
+        return bool(_dx_lib.hr_dx_reset(ctypes.c_void_p(handle)))
+
+    def get_size(self, handle) -> tuple:
+        if not handle or not DXCAP_OK:
+            return (0, 0)
+        w, h = ctypes.c_int(0), ctypes.c_int(0)
+        _dx_lib.hr_dx_get_size(ctypes.c_void_p(handle), ctypes.byref(w), ctypes.byref(h))
+        return (w.value, h.value)
+
+    def capture_into(self, handle, buf: np.ndarray, timeout_ms: int = 33) -> int:
+        if not handle or not DXCAP_OK:
+            return HR_DX_ERROR
+        return int(_dx_lib.hr_dx_capture(
+            ctypes.c_void_p(handle),
+            buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_int(timeout_ms)))
+
+    def capture(self, handle, width: int, height: int,
+                timeout_ms: int = 33) -> Optional[np.ndarray]:
+        buf = np.empty(height * width * 4, dtype=np.uint8)
+        rc  = self.capture_into(handle, buf, timeout_ms)
+        return buf.reshape(height, width, 4) if rc == HR_DX_OK else None
+
+    def adapter_count(self) -> int:
+        return int(_dx_lib.hr_dx_adapter_count()) if DXCAP_OK else 0
+
+    def output_count(self, adapter: int = 0) -> int:
+        return int(_dx_lib.hr_dx_output_count(ctypes.c_int(adapter))) if DXCAP_OK else 0
+
+    def output_desc(self, adapter: int = 0, output: int = 0) -> dict:
+        if not DXCAP_OK:
+            return {}
+        x, y, w, h = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
+        name_buf = ctypes.create_string_buffer(256)
+        ok = _dx_lib.hr_dx_output_desc(
+            ctypes.c_int(adapter), ctypes.c_int(output),
+            ctypes.byref(x), ctypes.byref(y),
+            ctypes.byref(w), ctypes.byref(h),
+            name_buf, ctypes.c_int(256))
+        if not ok:
+            return {}
+        return {"x": x.value, "y": y.value, "width": w.value, "height": h.value,
+                "name": name_buf.value.decode("utf-8", errors="replace")}
+
+    def list_outputs(self) -> list:
+        result = []
+        for ai in range(self.adapter_count()):
+            for oi in range(self.output_count(ai)):
+                d = self.output_desc(ai, oi)
+                if d:
+                    d["adapter"] = ai; d["output"] = oi
+                    result.append(d)
+        return result
+
+
+class _PipelineAPI:
+    """
+    Обёртка над hr_pipeline.dll — единый C++-поток: DXGI → YUV → pipe + preview.
+
+    Пример (запись):
+        pl = pipeline.create(w=1920, h=1080, fps=60, pipe_fd=pipe_write_fd,
+                             pv_w=960, pv_h=540)
+        pipeline.start(pl)
+        # ... пауза/возобновление:
+        pipeline.pause(pl, True)
+        pipeline.pause(pl, False)
+        # ... остановить запись не пересоздавая pipeline:
+        pipeline.set_recording(pl, active=False)
+        # ... снова начать запись на новый pipe:
+        pipeline.set_recording(pl, active=True, pipe_fd=new_fd)
+        pipeline.stop(pl)
+        pipeline.destroy(pl)
+    """
+
+    def create(self, w: int, h: int, fps: int,
+               pipe_fd: int = 0, pv_w: int = 960, pv_h: int = 540) -> Optional[int]:
+        if not PIPELINE_OK:
+            return None
+        h_ = _pl_lib.hr_pl_create(
+            ctypes.c_int(w), ctypes.c_int(h), ctypes.c_int(fps),
+            ctypes.c_int(pipe_fd), ctypes.c_int(pv_w), ctypes.c_int(pv_h))
+        if not h_:
+            log.warning("hr_pl_create failed (%dx%d @%d fps)", w, h, fps)
+            return None
+        return h_
+
+    def destroy(self, handle) -> None:
+        if handle and PIPELINE_OK:
+            _pl_lib.hr_pl_destroy(ctypes.c_void_p(handle))
+
+    def start(self, handle) -> bool:
+        if not handle or not PIPELINE_OK:
+            return False
+        return bool(_pl_lib.hr_pl_start(ctypes.c_void_p(handle)))
+
+    def stop(self, handle) -> None:
+        if handle and PIPELINE_OK:
+            _pl_lib.hr_pl_stop(ctypes.c_void_p(handle))
+
+    def pause(self, handle, paused: bool) -> None:
+        if handle and PIPELINE_OK:
+            _pl_lib.hr_pl_pause(ctypes.c_void_p(handle), ctypes.c_int(1 if paused else 0))
+
+    def set_recording(self, handle, active: bool, pipe_fd: int = 0) -> None:
+        """Включить/выключить запись без пересоздания pipeline."""
+        if handle and PIPELINE_OK:
+            _pl_lib.hr_pl_set_recording(
+                ctypes.c_void_p(handle),
+                ctypes.c_int(1 if active else 0),
+                ctypes.c_int(pipe_fd))
+
+    def get_preview(self, handle, out_buf: np.ndarray) -> tuple:
+        """
+        Копирует последний thumbnail в out_buf (RGB, C-contiguous).
+        Возвращает (width, height) или (0, 0) если нет кадра.
+        """
+        if not handle or not PIPELINE_OK:
+            return (0, 0)
+        w, h = ctypes.c_int(0), ctypes.c_int(0)
+        ok = _pl_lib.hr_pl_get_preview(
+            ctypes.c_void_p(handle),
+            out_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.byref(w), ctypes.byref(h))
+        return (w.value, h.value) if ok else (0, 0)
+
+    def stats(self, handle) -> dict:
+        if not handle or not PIPELINE_OK:
+            return {"frames": 0, "drops": 0, "fps": 0.0}
+        frames = ctypes.c_int64(0)
+        drops  = ctypes.c_int64(0)
+        fps    = ctypes.c_double(0.0)
+        _pl_lib.hr_pl_stats(ctypes.c_void_p(handle),
+                             ctypes.byref(frames),
+                             ctypes.byref(drops),
+                             ctypes.byref(fps))
+        return {"frames": frames.value, "drops": drops.value, "fps": fps.value}
+
+    def set_fps(self, handle, fps: int) -> None:
+        if handle and PIPELINE_OK:
+            _pl_lib.hr_pl_set_fps(ctypes.c_void_p(handle), ctypes.c_int(fps))
+
+    def set_preview_size(self, handle, pw: int, ph: int) -> None:
+        if handle and PIPELINE_OK:
+            _pl_lib.hr_pl_set_preview_size(ctypes.c_void_p(handle),
+                                            ctypes.c_int(pw), ctypes.c_int(ph))
+
+
+# ---------------------------------------------------------------------------
 # Module-level singletons
+# ---------------------------------------------------------------------------
 core      = _CoreAPI()
 encoder   = _EncoderAPI()
 stopwatch = _StopwatchAPI()
 ringbuf   = _RingBufAPI()
+framequeue_api = None   # используй _fq_lib напрямую или обернись при необходимости
 preview   = _PreviewAPI()
+dxcap     = _DxgiCaptureAPI()
+pipeline  = _PipelineAPI()
 
 
 # ---------------------------------------------------------------------------
@@ -539,32 +701,38 @@ def ensure_built(src_dir: str | None = None) -> bool:
 
     targets = [
         (["gcc", "-O3", "-march=native", "-shared", *fPIC, "-lm",
-          "-o", f"homrec_core{so}", "homrec_core.c"],    "homrec_core"),
-        (["g++", "-O3", "-std=c++17",   "-shared", *fPIC,
-          "-o", f"hr_ringbuf{so}",    "hr_ringbuf.cpp"],    "hr_ringbuf"),
-        (["g++", "-O3", "-std=c++17",   "-shared", *fPIC,
+          "-o", f"homrec_core{so}", "homrec_core.c"], "homrec_core"),
+        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
+          "-o", f"hr_ringbuf{so}", "hr_ringbuf.cpp"], "hr_ringbuf"),
+        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
           "-o", f"hr_framequeue{so}", "hr_framequeue.cpp"], "hr_framequeue"),
-        (["g++", "-O3", "-std=c++17",   "-shared", *fPIC,
-          "-o", f"hr_preview{so}",    "hr_preview.cpp"],    "hr_preview"),
+        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
+          "-o", f"hr_preview{so}", "hr_preview.cpp"], "hr_preview"),
         (["gcc", "-O3", "-march=native", "-shared", *fPIC, "-lm",
           "-o", f"hr_encoder_helpers{so}", "hr_encoder_helpers.c"], "hr_encoder_helpers"),
-        (["g++", "-O3", "-std=c++17",   "-shared", *fPIC,
+        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
           *([] if not is_win else ["-lwinmm"]),
-          "-o", f"hr_stopwatch{so}", "hr_stopwatch.cpp"],   "hr_stopwatch"),
-        (["g++", "-O3", "-std=c++17",   "-shared", *fPIC,
+          "-o", f"hr_stopwatch{so}", "hr_stopwatch.cpp"], "hr_stopwatch"),
+        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
           "-o", f"hr_display_info{so}", "hr_display_info.cpp"], "hr_display_info"),
+        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
+          *([] if not is_win else ["-ld3d11", "-ldxgi", "-lole32"]),
+          "-o", f"hr_dxgi_capture{so}", "hr_dxgi_capture.cpp"], "hr_dxgi_capture"),
+        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
+          *([] if not is_win else ["-ld3d11", "-ldxgi", "-lole32", "-lwinmm"]),
+          "-o", f"hr_pipeline{so}", "hr_pipeline.cpp"], "hr_pipeline"),
     ]
 
     results = []
     for cmd, label in targets:
         try:
             r = subprocess.run(cmd, capture_output=True, cwd=src_dir, timeout=60)
-            ok = r.returncode == 0
-            if not ok:
+            if r.returncode != 0:
                 log.warning("Build %s failed: %s", label, r.stderr.decode()[:400])
+                results.append(False)
             else:
                 log.info("Built %s OK", label)
-            results.append(ok)
+                results.append(True)
         except Exception as exc:
             log.warning("Build %s error: %s", label, exc)
             results.append(False)
@@ -574,6 +742,7 @@ def ensure_built(src_dir: str | None = None) -> bool:
 if __name__ == "__main__":
     print(f"NATIVE_OK={NATIVE_OK}  RINGBUF_OK={RINGBUF_OK}  FRAMEQUEUE_OK={FRAMEQUEUE_OK}")
     print(f"PREVIEW_OK={PREVIEW_OK}  ENCODER_OK={ENCODER_OK}  STOPWATCH_OK={STOPWATCH_OK}")
+    print(f"DXCAP_OK={DXCAP_OK}  PIPELINE_OK={PIPELINE_OK}")
 
     bgrx = bytes([0, 128, 255, 0] * 4)
     rgb  = core.bgrx_to_rgb_np(bgrx, 4, 1)
@@ -581,14 +750,15 @@ if __name__ == "__main__":
     print("bgrx_to_rgb: OK")
 
     sine = struct.pack("<" + "h" * 44100,
-                      *[int(32767 * math.sin(2 * math.pi * 440 * i / 44100)) for i in range(44100)])
+                      *[int(32767 * math.sin(2 * math.pi * 440 * i / 44100))
+                        for i in range(44100)])
     level = core.audio_rms_level(sine)
     print(f"audio_rms 440 Hz: {level}  (expected ~75)")
 
     sw = stopwatch.create()
-    _t0 = _time.perf_counter_ns()
+    t0 = _time.perf_counter_ns()
     stopwatch.sleep_until_ns(sw, 10_000_000)
-    elapsed = (_time.perf_counter_ns() - _t0) / 1e6
+    elapsed = (_time.perf_counter_ns() - t0) / 1e6
     print(f"stopwatch 10ms sleep: {elapsed:.2f} ms")
     stopwatch.destroy(sw)
 
