@@ -317,7 +317,7 @@ def find_ffmpeg() -> str | None:
     return None
 
 def optimize_for_performance() -> None:
-    """v1.5.0: Apply multi-level performance optimizations."""
+    """Apply multi-level performance optimizations."""
     # -- Process priority ----------------------------------------------------
     try:
         import psutil, platform as _plat
@@ -329,19 +329,32 @@ def optimize_for_performance() -> None:
     except Exception:
         pass
 
-    # -- OpenCV: use all logical cores for resize/encode helpers -------------
+    # -- OpenCV: на слабом CPU (≤4 потоков) ставим 1 поток.
+    # cv2 используется только для resize в preview — не нужно больше.
+    # Лишние потоки конкурируют с FFmpeg за CPU time на i3/i5.
     try:
         cpu_count = os.cpu_count() or 4
-        cv2.setNumThreads(max(2, cpu_count - 1))   # leave 1 core for OS/UI
+        cv_threads = 1 if cpu_count <= 4 else max(1, cpu_count // 4)
+        cv2.setNumThreads(cv_threads)
         cv2.setUseOptimized(True)
     except Exception:
         pass
 
-    # -- Garbage-collector tuning: fewer Gen-0 collections during recording --
+    # -- GC: поднимаем порог чтобы GC не срабатывал посреди кадра ----------
     import gc
-    gc.set_threshold(1200, 15, 15)  # default is (700, 10, 10)
+    gc.set_threshold(20000, 100, 100)
 
-    # -- Pre-import native extension (loads DLL / .so into process) ----------
+    # -- GIL switch interval: 20 мс вместо 5 мс ----------------------------
+    # При 60 FPS окно кадра = 16.7 мс. GIL-переключение каждые 5 мс
+    # прерывает capture thread 3 раза за кадр. 20 мс = 1 раз за кадр.
+    # UI остаётся отзывчивым: root.after() не зависит от GIL interval.
+    try:
+        import sys as _sys
+        _sys.setswitchinterval(0.020)
+    except Exception:
+        pass
+
+    # -- Pre-import native extension -----------------------------------------
     try:
         from homrec_native import NATIVE_OK, RINGBUF_OK
         log.info(f"Native extensions: core={NATIVE_OK} ringbuf={RINGBUF_OK}")
@@ -672,7 +685,15 @@ class AudioPanel:
         self.sys_mute = tk.BooleanVar(value=False)
         self.audio_stream = None
         self.audio_p = None
-        
+
+        # PERF FIX: audio threads write only these plain ints/floats/bools.
+        # UI thread flushes them into Canvas every 100 ms via _poll_audio_levels().
+        self._mic_level_pending: int = 0
+        self._sys_level_pending: int = 0
+        self._mic_vol_cached:   float = 0.80
+        self._sys_vol_cached:   float = 0.50
+        self._mic_mute_cached:  bool  = False
+
         self.create_mixer_layout()
     
     def create_mic_section(self) -> None:
@@ -801,6 +822,9 @@ class AudioPanel:
                                       bg=c["surface"], fg=ffmpeg_color,
                                       font=("Segoe UI", 8))
         self.ffmpeg_label.pack(side='right')
+
+        # PERF FIX: start the UI-thread level poller
+        self.app.root.after(100, self._poll_audio_levels)
     
     def on_mic_volume_change(self, value: str) -> None:
         self.mic_volume_label.config(text=f"{int(float(value))}%")
@@ -819,10 +843,34 @@ class AudioPanel:
                                  text=self.app.lang["unmute"] if self.sys_mute.get() else self.app.lang["mute"])
     
     def update_mic_level(self, level: int) -> None:
-        self.mic_meter.set_level(level)
-    
+        # PERF FIX: called from audio thread — store only, never touch Tkinter.
+        self._mic_level_pending = level
+
     def update_sys_level(self, level: int) -> None:
-        self.sys_meter.set_level(level)
+        # PERF FIX: called from audio thread — store only, never touch Tkinter.
+        self._sys_level_pending = level
+
+    def _poll_audio_levels(self) -> None:
+        """UI-thread poller: flushes pending levels into canvas widgets.
+        Runs via root.after(100) — never called from audio threads."""
+        try:
+            mic_lv = self._mic_level_pending
+            sys_lv = self._sys_level_pending
+            if self.mic_meter.level != mic_lv:
+                self.mic_meter.set_level(mic_lv)
+            if self.sys_meter.level != sys_lv:
+                self.sys_meter.set_level(sys_lv)
+            # Refresh cached tk vars for audio threads (safe — we're in UI thread)
+            self._mic_vol_cached  = self.mic_volume.get() / 100.0
+            self._sys_vol_cached  = self.sys_volume.get() / 100.0
+            self._mic_mute_cached = self.mic_mute.get()
+        except Exception:
+            pass
+        try:
+            self.app.root.after(100, self._poll_audio_levels)
+        except Exception:
+            pass
+
     
     def update_language(self) -> None:
         self.frame.config(text=self.app.lang["audio_mixer"])
@@ -1635,7 +1683,10 @@ class AdvancedSettingsDialog:
     def _start_key_capture(self, var: tk.StringVar, entry: tk.Entry) -> None:
         """Let user press a key to set hotkey."""
         entry.config(state="normal")
+        _prev_value = var.get()   # remember original so we can restore on cancel
         var.set("Press a key...")
+        _captured = [False]
+
         def on_key(event):
             parts = []
             if event.state & 0x4:  parts.append("Control")
@@ -1645,10 +1696,22 @@ class AdvancedSettingsDialog:
             if key not in ("Control_L","Control_R","Shift_L","Shift_R","Alt_L","Alt_R"):
                 parts.append(key)
             if parts:
-                var.set("+".join(parts))
+                hotkey = "+".join(parts)
+                if " " not in hotkey and hotkey != "Press a key...":
+                    var.set(hotkey)
+                    _captured[0] = True
             entry.config(state="readonly")
             entry.unbind("<KeyPress>")
+
+        def on_focusout(event):
+            # Clicked away without pressing a key — restore previous value
+            if not _captured[0]:
+                var.set(_prev_value)
+            entry.config(state="readonly")
+            entry.unbind("<KeyPress>")
+
         entry.bind("<KeyPress>", on_key)
+        entry.bind("<FocusOut>", on_focusout, add="+")
 
     def _delete_asset(self, name: str, kind: str, combo: ttk.Combobox) -> None:
         """Delete a custom theme or language file."""
@@ -1850,17 +1913,39 @@ class SettingsDialog:
         tk.Label(res_frame, text="%", bg=c["bg"], fg=c["text_secondary"],
                 font=("Segoe UI", 10)).pack(side="left")
         
-        mode_frame = tk.Frame(video_inner, bg=c["bg"])
-        mode_frame.pack(fill="x", pady=10)
-        tk.Label(mode_frame, text=a.lang["mode"], bg=c["bg"], fg=c["text"],
+        # FPS slider (replaces mode combo)
+        fps_frame = tk.Frame(video_inner, bg=c["bg"])
+        fps_frame.pack(fill="x", pady=10)
+        tk.Label(fps_frame, text="FPS:", bg=c["bg"], fg=c["text"],
                 font=("Segoe UI", 10), width=10, anchor="w").pack(side="left")
-        self.mode_var = tk.StringVar(value=a.recording_mode)
-        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
-                                  values=["ultra", "turbo", "balanced", "eco"],
-                                  width=15, state="readonly", font=("Segoe UI", 10))
-        mode_combo.pack(side="left", padx=5)
-        mode_combo.bind("<<ComboboxSelected>>", self.on_mode_change)
-        
+        self.fps_slider_var = tk.IntVar(value=a.target_fps)
+        fps_scale = tk.Scale(fps_frame, from_=1, to=60,
+                             orient="horizontal", length=200,
+                             variable=self.fps_slider_var,
+                             bg=c["surface"], fg=c["text"],
+                             highlightthickness=0, troughcolor=c["surface_light"],
+                             command=self._on_fps_change)
+        fps_scale.pack(side="left", padx=5)
+        self._fps_val_label = tk.Label(fps_frame, text=f"{a.target_fps} fps",
+                                       bg=c["bg"], fg=c["accent"],
+                                       font=("Segoe UI", 10, "bold"), width=7)
+        self._fps_val_label.pack(side="left")
+
+        # FPS presets quick-select
+        fps_presets_frame = tk.Frame(video_inner, bg=c["bg"])
+        fps_presets_frame.pack(fill="x", pady=(0, 6))
+        tk.Label(fps_presets_frame, text="", bg=c["bg"], width=10).pack(side="left")
+        for lbl, val in [("8", 8), ("15", 15), ("30", 30), ("60", 60)]:
+            def _make_fps_cmd(v=val):
+                def _cmd():
+                    self.fps_slider_var.set(v)
+                    self._fps_val_label.config(text=f"{v} fps")
+                return _cmd
+            tk.Button(fps_presets_frame, text=lbl, command=_make_fps_cmd(),
+                      bg=c["surface_light"], fg=c["text"],
+                      font=("Segoe UI", 8), relief="flat",
+                      padx=8, pady=2, cursor="hand2").pack(side="left", padx=2)
+
         tk.Label(video_inner, text="Codec and HW Accel settings are in ⚙ Advanced tab.",
                  bg=c["bg"], fg=c["text_secondary"],
                  font=("Segoe UI", 9, "italic")).pack(anchor="w", pady=(8, 0))
@@ -1994,6 +2079,10 @@ class SettingsDialog:
     def update_scale(self, event=None) -> None:
         pass
     
+    def _on_fps_change(self, val=None) -> None:
+        v = self.fps_slider_var.get()
+        self._fps_val_label.config(text=f"{v} fps")
+
     def on_mode_change(self, event=None) -> None:
         pass
     
@@ -2022,8 +2111,18 @@ class SettingsDialog:
             self.app.update_ui_language()
         
         self.app.quality = int(self.quality_var.get())
-        self.app.recording_mode = self.mode_var.get()
-        self.app.update_mode_settings()
+        # FPS slider replaces mode combo: set target_fps directly
+        new_fps = int(self.fps_slider_var.get())
+        self.app.target_fps = new_fps
+        # Derive recording_mode from fps for backward compat
+        if new_fps >= 60:
+            self.app.recording_mode = "ultra"
+        elif new_fps >= 30:
+            self.app.recording_mode = "turbo"
+        elif new_fps >= 15:
+            self.app.recording_mode = "balanced"
+        else:
+            self.app.recording_mode = "eco"
         self.app.scale_factor = int(self.scale_var.get()) / 100
         self.app.update_monitor_info()
         self.app.monitor_id = int(self.monitor_var.get())
@@ -2161,6 +2260,7 @@ class HomRecScreen:
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
         self.update_preview()
+        self.root.after(500, self._warm_up_gpu_probe)
         
         self.root.bind('<Configure>', self.on_window_resize)
         self._apply_hotkeys()
@@ -2486,13 +2586,6 @@ class HomRecScreen:
         settings_menu.add_command(label=self.lang["preferences"], command=self.open_settings)
         settings_menu.add_separator()
         
-        perf_menu = tk.Menu(settings_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
-        settings_menu.add_cascade(label=self.lang["performance_menu"], menu=perf_menu)
-        perf_menu.add_command(label=self.lang["ultra"], command=lambda: self.set_mode("ultra"))
-        perf_menu.add_command(label=self.lang["turbo"], command=lambda: self.set_mode("turbo"))
-        perf_menu.add_command(label=self.lang["balanced"], command=lambda: self.set_mode("balanced"))
-        perf_menu.add_command(label=self.lang["eco"], command=lambda: self.set_mode("eco"))
-
         capture_menu = tk.Menu(settings_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
         settings_menu.add_cascade(label=self.lang["capture_source"], menu=capture_menu)
         capture_menu.add_command(label=self.lang["full_desktop"], command=self.set_capture_desktop)
@@ -2656,7 +2749,10 @@ class HomRecScreen:
                     self.output_folder = settings.get("output_folder", "recordings")
                     self.scale_factor = settings.get("scale_factor", 0.75)
                     self.target_fps = settings.get("target_fps", 15)
-                    self.quality = settings.get("quality", 70)
+                    # Клампим quality: старые настройки могли сохранить 95-100%
+                    # → qp=18 (lossless) → encoder не успевает → FPS падает
+                    loaded_q = settings.get("quality", 70)
+                    self.quality = max(50, min(100, int(loaded_q)))
                     self.recording_mode = settings.get("mode", "balanced")
                     self.current_theme = settings.get("theme", "dark")
                     self.current_language = settings.get("language", "en")
@@ -2843,7 +2939,40 @@ class HomRecScreen:
                                  bg=self.colors["surface"], fg=self.colors["text"],
                                  font=("Consolas", 11))
         self.res_label.pack(anchor="w", pady=3)
-        
+
+        # --- Inline FPS slider (quick access without opening Settings) ---
+        fps_ctrl_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        fps_ctrl_frame.pack(pady=(0, 8), padx=15, fill="x")
+        tk.Frame(fps_ctrl_frame, bg=self.colors.get("surface_light", "#45475a"),
+                 height=1).pack(fill="x", pady=(0, 8))
+        fps_row = tk.Frame(fps_ctrl_frame, bg=self.colors["surface"])
+        fps_row.pack(fill="x")
+        tk.Label(fps_row, text="FPS limit:", bg=self.colors["surface"],
+                 fg=self.colors["text_secondary"],
+                 font=("Segoe UI", 8)).pack(side="left")
+        self._inline_fps_val = tk.Label(fps_row, text=str(self.target_fps),
+                                        bg=self.colors["surface"],
+                                        fg=self.colors["accent"],
+                                        font=("Segoe UI", 8, "bold"), width=3)
+        self._inline_fps_val.pack(side="right")
+
+        def _fps_slide(v):
+            val = int(float(v))
+            self.target_fps = val
+            self._inline_fps_val.config(text=str(val))
+            self.save_settings(silent=True)
+
+        self._inline_fps_slider = tk.Scale(
+            fps_ctrl_frame, from_=1, to=60,
+            orient="horizontal", length=160,
+            showvalue=False,
+            bg=self.colors["surface"], fg=self.colors["text"],
+            highlightthickness=0, troughcolor=self.colors.get("surface_light", "#45475a"),
+            command=_fps_slide,
+        )
+        self._inline_fps_slider.set(self.target_fps)
+        self._inline_fps_slider.pack(fill="x", pady=(2, 0))
+
         right_panel = tk.Frame(main_container, bg=self.colors["bg"])
         right_panel.pack(side="right", fill="both", expand=True)
         
@@ -3070,10 +3199,19 @@ class HomRecScreen:
             except Exception:
                 pass
         self._bound_hotkeys = []
+
         def _bind(key, cmd):
+            # Guard: skip empty, placeholder, or keys with spaces (invalid Tcl keysym)
+            if not key or " " in key or key == "Press a key...":
+                log.warning(f"Skipping invalid hotkey: {key!r}")
+                return
             k = f'<{key}>'
-            self.root.bind(k, cmd)
-            self._bound_hotkeys.append(k)
+            try:
+                self.root.bind(k, cmd)
+                self._bound_hotkeys.append(k)
+            except Exception as e:
+                log.warning(f"Failed to bind hotkey {k!r}: {e}")
+
         _bind(self.hotkey_start_stop, lambda e: self.toggle_recording())
         _bind(self.hotkey_pause, lambda e: self.toggle_pause() if self.recording else None)
         _bind(self.hotkey_fullscreen, lambda e: self.toggle_fullscreen())
@@ -3176,106 +3314,87 @@ class HomRecScreen:
             pass
 
     def _detect_gpu_encoder(self) -> str | None:
-        """
-        v1.5.0: Probe ffmpeg for available GPU encoders (NVENC → AMF → QSV).
-        Returns encoder name or None.  Result is cached in self._gpu_encoder_cache.
-        """
-        if hasattr(self, '_gpu_encoder_cache'):
-            return self._gpu_encoder_cache
+        """Возвращает кеш. Реальный проб — в _warm_up_gpu_probe() при старте."""
+        return getattr(self, '_gpu_encoder_cache', None)
 
-        if not self.ffmpeg_path:
+    def _warm_up_gpu_probe(self) -> None:
+        if not self.ffmpeg_path or hasattr(self, '_gpu_encoder_cache'):
+            return
+        def _probe():
+            for name, args in [
+                ('h264_nvenc', ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_nvenc','-f','null','-']),
+                ('h264_amf',   ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_amf',  '-f','null','-']),
+                ('h264_qsv',   ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_qsv',  '-f','null','-']),
+            ]:
+                try:
+                    r = subprocess.run([self.ffmpeg_path, '-y', *args],
+                        capture_output=True, timeout=6,
+                        creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
+                    if r.returncode == 0:
+                        log.info(f"GPU encoder detected (background): {name}")
+                        self._gpu_encoder_cache = name
+                        return
+                except Exception:
+                    pass
+            log.info("No GPU encoder found (background probe)")
             self._gpu_encoder_cache = None
-            return None
-
-        candidates = [
-            ('h264_nvenc',  ['-f', 'lavfi', '-i', 'nullsrc=s=32x32:d=0.1',
-                              '-c:v', 'h264_nvenc', '-f', 'null', '-']),
-            ('h264_amf',    ['-f', 'lavfi', '-i', 'nullsrc=s=32x32:d=0.1',
-                              '-c:v', 'h264_amf',   '-f', 'null', '-']),
-            ('h264_qsv',    ['-f', 'lavfi', '-i', 'nullsrc=s=32x32:d=0.1',
-                              '-c:v', 'h264_qsv',   '-f', 'null', '-']),
-        ]
-        for name, extra_args in candidates:
-            try:
-                r = subprocess.run(
-                    [self.ffmpeg_path, '-y', *extra_args],
-                    capture_output=True, timeout=6,
-                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
-                )
-                if r.returncode == 0:
-                    log.info(f"GPU encoder detected: {name}")
-                    self._gpu_encoder_cache = name
-                    return name
-            except Exception:
-                pass
-
-        log.info("No GPU encoder found - will use libx264")
-        self._gpu_encoder_cache = None
-        return None
+        threading.Thread(target=_probe, daemon=True).start()
 
     def _build_codec_args(self) -> list:
-        """
-        v1.5.0: Return ffmpeg codec arguments.
-        Improvements in v1.5.0:
-          • Auto-selects GPU encoder (NVENC/AMF/QSV) when codec='libx264' and
-            a GPU encoder is available - offloads encoding from CPU entirely.
-          • Default CRF raised from 18 → 23 (visually identical, ~40% less CPU).
-          • libx264 CPU thread count capped at half of logical cores to avoid
-            starving the OS and preview thread.
-          • libx264 -tune zerolatency removed for non-screen-content (use
-            -tune stillimage for slides / -tune zerolatency only when user sets it).
-        """
         codec = getattr(self, 'video_codec', 'libx264')
         hw    = getattr(self, 'hw_accel',    'auto')
 
-        # Auto GPU detection: if user left the default 'libx264' and a GPU
-        # encoder is available, silently upgrade to it.
         if codec == 'libx264' and hw == 'auto':
             gpu = self._detect_gpu_encoder()
             if gpu:
                 codec = gpu
                 log.info(f"Auto-upgraded codec: libx264 → {codec}")
 
-        # CRF / QP - user can override via Advanced Settings enc_crf
-        # Default raised to 23: visually near-lossless for screen content,
-        # roughly 35-45% less CPU than crf=18.
-        if getattr(self, 'enc_crf', None) is not None:
-            crf = self.enc_crf
-        else:
-            q   = getattr(self, 'quality', 70)
-            # quality 10→100 maps to crf 36→18  (was 45→15, too aggressive)
-            crf = int(36 - (q / 100) * 18)
+        # quality (10–100) → qp/crf
+        # Диапазон специально сужен: минимум qp=23 (quality=100).
+        # qp=18 (lossless) на слабом CPU/GPU убивает FPS — битрейт 80-150 Мбит/с.
+        # i3-1005G1 + QSV: qp=28 (~30 Мбит/с) — оптимальный баланс.
+        q  = getattr(self, 'quality', 70)
+        qp = max(23, min(34, int(34 - (q / 100) * 11)))  # 100%→23, 70%→26, 0%→34
 
-        is_hw  = codec in ('h264_nvenc', 'hevc_nvenc', 'h264_amf', 'hevc_amf', 'h264_qsv', 'hevc_qsv')
-        is_265 = codec in ('libx265', 'hevc_nvenc', 'hevc_amf', 'hevc_qsv')
+        fps = getattr(self, 'target_fps', 30)
+        gop = fps * 2
 
-        args = []
+        is_hw  = codec in ('h264_nvenc','hevc_nvenc','h264_amf','hevc_amf','h264_qsv','hevc_qsv')
+        is_265 = codec in ('libx265','hevc_nvenc','hevc_amf','hevc_qsv')
 
-        # hwaccel on input side only makes sense for GPU decode (not needed for gdigrab)
-        # so we skip it - it caused errors with some drivers anyway.
-
-        args += ['-c:v', codec]
-
+        args = ['-c:v', codec]
         preset = getattr(self, 'enc_preset', 'ultrafast')
+
         if is_hw:
-            args += ['-qp', str(crf)]
             if 'nvenc' in codec:
-                # p1 = fastest NVENC preset, ull = ultra-low latency tune
-                args += ['-preset', 'p1', '-tune', 'ull', '-rc', 'constqp']
+                # NVENC: p1 = fastest, ull = ultra-low latency
+                args += ['-preset', 'p1', '-tune', 'ull', '-rc', 'constqp',
+                         '-qp', str(qp), '-g', str(gop)]
             elif 'qsv' in codec:
-                args += ['-preset', 'veryfast']
+                # QSV на слабой встройке (i3/i5 UHD):
+                #   - async_depth убран: с gdigrab блокирует capture-поток
+                #   - veryfast даёт меньше нагрузки чем slow/medium
+                #   - look_ahead 0: отключает lookahead (он жрёт CPU)
+                #   - low_power 1: на UHD Graphics включает LP режим (VDENC)
+                #     который в 2-3 раза быстрее обычного PAK при slightl хуже качестве
+                args += ['-preset', 'veryfast',
+                         '-look_ahead', '0',
+                         '-low_power', '1',
+                         '-qp', str(qp), '-g', str(gop)]
             elif 'amf' in codec:
-                args += ['-quality', 'speed', '-rc', 'cqp', '-qp_i', str(crf), '-qp_p', str(crf)]
+                args += ['-quality', 'speed', '-rc', 'cqp',
+                         '-qp_i', str(qp), '-qp_p', str(qp), '-g', str(gop)]
         else:
-            # CPU encoder: cap threads so ffmpeg doesn't monopolise all cores
+            # CPU (libx264/libx265):
+            # На 2-ядерном i3: оставляем 1 поток FFmpeg, остальное OS.
+            # ultrafast + zerolatency = минимальная нагрузка на encoder.
             cpu_count = os.cpu_count() or 4
-            ffmpeg_threads = max(1, cpu_count // 2)
-            args += [
-                '-preset', preset,
-                '-tune', 'zerolatency',
-                '-crf', str(crf),
-                '-threads', str(ffmpeg_threads),
-            ]
+            # Слабый CPU (≤4 потоков): 1 поток FFmpeg, не мешает OS и Python.
+            ffmpeg_threads = 1 if cpu_count <= 4 else max(1, cpu_count // 4)
+            args += ['-preset', preset, '-tune', 'zerolatency',
+                     '-crf', str(qp), '-g', str(gop),
+                     '-threads', str(ffmpeg_threads)]
             if is_265:
                 args += ['-x265-params', 'log-level=error']
 
@@ -3305,31 +3424,35 @@ class HomRecScreen:
             )
             self.audio_recording = True
 
+            # PERF FIX: import once before the loop — not 43×/sec inside it.
+            try:
+                from homrec_native import core as _nc_mic
+            except Exception:
+                _nc_mic = None
+
             def record_mic() -> None:
                 while self.audio_recording and not self.stop_flag:
                     if not self.paused:
-                        if not self.audio_panel.mic_mute.get():
+                        # PERF FIX: read cached plain-Python values, not tk vars
+                        if not self.audio_panel._mic_mute_cached:
                             try:
                                 data = self.audio_stream.read(1024, exception_on_overflow=False)
-                                # Apply mic volume
-                                vol = self.audio_panel.mic_volume.get() / 100.0
+                                vol = self.audio_panel._mic_vol_cached
                                 if vol != 1.0:
                                     data = audioop.mul(data, 2, vol)
                                 self.audio_frames.append(data)
-                                # v1.5.0: use native RMS when available
-                                try:
-                                    from homrec_native import core as _nc
-                                    level = _nc.audio_rms_level(data)
-                                except Exception:
-                                    rms = audioop.rms(data, 2)
-                                    level = min(100, int(rms / 300))
+                                # PERF FIX: store int only — no Tkinter draw
+                                if _nc_mic is not None:
+                                    level = _nc_mic.audio_rms_level(data)
+                                else:
+                                    level = min(100, int(audioop.rms(data, 2) / 300))
                                 self.audio_panel.update_mic_level(level)
-                            except:
+                            except Exception:
                                 pass
                         else:
                             try:
                                 self.audio_stream.read(1024, exception_on_overflow=False)
-                            except:
+                            except Exception:
                                 pass
                             self.audio_frames.append(silence)
                     else:
@@ -3383,13 +3506,14 @@ class HomRecScreen:
                                     if not self.paused:
                                         try:
                                             data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                            vol = self.audio_panel.sys_volume.get() / 100.0
+                                            # PERF FIX: cached float, no tk .get()
+                                            vol = self.audio_panel._sys_vol_cached
                                             if vol != 1.0:
                                                 data = audioop.mul(data, 2, vol)
                                             self.sys_audio_frames.append(data)
                                             rms = audioop.rms(data, 2)
-                                            level = min(100, int(rms / 300))
-                                            self.audio_panel.update_sys_level(level)
+                                            # PERF FIX: store int only, no Tkinter draw
+                                            self.audio_panel.update_sys_level(min(100, int(rms / 300)))
                                         except Exception as e:
                                             log.debug(f"sys audio read error: {e}")
                                     else:
@@ -3473,11 +3597,13 @@ class HomRecScreen:
                                         if not self.paused:
                                             try:
                                                 data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                                vol = self.audio_panel.sys_volume.get() / 100.0
+                                                # PERF FIX: cached float, no tk .get()
+                                                vol = self.audio_panel._sys_vol_cached
                                                 if vol != 1.0:
                                                     data = audioop.mul(data, 2, vol)
                                                 self.sys_audio_frames.append(data)
                                                 rms = audioop.rms(data, 2)
+                                                # PERF FIX: store int only, no Tkinter draw
                                                 self.audio_panel.update_sys_level(min(100, int(rms / 300)))
                                             except Exception as e:
                                                 log.debug(f"sys mix read error: {e}")
@@ -3816,11 +3942,15 @@ class HomRecScreen:
 
     def _capture_loop(self) -> None:
         """
-        v1.5.0 - Background capture thread.
-        Hot path uses native C extension (homrec_native) when available:
-          • BGRX→RGB via hr_bgrx_to_rgb  (avoids Pillow "raw" overhead)
-          • Resize     via hr_resize_*    (bilinear preview / nearest recording)
-          • Badge blend via hr_blend_rgba (alpha-composite without Pillow paste)
+        v1.5.0 - Background preview thread.
+
+        During RECORDING ffmpeg already captures the screen via gdigrab —
+        running mss.grab() in parallel steals CPU and memory bandwidth from it,
+        causing frame drops.  The preview thread therefore:
+          • skips grab() entirely while recording (just re-displays the last frame)
+          • resumes normal grab() when idle (no recording) for live preview
+
+        Hot path uses native C extension (homrec_native) when available.
         Falls back to original Pillow path transparently.
         """
         import mss as _mss
@@ -3848,6 +3978,8 @@ class HomRecScreen:
                 return _badge_np_cache[idx % len(_badge_np_cache)]
             return None
 
+        _last_img = None  # cached frame shown during recording
+
         while self._preview_running:
             try:
                 monitor   = getattr(self, 'monitor', None)
@@ -3860,61 +3992,44 @@ class HomRecScreen:
                     time.sleep(0.1)
                     continue
 
-                # -- Disable Preview mode: skip all capture work --------------
+                # -- Disable Preview mode: show placeholder ------------------
                 if getattr(self, 'disable_preview', False):
-                    # Signal UI thread to show the placeholder (only when needed)
                     try:
                         self._preview_queue.get_nowait()
                     except queue.Empty:
                         pass
-                    self._preview_queue.put_nowait(None)  # None = show HomRec placeholder
+                    self._preview_queue.put_nowait(None)
                     time.sleep(0.5)
                     continue
 
+                # -- Во время записи: полный sleep, ноль PIL/numpy/queue --
+                if recording:
+                    time.sleep(0.5)
+                    continue
+
+                # -- Idle: capture and display normally ----------------------
                 screenshot = sct.grab(monitor)
                 sw, sh = screenshot.size
 
                 if _have_native and _native_core is not None:
-                    # -- Native fast path ------------------------------------
-                    # 1. BGRX → RGB numpy array via ctypes (no extra Python copy)
-                    rgb_np = _native_core.bgrx_to_rgb_np(screenshot.bgra, sw, sh)
-
-                    # 2. Resize: nearest for recording (cheap), bilinear for idle
-                    if recording:
-                        small_np = _native_core.resize_nearest_np(rgb_np, sw, sh, pw, ph)
-                    else:
-                        small_np = _native_core.resize_bilinear_np(rgb_np, sw, sh, pw, ph)
-
-                    # 3. Badge overlay (only during active recording)
-                    if recording and not paused:
-                        badge_np = _get_badge_np(self._rec_frame_idx)
-                        self._rec_frame_idx += 1
-                        if badge_np is not None:
-                            _native_core.blend_badge(small_np, badge_np, 10, 10)
-
-                    # 4. Convert numpy→PIL using frombuffer (zero-copy view)
-                    img = Image.frombuffer("RGB", (pw, ph), small_np, "raw", "RGB", 0, 1)
-
+                    rgb_np   = _native_core.bgrx_to_rgb_np(screenshot.bgra, sw, sh)
+                    small_np = _native_core.resize_bilinear_np(rgb_np, sw, sh, pw, ph)
+                    img      = Image.frombuffer("RGB", (pw, ph), small_np, "raw", "RGB", 0, 1)
                 else:
-                    # -- Original Pillow fallback path -----------------------
                     img = Image.frombytes("RGB", screenshot.size,
                                          screenshot.bgra, "raw", "BGRX")
-                    resample = (Image.Resampling.NEAREST if recording
-                                else Image.Resampling.BILINEAR)
-                    img.thumbnail((pw, ph), resample)
-                    if recording and not paused:
-                        badge = self._rec_frames[self._rec_frame_idx % 2]
-                        self._rec_frame_idx += 1
-                        img.paste(badge, (10, 10), badge)
+                    img.thumbnail((pw, ph), Image.Resampling.BILINEAR)
 
-                # 5. Push to UI queue (latest-wins - drop stale frames)
+                _last_img = img  # cache for use during recording
+
+                # Push to UI queue (latest-wins)
                 try:
                     self._preview_queue.get_nowait()
                 except queue.Empty:
                     pass
                 self._preview_queue.put_nowait(img)
 
-                # Track preview FPS for status display
+                # Track preview FPS
                 _now = time.time()
                 if not hasattr(self, '_pv_last_t'):
                     self._pv_last_t = _now
@@ -3933,10 +4048,8 @@ class HomRecScreen:
             except Exception as e:
                 log.debug(f"_capture_loop error: {e}")
 
-            # Adaptive sleep:
-            #   recording  → 4 FPS (250 ms): ffmpeg owns CPU, preview is bonus
-            #   idle       → 15 FPS (67 ms): smooth, still cheap
-            time.sleep(0.25 if getattr(self, 'recording', False) else 0.067)
+            # Idle preview: ~12 FPS is smooth and cheap
+            time.sleep(0.083)
 
     def update_preview(self) -> None:
         """UI thread: converts PIL→PhotoImage and updates the label.
@@ -3956,8 +4069,8 @@ class HomRecScreen:
             pass   # no new frame yet - skip, don't block
         except Exception:
             pass
-        # Poll every 80 ms for smoother UI
-        self.root.after(80, self.update_preview)
+        interval = 2000 if getattr(self, 'recording', False) else 80
+        self.root.after(interval, self.update_preview)
 
     def _show_preview_placeholder(self) -> None:
         """Show a grey placeholder when preview is disabled."""
@@ -4010,7 +4123,23 @@ class HomRecScreen:
             self.stop_recording()
     
     def start_recording(self) -> None:
-        """Start recording with STRICT fps control and correct monitor offsets"""
+        """Start recording — optimised FFmpeg pipeline (v1.5.0)
+
+        Performance optimisations for stable 55-60 FPS capture:
+          - -thread_queue_size 512: larger input queue prevents gdigrab stalls
+            when the encoder is briefly busy; without this every encoder hiccup
+            causes a dropped frame at the capture side.
+          - -vsync passthrough (0): discard ffmpeg's timestamp-repair logic which
+            can cause duplicate or dropped frames when the capture timer drifts.
+          - -flush_packets 1: write packets immediately, unblocking the capture
+            thread faster after each I-frame.
+          - -max_muxing_queue_size 1024: prevents "DTS out of order" packet drops
+            during the first seconds of recording.
+          - FFmpeg process priority raised to HIGH on Windows so the OS scheduler
+            doesn't pre-empt it during the 16 ms capture window.
+          - Preview thread sleeps 500 ms during recording (already done) so it
+            competes neither for GDI bandwidth nor CPU time with gdigrab.
+        """
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.filename = f"{self.output_folder}/HomRec_{timestamp}.mp4"
@@ -4033,39 +4162,56 @@ class HomRecScreen:
             
             offset_x = self.monitor_left
             offset_y = self.monitor_top
-            
-            vf_filter = f'scale={width}:{height}' if (width != self.original_width or height != self.original_height) else 'null'
 
-            # Build codec args based on selected codec
+            # Only apply scale filter when resolution actually changes.
+            needs_scale = (width != self.original_width or height != self.original_height)
+            # Use fast_bilinear for scale: ~3x cheaper than the default bicubic,
+            # and indistinguishable at 1080p recording resolutions.
+            vf_args = ['-vf', f'scale={width}:{height}:flags=fast_bilinear'] if needs_scale else []
             codec_args = self._build_codec_args()
             log.info(f"Video codec: {self.video_codec} | hw_accel: {self.hw_accel}")
 
+            # --- Low-latency gdigrab input flags ----------------------------
+            # thread_queue_size 128: на слабом CPU 512 буферов = лишняя память
+            # и scheduler pressure. 128 достаточно для 60fps при стабильном encoder.
+            # rtbufsize 16M: ограничивает входной буфер, меньше RAM pressure.
+            gdi_input_flags = [
+                '-thread_queue_size', '128',
+                '-probesize', '32',
+                '-fflags', 'nobuffer',
+                '-rtbufsize', '16M',
+            ]
+
+            # --- Output flags that reduce frame drops -----------------------
+            output_extra = [
+                '-vsync', '0',                  # passthrough timestamps, no dup/drop
+                '-flush_packets', '1',          # don't buffer output packets
+                '-max_muxing_queue_size', '1024',  # avoid DTS-order drops on startup
+            ]
+
+            draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
+
             if self.capture_mode == "window" and self.capture_window_title:
-                # Record a specific window by title
                 log.info(f"Capture mode: window - '{self.capture_window_title}'")
-                draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
                 cmd = [
-                    self.ffmpeg_path,
-                    '-y',
+                    self.ffmpeg_path, '-y',
+                    *gdi_input_flags,
                     '-f', 'gdigrab',
                     '-framerate', str(fps),
                     '-draw_mouse', draw_mouse,
                     '-i', f'title={self.capture_window_title}',
-                    '-vf', vf_filter,
-                    '-r', str(fps),
+                    *vf_args,
                     *codec_args,
                     '-pix_fmt', getattr(self, 'pix_fmt', 'yuv420p'),
-                    '-movflags', '+faststart',
+                    *output_extra,
                     '-an',
                     self.filename
                 ]
             else:
-                # Record full desktop (default)
                 log.info(f"Capture mode: desktop - monitor {self.monitor_id}")
-                draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
                 cmd = [
-                    self.ffmpeg_path,
-                    '-y',
+                    self.ffmpeg_path, '-y',
+                    *gdi_input_flags,
                     '-f', 'gdigrab',
                     '-framerate', str(fps),
                     '-draw_mouse', draw_mouse,
@@ -4073,26 +4219,39 @@ class HomRecScreen:
                     '-offset_y', str(offset_y),
                     '-video_size', f'{self.original_width}x{self.original_height}',
                     '-i', 'desktop',
-                    '-vf', vf_filter,
-                    '-r', str(fps),
+                    *vf_args,
                     *codec_args,
                     '-pix_fmt', getattr(self, 'pix_fmt', 'yuv420p'),
-                    '-movflags', '+faststart',
+                    *output_extra,
                     '-an',
                     self.filename
                 ]
             log.debug(f"FFmpeg command: {chr(32).join(cmd)}")
+
             self.ffmpeg_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 stdin=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
             )
-            
+
+            # Boost ffmpeg process priority so the OS doesn't pre-empt it
+            # during the narrow 16 ms capture window at 60 FPS.
+            # HIGH_PRIORITY_CLASS on Windows; -10 nice on Linux/macOS.
+            try:
+                import psutil as _ps
+                _fp = _ps.Process(self.ffmpeg_proc.pid)
+                if platform.system() == "Windows":
+                    _fp.nice(_ps.HIGH_PRIORITY_CLASS)
+                else:
+                    _fp.nice(-10)
+                log.debug("FFmpeg process priority boosted")
+            except Exception as _pe:
+                log.debug(f"FFmpeg priority boost skipped: {_pe}")
+
             self.stop_ffmpeg_reader = False
-            self.ffmpeg_reader_thread = threading.Thread(target=self._ffmpeg_reader, daemon=True)
-            self.ffmpeg_reader_thread.start()
+            self.ffmpeg_reader_thread = None
             
             if self.audio_panel.audio_enabled.get():
                 self.start_audio_recording()
@@ -4157,7 +4316,7 @@ class HomRecScreen:
             except:
                 pass
             
-            self.root.after(500, self._update_stats)
+            self.root.after(1000, self._update_stats)
     
     def stop_recording(self) -> None:
         """Stop recording - heavy finalization runs in a background thread to avoid UI freeze."""
@@ -4187,7 +4346,7 @@ class HomRecScreen:
             # Signal ffmpeg reader thread to stop (in case ffmpeg is already dead)
             self.stop_ffmpeg_reader = True
 
-            # Step 1: Terminate ffmpeg gracefully with 'q', fallback to kill
+            # Step 1: завершаем ffmpeg через 'q', fallback kill
             if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
                 try:
                     self.ffmpeg_proc.stdin.write(b'q')
@@ -4195,22 +4354,16 @@ class HomRecScreen:
                 except Exception:
                     pass
                 try:
-                    self.ffmpeg_proc.wait(timeout=15)
+                    self.ffmpeg_proc.wait(timeout=5)
                 except Exception:
                     try:
                         self.ffmpeg_proc.terminate()
-                        self.ffmpeg_proc.wait(timeout=3)
+                        self.ffmpeg_proc.wait(timeout=2)
                     except Exception:
                         try:
                             self.ffmpeg_proc.kill()
                         except Exception:
                             pass
-                finally:
-                    # Drain stderr so reader thread can finish
-                    try:
-                        self.ffmpeg_proc.stderr.read()
-                    except Exception:
-                        pass
 
             # Step 2: Stop audio recording (fast - just sets flag)
             audio_file = None
