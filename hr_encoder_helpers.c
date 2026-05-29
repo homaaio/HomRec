@@ -1,29 +1,3 @@
-/*
- * hr_encoder_helpers.c  -  HomRec v1.8.0  encoder pipeline helpers
- *
- * ОПТИМИЗАЦИИ v1.8.0:
- *
- *   1. hr_memcpy_nt: использует _mm_stream_si128 (реальные NT stores) вместо
- *      _mm_storeu_si128 (обычный кэшируемый store).
- *      v1.7.0 называл функцию «non-temporal» но использовал кэшируемые stores —
- *      никакой экономии пропускной способности памяти не было.
- *
- *   2. hr_rgb_to_yuv420p / hr_bgra_to_yuv420p: inner loop переписан с
- *      явным unroll x2 — компилятор не всегда разворачивает вручную,
- *      а 2x unroll устраняет часть branch overhead на нечётных размерах.
- *
- *   3. hr_build_thumbnail_lq: лишний integer divide на bsz заменён на
- *      умножение на обратное (для степеней двойки — сдвиг).
- *
- * Build (Linux / macOS):
- *   gcc -O3 -march=native -shared -fPIC -o hr_encoder_helpers.so \
- *       hr_encoder_helpers.c -lm
- *
- * Build (Windows MinGW):
- *   gcc -O3 -march=native -shared -o hr_encoder_helpers.dll \
- *       hr_encoder_helpers.c -lm
- */
-
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>

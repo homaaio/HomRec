@@ -1,38 +1,8 @@
-/*
- * hr_display_info.cpp  -  HomRec v1.5.0  display enumeration helpers
- *
- * FIXES vs v1.5.0:
- *   - Added #include <algorithm> so std::stable_sort is visible.
- *     MinGW g++ does NOT pull <algorithm> implicitly through <vector> or
- *     <windows.h>, causing "stable_sort is not a member of std".
- *   - hr_di_refresh (non-Windows): xrandr popen call is now async-signal-
- *     safe; added explicit NULL-check on the FILE* before fgets.
- *   - MonitorInfo initialised with = {} (value-init) to zero-fill padding
- *     bytes, preventing Valgrind warnings on struct copies.
- *   - hr_di_get / hr_di_primary: out-pointer writes guarded with null checks
- *     (were already present but now consistent across all six out-params).
- *
- * API: (unchanged)
- *   hr_di_create()        -> handle
- *   hr_di_destroy(handle)
- *   hr_di_refresh(handle)
- *   hr_di_count(handle)   -> int
- *   hr_di_get(handle, index, out_x, out_y, out_w, out_h, out_dpi) -> 0/1
- *   hr_di_primary(handle, out_x, out_y, out_w, out_h, out_dpi)    -> 0/1
- *
- * Compile (Linux):
- *   g++ -O3 -std=c++17 -shared -fPIC -o hr_display_info.so hr_display_info.cpp
- *
- * Compile (Windows MinGW):
- *   g++ -O3 -std=c++17 -shared -static-libgcc -static-libstdc++ \
- *       -o hr_display_info.dll hr_display_info.cpp
- */
-
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
 #include <vector>
-#include <algorithm>   /* FIX: required for std::stable_sort */
+#include <algorithm>
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)

@@ -1,36 +1,3 @@
-/*
- * hr_ringbuf.cpp  -  HomRec v1.5.0  lock-free audio ring-buffer
- *
- * A single-producer / single-consumer (SPSC) ring buffer for raw PCM chunks.
- * The audio capture thread writes; the encoder flush reads - no mutex needed.
- *
- * Exported C API (callable from Python ctypes):
- *
- *   hr_rb_create(capacity_bytes)  -> handle (void*)
- *   hr_rb_destroy(handle)
- *   hr_rb_write(handle, data, nbytes) -> bytes actually written (0 if full)
- *   hr_rb_read (handle, dst,  nbytes) -> bytes actually read   (0 if empty)
- *   hr_rb_available_read (handle) -> bytes ready to consume
- *   hr_rb_available_write(handle) -> free space
- *   hr_rb_reset(handle)           -> clear buffer (call before new recording)
- *
- * BUG FIXES vs previous version:
- *   - available_read() used mismatched memory orders; fixed to acquire/acquire.
- *   - hr_rb_reset() now uses seq_cst to ensure visibility across both threads,
- *     and also zeroes the buffer contents to prevent stale-data reads if a
- *     consumer races with reset (previously only cursors were cleared).
- *   - Write/read wrap-around memcpy path had an off-by-one for exact-power-of-2
- *     boundaries; fixed by computing `first` from mask(h) not raw h.
- *   - restrict keyword replaced with HR_RESTRICT macro for C++ compatibility.
- *
- * Compile (Linux):
- *   g++ -O3 -std=c++17 -shared -fPIC -o hr_ringbuf.so hr_ringbuf.cpp
- *
- * Compile (Windows MinGW):
- *   g++ -O3 -std=c++17 -shared -static-libgcc -static-libstdc++ \
- *       -o hr_ringbuf.dll hr_ringbuf.cpp
- */
-
 #include <cstdint>
 #include <cstddef>
 #include <cstring>

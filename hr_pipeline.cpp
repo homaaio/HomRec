@@ -1,39 +1,3 @@
-/*
- * hr_pipeline.cpp  -  HomRec v1.8.0  Central capture/encode pipeline
- *
- * ОПТИМИЗАЦИИ v1.8.0 vs v1.7.0:
- *
- *   1. УБРАН rgb_pv буфер (экономия ~6 МБ при 1920x1080, ~25 МБ при 4K).
- *      Thumbnail строится напрямую из BGRA без промежуточного RGB.
- *      Добавлена hr_bgra_to_thumbnail() — box-filter из BGRA с нулевой копией.
- *
- *   2. PREVIEW_EVERY теперь динамический: max(1, fps/20).
- *      При 30fps → каждые 1-2 кадра, при 60fps → каждые 3 кадра.
- *      Было жёстко зашито 3 — при 30fps preview обновлялось слишком редко.
- *
- *   3. THREAD_PRIORITY_TIME_CRITICAL вместо ABOVE_NORMAL.
- *      На загруженной системе ABOVE_NORMAL не защищает от вытеснения на 15 мс.
- *      TIME_CRITICAL гарантирует sub-frame scheduling latency.
- *
- *   4. bgra_to_yuv теперь вызывается только когда pipe открыт (recording).
- *      При просмотре без записи — только thumbnail, YUV не считается.
- *      Экономия: ~3-5 мс/кадр при 1080p на слабых CPU.
- *
- *   5. pv_buf выделяется один раз при старте (не resize() в каждом кадре).
- *
- *   6. capture_loop: timeout_ms считается точнее: frame_ns/1_500_000
- *      (2/3 frame вместо 1/2), что снижает количество TIMEOUT-пропусков.
- *
- * Build (Windows MinGW):
- *   g++ -O3 -std=c++17 -shared -static-libgcc -static-libstdc++ \
- *       -o hr_pipeline.dll hr_pipeline.cpp \
- *       hr_dxgi_capture.dll hr_encoder_helpers.dll hr_stopwatch.dll \
- *       -ld3d11 -ldxgi -lole32 -lwinmm
- *
- * Build (Linux — stub):
- *   g++ -O3 -std=c++17 -shared -fPIC -o hr_pipeline.so hr_pipeline.cpp
- */
-
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
