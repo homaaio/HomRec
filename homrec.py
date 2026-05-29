@@ -364,7 +364,7 @@ def optimize_for_performance() -> None:
     log.info("Performance optimizations applied (v1.5.0)")
 
 class AudioLevelMeter(tk.Canvas):
-    """Improved audio level meter with segmented display and peak indicator."""
+    """Smooth gradient audio level meter with peak indicator (no segments)."""
     def __init__(self, parent, width: int = 180, height: int = 20, **kwargs) -> None:
         super().__init__(parent, width=width, height=height, highlightthickness=0, **kwargs)
         self.meter_width = width
@@ -372,46 +372,60 @@ class AudioLevelMeter(tk.Canvas):
         self.level = 0
         self._peak = 0
         self._peak_decay = 0
-        self.draw_meter()
+        self._bar_id  = None
+        self._peak_id = None
+        self._init_canvas()
+
+    def _lerp_color(self, t: float) -> str:
+        """Interpolate green -> yellow -> red for t in [0, 1]."""
+        if t < 0.7:
+            s = t / 0.7
+            r = int(166 + (249 - 166) * s)
+            g = int(227 + (226 - 227) * s)
+            b = int(161 + (175 - 161) * s)
+        else:
+            s = (t - 0.7) / 0.3
+            r = int(249 + (243 - 249) * s)
+            g = int(226 + ( 56 - 226) * s)
+            b = int(175 + (168 - 175) * s)
+        return f'#{r:02x}{g:02x}{b:02x}'
+
+    def _init_canvas(self) -> None:
+        self.delete("all")
+        self.create_rectangle(
+            0, 0, self.meter_width, self.meter_height,
+            fill='#1e1e2e', outline='#45475a', width=1)
+        self._bar_id = self.create_rectangle(
+            2, 2, 2, self.meter_height - 2,
+            fill='#a6e3a1', outline='')
+        self._peak_id = self.create_line(
+            2, 2, 2, self.meter_height - 2,
+            fill='#a6e3a1', width=2, state='hidden')
 
     def draw_meter(self) -> None:
-        self.delete("all")
-        # Background
-        self.create_rectangle(0, 0, self.meter_width, self.meter_height,
-                              fill='#2a2a3e', outline='#45475a', width=1)
-        # Segments (20 total)
-        n_seg = 20
-        seg_w = (self.meter_width - 4) / n_seg
-        active = int(self.level / 100 * n_seg)
-        for i in range(n_seg):
-            x0 = int(2 + i * seg_w) + 1
-            x1 = int(2 + (i + 1) * seg_w) - 1
-            if i < active:
-                if i < 14:       color = '#a6e3a1'  # green
-                elif i < 17:     color = '#f9e2af'  # yellow
-                else:            color = '#f38ba8'  # red
-            else:
-                if i < 14:       color = '#1e3a26'
-                elif i < 17:     color = '#3a2e10'
-                else:            color = '#3a1420'
-            self.create_rectangle(x0, 2, x1, self.meter_height - 2,
-                                  fill=color, outline='')
-        # Peak indicator
+        inner_w = self.meter_width - 4
+        bar_x1 = 2 + max(0, int(self.level / 100 * inner_w))
+        color = self._lerp_color(self.level / 100)
+        self.coords(self._bar_id, 2, 2, bar_x1, self.meter_height - 2)
+        self.itemconfig(self._bar_id, fill=color)
         if self._peak > 0:
-            px = int(2 + self._peak / 100 * (self.meter_width - 4))
+            px = 2 + int(self._peak / 100 * inner_w)
             pcol = '#f38ba8' if self._peak > 90 else '#f9e2af' if self._peak > 70 else '#a6e3a1'
-            self.create_line(px, 2, px, self.meter_height - 2, fill=pcol, width=2)
+            self.coords(self._peak_id, px, 2, px, self.meter_height - 2)
+            self.itemconfig(self._peak_id, fill=pcol, state='normal')
+        else:
+            self.itemconfig(self._peak_id, state='hidden')
 
     def set_level(self, level: int) -> None:
         self.level = max(0, min(100, level))
         if self.level > self._peak:
             self._peak = self.level
-            self._peak_decay = 15
+            self._peak_decay = 20
         else:
             if self._peak_decay > 0:
                 self._peak_decay -= 1
             else:
-                self._peak = max(0, self._peak - 2)
+                self._peak = max(0, self._peak - 3)
         self.draw_meter()
 
 class CustomMessageBox:
@@ -678,7 +692,9 @@ class AudioPanel:
                                    bg=app.colors["surface"], fg=app.colors["accent"],
                                    font=("Segoe UI", 11, "bold"),
                                    padx=10, pady=10)
-        self.frame.pack(side='left', fill='both', expand=True, padx=(5, 0))
+        # FIX: use fill='both' with no side= so the LabelFrame fills the
+        # bottom_panel correctly regardless of pack_propagate(False) height.
+        self.frame.pack(fill='both', expand=True, padx=5, pady=5)
         
         self.audio_enabled = tk.BooleanVar(value=True)
         self.mic_mute = tk.BooleanVar(value=False)
@@ -691,8 +707,9 @@ class AudioPanel:
         self._mic_level_pending: int = 0
         self._sys_level_pending: int = 0
         self._mic_vol_cached:   float = 0.80
-        self._sys_vol_cached:   float = 0.50
+        self._sys_vol_cached:   float = 1.0
         self._mic_mute_cached:  bool  = False
+        self._sys_mute_cached:  bool  = False
 
         self.create_mixer_layout()
     
@@ -789,11 +806,12 @@ class AudioPanel:
                                    troughcolor=c["surface"],
                                    command=self.on_sys_volume_change,
                                    showvalue=False)
-        self.sys_volume.set(50)
+        self.sys_volume.set(100)
         self.sys_volume.pack(side='left', padx=4)
         self.sys_volume_label = tk.Label(sys_vol_row, text="50%",
                                           bg=c["surface"], fg='#89b4fa',
                                           font=("Segoe UI", 8, 'bold'), width=4)
+        self.sys_volume_label.config(text="100%")
         self.sys_volume_label.pack(side='left')
 
         sys_meter_row = tk.Frame(sys_strip, bg=c["surface"])
@@ -825,12 +843,16 @@ class AudioPanel:
 
         # PERF FIX: start the UI-thread level poller
         self.app.root.after(100, self._poll_audio_levels)
+        # Start idle mic monitor so the VU-meter is live before recording
+        self.app.root.after(200, self._start_idle_monitor)
     
     def on_mic_volume_change(self, value: str) -> None:
         self.mic_volume_label.config(text=f"{int(float(value))}%")
-    
+        self.app.save_settings(silent=True)
+
     def on_sys_volume_change(self, value: str) -> None:
         self.sys_volume_label.config(text=f"{int(float(value))}%")
+        self.app.save_settings(silent=True)
     
     def toggle_mic_mute(self) -> None:
         self.mic_mute.set(not self.mic_mute.get())
@@ -856,14 +878,23 @@ class AudioPanel:
         try:
             mic_lv = self._mic_level_pending
             sys_lv = self._sys_level_pending
-            if self.mic_meter.level != mic_lv:
-                self.mic_meter.set_level(mic_lv)
-            if self.sys_meter.level != sys_lv:
-                self.sys_meter.set_level(sys_lv)
+            # Always call set_level so peak decay animates even when silent
+            self.mic_meter.set_level(mic_lv)
+            self.sys_meter.set_level(sys_lv)
             # Refresh cached tk vars for audio threads (safe — we're in UI thread)
             self._mic_vol_cached  = self.mic_volume.get() / 100.0
             self._sys_vol_cached  = self.sys_volume.get() / 100.0
             self._mic_mute_cached = self.mic_mute.get()
+            self._sys_mute_cached = self.sys_mute.get()
+            # Push volume/mute to C++ engine if active (lock-free atomic write)
+            if getattr(self.app, '_using_cpp_audio', False):
+                try:
+                    from homrec_native import audio_engine as _ae
+                    if _ae:
+                        _ae.set_volumes(self._mic_vol_cached, self._sys_vol_cached,
+                                        self._mic_mute_cached, self._sys_mute_cached)
+                except Exception:
+                    pass
         except Exception:
             pass
         try:
@@ -871,7 +902,82 @@ class AudioPanel:
         except Exception:
             pass
 
+
     
+
+    
+    # ------------------------------------------------------------------
+    # Idle mic monitor
+    # Opens a read-only mic stream so the VU-meter is live before recording.
+    # Pauses automatically while recording uses its own audio stream.
+    # ------------------------------------------------------------------
+
+    def _start_idle_monitor(self) -> None:
+        """Open a lightweight PyAudio stream just for the idle VU-meter."""
+        import threading
+        self._idle_monitor_active = True
+        self._idle_monitor_thread = threading.Thread(
+            target=self._idle_monitor_worker, daemon=True)
+        self._idle_monitor_thread.start()
+
+    def stop_idle_monitor(self) -> None:
+        """Stop idle monitor (called when recording starts / app closes)."""
+        self._idle_monitor_active = False
+
+    def resume_idle_monitor(self) -> None:
+        """Restart idle monitor after recording stops."""
+        import threading
+        self._idle_monitor_active = True
+        if not getattr(self, '_idle_monitor_thread', None) or \
+                not self._idle_monitor_thread.is_alive():
+            self._idle_monitor_thread = threading.Thread(
+                target=self._idle_monitor_worker, daemon=True)
+            self._idle_monitor_thread.start()
+
+    def _idle_monitor_worker(self) -> None:
+        """Background thread: reads mic in small chunks, feeds VU-meter."""
+        import pyaudio, audioop, time
+        p = None
+        stream = None
+        try:
+            p = pyaudio.PyAudio()
+            dev_info = p.get_default_input_device_info()
+            dev_idx  = dev_info.get('index', 0)
+            max_ch   = int(dev_info.get('maxInputChannels', 1))
+            ch = min(2, max(1, max_ch))
+            stream = p.open(format=pyaudio.paInt16,
+                            channels=ch,
+                            rate=44100,
+                            input=True,
+                            input_device_index=dev_idx,
+                            frames_per_buffer=1024)
+            while self._idle_monitor_active:
+                # When recording is active, the recording thread feeds mic levels.
+                # Drain the stream buffer so it stays fresh for after recording stops.
+                if getattr(self.app, 'audio_recording', False):
+                    try:
+                        stream.read(1024, exception_on_overflow=False)
+                    except Exception:
+                        pass
+                    time.sleep(0.05)
+                    continue
+                try:
+                    data = stream.read(1024, exception_on_overflow=False)
+                    rms  = audioop.rms(data, 2)
+                    self._mic_level_pending = min(100, int(rms / 150))
+                except Exception:
+                    time.sleep(0.05)
+        except Exception as e:
+            import logging
+            logging.getLogger('homrec').debug(f'idle mic monitor failed: {e}')
+        finally:
+            try:
+                if stream: stream.stop_stream(); stream.close()
+            except Exception: pass
+            try:
+                if p: p.terminate()
+            except Exception: pass
+
     def update_language(self) -> None:
         self.frame.config(text=self.app.lang["audio_mixer"])
         self.ffmpeg_label.config(
@@ -2784,6 +2890,11 @@ class HomRecScreen:
                     self.notify_flash = settings.get("notify_flash", True)
                     self.auto_save_profile = settings.get("auto_save_profile", False)
                     self.disable_preview = settings.get("disable_preview", False)
+                    self._saved_mic_volume  = settings.get("mic_volume", 80)
+                    self._saved_sys_volume  = settings.get("sys_volume", 100)
+                    self._saved_mic_mute    = settings.get("mic_mute", False)
+                    self._saved_sys_mute    = settings.get("sys_mute", False)
+                    self._saved_audio_enabled = settings.get("audio_enabled", True)
 
                     if self.always_on_top.get():
                         self.root.attributes('-topmost', True)
@@ -2828,6 +2939,11 @@ class HomRecScreen:
             "notify_flash": getattr(self, 'notify_flash', True),
             "auto_save_profile": getattr(self, 'auto_save_profile', False),
             "disable_preview": getattr(self, 'disable_preview', False),
+            "mic_volume": int(self.audio_panel.mic_volume.get()) if hasattr(self, 'audio_panel') else 80,
+            "sys_volume": int(self.audio_panel.sys_volume.get()) if hasattr(self, 'audio_panel') else 100,
+            "mic_mute": bool(self.audio_panel.mic_mute.get()) if hasattr(self, 'audio_panel') else False,
+            "sys_mute": bool(self.audio_panel.sys_mute.get()) if hasattr(self, 'audio_panel') else False,
+            "audio_enabled": bool(self.audio_panel.audio_enabled.get()) if hasattr(self, 'audio_panel') else True,
         }
         with open(SETTINGS_PATH, "w") as f:
             json.dump(settings, f, indent=2)
@@ -3004,6 +3120,21 @@ class HomRecScreen:
         bottom_panel.pack_propagate(False)
         
         self.audio_panel = AudioPanel(bottom_panel, self)
+        # Restore saved mixer state (loaded before audio_panel existed)
+        if hasattr(self, '_saved_mic_volume'):
+            self.audio_panel.mic_volume.set(self._saved_mic_volume)
+            self.audio_panel.mic_volume_label.config(text=f"{self._saved_mic_volume}%")
+        if hasattr(self, '_saved_sys_volume'):
+            self.audio_panel.sys_volume.set(self._saved_sys_volume)
+            self.audio_panel.sys_volume_label.config(text=f"{self._saved_sys_volume}%")
+        if hasattr(self, '_saved_mic_mute') and self._saved_mic_mute:
+            self.audio_panel.mic_mute.set(True)
+            self.audio_panel.mic_mute_btn.config(text=self.lang.get('unmute', 'Unmute'))
+        if hasattr(self, '_saved_sys_mute') and self._saved_sys_mute:
+            self.audio_panel.sys_mute.set(True)
+            self.audio_panel.sys_mute_btn.config(text=self.lang.get('unmute', 'Unmute'))
+        if hasattr(self, '_saved_audio_enabled'):
+            self.audio_panel.audio_enabled.set(self._saved_audio_enabled)
         
         bottom_bar = tk.Frame(self.root, bg=self.colors["surface"], height=32)
         bottom_bar.pack(side="bottom", fill="x")
@@ -3072,11 +3203,41 @@ class HomRecScreen:
         except:
             return 1
     
-    def _find_wasapi_loopback(self, p: "pyaudio.PyAudio") -> int | None:
+    @staticmethod
+    def _pyaudio_supports_loopback(p: "pyaudio.PyAudio") -> bool:
+        """Return True if this PyAudio build accepts the as_loopback kwarg.
+
+        Standard PyAudio does NOT support as_loopback — only the pyaudio-wasapi
+        fork does.  We detect support with a harmless probe: open a stream with
+        an intentionally bad device index so it raises OSError/IOError, but if
+        it raises TypeError first the kwarg itself is unsupported.
+        """
+        try:
+            p.open(format=pyaudio.paInt16, channels=1, rate=44100,
+                   input=True, input_device_index=99999,
+                   frames_per_buffer=512, as_loopback=True)
+        except TypeError:
+            return False   # kwarg unknown → standard PyAudio build
+        except Exception:
+            return True    # kwarg accepted, device error is expected
+        return True
+
+    def _find_wasapi_loopback(self, p: "pyaudio.PyAudio",
+                               require_input: bool = False) -> int | None:
         """Find WASAPI loopback device index for system audio capture (Windows only).
 
-        With pyaudio-wasapi, any output device can be opened as loopback via as_loopback=True.
-        Priority: explicit loopback/Stereo Mix device → default output device (works with as_loopback).
+        With pyaudio-wasapi, any output device can be opened as loopback via
+        as_loopback=True.  With standard PyAudio that flag does not exist, so
+        we must find a real input-capable loopback/Stereo Mix device.
+
+        Args:
+            require_input: when True, only return devices that already expose
+                input channels (maxInputChannels >= 1).  Pass True when
+                as_loopback is NOT supported so we never hand back an
+                output-only device that cannot be opened without the flag.
+
+        Priority: explicit loopback/Stereo Mix input device → default output
+        device as_loopback fallback (only when require_input is False).
         Returns None on non-Windows or if WASAPI is not available.
         """
         if sys.platform != 'win32':
@@ -3087,7 +3248,14 @@ class HomRecScreen:
             log.warning("WASAPI not available on this system")
             return None
 
+        # FIX: collect first WASAPI output device as fallback; also track the
+        # "defaultOutputDevice" index reported by wasapi_info if present.
+        # wasapi_info['defaultOutputDevice'] is a device *count* index on some
+        # PyAudio builds and -1/absent on others — so we also keep the first
+        # WASAPI output we encounter as a safe secondary fallback.
         default_out_idx = None
+        first_wasapi_out_idx = None
+        wasapi_default_dev = wasapi_info.get('defaultOutputDevice', -1)
 
         for i in range(p.get_device_count()):
             try:
@@ -3098,23 +3266,27 @@ class HomRecScreen:
                 continue
             name = dev.get('name', '').lower()
             log.debug(f"WASAPI device [{i}]: {dev.get('name')} in={dev.get('maxInputChannels')} out={dev.get('maxOutputChannels')}")
-            # Explicit loopback / Stereo Mix device - best option
+            # Explicit loopback / Stereo Mix device with real input channels — best option
             if dev.get('maxInputChannels', 0) >= 1:
                 if any(k in name for k in ('loopback', 'stereo mix', 'what u hear',
                                            'стерео микшер', 'что слышит')):
                     log.info(f"WASAPI loopback device found: [{i}] {dev.get('name')}")
                     return i
             # Remember default output device as fallback for as_loopback=True
-            if dev.get('maxOutputChannels', 0) >= 1:
-                if default_out_idx is None:
-                    default_out = wasapi_info.get('defaultOutputDevice', -1)
-                    if dev.get('index', i) == default_out or default_out < 0:
-                        default_out_idx = i
+            # (only useful when the pyaudio-wasapi fork is installed)
+            if not require_input and dev.get('maxOutputChannels', 0) >= 1:
+                # Match by the host-api-level default output device index
+                if default_out_idx is None and wasapi_default_dev >= 0 and i == wasapi_default_dev:
+                    default_out_idx = i
+                # Keep the very first WASAPI output as an ultimate fallback
+                if first_wasapi_out_idx is None:
+                    first_wasapi_out_idx = i
 
-        # Fallback: use default output device with as_loopback=True (pyaudio-wasapi only)
-        if default_out_idx is not None:
-            log.info(f"No explicit loopback device found; using default output [{default_out_idx}] with as_loopback=True")
-            return default_out_idx
+        # Prefer the explicitly-marked default, then the first WASAPI output found
+        chosen = default_out_idx if default_out_idx is not None else first_wasapi_out_idx
+        if chosen is not None:
+            log.info(f"No explicit loopback device found; using WASAPI output [{chosen}] with as_loopback=True")
+            return chosen
 
         log.warning("No WASAPI loopback device found at all")
         return None
@@ -3410,10 +3582,73 @@ class HomRecScreen:
             self.audio_frames = []
             self.sys_audio_frames = []
 
+            self.sys_audio_recording = False
+            if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
+                try:
+                    self.sys_audio_stream.stop_stream()
+                    self.sys_audio_stream.close()
+                except Exception:
+                    pass
+                self.sys_audio_stream = None
+            if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
+                try:
+                    self.sys_audio_p.terminate()
+                except Exception:
+                    pass
+                self.sys_audio_p = None
+            self.sys_audio_filename = None
+            self.sys_ffmpeg_proc = None
+
+            # ----------------------------------------------------------------
+            # Try C++ WASAPI engine first (hr_audio.dll)
+            # ----------------------------------------------------------------
+            try:
+                from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+            except Exception:
+                _ae = None
+                _AOK = False
+
+            if _AOK and _ae is not None:
+                mic_vol  = self.audio_panel.mic_volume.get() / 100.0
+                sys_vol  = self.audio_panel.sys_volume.get() / 100.0
+                mic_mute = self.audio_panel.mic_mute.get()
+                sys_mute = self.audio_panel.sys_mute.get()
+
+                flags = _ae.start(mic_vol, sys_vol, mic_mute, sys_mute)
+                mic_ok = bool(flags & 0x1)
+                sys_ok = bool(flags & 0x2)
+                log.info(f"C++ AudioEngine started: mic={'OK' if mic_ok else 'FAIL'} "
+                         f"sys={'OK' if sys_ok else 'FAIL'}")
+
+                if mic_ok or sys_ok:
+                    self._using_cpp_audio = True
+                    self.audio_recording  = mic_ok
+                    self.sys_audio_recording = sys_ok
+                    self.audio_channels   = 2
+
+                    def _cpp_vu_poll():
+                        while getattr(self, '_using_cpp_audio', False) and (
+                                self.audio_recording or self.sys_audio_recording):
+                            m, s = _ae.get_levels()
+                            self.audio_panel.update_mic_level(m)
+                            self.audio_panel.update_sys_level(s)
+                            time.sleep(0.05)
+
+                    self._cpp_vu_thread = threading.Thread(target=_cpp_vu_poll, daemon=True)
+                    self._cpp_vu_thread.start()
+                    if mic_ok:
+                        log.info("Mic recording started via C++ WASAPI engine")
+                    if sys_ok:
+                        log.info("System audio recording started via C++ WASAPI engine")
+                    return
+
+            # ----------------------------------------------------------------
+            # Fallback: original PyAudio path
+            # ----------------------------------------------------------------
+            self._using_cpp_audio = False
             self.audio_channels = self.get_audio_channels()
             silence = b'\x00' * 1024 * 2 * self.audio_channels
 
-            # -- Microphone stream ------------------------------------------
             self.audio_p = pyaudio.PyAudio()
             self.audio_stream = self.audio_p.open(
                 format=pyaudio.paInt16,
@@ -3424,7 +3659,6 @@ class HomRecScreen:
             )
             self.audio_recording = True
 
-            # PERF FIX: import once before the loop — not 43×/sec inside it.
             try:
                 from homrec_native import core as _nc_mic
             except Exception:
@@ -3433,7 +3667,6 @@ class HomRecScreen:
             def record_mic() -> None:
                 while self.audio_recording and not self.stop_flag:
                     if not self.paused:
-                        # PERF FIX: read cached plain-Python values, not tk vars
                         if not self.audio_panel._mic_mute_cached:
                             try:
                                 data = self.audio_stream.read(1024, exception_on_overflow=False)
@@ -3441,11 +3674,10 @@ class HomRecScreen:
                                 if vol != 1.0:
                                     data = audioop.mul(data, 2, vol)
                                 self.audio_frames.append(data)
-                                # PERF FIX: store int only — no Tkinter draw
                                 if _nc_mic is not None:
                                     level = _nc_mic.audio_rms_level(data)
                                 else:
-                                    level = min(100, int(audioop.rms(data, 2) / 300))
+                                    level = min(100, int(audioop.rms(data, 2) / 150))
                                 self.audio_panel.update_mic_level(level)
                             except Exception:
                                 pass
@@ -3461,35 +3693,35 @@ class HomRecScreen:
 
             self.audio_thread = threading.Thread(target=record_mic, daemon=True)
             self.audio_thread.start()
-            log.info(f"Mic recording started ({self.audio_channels} channel(s))")
+            log.info(f"Mic recording started via PyAudio ({self.audio_channels} channel(s))")
 
-            # -- System audio via WASAPI loopback (PyAudio) ---------------
             try:
                 if not self.audio_panel.sys_mute.get():
                     self.sys_audio_p = pyaudio.PyAudio()
-                    loopback_idx = self._find_wasapi_loopback(self.sys_audio_p)
+                    supports_loopback_flag = self._pyaudio_supports_loopback(self.sys_audio_p)
+                    log.info(f"PyAudio as_loopback support: {supports_loopback_flag}")
+                    loopback_idx = self._find_wasapi_loopback(
+                        self.sys_audio_p, require_input=not supports_loopback_flag)
 
                     if loopback_idx is not None:
-                        # Try combinations: as_loopback flag x channel count
+                        flag_variants = []
+                        if supports_loopback_flag:
+                            flag_variants.append(True)
+                        flag_variants.append(False)
                         opened = False
                         sys_channels = 2
-                        for use_loopback_flag in (True, False):
+                        for use_loopback_flag in flag_variants:
                             for ch in (2, 1):
                                 try:
-                                    kwargs = dict(
-                                        format=pyaudio.paInt16,
-                                        channels=ch,
-                                        rate=44100,
-                                        input=True,
-                                        input_device_index=loopback_idx,
-                                        frames_per_buffer=1024,
-                                    )
+                                    kwargs = dict(format=pyaudio.paInt16, channels=ch,
+                                                  rate=44100, input=True,
+                                                  input_device_index=loopback_idx,
+                                                  frames_per_buffer=1024)
                                     if use_loopback_flag:
                                         kwargs['as_loopback'] = True
                                     self.sys_audio_stream = self.sys_audio_p.open(**kwargs)
-                                    opened = True
-                                    sys_channels = ch
-                                    log.info(f"System audio stream opened (as_loopback={use_loopback_flag}, ch={ch}, device={loopback_idx})")
+                                    opened = True; sys_channels = ch
+                                    log.info(f"System audio stream opened (as_loopback={use_loopback_flag}, ch={ch})")
                                     break
                                 except (TypeError, OSError) as e:
                                     log.warning(f"sys audio open failed (as_loopback={use_loopback_flag}, ch={ch}): {e}")
@@ -3506,14 +3738,17 @@ class HomRecScreen:
                                     if not self.paused:
                                         try:
                                             data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                            # PERF FIX: cached float, no tk .get()
-                                            vol = self.audio_panel._sys_vol_cached
-                                            if vol != 1.0:
-                                                data = audioop.mul(data, 2, vol)
-                                            self.sys_audio_frames.append(data)
-                                            rms = audioop.rms(data, 2)
-                                            # PERF FIX: store int only, no Tkinter draw
-                                            self.audio_panel.update_sys_level(min(100, int(rms / 300)))
+                                            muted = self.audio_panel._sys_mute_cached
+                                            vol   = self.audio_panel._sys_vol_cached
+                                            if muted:
+                                                self.sys_audio_frames.append(silence_sys)
+                                                self.audio_panel.update_sys_level(0)
+                                            else:
+                                                if vol != 1.0:
+                                                    data = audioop.mul(data, 2, vol)
+                                                self.sys_audio_frames.append(data)
+                                                self.audio_panel.update_sys_level(
+                                                    min(100, int(audioop.rms(data, 2) / 150)))
                                         except Exception as e:
                                             log.debug(f"sys audio read error: {e}")
                                     else:
@@ -3522,147 +3757,108 @@ class HomRecScreen:
 
                             self.sys_audio_thread = threading.Thread(target=record_sys, daemon=True)
                             self.sys_audio_thread.start()
-                            log.info(f"System audio recording started via WASAPI loopback (device index {loopback_idx})")
+                            log.info(f"System audio via WASAPI loopback (device={loopback_idx})")
                         else:
-                            log.warning("Could not open WASAPI loopback stream, falling through to dshow")
+                            log.warning("Could not open WASAPI loopback stream")
                             loopback_idx = None
 
                     if loopback_idx is None:
-                        # Step 2: try PyAudio direct with Stereo Mix device
                         log.warning("WASAPI loopback not found, trying PyAudio Stereo Mix")
                         if self.sys_audio_p is None:
                             self.sys_audio_p = pyaudio.PyAudio()
-
-                        stereo_mix_idx = None
-                        stereo_mix_ch = 2
-
-                        def _fix_pyaudio_name(name: str) -> str:
-                            """PyAudio on Windows often gives UTF-8 bytes decoded as cp1251."""
-                            try:
-                                return name.encode('cp1251').decode('utf-8')
-                            except Exception:
-                                return name
-
-                        keywords = [
-                            'stereo mix', 'what u hear', 'loopback', 'mixer', 'wave out',
-                            'стерео', 'микшер', 'что слышит',
-                        ]
-
+                        stereo_mix_idx = None; stereo_mix_ch = 2
+                        keywords = ['stereo mix','what u hear','loopback','mixer','wave out',
+                                    'стерео','микшер','что слышит']
                         for i in range(self.sys_audio_p.get_device_count()):
                             try:
                                 dev = self.sys_audio_p.get_device_info_by_index(i)
-                                raw_name = dev.get('name', '')
-                                fixed_name = _fix_pyaudio_name(raw_name)
+                                raw = dev.get('name', '')
+                                try: nm = raw.encode('cp1251').decode('utf-8')
+                                except: nm = raw
                                 max_in = int(dev.get('maxInputChannels', 0))
-                                log.debug(f"PyAudio device [{i}]: {fixed_name!r} in={max_in}")
-                                if max_in > 0:
-                                    nl = fixed_name.lower()
-                                    if any(k in nl for k in keywords):
-                                        stereo_mix_idx = i
-                                        stereo_mix_ch = min(max_in, 2)
-                                        log.info(f"PyAudio Stereo Mix found: [{i}] {fixed_name!r} ch={stereo_mix_ch}")
-                                        break
-                            except Exception:
-                                continue
-
-                        if stereo_mix_idx is None:
-                            log.warning("PyAudio Stereo Mix not found by keyword - trying dshow")
+                                log.debug(f"PyAudio device [{i}]: {nm!r} in={max_in}")
+                                if max_in > 0 and any(k in nm.lower() for k in keywords):
+                                    stereo_mix_idx = i; stereo_mix_ch = min(max_in, 2)
+                                    log.info(f"PyAudio Stereo Mix found: [{i}] {nm!r} ch={stereo_mix_ch}")
+                                    break
+                            except Exception: continue
 
                         if stereo_mix_idx is not None:
                             opened2 = False
                             for ch2 in ([stereo_mix_ch] if stereo_mix_ch == 1 else [2, 1]):
                                 try:
                                     self.sys_audio_stream = self.sys_audio_p.open(
-                                        format=pyaudio.paInt16,
-                                        channels=ch2,
-                                        rate=44100,
-                                        input=True,
+                                        format=pyaudio.paInt16, channels=ch2,
+                                        rate=44100, input=True,
                                         input_device_index=stereo_mix_idx,
-                                        frames_per_buffer=1024,
-                                    )
-                                    opened2 = True
-                                    stereo_mix_ch = ch2
+                                        frames_per_buffer=1024)
+                                    opened2 = True; stereo_mix_ch = ch2
                                     log.info(f"PyAudio Stereo Mix stream opened (ch={ch2})")
                                     break
                                 except Exception as e:
                                     log.warning(f"PyAudio Stereo Mix open failed (ch={ch2}): {e}")
-
                             if opened2:
                                 self.sys_audio_recording = True
                                 self._sys_channels = stereo_mix_ch
                                 _silence2 = b'\x00' * 1024 * 2 * stereo_mix_ch
-
                                 def record_sys_mix() -> None:
                                     while self.sys_audio_recording and not self.stop_flag:
                                         if not self.paused:
                                             try:
                                                 data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                                # PERF FIX: cached float, no tk .get()
-                                                vol = self.audio_panel._sys_vol_cached
-                                                if vol != 1.0:
-                                                    data = audioop.mul(data, 2, vol)
-                                                self.sys_audio_frames.append(data)
-                                                rms = audioop.rms(data, 2)
-                                                # PERF FIX: store int only, no Tkinter draw
-                                                self.audio_panel.update_sys_level(min(100, int(rms / 300)))
+                                                muted = self.audio_panel._sys_mute_cached
+                                                vol   = self.audio_panel._sys_vol_cached
+                                                if muted:
+                                                    self.sys_audio_frames.append(_silence2)
+                                                    self.audio_panel.update_sys_level(0)
+                                                else:
+                                                    if vol != 1.0:
+                                                        data = audioop.mul(data, 2, vol)
+                                                    self.sys_audio_frames.append(data)
+                                                    self.audio_panel.update_sys_level(
+                                                        min(100, int(audioop.rms(data, 2) / 150)))
                                             except Exception as e:
                                                 log.debug(f"sys mix read error: {e}")
                                         else:
                                             self.sys_audio_frames.append(_silence2)
                                             time.sleep(1024 / 44100)
-
                                 self.sys_audio_thread = threading.Thread(target=record_sys_mix, daemon=True)
                                 self.sys_audio_thread.start()
                                 log.info("System audio recording started via PyAudio Stereo Mix")
-                                loopback_idx = "pyaudio_mix"  # mark as handled - skip dshow
+                                loopback_idx = "pyaudio_mix"
 
                     if loopback_idx is None:
-                        # Step 3: last resort - dshow ffmpeg
-                        log.warning("WASAPI loopback device not found, trying dshow fallback")
-                        try:
-                            self.sys_audio_p.terminate()
-                        except Exception:
-                            pass
+                        log.warning("No WASAPI/Stereo Mix found, trying dshow fallback")
+                        try: self.sys_audio_p.terminate()
+                        except: pass
                         self.sys_audio_p = None
-
                         self.sys_audio_filename = self.filename.replace('.mp4', '_sys.wav')
                         devices = self.get_dshow_audio_devices()
                         sys_device = None
                         for d in devices:
                             dl = d.lower()
-                            if any(k in dl for k in ['stereo mix', 'what u hear', 'loopback',
-                                                       'стерео микшер', 'что слышит']):
-                                sys_device = d
-                                break
+                            if any(k in dl for k in ['stereo mix','what u hear','loopback',
+                                                       'стерео микшер','что слышит']):
+                                sys_device = d; break
                         if not sys_device and devices:
                             sys_device = devices[0]
-
                         if sys_device and self.ffmpeg_path:
                             vol = self.audio_panel.sys_volume.get() / 100.0
-                            vol_filter = f'volume={vol:.2f}' if vol != 1.0 else 'anull'
-                            sys_cmd = [
-                                self.ffmpeg_path, '-y',
-                                '-f', 'dshow',
-                                '-i', f'audio={sys_device}',
-                                '-af', vol_filter,
-                                '-acodec', 'pcm_s16le',
-                                '-ar', '44100', '-ac', '2',
-                                self.sys_audio_filename
-                            ]
+                            vf  = f'volume={vol:.2f}' if vol != 1.0 else 'anull'
+                            sys_cmd = [self.ffmpeg_path, '-y', '-f', 'dshow',
+                                       '-i', f'audio={sys_device}', '-af', vf,
+                                       '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2',
+                                       self.sys_audio_filename]
                             self.sys_ffmpeg_proc = subprocess.Popen(
-                                sys_cmd,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                stdin=subprocess.PIPE,
-                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
-                            )
+                                sys_cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.PIPE,
+                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
                             self.sys_audio_recording = True
-                            log.info(f"System audio recording started via dshow fallback: {sys_device}")
+                            log.info(f"System audio recording via dshow: {sys_device}")
                         else:
-                            log.warning("No system audio device found (neither WASAPI loopback nor dshow Stereo Mix)")
+                            log.warning("No system audio device found at all")
                             self.sys_audio_filename = None
                             self.sys_audio_recording = False
-
             except Exception as e:
                 log.warning(f"System audio unavailable: {e}")
                 self.sys_audio_filename = None
@@ -3671,7 +3867,1860 @@ class HomRecScreen:
         except Exception as e:
             log.error(f"Audio error: {e}")
             self.audio_recording = False
+
+    def stop_audio_recording(self) -> str | None:
+        # ----------------------------------------------------------------
+        # C++ engine path
+        # ----------------------------------------------------------------
+        if getattr(self, '_using_cpp_audio', False):
+            self._using_cpp_audio = False
+            self.audio_recording     = False
+            self.sys_audio_recording = False
+
+            try:
+                from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+            except Exception:
+                _ae = None; _AOK = False
+
+            if not (_AOK and _ae):
+                return None
+
+            audio_filename = self.filename.replace('.mp4', '_audio.wav')
+            mic_wav = self.filename.replace('.mp4', '_mic_tmp.wav')
+            sys_wav = self.filename.replace('.mp4', '_sys.wav')
+
+            has_mic = not self.audio_panel.mic_mute.get()
+            has_sys = not self.audio_panel.sys_mute.get()
+
+            flags = _ae.stop(
+                mic_wav if has_mic else None,
+                sys_wav if has_sys else None,
+            )
+            mic_written = bool(flags & 0x1)
+            sys_written = bool(flags & 0x2)
+            log.info(f"C++ AudioEngine stopped: mic_wav={mic_written} sys_wav={sys_written}")
+
+            if mic_written and sys_written:
+                ok = _ae.mix_wav(mic_wav, sys_wav, audio_filename)
+                if ok:
+                    try: import os; os.remove(mic_wav); os.remove(sys_wav)
+                    except: pass
+                    log.info(f"Mixed audio saved (C++): {audio_filename}")
+                    return audio_filename
+                else:
+                    log.warning("C++ mix_wav failed, using mic only")
+                    try: import os; os.rename(mic_wav, audio_filename)
+                    except: pass
+                    return audio_filename
+            elif mic_written:
+                try: import os; os.rename(mic_wav, audio_filename)
+                except: pass
+                log.info(f"Mic audio saved (C++): {audio_filename}")
+                return audio_filename
+            elif sys_written:
+                try: import os; os.rename(sys_wav, audio_filename)
+                except: pass
+                log.info(f"System audio saved (C++): {audio_filename}")
+                return audio_filename
+            return None
+
+        # ----------------------------------------------------------------
+        # PyAudio fallback path (оригинальный код)
+        # ----------------------------------------------------------------
+        self.audio_recording = False
+        self.sys_audio_recording = False
+
+        if self.audio_stream:
+            try:
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+            except Exception:
+                pass
+        self.audio_stream = None
+        if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
+            try:
+                self.sys_audio_stream.stop_stream()
+                self.sys_audio_stream.close()
+            except Exception:
+                pass
+            self.sys_audio_stream = None
+
+        if self.audio_thread and self.audio_thread.is_alive():
+            self.audio_thread.join(timeout=1)
+        self.audio_thread = None
+        if hasattr(self, 'sys_audio_thread') and self.sys_audio_thread and self.sys_audio_thread.is_alive():
+            self.sys_audio_thread.join(timeout=1)
+        self.sys_audio_thread = None
+
+        if self.audio_p:
+            try: self.audio_p.terminate()
+            except: pass
+        self.audio_p = None
+        if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
+            try: self.sys_audio_p.terminate()
+            except: pass
+            self.sys_audio_p = None
+
+        if self.sys_ffmpeg_proc and self.sys_ffmpeg_proc.poll() is None:
+            try:
+                self.sys_ffmpeg_proc.stdin.write(b'q\n')
+                self.sys_ffmpeg_proc.stdin.flush()
+            except: pass
+            try:
+                self.sys_ffmpeg_proc.wait(timeout=3)
+            except:
+                try: self.sys_ffmpeg_proc.kill()
+                except: pass
+        self.sys_ffmpeg_proc = None
+        time.sleep(0.15)
+
+        mic_frames = self.audio_frames
+        sys_frames = self.sys_audio_frames
+        self.audio_frames = []
+        self.sys_audio_frames = []
+
+        has_mic = bool(mic_frames) and not self.audio_panel.mic_mute.get()
+
+        sys_wav = self.sys_audio_filename
+        self.sys_audio_filename = None
+
+        has_sys_frames = bool(sys_frames) and not self.audio_panel.sys_mute.get()
+        has_sys_file   = bool(sys_wav) and os.path.exists(sys_wav or '') and not self.audio_panel.sys_mute.get()
+
+        if has_sys_frames and not has_sys_file:
+            sys_wav = self.filename.replace('.mp4', '_sys.wav')
+            try:
+                sys_ch = getattr(self, '_sys_channels', 2)
+                wf = wave.open(sys_wav, 'wb')
+                wf.setnchannels(sys_ch); wf.setsampwidth(2); wf.setframerate(44100)
+                CHUNK = 256
+                for _ci in range(0, len(sys_frames), CHUNK):
+                    wf.writeframes(b''.join(sys_frames[_ci:_ci+CHUNK]))
+                wf.close()
+                has_sys_file = True
+                log.info(f"System audio (WASAPI) written: {sys_wav}")
+            except Exception as e:
+                log.warning(f"Failed to write system audio frames: {e}")
+                has_sys_file = False
+
+        has_sys = has_sys_file
+
+        if not has_mic and not has_sys:
+            return None
+
+        audio_filename = self.filename.replace('.mp4', '_audio.wav')
+
+        if has_mic and has_sys:
+            try:
+                mic_tmp = audio_filename + '_mic_tmp.wav'
+                mix_cmd = [self.ffmpeg_path, '-y',
+                           '-i', mic_tmp, '-i', sys_wav,
+                           '-filter_complex', 'amix=inputs=2:duration=longest:normalize=0',
+                           '-acodec', 'pcm_s16le', audio_filename]
+                wf = wave.open(mic_tmp, 'wb')
+                wf.setnchannels(self.audio_channels); wf.setsampwidth(2); wf.setframerate(44100)
+                CHUNK = 256
+                for _ci in range(0, len(mic_frames), CHUNK):
+                    wf.writeframes(b''.join(mic_frames[_ci:_ci+CHUNK]))
+                wf.close()
+                result = subprocess.run(mix_cmd, capture_output=True, timeout=20,
+                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
+                if result.returncode != 0:
+                    log.warning(f"amix ffmpeg error: {result.stderr.decode(errors='replace')[-400:]}")
+                    raise RuntimeError(f"ffmpeg amix returncode={result.returncode}")
+                try: os.remove(mic_tmp); os.remove(sys_wav)
+                except: pass
+                log.info(f"Mixed audio saved: {audio_filename}")
+                return audio_filename
+            except Exception as e:
+                log.warning(f"Mix failed, using mic only: {e}")
+                has_sys = False
+
+        if has_sys and not has_mic:
+            try:
+                os.rename(sys_wav, audio_filename)
+                log.info(f"System audio saved: {audio_filename}")
+                return audio_filename
+            except: return sys_wav
+
+        try:
+            wf = wave.open(audio_filename, 'wb')
+            wf.setnchannels(self.audio_channels); wf.setsampwidth(2); wf.setframerate(44100)
+            CHUNK = 256
+            for i in range(0, len(mic_frames), CHUNK):
+                wf.writeframes(b''.join(mic_frames[i:i+CHUNK]))
+            wf.close()
+            log.info(f"Mic audio saved: {audio_filename}")
+        except Exception as e:
+            log.warning(f"Mic WAV write failed: {e}")
+            return None
+        return audio_filename
+
+    def select_folder(self) -> None:
+        folder = filedialog.askdirectory(initialdir=self.app.output_folder)
+        if folder:
+            self.app.output_folder = folder
+            self.folder_label.config(text=os.path.basename(folder))
     
+    def save_settings(self) -> None:
+        new_lang = self.lang_var.get()
+        if new_lang != self.app.current_language:
+            self.app.current_language = new_lang
+            self.app.lang = LANGUAGES[new_lang]
+            self.app.update_ui_language()
+        
+        self.app.quality = int(self.quality_var.get())
+        # FPS slider replaces mode combo: set target_fps directly
+        new_fps = int(self.fps_slider_var.get())
+        self.app.target_fps = new_fps
+        # Derive recording_mode from fps for backward compat
+        if new_fps >= 60:
+            self.app.recording_mode = "ultra"
+        elif new_fps >= 30:
+            self.app.recording_mode = "turbo"
+        elif new_fps >= 15:
+            self.app.recording_mode = "balanced"
+        else:
+            self.app.recording_mode = "eco"
+        self.app.scale_factor = int(self.scale_var.get()) / 100
+        self.app.update_monitor_info()
+        self.app.monitor_id = int(self.monitor_var.get())
+        self.app.update_monitor_info()
+        self.app.countdown_var.set(self.countdown_var.get())
+        self.app.timestamp_var.set(self.timestamp_var.get())
+        self.app.cursor_var.set(self.cursor_var.get())
+        self.app.show_summary = self.show_summary_var.get()
+        self.app.minimize_to_tray.set(self.minimize_tray_var.get())
+        # Save disable_preview and apply immediately
+        if hasattr(self, 'disable_preview_var'):
+            self.app.disable_preview = self.disable_preview_var.get()
+        # codec_var / hw_var live in AdvancedSettingsDialog, not here - guard safely
+        if hasattr(self, 'codec_var'):
+            self.app.video_codec = self.codec_var.get()
+        if hasattr(self, 'hw_var'):
+            self.app.hw_accel = self.hw_var.get()
+        self.app.res_label.config(text=f"{self.app.lang['resolution']} {self.app.record_width}x{self.app.record_height}")
+        self.app.save_settings(silent=True)
+        self.dialog.destroy()
+        messagebox.showinfo(self.app.lang["info"], self.app.lang["settings_saved"])
+
+class HomRecScreen:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.current_language = "en"
+        self.lang = self._load_language(self.current_language)
+        
+        self.root.title(self.lang["app_title"])
+        self.root.geometry("1300x750")
+        self.root.minsize(1200, 650)
+        
+        optimize_for_performance()
+        
+        self.set_app_icon()
+        
+        self.current_theme = "dark"
+        self.colors = self.get_theme_colors("dark")
+        self.apply_theme()
+        
+        self.sct = mss.mss()
+        # Queue initialized here; thread starts later after monitor is set up
+        self._preview_queue = queue.Queue(maxsize=1)
+        self._preview_running = True
+        
+        self.audio_recording = False
+        self.audio_thread: threading.Thread | None = None
+        self.audio_frames: list = []
+        self.audio_stream = None
+        self.audio_p = None
+        self.audio_channels = 1
+        self.sys_audio_recording = False
+        self.sys_audio_thread: threading.Thread | None = None
+        self.sys_audio_frames: list = []
+        self.sys_audio_stream = None
+        self.sys_audio_p = None
+        self.sys_audio_filename: str | None = None
+        self.sys_ffmpeg_proc = None
+        
+        self.ffmpeg_proc: subprocess.Popen | None = None
+        self.ffmpeg_reader_thread: threading.Thread | None = None
+        self.stop_ffmpeg_reader = False
+        
+        self.scale_factor = 0.75
+        self.output_folder = "recordings"
+        self.quality = 70
+        self.target_fps = 15
+        self.recording_mode = "balanced"
+        self.show_summary = True
+        self.hotkey_start_stop = "F9"
+        self.hotkey_pause = "F10"
+        self.hotkey_fullscreen = "F11"
+        self.notify_sound = True
+        self.notify_flash = True
+        self.auto_save_profile = False
+        self.video_codec = "libx264"
+        self.hw_accel = "auto"
+        self.enc_preset = "ultrafast"
+        self.enc_crf = 18
+        self.pix_fmt = "yuv420p"
+        self.audio_sample_rate = 44100
+        self.audio_aac_bitrate = "192k"
+        self.audio_out_channels = 2
+        self.ui_theme = "dark"
+        self.ui_scale = 1.0
+        self.ui_font = "Segoe UI"
+        self.filename_template = "HomRec_{date}_{time}"
+        self.auto_stop_min = 0
+        self.replay_buffer_sec = 0
+        
+        self.always_on_top = tk.BooleanVar(value=False)
+        self.minimize_to_tray = tk.BooleanVar(value=True)
+        self.language_var = tk.StringVar(value="en")
+        self.theme_var = tk.StringVar(value="dark")
+        
+        self.countdown_var = tk.BooleanVar(value=True)
+        self.timestamp_var = tk.BooleanVar(value=False)
+        self.cursor_var = tk.BooleanVar(value=False)
+        
+        self.preview_width = 900
+        self.preview_height = 500
+        
+        self.load_settings()
+        
+        self.recording = False
+        self.paused = False
+        self.out = None
+        self.frame_count = 0
+        self.start_time = 0.0
+        self.recording_thread: threading.Thread | None = None
+        self.stop_flag = False
+        self.last_frame_time = 0.0
+        
+        self.monitor_id = 1
+        self.monitor_left = 0
+        self.monitor_top = 0
+        self.update_monitor_info()
+
+        # capture mode: "desktop" or "window"
+        self.capture_mode = "desktop"
+        self.capture_window_title = ""
+        self.tray_icon = None
+        
+        os.makedirs(self.output_folder, exist_ok=True)
+        
+        self.ffmpeg_path = find_ffmpeg()
+        if self.ffmpeg_path:
+            log.info(f"FFmpeg found: {self.ffmpeg_path}")
+        else:
+            log.warning("FFmpeg NOT found!")
+        
+        self.create_menu()
+        self.create_widgets()
+        # Start background capture thread now - monitor and preview_width are ready
+        self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._capture_thread.start()
+        self.update_preview()
+        self.root.after(500, self._warm_up_gpu_probe)
+        
+        self.root.bind('<Configure>', self.on_window_resize)
+        self._apply_hotkeys()
+        self._setup_drag_drop()
+        self._register_file_types()
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.setup_tray()
+        log.info("HomRec v1.5.0 started, language: %s", self.current_language)
+        # Check for updates 2 seconds after startup (non-blocking)
+        self.root.after(2000, self._start_update_check)
+        # Show welcome dialog on first launch
+        if getattr(self, '_first_launch', False):
+            self.root.after(400, self._show_welcome_and_save)
+    
+    def update_ui_language(self) -> None:
+        self.root.title(self.lang["app_title"])
+        self.recreate_widgets()
+    
+    def check_ffmpeg(self) -> bool:
+        return self.ffmpeg_path is not None
+    
+    def get_dshow_audio_devices(self) -> list[str]:
+        """List available dshow audio input devices via ffmpeg."""
+        try:
+            result = subprocess.run(
+                [self.ffmpeg_path, '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+            )
+            devices = []
+            for line in result.stderr.split('\n'):
+                if '"' in line and ('audio' in line.lower() or 'stereo' in line.lower() or 'mix' in line.lower() or 'что' in line.lower()):
+                    start = line.find('"')
+                    end = line.find('"', start + 1)
+                    if end > start:
+                        devices.append(line[start+1:end])
+            return devices
+        except:
+            return []
+
+    def merge_audio_video(self, video_file: str, audio_file: str) -> bool:
+        log.info(f"merge_audio_video: video={video_file!r} audio={audio_file!r}")
+        if not audio_file or not os.path.exists(audio_file):
+            log.warning(f"merge_audio_video: audio file missing: {audio_file!r}")
+            return False
+        if not os.path.exists(video_file):
+            log.warning(f"merge_audio_video: video file missing: {video_file!r}")
+            return False
+        if not self.ffmpeg_path:
+            log.warning("merge_audio_video: no ffmpeg path")
+            return False
+
+        audio_size = os.path.getsize(audio_file)
+        video_size = os.path.getsize(video_file)
+        log.info(f"merge_audio_video: audio_size={audio_size} video_size={video_size}")
+
+        output_file = video_file.replace('.mp4', '_temp.mp4')
+
+        try:
+            cmd = [
+                self.ffmpeg_path,
+                '-i', video_file,
+                '-i', audio_file,
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-af', 'aresample=async=1000',
+                '-map', '0:v:0',
+                '-map', '1:a:0',
+                '-shortest',
+                '-y',
+                output_file
+            ]
+            log.debug(f"merge cmd: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, timeout=120,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0)
+            stderr = result.stderr.decode('utf-8', errors='replace')
+            log.debug(f"merge ffmpeg returncode={result.returncode}")
+            if result.returncode != 0:
+                log.warning(f"merge ffmpeg failed:\n{stderr[-1000:]}")
+
+            if result.returncode == 0 and os.path.exists(output_file):
+                os.remove(video_file)
+                os.remove(audio_file)
+                os.rename(output_file, video_file)
+                log.info(f"merge_audio_video: success → {video_file}")
+                return True
+            log.warning(f"merge_audio_video: output not created or returncode!=0")
+            return False
+        except Exception as e:
+            log.warning(f"merge_audio_video exception: {e}")
+            return False
+    
+    def set_app_icon(self) -> None:
+        # Resolve icons folder relative to exe or script
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        self._icons_dir = os.path.join(base_dir, "icons")
+
+        # main.ico - icon shown in taskbar and window
+        self._main_ico = os.path.join(self._icons_dir, "main.ico")
+        self._rec_ico  = os.path.join(self._icons_dir, "rec.ico")
+
+        try:
+            self.root.iconbitmap(self._main_ico)
+        except:
+            # fallback: generate a simple icon if file not found
+            try:
+                icon_image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(icon_image)
+                draw.rectangle([10, 20, 54, 44], fill="#89b4fa", outline="#cdd6f4", width=2)
+                draw.ellipse([25, 25, 39, 39], fill="#1e1e2e", outline="#cdd6f4", width=2)
+                draw.ellipse([29, 29, 35, 35], fill="#89b4fa")
+                icon_photo = ImageTk.PhotoImage(icon_image)
+                self.root.iconphoto(True, icon_photo)
+            except:
+                pass
+
+        if sys.platform == "win32":
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.5.0")
+
+        # Pre-render two frames of the REC badge (for a simple pulse animation)
+        self._rec_icon_img = None
+        self._rec_frames = self._make_rec_frames()
+        self._rec_frame_idx = 0
+
+    def _set_taskbar_icon(self, recording: bool) -> None:
+        """Switch the taskbar/window icon between main.ico and rec.ico."""
+        try:
+            if recording and os.path.exists(self._rec_ico):
+                self.root.iconbitmap(self._rec_ico)
+            else:
+                self.root.iconbitmap(self._main_ico)
+        except Exception as e:
+            log.debug(f"Taskbar icon switch failed: {e}")
+    
+    def on_window_resize(self, event: tk.Event) -> None:
+        if event.widget == self.root:
+            self.update_preview_size()
+    
+    def update_preview_size(self) -> None:
+        try:
+            preview_height = self.root.winfo_height() - 200
+            preview_width = self.root.winfo_width() - 280
+            if preview_width > 0 and preview_height > 0:
+                self.preview_width = max(600, min(preview_width - 40, 1280))
+                self.preview_height = max(350, min(preview_height - 40, 720))
+        except:
+            pass
+    
+    # Built-in themes
+    BUILTIN_THEMES = {
+        "dark": {
+            "bg": "#1e1e2e", "fg": "#cdd6f4", "accent": "#89b4fa",
+            "success": "#a6e3a1", "warning": "#f9e2af", "error": "#f38ba8",
+            "surface": "#313244", "surface_light": "#45475a",
+            "preview_bg": "#11111b", "text": "#cdd6f4", "text_secondary": "#a6adc8"
+        },
+        "light": {
+            "bg": "#f5f5f5", "fg": "#2c3e50", "accent": "#3498db",
+            "success": "#27ae60", "warning": "#f39c12", "error": "#e74c3c",
+            "surface": "#ecf0f1", "surface_light": "#bdc3c7",
+            "preview_bg": "#ffffff", "text": "#2c3e50", "text_secondary": "#7f8c8d"
+        },
+        "catppuccin": {
+            "bg": "#1e1e2e", "fg": "#cdd6f4", "accent": "#cba6f7",
+            "success": "#a6e3a1", "warning": "#f9e2af", "error": "#f38ba8",
+            "surface": "#181825", "surface_light": "#313244",
+            "preview_bg": "#11111b", "text": "#cdd6f4", "text_secondary": "#6c7086"
+        },
+        "nord": {
+            "bg": "#2e3440", "fg": "#eceff4", "accent": "#88c0d0",
+            "success": "#a3be8c", "warning": "#ebcb8b", "error": "#bf616a",
+            "surface": "#3b4252", "surface_light": "#434c5e",
+            "preview_bg": "#242933", "text": "#eceff4", "text_secondary": "#d8dee9"
+        },
+        "dracula": {
+            "bg": "#282a36", "fg": "#f8f8f2", "accent": "#bd93f9",
+            "success": "#50fa7b", "warning": "#f1fa8c", "error": "#ff5555",
+            "surface": "#44475a", "surface_light": "#6272a4",
+            "preview_bg": "#21222c", "text": "#f8f8f2", "text_secondary": "#6272a4"
+        },
+    }
+
+    def get_theme_colors(self, theme: str) -> dict:
+        # Check built-in themes
+        if theme in self.BUILTIN_THEMES:
+            return self.BUILTIN_THEMES[theme]
+        # Try loading .hrt file from themes/ folder
+        themes_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR)
+        hrt_path = os.path.join(themes_dir, f"{theme}.hrt")
+        if os.path.exists(hrt_path):
+            try:
+                data = _hrc_read(hrt_path, _HRT_MAGIC)
+                result = dict(self.BUILTIN_THEMES["dark"])
+                result.update(data)
+                log.info(f"Loaded theme from {hrt_path}")
+                return result
+            except Exception as e:
+                log.warning(f"Failed to load theme {hrt_path}: {e}")
+        # Fallback to dark
+        return self.BUILTIN_THEMES["dark"]
+    
+    def _load_language(self, lang_code: str) -> dict:
+        """Load language from LANGUAGES dict or from Assets/L/*.hrl file."""
+        if lang_code in LANGUAGES:
+            return dict(LANGUAGES[lang_code])
+        # Try .hrl file in Assets/L/
+        base = os.path.dirname(os.path.abspath(__file__))
+        hrl_path = os.path.join(base, LANGS_DIR, f"{lang_code}.hrl")
+        if os.path.exists(hrl_path):
+            try:
+                data = _hrc_read(hrl_path, _HRL_MAGIC)
+                result = dict(LANGUAGES["en"])
+                file_schema = data.get("schema_version", 0)
+                result.update(data)
+                # Check for missing keys
+                missing = [k for k in LANG_REQUIRED_KEYS if k not in data]
+                if missing:
+                    log.warning(f"Language {lang_code}: {len(missing)} missing keys "
+                                f"(schema {file_schema} vs {LANG_SCHEMA_VERSION}). "
+                                f"Using English fallback for: {missing[:5]}...")
+                log.info(f"Loaded language from {hrl_path} (schema={file_schema})")
+                return result
+            except Exception as e:
+                log.warning(f"Failed to load language {hrl_path}: {e}")
+        return dict(LANGUAGES["en"])
+
+    def _scan_custom_languages(self) -> list:
+        """Return list of (code, name) for all .hrl files in Assets/L/ folder."""
+        langs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), LANGS_DIR)
+        result = []
+        os.makedirs(langs_dir, exist_ok=True)
+        for fname in os.listdir(langs_dir):
+            if fname.endswith(".hrl"):
+                code = fname[:-4]
+                try:
+                    data = _hrc_read(os.path.join(langs_dir, fname), _HRL_MAGIC)
+                    name = data.get("lang_name", code)
+                    result.append((code, name))
+                except Exception as e:
+                    log.warning(f"Failed to scan language {fname}: {e}")
+        return result
+
+    def _scan_custom_themes(self) -> list:
+        """Return list of theme names from Assets/Themes/*.hrt files."""
+        themes_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR)
+        os.makedirs(themes_dir, exist_ok=True)
+        result = []
+        if not os.path.exists(themes_dir):
+            return result
+        for fname in os.listdir(themes_dir):
+            if fname.endswith(".hrt"):
+                result.append(fname[:-4])
+        return result
+
+    def apply_theme(self) -> None:
+        self.root.configure(bg=self.colors["bg"])
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("TFrame", background=self.colors["bg"])
+        style.configure("TLabel", background=self.colors["bg"], foreground=self.colors["fg"])
+        style.configure("TLabelframe", background=self.colors["bg"], foreground=self.colors["accent"])
+        style.configure("TLabelframe.Label", background=self.colors["bg"], foreground=self.colors["accent"], 
+                       font=("Segoe UI", 11, "bold"))
+        style.configure("TButton", background=self.colors["surface"], foreground=self.colors["fg"])
+        style.configure("TCombobox", fieldbackground=self.colors["surface"], foreground=self.colors["fg"])
+    
+    def create_menu(self) -> None:
+        menubar = tk.Menu(self.root, bg=self.colors["surface"], fg=self.colors["fg"])
+        self.root.config(menu=menubar)
+        
+        file_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        menubar.add_cascade(label=self.lang["file_menu"], menu=file_menu)
+        file_menu.add_command(label=self.lang["open_recordings"], command=self.open_recordings)
+        file_menu.add_separator()
+        file_menu.add_command(label=self.lang["exit"], command=self.quit_app)
+        
+        view_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        menubar.add_cascade(label=self.lang["view_menu"], menu=view_menu)
+        
+        view_menu.add_checkbutton(label=self.lang["always_on_top"],
+                                 variable=self.always_on_top,
+                                 command=self.toggle_always_on_top)
+        view_menu.add_command(label=self.lang["fullscreen"], command=self.toggle_fullscreen)
+        view_menu.add_separator()
+        
+        if HAS_PSUTIL:
+            view_menu.add_command(label=self.lang["pc_analytics"], command=self.show_analytics)
+            view_menu.add_separator()
+        
+        lang_menu = tk.Menu(view_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        view_menu.add_cascade(label=self.lang["language"], menu=lang_menu)
+        lang_menu.add_radiobutton(label="English", variable=self.language_var, value="en",
+                                 command=lambda: self.change_language("en"))
+        lang_menu.add_radiobutton(label="Русский", variable=self.language_var, value="ru",
+                                 command=lambda: self.change_language("ru"))
+        _custom_langs = self._scan_custom_languages()
+        if _custom_langs:
+            lang_menu.add_separator()
+            for _lcode, _lname in _custom_langs:
+                lang_menu.add_radiobutton(label=f"★ {_lname}", variable=self.language_var,
+                                          value=_lcode,
+                                          command=lambda c=_lcode: self.change_language(c))
+        
+        theme_menu = tk.Menu(view_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        view_menu.add_cascade(label=self.lang["theme"], menu=theme_menu)
+        for _tid, _tlabel in [("dark", "Dark"), ("light", "Light"),
+                               ("catppuccin", "Catppuccin"), ("nord", "Nord"), ("dracula", "Dracula")]:
+            theme_menu.add_radiobutton(label=_tlabel, variable=self.theme_var, value=_tid,
+                                       command=lambda t=_tid: self.change_theme(t))
+        _custom_themes = self._scan_custom_themes()
+        if _custom_themes:
+            theme_menu.add_separator()
+            for _ct in _custom_themes:
+                theme_menu.add_radiobutton(label=f"★ {_ct}", variable=self.theme_var, value=_ct,
+                                           command=lambda t=_ct: self.change_theme(t))
+        
+        settings_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        menubar.add_cascade(label=self.lang["settings_menu"], menu=settings_menu)
+        settings_menu.add_command(label=self.lang["preferences"], command=self.open_settings)
+        settings_menu.add_separator()
+        
+        capture_menu = tk.Menu(settings_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        settings_menu.add_cascade(label=self.lang["capture_source"], menu=capture_menu)
+        capture_menu.add_command(label=self.lang["full_desktop"], command=self.set_capture_desktop)
+        capture_menu.add_command(label=self.lang["select_window"], command=self.open_window_picker)
+
+        help_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        menubar.add_cascade(label=self.lang["help_menu"], menu=help_menu)
+        help_menu.add_command(label=self.lang["check_updates"], command=self._manual_update_check)
+        help_menu.add_separator()
+        help_menu.add_command(label=self.lang["report_issue"], command=self._open_issues)
+    
+    def toggle_always_on_top(self) -> None:
+        if self.always_on_top.get():
+            self.root.attributes('-topmost', True)
+        else:
+            self.root.attributes('-topmost', False)
+        self.save_settings(silent=True)
+    
+    def toggle_fullscreen(self) -> None:
+        if self.root.attributes('-fullscreen'):
+            self.root.attributes('-fullscreen', False)
+        else:
+            self.root.attributes('-fullscreen', True)
+    
+    def show_cpu_info(self) -> None:
+        self.show_analytics()
+
+    def show_ram_info(self) -> None:
+        self.show_analytics()
+
+    def show_disk_info(self) -> None:
+        self.show_analytics()
+
+    def show_analytics(self) -> None:
+        if not HAS_PSUTIL:
+            messagebox.showinfo("PC Analytics", "psutil not installed.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        self._set_icon(dlg)
+        dlg.title("PC Analytics")
+        self._set_icon(dlg)
+        dlg.geometry("360x440")
+        dlg.configure(bg=self.colors["bg"])
+        dlg.transient(self.root)
+        dlg.resizable(False, True)
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + self.root.winfo_width() // 2 - 170
+        y = self.root.winfo_y() + self.root.winfo_height() // 2 - 150
+        dlg.geometry(f"+{x}+{y}")
+
+        def make_section(parent, title, color):
+            f = tk.Frame(parent, bg=self.colors["surface"], pady=8, padx=12)
+            f.pack(fill="x", padx=12, pady=6)
+            tk.Label(f, text=title, bg=self.colors["surface"],
+                     fg=color, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            return f
+
+        def row(parent, label, value):
+            r = tk.Frame(parent, bg=self.colors["surface"])
+            r.pack(fill="x", pady=1)
+            tk.Label(r, text=label, bg=self.colors["surface"],
+                     fg=self.colors["text_secondary"], font=("Segoe UI", 9), width=14, anchor="w").pack(side="left")
+            tk.Label(r, text=value, bg=self.colors["surface"],
+                     fg=self.colors["text"], font=("Consolas", 9)).pack(side="left")
+
+        def refresh():
+            for w in dlg.winfo_children():
+                w.destroy()
+
+            tk.Label(dlg, text="PC Analytics", bg=self.colors["bg"],
+                     fg=self.colors["accent"], font=("Segoe UI", 12, "bold")).pack(pady=(12, 4))
+
+            cpu_f = make_section(dlg, "CPU", self.colors["accent"])
+            row(cpu_f, "Cores:", str(psutil.cpu_count()))
+            row(cpu_f, "Usage:", f"{psutil.cpu_percent(interval=0.3):.1f}%")
+
+            mem = psutil.virtual_memory()
+            ram_f = make_section(dlg, "RAM", self.colors["success"])
+            row(ram_f, "Total:", f"{mem.total/1024**3:.1f} GB")
+            row(ram_f, "Available:", f"{mem.available/1024**3:.1f} GB")
+            row(ram_f, "Used:", f"{mem.percent}%")
+
+            if os.path.exists(self.output_folder):
+                disk = psutil.disk_usage(self.output_folder)
+                dsk_f = make_section(dlg, "Disk", self.colors["warning"])
+                row(dsk_f, "Total:", f"{disk.total/1024**3:.1f} GB")
+                row(dsk_f, "Free:", f"{disk.free/1024**3:.1f} GB")
+                row(dsk_f, "Used:", f"{disk.percent}%")
+
+            tk.Button(dlg, text="Refresh", command=refresh,
+                      bg=self.colors["surface_light"], fg=self.colors["text"],
+                      font=("Segoe UI", 9), relief="flat", padx=16, pady=4,
+                      cursor="hand2").pack(pady=(4, 12))
+
+        refresh()
+    
+    def change_language(self, lang: str) -> None:
+        if lang != self.current_language:
+            self.current_language = lang
+            self.lang = LANGUAGES[lang]
+            self.language_var.set(lang)
+            self.update_ui_language()
+            self.save_settings(silent=True)
+    
+    def open_settings(self) -> None:
+        SettingsDialog(self.root, self)
+    
+    def change_theme(self, theme: str) -> None:
+        self.current_theme = theme
+        self.theme_var.set(theme)
+        self.colors = self.get_theme_colors(theme)
+        self.apply_theme()
+        self.recreate_widgets()
+        self.save_settings(silent=True)
+    
+    def recreate_widgets(self) -> None:
+        was_recording = self.recording
+        was_paused = self.paused
+        for widget in self.root.winfo_children():
+            widget.destroy()
+        self.create_menu()
+        self.create_widgets()
+        if was_recording:
+            self.record_btn.config(text=self.lang["stop"], bg=self.colors["error"], command=self.stop_recording)
+            self.pause_btn.config(state="normal")
+            if was_paused:
+                self.pause_btn.config(text=self.lang["resume"], bg=self.colors["success"])
+    
+    def set_mode(self, mode: str) -> None:
+        self.recording_mode = mode
+        self.update_mode_settings()
+        self.save_settings(silent=True)
+        self.res_label.config(text=f"{self.lang['resolution']} {self.record_width}x{self.record_height}")
+    
+    def update_mode_settings(self) -> None:
+        if self.recording_mode == "ultra":
+            self.target_fps = 60
+            self.quality = 95
+            self.scale_factor = 1.0
+        elif self.recording_mode == "turbo":
+            self.target_fps = 30
+            self.quality = 90
+            self.scale_factor = 1.0
+        elif self.recording_mode == "balanced":
+            self.target_fps = 15
+            self.quality = 70
+            self.scale_factor = 0.75
+        else:
+            self.target_fps = 8
+            self.quality = 50
+            self.scale_factor = 0.5
+        self.update_monitor_info()
+    
+    def load_settings(self) -> None:
+        try:
+            if os.path.exists(SETTINGS_PATH):
+                self._first_launch = False
+                with open(SETTINGS_PATH, "r") as f:
+                    settings = json.load(f)
+                    self.output_folder = settings.get("output_folder", "recordings")
+                    self.scale_factor = settings.get("scale_factor", 0.75)
+                    self.target_fps = settings.get("target_fps", 15)
+                    # Клампим quality: старые настройки могли сохранить 95-100%
+                    # → qp=18 (lossless) → encoder не успевает → FPS падает
+                    loaded_q = settings.get("quality", 70)
+                    self.quality = max(50, min(100, int(loaded_q)))
+                    self.recording_mode = settings.get("mode", "balanced")
+                    self.current_theme = settings.get("theme", "dark")
+                    self.current_language = settings.get("language", "en")
+                    self.lang = LANGUAGES[self.current_language]
+                    self.always_on_top.set(settings.get("always_on_top", False))
+                    self.countdown_var.set(settings.get("countdown", True))
+                    self.timestamp_var.set(settings.get("timestamp", False))
+                    self.cursor_var.set(settings.get("cursor", False))
+                    self.show_summary = settings.get("show_summary", True)
+                    self.minimize_to_tray.set(settings.get("minimize_to_tray", True))
+                    self.video_codec = settings.get("video_codec", "libx264")
+                    self.hw_accel = settings.get("hw_accel", "auto")
+                    self.enc_preset = settings.get("enc_preset", "ultrafast")
+                    self.enc_crf = settings.get("enc_crf", 18)
+                    self.pix_fmt = settings.get("pix_fmt", "yuv420p")
+                    self.audio_sample_rate = settings.get("audio_sample_rate", 44100)
+                    self.audio_aac_bitrate = settings.get("audio_aac_bitrate", "192k")
+                    self.audio_out_channels = settings.get("audio_out_channels", 2)
+                    self.ui_theme = settings.get("ui_theme", "dark")
+                    self.ui_scale = settings.get("ui_scale", 1.0)
+                    self.ui_font = settings.get("ui_font", "Segoe UI")
+                    self.filename_template = settings.get("filename_template", "HomRec_{date}_{time}")
+                    self.auto_stop_min = settings.get("auto_stop_min", 0)
+                    self.replay_buffer_sec = settings.get("replay_buffer_sec", 0)
+                    self.hotkey_start_stop = settings.get("hotkey_start_stop", "F9")
+                    self.hotkey_pause = settings.get("hotkey_pause", "F10")
+                    self.hotkey_fullscreen = settings.get("hotkey_fullscreen", "F11")
+                    self.notify_sound = settings.get("notify_sound", True)
+                    self.notify_flash = settings.get("notify_flash", True)
+                    self.auto_save_profile = settings.get("auto_save_profile", False)
+                    self.disable_preview = settings.get("disable_preview", False)
+                    self._saved_mic_volume  = settings.get("mic_volume", 80)
+                    self._saved_sys_volume  = settings.get("sys_volume", 100)
+                    self._saved_mic_mute    = settings.get("mic_mute", False)
+                    self._saved_sys_mute    = settings.get("sys_mute", False)
+                    self._saved_audio_enabled = settings.get("audio_enabled", True)
+
+                    if self.always_on_top.get():
+                        self.root.attributes('-topmost', True)
+        except:
+            pass
+        if not hasattr(self, '_first_launch'):
+            self._first_launch = True
+
+    def save_settings(self, silent: bool = False) -> None:
+        settings = {
+            "output_folder": self.output_folder,
+            "scale_factor": self.scale_factor,
+            "target_fps": self.target_fps,
+            "quality": self.quality,
+            "mode": self.recording_mode,
+            "theme": self.current_theme,
+            "language": self.current_language,
+            "always_on_top": self.always_on_top.get(),
+            "countdown": self.countdown_var.get(),
+            "timestamp": self.timestamp_var.get(),
+            "cursor": self.cursor_var.get(),
+            "show_summary": self.show_summary,
+            "minimize_to_tray": self.minimize_to_tray.get(),
+            "video_codec": getattr(self, 'video_codec', 'libx264'),
+            "hw_accel": getattr(self, 'hw_accel', 'auto'),
+            "enc_preset": getattr(self, 'enc_preset', 'ultrafast'),
+            "enc_crf": getattr(self, 'enc_crf', 18),
+            "pix_fmt": getattr(self, 'pix_fmt', 'yuv420p'),
+            "audio_sample_rate": getattr(self, 'audio_sample_rate', 44100),
+            "audio_aac_bitrate": getattr(self, 'audio_aac_bitrate', '192k'),
+            "audio_out_channels": getattr(self, 'audio_out_channels', 2),
+            "ui_theme": getattr(self, 'ui_theme', 'dark'),
+            "ui_scale": getattr(self, 'ui_scale', 1.0),
+            "ui_font": getattr(self, 'ui_font', 'Segoe UI'),
+            "filename_template": getattr(self, 'filename_template', 'HomRec_{date}_{time}'),
+            "auto_stop_min": getattr(self, 'auto_stop_min', 0),
+            "replay_buffer_sec": getattr(self, 'replay_buffer_sec', 0),
+            "hotkey_start_stop": getattr(self, 'hotkey_start_stop', 'F9'),
+            "hotkey_pause": getattr(self, 'hotkey_pause', 'F10'),
+            "hotkey_fullscreen": getattr(self, 'hotkey_fullscreen', 'F11'),
+            "notify_sound": getattr(self, 'notify_sound', True),
+            "notify_flash": getattr(self, 'notify_flash', True),
+            "auto_save_profile": getattr(self, 'auto_save_profile', False),
+            "disable_preview": getattr(self, 'disable_preview', False),
+            "mic_volume": int(self.audio_panel.mic_volume.get()) if hasattr(self, 'audio_panel') else 80,
+            "sys_volume": int(self.audio_panel.sys_volume.get()) if hasattr(self, 'audio_panel') else 100,
+            "mic_mute": bool(self.audio_panel.mic_mute.get()) if hasattr(self, 'audio_panel') else False,
+            "sys_mute": bool(self.audio_panel.sys_mute.get()) if hasattr(self, 'audio_panel') else False,
+            "audio_enabled": bool(self.audio_panel.audio_enabled.get()) if hasattr(self, 'audio_panel') else True,
+        }
+        with open(SETTINGS_PATH, "w") as f:
+            json.dump(settings, f, indent=2)
+        if not silent:
+            messagebox.showinfo(self.lang["info"], self.lang["settings_saved"])
+    
+    def update_monitor_info(self) -> None:
+        """Update monitor information including position offsets"""
+        if self.monitor_id < len(self.sct.monitors):
+            self.monitor = self.sct.monitors[self.monitor_id]
+            self.original_width = self.monitor['width']
+            self.original_height = self.monitor['height']
+            
+            # Store monitor position for FFmpeg
+            self.monitor_left = self.monitor['left']
+            self.monitor_top = self.monitor['top']
+            
+            self.record_width = int(self.original_width * self.scale_factor)
+            self.record_height = int(self.original_height * self.scale_factor)
+            
+            # Ensure dimensions are even (required for some codecs)
+            if self.record_width % 2 != 0:
+                self.record_width -= 1
+            if self.record_height % 2 != 0:
+                self.record_height -= 1
+            log.debug(f"Monitor {self.monitor_id}: {self.original_width}x{self.original_height} at ({self.monitor_left}, {self.monitor_top}), record: {self.record_width}x{self.record_height}")
+    
+    def create_widgets(self) -> None:
+        main_container = tk.Frame(self.root, bg=self.colors["bg"])
+        main_container.pack(fill="both", expand=True, padx=15, pady=15)
+        
+        left_panel = tk.Frame(main_container, bg=self.colors["surface"], width=240)
+        left_panel.pack(side="left", fill="y", padx=(0, 15))
+        left_panel.pack_propagate(False)
+        
+        title_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        title_frame.pack(pady=20, fill="x")
+        tk.Label(title_frame, text="HomRec", 
+                font=("Segoe UI", 22, "bold"), 
+                bg=self.colors["surface"], 
+                fg=self.colors["accent"]).pack()
+        tk.Label(title_frame, text="v1.5.0", 
+                font=("Segoe UI", 11), 
+                bg=self.colors["surface"], 
+                fg=self.colors["text_secondary"]).pack()
+        
+        btn_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        btn_frame.pack(pady=25, padx=15, fill="x")
+        
+        # Start/Stop - single button that toggles
+        self.record_btn = tk.Button(btn_frame, text=self.lang["start"],
+                                   command=self.start_with_countdown,
+                                   bg=self.colors["success"], fg=self.colors["bg"],
+                                   font=("Segoe UI", 11, "bold"),
+                                   relief="flat", height=2, cursor="hand2")
+        self.record_btn.pack(fill="x", pady=(0, 4))
+
+        self.pause_btn = tk.Button(btn_frame, text=self.lang["pause"],
+                                  command=self.toggle_pause,
+                                  bg=self.colors["warning"], fg=self.colors["bg"],
+                                  font=("Segoe UI", 10, "bold"),
+                                  state="disabled", relief="flat", height=1,
+                                  cursor="hand2")
+        self.pause_btn.pack(fill="x", pady=(4, 0))
+        # stop_btn kept as hidden reference for compatibility but not shown
+        self.stop_btn = tk.Button(btn_frame)
+        
+        status_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        status_frame.pack(pady=15, padx=15, fill="x")
+        tk.Label(status_frame, text=self.lang["status"], 
+                font=("Segoe UI", 11, "bold"),
+                bg=self.colors["surface"], fg=self.colors["accent"]).pack(anchor="w")
+        
+        status_row = tk.Frame(status_frame, bg=self.colors["surface"])
+        status_row.pack(fill="x", pady=8)
+        self.status_icon = tk.Label(status_row, text="⬤", 
+                                   fg=self.colors["error"], 
+                                   bg=self.colors["surface"], 
+                                   font=("Arial", 18))
+        self.status_icon.pack(side="left", padx=(0, 8))
+        self.status_label = tk.Label(status_row, text=self.lang["ready"], 
+                                    bg=self.colors["surface"], fg=self.colors["text"],
+                                    font=("Segoe UI", 11))
+        self.status_label.pack(side="left")
+        
+        timer_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        timer_frame.pack(pady=15, padx=15, fill="x")
+        tk.Label(timer_frame, text=self.lang["time"], 
+                font=("Segoe UI", 11, "bold"),
+                bg=self.colors["surface"], fg=self.colors["accent"]).pack(anchor="w")
+        self.time_label = tk.Label(timer_frame, text="00:00:00", 
+                                   font=("Consolas", 24, "bold"),
+                                   bg=self.colors["surface"], fg=self.colors["accent"])
+        self.time_label.pack(pady=8)
+        
+        stats_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        stats_frame.pack(pady=15, padx=15, fill="x")
+        tk.Label(stats_frame, text=self.lang["stats"], 
+                font=("Segoe UI", 11, "bold"),
+                bg=self.colors["surface"], fg=self.colors["accent"]).pack(anchor="w")
+        
+        self.fps_label = tk.Label(stats_frame, text=f"{self.lang['fps']} 0", 
+                                 bg=self.colors["surface"], fg=self.colors["text"],
+                                 font=("Consolas", 11))
+        self.fps_label.pack(anchor="w", pady=3)
+        
+        self.res_label = tk.Label(stats_frame, 
+                                 text=f"{self.lang['resolution']} {self.record_width}x{self.record_height}", 
+                                 bg=self.colors["surface"], fg=self.colors["text"],
+                                 font=("Consolas", 11))
+        self.res_label.pack(anchor="w", pady=3)
+
+        # --- Inline FPS slider (quick access without opening Settings) ---
+        fps_ctrl_frame = tk.Frame(left_panel, bg=self.colors["surface"])
+        fps_ctrl_frame.pack(pady=(0, 8), padx=15, fill="x")
+        tk.Frame(fps_ctrl_frame, bg=self.colors.get("surface_light", "#45475a"),
+                 height=1).pack(fill="x", pady=(0, 8))
+        fps_row = tk.Frame(fps_ctrl_frame, bg=self.colors["surface"])
+        fps_row.pack(fill="x")
+        tk.Label(fps_row, text="FPS limit:", bg=self.colors["surface"],
+                 fg=self.colors["text_secondary"],
+                 font=("Segoe UI", 8)).pack(side="left")
+        self._inline_fps_val = tk.Label(fps_row, text=str(self.target_fps),
+                                        bg=self.colors["surface"],
+                                        fg=self.colors["accent"],
+                                        font=("Segoe UI", 8, "bold"), width=3)
+        self._inline_fps_val.pack(side="right")
+
+        def _fps_slide(v):
+            val = int(float(v))
+            self.target_fps = val
+            self._inline_fps_val.config(text=str(val))
+            self.save_settings(silent=True)
+
+        self._inline_fps_slider = tk.Scale(
+            fps_ctrl_frame, from_=1, to=60,
+            orient="horizontal", length=160,
+            showvalue=False,
+            bg=self.colors["surface"], fg=self.colors["text"],
+            highlightthickness=0, troughcolor=self.colors.get("surface_light", "#45475a"),
+            command=_fps_slide,
+        )
+        self._inline_fps_slider.set(self.target_fps)
+        self._inline_fps_slider.pack(fill="x", pady=(2, 0))
+
+        right_panel = tk.Frame(main_container, bg=self.colors["bg"])
+        right_panel.pack(side="right", fill="both", expand=True)
+        
+        preview_container = tk.Frame(right_panel, bg=self.colors["surface_light"], relief="flat", bd=2)
+        preview_container.pack(fill="both", expand=True, pady=(0, 15))
+        
+        # Preview header bar
+        preview_header = tk.Frame(preview_container, bg=self.colors.get("surface_light", "#45475a"), height=30)
+        preview_header.pack(fill="x")
+        preview_header.pack_propagate(False)
+        tk.Label(preview_header, text="● " + self.lang["live_preview"],
+                 bg=self.colors.get("surface_light", "#45475a"),
+                 fg=self.colors["accent"],
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=10, pady=5)
+        self._preview_fps_lbl = tk.Label(preview_header, text="",
+                 bg=self.colors.get("surface_light", "#45475a"),
+                 fg=self.colors.get("text_secondary", "#a6adc8"),
+                 font=("Segoe UI", 8))
+        self._preview_fps_lbl.pack(side="right", padx=10, pady=5)
+        
+        preview_frame = tk.Frame(preview_container, bg=self.colors["preview_bg"])
+        preview_frame.pack(fill="both", expand=True, padx=8, pady=8)
+        
+        self.preview_label = tk.Label(preview_frame, bg=self.colors["preview_bg"])
+        self.preview_label.pack(fill="both", expand=True)
+        
+        bottom_panel = tk.Frame(right_panel, bg=self.colors["bg"], height=300)
+        bottom_panel.pack(fill="x")
+        bottom_panel.pack_propagate(False)
+        
+        self.audio_panel = AudioPanel(bottom_panel, self)
+        # Restore saved mixer state (loaded before audio_panel existed)
+        if hasattr(self, '_saved_mic_volume'):
+            self.audio_panel.mic_volume.set(self._saved_mic_volume)
+            self.audio_panel.mic_volume_label.config(text=f"{self._saved_mic_volume}%")
+        if hasattr(self, '_saved_sys_volume'):
+            self.audio_panel.sys_volume.set(self._saved_sys_volume)
+            self.audio_panel.sys_volume_label.config(text=f"{self._saved_sys_volume}%")
+        if hasattr(self, '_saved_mic_mute') and self._saved_mic_mute:
+            self.audio_panel.mic_mute.set(True)
+            self.audio_panel.mic_mute_btn.config(text=self.lang.get('unmute', 'Unmute'))
+        if hasattr(self, '_saved_sys_mute') and self._saved_sys_mute:
+            self.audio_panel.sys_mute.set(True)
+            self.audio_panel.sys_mute_btn.config(text=self.lang.get('unmute', 'Unmute'))
+        if hasattr(self, '_saved_audio_enabled'):
+            self.audio_panel.audio_enabled.set(self._saved_audio_enabled)
+        
+        bottom_bar = tk.Frame(self.root, bg=self.colors["surface"], height=32)
+        bottom_bar.pack(side="bottom", fill="x")
+        bottom_bar.pack_propagate(False)
+
+        # Status dot
+        self._status_dot = tk.Label(bottom_bar, text="●",
+                                    bg=self.colors["surface"], fg=self.colors.get("success", "#a6e3a1"),
+                                    font=("Segoe UI", 9))
+        self._status_dot.pack(side="left", padx=(10, 2), pady=6)
+
+        self.file_label = tk.Label(bottom_bar, text=self.lang["ready"],
+                                   bg=self.colors["surface"], fg=self.colors["text_secondary"],
+                                   font=("Segoe UI", 9))
+        self.file_label.pack(side="left", padx=(0, 10), pady=6)
+
+        # Native libs indicator
+        try:
+            from homrec_native import NATIVE_OK, ENCODER_OK
+            native_txt = "⚡ Native" if NATIVE_OK else "🐍 Python"
+            native_col = self.colors.get("success", "#a6e3a1") if NATIVE_OK else self.colors.get("warning", "#f9e2af")
+        except Exception:
+            native_txt = "🐍 Python"
+            native_col = self.colors.get("text_secondary", "#a6adc8")
+        tk.Label(bottom_bar, text=native_txt,
+                 bg=self.colors["surface"], fg=native_col,
+                 font=("Segoe UI", 8)).pack(side="left", padx=4, pady=6)
+
+        tk.Label(bottom_bar, text=self.lang["made_by"],
+                bg=self.colors["surface"], fg=self.colors["accent"],
+                font=("Segoe UI", 9, "bold")).pack(side="right", padx=12, pady=6)
+
+        # Version badge
+        tk.Label(bottom_bar, text=f"v{CURRENT_VERSION}",
+                 bg=self.colors["surface"], fg=self.colors.get("text_secondary", "#6c7086"),
+                 font=("Segoe UI", 8)).pack(side="right", padx=(0, 4), pady=6)
+        
+        self.update_preview_size()
+    
+    def get_audio_channels(self) -> int:
+        try:
+            p = pyaudio.PyAudio()
+            try:
+                stream = p.open(
+                    format=pyaudio.paInt16,
+                    channels=2,
+                    rate=44100,
+                    input=True,
+                    frames_per_buffer=1024
+                )
+                stream.close()
+                return 2
+            except:
+                try:
+                    stream = p.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=44100,
+                        input=True,
+                        frames_per_buffer=1024
+                    )
+                    stream.close()
+                    return 1
+                except:
+                    return 1
+        except:
+            return 1
+    
+    @staticmethod
+    def _pyaudio_supports_loopback(p: "pyaudio.PyAudio") -> bool:
+        """Return True if this PyAudio build accepts the as_loopback kwarg.
+
+        Standard PyAudio does NOT support as_loopback — only the pyaudio-wasapi
+        fork does.  We detect support with a harmless probe: open a stream with
+        an intentionally bad device index so it raises OSError/IOError, but if
+        it raises TypeError first the kwarg itself is unsupported.
+        """
+        try:
+            p.open(format=pyaudio.paInt16, channels=1, rate=44100,
+                   input=True, input_device_index=99999,
+                   frames_per_buffer=512, as_loopback=True)
+        except TypeError:
+            return False   # kwarg unknown → standard PyAudio build
+        except Exception:
+            return True    # kwarg accepted, device error is expected
+        return True
+
+    def _find_wasapi_loopback(self, p: "pyaudio.PyAudio",
+                               require_input: bool = False) -> int | None:
+        """Find WASAPI loopback device index for system audio capture (Windows only).
+
+        With pyaudio-wasapi, any output device can be opened as loopback via
+        as_loopback=True.  With standard PyAudio that flag does not exist, so
+        we must find a real input-capable loopback/Stereo Mix device.
+
+        Args:
+            require_input: when True, only return devices that already expose
+                input channels (maxInputChannels >= 1).  Pass True when
+                as_loopback is NOT supported so we never hand back an
+                output-only device that cannot be opened without the flag.
+
+        Priority: explicit loopback/Stereo Mix input device → default output
+        device as_loopback fallback (only when require_input is False).
+        Returns None on non-Windows or if WASAPI is not available.
+        """
+        if sys.platform != 'win32':
+            return None
+        try:
+            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+        except OSError:
+            log.warning("WASAPI not available on this system")
+            return None
+
+        # FIX: collect first WASAPI output device as fallback; also track the
+        # "defaultOutputDevice" index reported by wasapi_info if present.
+        # wasapi_info['defaultOutputDevice'] is a device *count* index on some
+        # PyAudio builds and -1/absent on others — so we also keep the first
+        # WASAPI output we encounter as a safe secondary fallback.
+        default_out_idx = None
+        first_wasapi_out_idx = None
+        wasapi_default_dev = wasapi_info.get('defaultOutputDevice', -1)
+
+        for i in range(p.get_device_count()):
+            try:
+                dev = p.get_device_info_by_index(i)
+            except Exception:
+                continue
+            if dev.get('hostApi') != wasapi_info['index']:
+                continue
+            name = dev.get('name', '').lower()
+            log.debug(f"WASAPI device [{i}]: {dev.get('name')} in={dev.get('maxInputChannels')} out={dev.get('maxOutputChannels')}")
+            # Explicit loopback / Stereo Mix device with real input channels — best option
+            if dev.get('maxInputChannels', 0) >= 1:
+                if any(k in name for k in ('loopback', 'stereo mix', 'what u hear',
+                                           'стерео микшер', 'что слышит')):
+                    log.info(f"WASAPI loopback device found: [{i}] {dev.get('name')}")
+                    return i
+            # Remember default output device as fallback for as_loopback=True
+            # (only useful when the pyaudio-wasapi fork is installed)
+            if not require_input and dev.get('maxOutputChannels', 0) >= 1:
+                # Match by the host-api-level default output device index
+                if default_out_idx is None and wasapi_default_dev >= 0 and i == wasapi_default_dev:
+                    default_out_idx = i
+                # Keep the very first WASAPI output as an ultimate fallback
+                if first_wasapi_out_idx is None:
+                    first_wasapi_out_idx = i
+
+        # Prefer the explicitly-marked default, then the first WASAPI output found
+        chosen = default_out_idx if default_out_idx is not None else first_wasapi_out_idx
+        if chosen is not None:
+            log.info(f"No explicit loopback device found; using WASAPI output [{chosen}] with as_loopback=True")
+            return chosen
+
+        log.warning("No WASAPI loopback device found at all")
+        return None
+
+    def _notify_recording_start(self) -> None:
+        """Flash the window border and/or play a beep when recording starts."""
+        if getattr(self, 'notify_flash', True):
+            # Flash red border 3 times
+            orig_bg = self.root.cget("bg")
+            def _flash(n=0):
+                if n >= 6:
+                    self.root.configure(bg=orig_bg)
+                    return
+                color = self.colors.get("error", "#f38ba8") if n % 2 == 0 else orig_bg
+                self.root.configure(bg=color)
+                self.root.after(120, lambda: _flash(n + 1))
+            _flash()
+        if getattr(self, 'notify_sound', True):
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+            except Exception:
+                pass
+
+
+    def _register_file_types(self) -> None:
+        """Register .hrc/.hrl/.hrt file associations in Windows registry."""
+        if platform.system() != "Windows":
+            return
+        try:
+            import winreg
+            base = os.path.dirname(os.path.abspath(__file__))
+            icons_dir = os.path.join(base, "icons")
+
+            types = [
+                (".hrc", "HomRec.Profile", "HomRec Profile",  "hrc.ico"),
+                (".hrl", "HomRec.Language","HomRec Language", "hrl.ico"),
+                (".hrt", "HomRec.Theme",   "HomRec Theme",    "hrt.ico"),
+            ]
+
+            for ext, prog_id, description, ico_file in types:
+                ico_path = os.path.join(icons_dir, ico_file)
+
+                # Register extension → ProgID
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                                      f"Software\\Classes\\{ext}") as k:
+                    winreg.SetValue(k, "", winreg.REG_SZ, prog_id)
+
+                # Register ProgID
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                                      f"Software\\Classes\\{prog_id}") as k:
+                    winreg.SetValue(k, "", winreg.REG_SZ, description)
+
+                # Set icon (only if file exists)
+                if os.path.exists(ico_path):
+                    with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                                          f"Software\\Classes\\{prog_id}\\DefaultIcon") as k:
+                        winreg.SetValue(k, "", winreg.REG_SZ, ico_path)
+
+                # Set "open with HomRec" action
+                exe_path = os.path.abspath(__file__)
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                                      f"Software\\Classes\\{prog_id}\\shell\\open\\command") as k:
+                    winreg.SetValue(k, "", winreg.REG_SZ, f'"{exe_path}" "%1"')
+
+            # Notify Windows Explorer to refresh icons
+            try:
+                import ctypes
+                ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+            except Exception:
+                pass
+
+            log.info("File type associations registered (.hrc/.hrl/.hrt)")
+        except Exception as e:
+            log.warning(f"Could not register file types: {e}")
+
+    def _apply_hotkeys(self) -> None:
+        """Bind hotkeys from current settings. Unbinds old ones first."""
+        for key in getattr(self, '_bound_hotkeys', []):
+            try:
+                self.root.unbind(key)
+            except Exception:
+                pass
+        self._bound_hotkeys = []
+
+        def _bind(key, cmd):
+            # Guard: skip empty, placeholder, or keys with spaces (invalid Tcl keysym)
+            if not key or " " in key or key == "Press a key...":
+                log.warning(f"Skipping invalid hotkey: {key!r}")
+                return
+            k = f'<{key}>'
+            try:
+                self.root.bind(k, cmd)
+                self._bound_hotkeys.append(k)
+            except Exception as e:
+                log.warning(f"Failed to bind hotkey {k!r}: {e}")
+
+        _bind(self.hotkey_start_stop, lambda e: self.toggle_recording())
+        _bind(self.hotkey_pause, lambda e: self.toggle_pause() if self.recording else None)
+        _bind(self.hotkey_fullscreen, lambda e: self.toggle_fullscreen())
+        log.debug(f"Hotkeys: start/stop={self.hotkey_start_stop} pause={self.hotkey_pause} fullscreen={self.hotkey_fullscreen}")
+
+    def _handle_drop(self, event) -> None:
+        """Handle drag-and-drop of .hrc/.hrl/.hrt files onto the main window."""
+        raw = event.data.strip()
+        paths = []
+        if raw.startswith('{'):
+            import re
+            paths = re.findall(r'{([^}]+)}', raw)
+            if not paths:
+                paths = [raw.strip('{}')]
+        else:
+            paths = raw.split()
+
+        for path in paths:
+            path = path.strip()
+            try:
+                kind = _hrc_detect(path)
+                if kind == 'hrc':
+                    self._import_hrc(path)
+                elif kind == 'hrl':
+                    self._import_hrl(path)
+                elif kind == 'hrt':
+                    self._import_hrt(path)
+            except ValueError as e:
+                messagebox.showerror("Invalid file", str(e))
+                log.warning(f"Drop rejected: {path} - {e}")
+
+    def _import_hrc(self, path: str) -> None:
+        """Import a .hrc profile file (binary format)."""
+        try:
+            data = _hrc_read(path, _HRC_MAGIC)
+            for k, v in data.items():
+                if k != 'hrc_version':
+                    setattr(self, k, v)
+            self.save_settings(silent=True)
+            self.apply_theme()
+            messagebox.showinfo("Profile imported", f"Profile loaded:\n{os.path.basename(path)}")
+            log.info(f"HRC profile imported (binary): {path}")
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+
+    def _import_hrl(self, path: str) -> None:
+        """Import a .hrl language file - copy to Assets/L/ folder."""
+        try:
+            langs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), LANGS_DIR)
+            os.makedirs(langs_dir, exist_ok=True)
+            dst = os.path.join(langs_dir, os.path.basename(path))
+            import shutil
+            shutil.copy2(path, dst)
+            messagebox.showinfo("Language imported",
+                f"Language file installed:\n{os.path.basename(path)}\n\n"
+                "Restart HomRec and select it in Settings → Language.")
+            log.info(f"HRL language imported: {path}")
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+
+    def _import_hrt(self, path: str) -> None:
+        """Import a .hrt theme file (binary format) - copy to Assets/Themes/ folder and apply."""
+        try:
+            themes_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR)
+            os.makedirs(themes_dir, exist_ok=True)
+            dst = os.path.join(themes_dir, os.path.basename(path))
+            import shutil
+            shutil.copy2(path, dst)
+            # Get theme name from binary file
+            data = _hrc_read(path, _HRT_MAGIC)
+            theme_name = data.get('theme_name', os.path.splitext(os.path.basename(path))[0])
+            self.ui_theme = os.path.splitext(os.path.basename(path))[0]
+            self.colors = self.get_theme_colors(self.ui_theme)
+            self.apply_theme()
+            self.save_settings(silent=True)
+            messagebox.showinfo("Theme imported", f"Theme '{theme_name}' applied!")
+            log.info(f"HRT theme imported and applied: {path}")
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+
+    def _setup_drag_drop(self) -> None:
+        """Register drag-and-drop on the main window if tkinterdnd2 is available."""
+        if not _DND_AVAILABLE:
+            log.debug("tkinterdnd2 not available - drag-and-drop disabled")
+            return
+        try:
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind('<<Drop>>', self._handle_drop)
+            log.info("Drag-and-drop enabled for .hrc/.hrl/.hrt files")
+        except Exception as e:
+            log.warning(f"Drag-and-drop setup failed: {e}")
+
+    def _set_icon(self, window) -> None:
+        """Set app icon on any Toplevel window."""
+        try:
+            ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
+            if os.path.exists(ico):
+                window.iconbitmap(ico)
+        except Exception:
+            pass
+
+    def _detect_gpu_encoder(self) -> str | None:
+        """Возвращает кеш. Реальный проб — в _warm_up_gpu_probe() при старте."""
+        return getattr(self, '_gpu_encoder_cache', None)
+
+    def _warm_up_gpu_probe(self) -> None:
+        if not self.ffmpeg_path or hasattr(self, '_gpu_encoder_cache'):
+            return
+        def _probe():
+            for name, args in [
+                ('h264_nvenc', ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_nvenc','-f','null','-']),
+                ('h264_amf',   ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_amf',  '-f','null','-']),
+                ('h264_qsv',   ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_qsv',  '-f','null','-']),
+            ]:
+                try:
+                    r = subprocess.run([self.ffmpeg_path, '-y', *args],
+                        capture_output=True, timeout=6,
+                        creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
+                    if r.returncode == 0:
+                        log.info(f"GPU encoder detected (background): {name}")
+                        self._gpu_encoder_cache = name
+                        return
+                except Exception:
+                    pass
+            log.info("No GPU encoder found (background probe)")
+            self._gpu_encoder_cache = None
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def _build_codec_args(self) -> list:
+        codec = getattr(self, 'video_codec', 'libx264')
+        hw    = getattr(self, 'hw_accel',    'auto')
+
+        if codec == 'libx264' and hw == 'auto':
+            gpu = self._detect_gpu_encoder()
+            if gpu:
+                codec = gpu
+                log.info(f"Auto-upgraded codec: libx264 → {codec}")
+
+        # quality (10–100) → qp/crf
+        # Диапазон специально сужен: минимум qp=23 (quality=100).
+        # qp=18 (lossless) на слабом CPU/GPU убивает FPS — битрейт 80-150 Мбит/с.
+        # i3-1005G1 + QSV: qp=28 (~30 Мбит/с) — оптимальный баланс.
+        q  = getattr(self, 'quality', 70)
+        qp = max(23, min(34, int(34 - (q / 100) * 11)))  # 100%→23, 70%→26, 0%→34
+
+        fps = getattr(self, 'target_fps', 30)
+        gop = fps * 2
+
+        is_hw  = codec in ('h264_nvenc','hevc_nvenc','h264_amf','hevc_amf','h264_qsv','hevc_qsv')
+        is_265 = codec in ('libx265','hevc_nvenc','hevc_amf','hevc_qsv')
+
+        args = ['-c:v', codec]
+        preset = getattr(self, 'enc_preset', 'ultrafast')
+
+        if is_hw:
+            if 'nvenc' in codec:
+                # NVENC: p1 = fastest, ull = ultra-low latency
+                args += ['-preset', 'p1', '-tune', 'ull', '-rc', 'constqp',
+                         '-qp', str(qp), '-g', str(gop)]
+            elif 'qsv' in codec:
+                # QSV на слабой встройке (i3/i5 UHD):
+                #   - async_depth убран: с gdigrab блокирует capture-поток
+                #   - veryfast даёт меньше нагрузки чем slow/medium
+                #   - look_ahead 0: отключает lookahead (он жрёт CPU)
+                #   - low_power 1: на UHD Graphics включает LP режим (VDENC)
+                #     который в 2-3 раза быстрее обычного PAK при slightl хуже качестве
+                args += ['-preset', 'veryfast',
+                         '-look_ahead', '0',
+                         '-low_power', '1',
+                         '-qp', str(qp), '-g', str(gop)]
+            elif 'amf' in codec:
+                args += ['-quality', 'speed', '-rc', 'cqp',
+                         '-qp_i', str(qp), '-qp_p', str(qp), '-g', str(gop)]
+        else:
+            # CPU (libx264/libx265):
+            # На 2-ядерном i3: оставляем 1 поток FFmpeg, остальное OS.
+            # ultrafast + zerolatency = минимальная нагрузка на encoder.
+            cpu_count = os.cpu_count() or 4
+            # Слабый CPU (≤4 потоков): 1 поток FFmpeg, не мешает OS и Python.
+            ffmpeg_threads = 1 if cpu_count <= 4 else max(1, cpu_count // 4)
+            args += ['-preset', preset, '-tune', 'zerolatency',
+                     '-crf', str(qp), '-g', str(gop),
+                     '-threads', str(ffmpeg_threads)]
+            if is_265:
+                args += ['-x265-params', 'log-level=error']
+
+        log.debug(f"codec args: {args}")
+        return args
+
+    def start_audio_recording(self) -> None:
+        try:
+            if self.audio_thread and self.audio_thread.is_alive():
+                self.audio_recording = False
+                self.audio_thread.join(timeout=2)
+            self.audio_thread = None
+            self.audio_frames = []
+            self.sys_audio_frames = []
+
+            self.sys_audio_recording = False
+            if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
+                try:
+                    self.sys_audio_stream.stop_stream()
+                    self.sys_audio_stream.close()
+                except Exception:
+                    pass
+                self.sys_audio_stream = None
+            if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
+                try:
+                    self.sys_audio_p.terminate()
+                except Exception:
+                    pass
+                self.sys_audio_p = None
+            self.sys_audio_filename = None
+            self.sys_ffmpeg_proc = None
+
+            # ----------------------------------------------------------------
+            # Try C++ WASAPI engine first (hr_audio.dll)
+            # ----------------------------------------------------------------
+            try:
+                from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+            except Exception:
+                _ae = None
+                _AOK = False
+
+            if _AOK and _ae is not None:
+                mic_vol  = self.audio_panel.mic_volume.get() / 100.0
+                sys_vol  = self.audio_panel.sys_volume.get() / 100.0
+                mic_mute = self.audio_panel.mic_mute.get()
+                sys_mute = self.audio_panel.sys_mute.get()
+
+                flags = _ae.start(mic_vol, sys_vol, mic_mute, sys_mute)
+                mic_ok = bool(flags & 0x1)
+                sys_ok = bool(flags & 0x2)
+                log.info(f"C++ AudioEngine started: mic={'OK' if mic_ok else 'FAIL'} "
+                         f"sys={'OK' if sys_ok else 'FAIL'}")
+
+                if mic_ok or sys_ok:
+                    self._using_cpp_audio = True
+                    self.audio_recording  = mic_ok
+                    self.sys_audio_recording = sys_ok
+                    self.audio_channels   = 2
+
+                    def _cpp_vu_poll():
+                        while getattr(self, '_using_cpp_audio', False) and (
+                                self.audio_recording or self.sys_audio_recording):
+                            m, s = _ae.get_levels()
+                            self.audio_panel.update_mic_level(m)
+                            self.audio_panel.update_sys_level(s)
+                            time.sleep(0.05)
+
+                    self._cpp_vu_thread = threading.Thread(target=_cpp_vu_poll, daemon=True)
+                    self._cpp_vu_thread.start()
+                    if mic_ok:
+                        log.info("Mic recording started via C++ WASAPI engine")
+                    if sys_ok:
+                        log.info("System audio recording started via C++ WASAPI engine")
+                    return
+
+            # ----------------------------------------------------------------
+            # Fallback: original PyAudio path
+            # ----------------------------------------------------------------
+            self._using_cpp_audio = False
+            self.audio_channels = self.get_audio_channels()
+            silence = b'\x00' * 1024 * 2 * self.audio_channels
+
+            self.audio_p = pyaudio.PyAudio()
+            self.audio_stream = self.audio_p.open(
+                format=pyaudio.paInt16,
+                channels=self.audio_channels,
+                rate=44100,
+                input=True,
+                frames_per_buffer=1024
+            )
+            self.audio_recording = True
+
+            try:
+                from homrec_native import core as _nc_mic
+            except Exception:
+                _nc_mic = None
+
+            def record_mic() -> None:
+                while self.audio_recording and not self.stop_flag:
+                    if not self.paused:
+                        if not self.audio_panel._mic_mute_cached:
+                            try:
+                                data = self.audio_stream.read(1024, exception_on_overflow=False)
+                                vol = self.audio_panel._mic_vol_cached
+                                if vol != 1.0:
+                                    data = audioop.mul(data, 2, vol)
+                                self.audio_frames.append(data)
+                                if _nc_mic is not None:
+                                    level = _nc_mic.audio_rms_level(data)
+                                else:
+                                    level = min(100, int(audioop.rms(data, 2) / 150))
+                                self.audio_panel.update_mic_level(level)
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                self.audio_stream.read(1024, exception_on_overflow=False)
+                            except Exception:
+                                pass
+                            self.audio_frames.append(silence)
+                    else:
+                        self.audio_frames.append(silence)
+                        time.sleep(1024 / 44100)
+
+            self.audio_thread = threading.Thread(target=record_mic, daemon=True)
+            self.audio_thread.start()
+            log.info(f"Mic recording started via PyAudio ({self.audio_channels} channel(s))")
+
+            try:
+                if not self.audio_panel.sys_mute.get():
+                    self.sys_audio_p = pyaudio.PyAudio()
+                    supports_loopback_flag = self._pyaudio_supports_loopback(self.sys_audio_p)
+                    log.info(f"PyAudio as_loopback support: {supports_loopback_flag}")
+                    loopback_idx = self._find_wasapi_loopback(
+                        self.sys_audio_p, require_input=not supports_loopback_flag)
+
+                    if loopback_idx is not None:
+                        flag_variants = []
+                        if supports_loopback_flag:
+                            flag_variants.append(True)
+                        flag_variants.append(False)
+                        opened = False
+                        sys_channels = 2
+                        for use_loopback_flag in flag_variants:
+                            for ch in (2, 1):
+                                try:
+                                    kwargs = dict(format=pyaudio.paInt16, channels=ch,
+                                                  rate=44100, input=True,
+                                                  input_device_index=loopback_idx,
+                                                  frames_per_buffer=1024)
+                                    if use_loopback_flag:
+                                        kwargs['as_loopback'] = True
+                                    self.sys_audio_stream = self.sys_audio_p.open(**kwargs)
+                                    opened = True; sys_channels = ch
+                                    log.info(f"System audio stream opened (as_loopback={use_loopback_flag}, ch={ch})")
+                                    break
+                                except (TypeError, OSError) as e:
+                                    log.warning(f"sys audio open failed (as_loopback={use_loopback_flag}, ch={ch}): {e}")
+                            if opened:
+                                break
+
+                        if opened:
+                            self.sys_audio_recording = True
+                            silence_sys = b'\x00' * 1024 * 2 * sys_channels
+                            self._sys_channels = sys_channels
+
+                            def record_sys() -> None:
+                                while self.sys_audio_recording and not self.stop_flag:
+                                    if not self.paused:
+                                        try:
+                                            data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
+                                            muted = self.audio_panel._sys_mute_cached
+                                            vol   = self.audio_panel._sys_vol_cached
+                                            if muted:
+                                                self.sys_audio_frames.append(silence_sys)
+                                                self.audio_panel.update_sys_level(0)
+                                            else:
+                                                if vol != 1.0:
+                                                    data = audioop.mul(data, 2, vol)
+                                                self.sys_audio_frames.append(data)
+                                                self.audio_panel.update_sys_level(
+                                                    min(100, int(audioop.rms(data, 2) / 150)))
+                                        except Exception as e:
+                                            log.debug(f"sys audio read error: {e}")
+                                    else:
+                                        self.sys_audio_frames.append(silence_sys)
+                                        time.sleep(1024 / 44100)
+
+                            self.sys_audio_thread = threading.Thread(target=record_sys, daemon=True)
+                            self.sys_audio_thread.start()
+                            log.info(f"System audio via WASAPI loopback (device={loopback_idx})")
+                        else:
+                            log.warning("Could not open WASAPI loopback stream")
+                            loopback_idx = None
+
+                    if loopback_idx is None:
+                        log.warning("WASAPI loopback not found, trying PyAudio Stereo Mix")
+                        if self.sys_audio_p is None:
+                            self.sys_audio_p = pyaudio.PyAudio()
+                        stereo_mix_idx = None; stereo_mix_ch = 2
+                        keywords = ['stereo mix','what u hear','loopback','mixer','wave out',
+                                    'стерео','микшер','что слышит']
+                        for i in range(self.sys_audio_p.get_device_count()):
+                            try:
+                                dev = self.sys_audio_p.get_device_info_by_index(i)
+                                raw = dev.get('name', '')
+                                try: nm = raw.encode('cp1251').decode('utf-8')
+                                except: nm = raw
+                                max_in = int(dev.get('maxInputChannels', 0))
+                                log.debug(f"PyAudio device [{i}]: {nm!r} in={max_in}")
+                                if max_in > 0 and any(k in nm.lower() for k in keywords):
+                                    stereo_mix_idx = i; stereo_mix_ch = min(max_in, 2)
+                                    log.info(f"PyAudio Stereo Mix found: [{i}] {nm!r} ch={stereo_mix_ch}")
+                                    break
+                            except Exception: continue
+
+                        if stereo_mix_idx is not None:
+                            opened2 = False
+                            for ch2 in ([stereo_mix_ch] if stereo_mix_ch == 1 else [2, 1]):
+                                try:
+                                    self.sys_audio_stream = self.sys_audio_p.open(
+                                        format=pyaudio.paInt16, channels=ch2,
+                                        rate=44100, input=True,
+                                        input_device_index=stereo_mix_idx,
+                                        frames_per_buffer=1024)
+                                    opened2 = True; stereo_mix_ch = ch2
+                                    log.info(f"PyAudio Stereo Mix stream opened (ch={ch2})")
+                                    break
+                                except Exception as e:
+                                    log.warning(f"PyAudio Stereo Mix open failed (ch={ch2}): {e}")
+                            if opened2:
+                                self.sys_audio_recording = True
+                                self._sys_channels = stereo_mix_ch
+                                _silence2 = b'\x00' * 1024 * 2 * stereo_mix_ch
+                                def record_sys_mix() -> None:
+                                    while self.sys_audio_recording and not self.stop_flag:
+                                        if not self.paused:
+                                            try:
+                                                data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
+                                                muted = self.audio_panel._sys_mute_cached
+                                                vol   = self.audio_panel._sys_vol_cached
+                                                if muted:
+                                                    self.sys_audio_frames.append(_silence2)
+                                                    self.audio_panel.update_sys_level(0)
+                                                else:
+                                                    if vol != 1.0:
+                                                        data = audioop.mul(data, 2, vol)
+                                                    self.sys_audio_frames.append(data)
+                                                    self.audio_panel.update_sys_level(
+                                                        min(100, int(audioop.rms(data, 2) / 150)))
+                                            except Exception as e:
+                                                log.debug(f"sys mix read error: {e}")
+                                        else:
+                                            self.sys_audio_frames.append(_silence2)
+                                            time.sleep(1024 / 44100)
+                                self.sys_audio_thread = threading.Thread(target=record_sys_mix, daemon=True)
+                                self.sys_audio_thread.start()
+                                log.info("System audio recording started via PyAudio Stereo Mix")
+                                loopback_idx = "pyaudio_mix"
+
+                    if loopback_idx is None:
+                        log.warning("No WASAPI/Stereo Mix found, trying dshow fallback")
+                        try: self.sys_audio_p.terminate()
+                        except: pass
+                        self.sys_audio_p = None
+                        self.sys_audio_filename = self.filename.replace('.mp4', '_sys.wav')
+                        devices = self.get_dshow_audio_devices()
+                        sys_device = None
+                        for d in devices:
+                            dl = d.lower()
+                            if any(k in dl for k in ['stereo mix','what u hear','loopback',
+                                                       'стерео микшер','что слышит']):
+                                sys_device = d; break
+                        if not sys_device and devices:
+                            sys_device = devices[0]
+                        if sys_device and self.ffmpeg_path:
+                            vol = self.audio_panel.sys_volume.get() / 100.0
+                            vf  = f'volume={vol:.2f}' if vol != 1.0 else 'anull'
+                            sys_cmd = [self.ffmpeg_path, '-y', '-f', 'dshow',
+                                       '-i', f'audio={sys_device}', '-af', vf,
+                                       '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2',
+                                       self.sys_audio_filename]
+                            self.sys_ffmpeg_proc = subprocess.Popen(
+                                sys_cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.PIPE,
+                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
+                            self.sys_audio_recording = True
+                            log.info(f"System audio recording via dshow: {sys_device}")
+                        else:
+                            log.warning("No system audio device found at all")
+                            self.sys_audio_filename = None
+                            self.sys_audio_recording = False
+            except Exception as e:
+                log.warning(f"System audio unavailable: {e}")
+                self.sys_audio_filename = None
+                self.sys_audio_recording = False
+
+        except Exception as e:
+            log.error(f"Audio error: {e}")
+            self.audio_recording = False
+
     def stop_audio_recording(self) -> str | None:
         # v1.5.0 FIX: non-blocking teardown — no more 30s hangs ---------
 
@@ -3783,7 +5832,7 @@ class HomRecScreen:
                     '-y',
                     '-i', mic_tmp,
                     '-i', sys_wav,
-                    '-filter_complex', 'amix=inputs=2:duration=longest:weights=1 1',
+                    '-filter_complex', 'amix=inputs=2:duration=longest:normalize=0',
                     '-acodec', 'pcm_s16le',
                     audio_filename
                 ]
@@ -3796,8 +5845,11 @@ class HomRecScreen:
                     wf.writeframes(b''.join(mic_frames[_ci:_ci+CHUNK]))
                 wf.close()
                 # mix timeout reduced: 60 s is pathological, 20 s is enough
-                subprocess.run(mix_cmd, capture_output=True, timeout=20,
+                result = subprocess.run(mix_cmd, capture_output=True, timeout=20,
                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0)
+                if result.returncode != 0:
+                    log.warning(f"amix ffmpeg error: {result.stderr.decode(errors='replace')[-400:]}")
+                    raise RuntimeError(f"ffmpeg amix returncode={result.returncode}")
                 try:
                     os.remove(mic_tmp)
                     os.remove(sys_wav)
@@ -4002,9 +6054,30 @@ class HomRecScreen:
                     time.sleep(0.5)
                     continue
 
-                # -- Во время записи: полный sleep, ноль PIL/numpy/queue --
+                # -- During recording: capture one frame every 2 s for the preview.
+                # We use mss here (not gdigrab) so there is no conflict with ffmpeg.
+                # Keep CPU cost low: one grab per 2 s is negligible.
                 if recording:
-                    time.sleep(0.5)
+                    try:
+                        screenshot = sct.grab(monitor)
+                        sw2, sh2 = screenshot.size
+                        if _have_native and _native_core is not None:
+                            rgb_np2   = _native_core.bgrx_to_rgb_np(screenshot.bgra, sw2, sh2)
+                            small_np2 = _native_core.resize_bilinear_np(rgb_np2, sw2, sh2, pw, ph)
+                            rec_img   = Image.frombuffer("RGB", (pw, ph), small_np2, "raw", "RGB", 0, 1)
+                        else:
+                            rec_img = Image.frombytes("RGB", screenshot.size,
+                                                      screenshot.bgra, "raw", "BGRX")
+                            rec_img.thumbnail((pw, ph), Image.Resampling.BILINEAR)
+                        _last_img = rec_img
+                        try:
+                            self._preview_queue.get_nowait()
+                        except Exception:
+                            pass
+                        self._preview_queue.put_nowait(rec_img)
+                    except Exception:
+                        pass
+                    time.sleep(2.0)
                     continue
 
                 # -- Idle: capture and display normally ----------------------
@@ -4069,7 +6142,7 @@ class HomRecScreen:
             pass   # no new frame yet - skip, don't block
         except Exception:
             pass
-        interval = 2000 if getattr(self, 'recording', False) else 80
+        interval = 2100 if getattr(self, 'recording', False) else 80
         self.root.after(interval, self.update_preview)
 
     def _show_preview_placeholder(self) -> None:

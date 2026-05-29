@@ -1,36 +1,3 @@
-/*
- * hr_stopwatch.cpp  -  HomRec v1.5.0  high-precision frame-pacing timer
- *
- * Provides nanosecond-resolution monotonic timers used by the capture loop
- * to maintain accurate frame intervals. Python's time.sleep() has ~15 ms
- * granularity on Windows; this module uses QueryPerformanceCounter (Win) or
- * clock_gettime(CLOCK_MONOTONIC) (POSIX) to achieve sub-millisecond accuracy.
- *
- * API:
- *   hr_sw_create()          -> handle (void*)
- *   hr_sw_destroy(handle)
- *   hr_sw_start(handle)     -> reset and start
- *   hr_sw_elapsed_ns(handle)-> nanoseconds since last start
- *   hr_sw_elapsed_ms(handle)-> milliseconds since last start (float)
- *   hr_sw_sleep_until_ns(handle, target_ns)
- *       Spin/sleep until elapsed_ns >= target_ns.
- *       Uses a hybrid: coarse sleep to ~2 ms before target, then spin.
- *       This gives accurate frame pacing with minimal CPU waste.
- *   hr_sw_now_ns()          -> absolute monotonic time in nanoseconds
- *
- * BUG PREVENTION:
- *   - On Windows, timeBeginPeriod(1) is called at create-time to enable 1 ms
- *     sleep resolution for the duration of the timer's life. Without this,
- *     Sleep() can overshoot by 14-15 ms, causing severe frame-rate jitter.
- *
- * Compile (Linux):
- *   g++ -O3 -std=c++17 -shared -fPIC -o hr_stopwatch.so hr_stopwatch.cpp -lrt
- *
- * Compile (Windows MinGW):
- *   g++ -O3 -std=c++17 -shared -static-libgcc -static-libstdc++ \
- *       -o hr_stopwatch.dll hr_stopwatch.cpp -lwinmm
- */
-
 #include <cstdint>
 #include <cstddef>
 #include <cstring>

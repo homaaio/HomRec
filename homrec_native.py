@@ -684,6 +684,108 @@ pipeline  = _PipelineAPI()
 
 
 # ---------------------------------------------------------------------------
+# hr_audio — C++ WASAPI audio engine
+# ---------------------------------------------------------------------------
+
+_audio_lib = _load("hr_audio")
+AUDIO_OK = _audio_lib is not None
+
+if AUDIO_OK:
+    _audio_lib.hr_audio_init.argtypes        = []
+    _audio_lib.hr_audio_init.restype         = ctypes.c_int
+
+    _audio_lib.hr_audio_start.argtypes       = [ctypes.c_float, ctypes.c_float,
+                                                 ctypes.c_int, ctypes.c_int]
+    _audio_lib.hr_audio_start.restype        = ctypes.c_int
+
+    _audio_lib.hr_audio_set_volumes.argtypes = [ctypes.c_float, ctypes.c_float,
+                                                 ctypes.c_int, ctypes.c_int]
+    _audio_lib.hr_audio_set_volumes.restype  = None
+
+    _audio_lib.hr_audio_get_levels.argtypes  = [ctypes.POINTER(ctypes.c_int),
+                                                 ctypes.POINTER(ctypes.c_int)]
+    _audio_lib.hr_audio_get_levels.restype   = None
+
+    _audio_lib.hr_audio_pause.argtypes       = [ctypes.c_int]
+    _audio_lib.hr_audio_pause.restype        = None
+
+    _audio_lib.hr_audio_stop.argtypes        = [ctypes.c_char_p, ctypes.c_char_p]
+    _audio_lib.hr_audio_stop.restype         = ctypes.c_int
+
+    _audio_lib.hr_audio_mix_wav.argtypes     = [ctypes.c_char_p, ctypes.c_char_p,
+                                                 ctypes.c_char_p]
+    _audio_lib.hr_audio_mix_wav.restype      = ctypes.c_int
+
+    _audio_lib.hr_audio_rms.argtypes         = [ctypes.c_void_p, ctypes.c_int]
+    _audio_lib.hr_audio_rms.restype          = ctypes.c_int
+
+    _audio_lib.hr_audio_init()
+    log.info("hr_audio loaded (C++ WASAPI engine)")
+
+
+class AudioEngine:
+    """Python wrapper over hr_audio.dll — replaces PyAudio+audioop audio logic."""
+
+    available: bool = AUDIO_OK
+
+    def __init__(self) -> None:
+        self._mic_level = ctypes.c_int(0)
+        self._sys_level = ctypes.c_int(0)
+
+    def start(self, mic_vol: float = 1.0, sys_vol: float = 1.0,
+              mic_mute: bool = False, sys_mute: bool = False) -> int:
+        """Start recording. Returns bitmask: bit0=mic_ok, bit1=sys_ok."""
+        if not AUDIO_OK:
+            return 0
+        return _audio_lib.hr_audio_start(
+            ctypes.c_float(mic_vol), ctypes.c_float(sys_vol),
+            ctypes.c_int(int(mic_mute)), ctypes.c_int(int(sys_mute))
+        )
+
+    def set_volumes(self, mic_vol: float, sys_vol: float,
+                    mic_mute: bool, sys_mute: bool) -> None:
+        if not AUDIO_OK: return
+        _audio_lib.hr_audio_set_volumes(
+            ctypes.c_float(mic_vol), ctypes.c_float(sys_vol),
+            ctypes.c_int(int(mic_mute)), ctypes.c_int(int(sys_mute))
+        )
+
+    def get_levels(self) -> tuple[int, int]:
+        """Returns (mic_level 0-100, sys_level 0-100)."""
+        if not AUDIO_OK: return 0, 0
+        _audio_lib.hr_audio_get_levels(
+            ctypes.byref(self._mic_level),
+            ctypes.byref(self._sys_level)
+        )
+        return self._mic_level.value, self._sys_level.value
+
+    def pause(self, paused: bool) -> None:
+        if not AUDIO_OK: return
+        _audio_lib.hr_audio_pause(ctypes.c_int(int(paused)))
+
+    def stop(self, mic_wav: str | None = None,
+             sys_wav: str | None = None) -> int:
+        """Stop and flush to WAV files. Returns bitmask: bit0=mic, bit1=sys."""
+        if not AUDIO_OK: return 0
+        mic_b = mic_wav.encode() if mic_wav else None
+        sys_b = sys_wav.encode() if sys_wav else None
+        return _audio_lib.hr_audio_stop(mic_b, sys_b)
+
+    @staticmethod
+    def mix_wav(mic_path: str, sys_path: str, out_path: str) -> bool:
+        """Mix two WAV files in pure C++ (no subprocess). Returns True on success."""
+        if not AUDIO_OK: return False
+        r = _audio_lib.hr_audio_mix_wav(
+            mic_path.encode(), sys_path.encode(), out_path.encode()
+        )
+        return r == 0
+
+
+# Singleton для использования в homrec.py
+audio_engine = AudioEngine() if AUDIO_OK else None
+
+
+# ---------------------------------------------------------------------------
 # Build helper
 # ---------------------------------------------------------------------------
 def ensure_built(src_dir: str | None = None) -> bool:
@@ -718,6 +820,9 @@ def ensure_built(src_dir: str | None = None) -> bool:
         (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
           *([] if not is_win else ["-ld3d11", "-ldxgi", "-lole32"]),
           "-o", f"hr_dxgi_capture{so}", "hr_dxgi_capture.cpp"], "hr_dxgi_capture"),
+        (["g++", "-O2", "-std=c++17", "-shared", *fPIC,
+          *([] if not is_win else ["-lole32", "-lwinmm", "-luuid"]),
+          "-o", f"hr_audio{so}", "hr_audio.cpp"], "hr_audio"),
         (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
           *([] if not is_win else ["-ld3d11", "-ldxgi", "-lole32", "-lwinmm"]),
           "-o", f"hr_pipeline{so}", "hr_pipeline.cpp"], "hr_pipeline"),
