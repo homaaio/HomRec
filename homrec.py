@@ -18,10 +18,23 @@ except ImportError:
     _DND_AVAILABLE = False
 import ctypes
 import sys
-import pyaudio
-import wave
-import audioop
 import subprocess
+
+# PyAudio / audioop — optional legacy fallback (not required when hr_audio.dll is present)
+try:
+    import pyaudio as _pyaudio_mod
+    import audioop as _audioop_mod
+    _PYAUDIO_AVAILABLE = True
+except ImportError:
+    _pyaudio_mod = None      # type: ignore
+    _audioop_mod = None      # type: ignore
+    _PYAUDIO_AVAILABLE = False
+
+# wave is still used for WAV writing in the PyAudio fallback path
+try:
+    import wave
+except ImportError:
+    wave = None              # type: ignore
 import shutil
 import platform
 
@@ -935,48 +948,101 @@ class AudioPanel:
             self._idle_monitor_thread.start()
 
     def _idle_monitor_worker(self) -> None:
-        """Background thread: reads mic in small chunks, feeds VU-meter."""
-        import pyaudio, audioop, time
+        """Background thread: feeds VU-meter using C++ AudioEngine (WASAPI).
+
+        Opens the WASAPI mic capture in a lightweight 'preview-only' mode via
+        hr_audio_start, polls get_levels() at ~50 ms and writes the result to
+        _mic_level_pending (int, written atomically by a single writer thread —
+        safe for Python's GIL).  Falls back to PyAudio when hr_audio.dll is
+        absent.
+        """
+        import time as _t
+
+        # ── Try C++ path ──────────────────────────────────────────────────────
+        try:
+            from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+        except Exception:
+            _ae = None
+            _AOK = False
+
+        if _AOK and _ae is not None:
+            # Start a temporary capture just for the idle meter.
+            # We start with no-mute/full-vol so the meter is always live.
+            flags = _ae.start(1.0, 1.0, False, False)
+            mic_ok = bool(flags & 0x1)
+            if mic_ok:
+                try:
+                    while self._idle_monitor_active:
+                        if getattr(self.app, 'audio_recording', False):
+                            # Recording is active — it has its own AudioEngine session.
+                            # Stop the idle session to avoid double-open.
+                            _ae.stop(None, None)
+                            # Wait until recording finishes, then restart.
+                            while (getattr(self.app, 'audio_recording', False)
+                                   and self._idle_monitor_active):
+                                _t.sleep(0.1)
+                            if not self._idle_monitor_active:
+                                return
+                            # Restart idle session.
+                            _ae.start(1.0, 1.0, False, False)
+                            continue
+                        m, _ = _ae.get_levels()
+                        self._mic_level_pending = m
+                        _t.sleep(0.05)
+                finally:
+                    try:
+                        _ae.stop(None, None)
+                    except Exception:
+                        pass
+                return
+            # mic not available — fall through to PyAudio
+
+        # ── PyAudio fallback ──────────────────────────────────────────────────
+        if not _PYAUDIO_AVAILABLE:
+            return
         p = None
         stream = None
         try:
-            p = pyaudio.PyAudio()
+            p = _pyaudio_mod.PyAudio()
             dev_info = p.get_default_input_device_info()
             dev_idx  = dev_info.get('index', 0)
             max_ch   = int(dev_info.get('maxInputChannels', 1))
             ch = min(2, max(1, max_ch))
-            stream = p.open(format=pyaudio.paInt16,
+            stream = p.open(format=_pyaudio_mod.paInt16,
                             channels=ch,
                             rate=44100,
                             input=True,
                             input_device_index=dev_idx,
                             frames_per_buffer=1024)
             while self._idle_monitor_active:
-                # When recording is active, the recording thread feeds mic levels.
-                # Drain the stream buffer so it stays fresh for after recording stops.
                 if getattr(self.app, 'audio_recording', False):
                     try:
                         stream.read(1024, exception_on_overflow=False)
                     except Exception:
                         pass
-                    time.sleep(0.05)
+                    _t.sleep(0.05)
                     continue
                 try:
                     data = stream.read(1024, exception_on_overflow=False)
-                    rms  = audioop.rms(data, 2)
+                    rms  = _audioop_mod.rms(data, 2)
                     self._mic_level_pending = min(100, int(rms / 150))
                 except Exception:
-                    time.sleep(0.05)
+                    _t.sleep(0.05)
         except Exception as e:
             import logging
-            logging.getLogger('homrec').debug(f'idle mic monitor failed: {e}')
+            logging.getLogger('homrec').debug(f'idle mic monitor (PyAudio) failed: {e}')
         finally:
             try:
-                if stream: stream.stop_stream(); stream.close()
-            except Exception: pass
+                if stream:
+                    stream.stop_stream()
+                    stream.close()
+            except Exception:
+                pass
             try:
-                if p: p.terminate()
-            except Exception: pass
+                if p:
+                    p.terminate()
+            except Exception:
+                pass
 
     def update_language(self) -> None:
         self.frame.config(text=self.app.lang["audio_mixer"])
@@ -3175,36 +3241,43 @@ class HomRecScreen:
         self.update_preview_size()
     
     def get_audio_channels(self) -> int:
+        """Return the number of audio channels for the default mic.
+
+        With the C++ WASAPI engine (hr_audio.dll) audio is always captured as
+        stereo (2 ch).  For the legacy PyAudio fallback we probe the device.
+        """
         try:
-            p = pyaudio.PyAudio()
+            from homrec_native import AUDIO_OK
+            if AUDIO_OK:
+                return 2
+        except Exception:
+            pass
+
+        if not _PYAUDIO_AVAILABLE:
+            return 2
+        try:
+            p = _pyaudio_mod.PyAudio()
             try:
-                stream = p.open(
-                    format=pyaudio.paInt16,
-                    channels=2,
-                    rate=44100,
-                    input=True,
-                    frames_per_buffer=1024
-                )
+                stream = p.open(format=_pyaudio_mod.paInt16, channels=2,
+                                rate=44100, input=True, frames_per_buffer=1024)
                 stream.close()
                 return 2
-            except:
+            except Exception:
                 try:
-                    stream = p.open(
-                        format=pyaudio.paInt16,
-                        channels=1,
-                        rate=44100,
-                        input=True,
-                        frames_per_buffer=1024
-                    )
+                    stream = p.open(format=_pyaudio_mod.paInt16, channels=1,
+                                    rate=44100, input=True, frames_per_buffer=1024)
                     stream.close()
                     return 1
-                except:
+                except Exception:
                     return 1
-        except:
-            return 1
+            finally:
+                try: p.terminate()
+                except Exception: pass
+        except Exception:
+            return 2
     
     @staticmethod
-    def _pyaudio_supports_loopback(p: "pyaudio.PyAudio") -> bool:
+    def _pyaudio_supports_loopback(p: "_pyaudio_mod.PyAudio") -> bool:
         """Return True if this PyAudio build accepts the as_loopback kwarg.
 
         Standard PyAudio does NOT support as_loopback — only the pyaudio-wasapi
@@ -3213,7 +3286,7 @@ class HomRecScreen:
         it raises TypeError first the kwarg itself is unsupported.
         """
         try:
-            p.open(format=pyaudio.paInt16, channels=1, rate=44100,
+            p.open(format=_pyaudio_mod.paInt16, channels=1, rate=44100,
                    input=True, input_device_index=99999,
                    frames_per_buffer=512, as_loopback=True)
         except TypeError:
@@ -3222,7 +3295,7 @@ class HomRecScreen:
             return True    # kwarg accepted, device error is expected
         return True
 
-    def _find_wasapi_loopback(self, p: "pyaudio.PyAudio",
+    def _find_wasapi_loopback(self, p: "_pyaudio_mod.PyAudio",
                                require_input: bool = False) -> int | None:
         """Find WASAPI loopback device index for system audio capture (Windows only).
 
@@ -3243,7 +3316,7 @@ class HomRecScreen:
         if sys.platform != 'win32':
             return None
         try:
-            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            wasapi_info = p.get_host_api_info_by_type(_pyaudio_mod.paWASAPI)
         except OSError:
             log.warning("WASAPI not available on this system")
             return None
@@ -3574,487 +3647,139 @@ class HomRecScreen:
         return args
 
     def start_audio_recording(self) -> None:
+        """Start audio capture using the C++ WASAPI engine (hr_audio.dll).
+
+        The legacy PyAudio path has been removed.  If hr_audio.dll is absent
+        the method sets audio_recording=False and logs a warning.
+        """
+        # Clean up any leftover PyAudio state from a previous session
+        self.audio_thread = None
+        self.audio_frames = []
+        self.sys_audio_frames = []
+        self.sys_audio_recording = False
+        self.sys_audio_filename = None
+        self.sys_ffmpeg_proc = None
+
         try:
-            if self.audio_thread and self.audio_thread.is_alive():
-                self.audio_recording = False
-                self.audio_thread.join(timeout=2)
-            self.audio_thread = None
-            self.audio_frames = []
-            self.sys_audio_frames = []
+            from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+        except Exception:
+            _ae = None
+            _AOK = False
 
-            self.sys_audio_recording = False
-            if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
-                try:
-                    self.sys_audio_stream.stop_stream()
-                    self.sys_audio_stream.close()
-                except Exception:
-                    pass
-                self.sys_audio_stream = None
-            if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
-                try:
-                    self.sys_audio_p.terminate()
-                except Exception:
-                    pass
-                self.sys_audio_p = None
-            self.sys_audio_filename = None
-            self.sys_ffmpeg_proc = None
-
-            # ----------------------------------------------------------------
-            # Try C++ WASAPI engine first (hr_audio.dll)
-            # ----------------------------------------------------------------
-            try:
-                from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
-            except Exception:
-                _ae = None
-                _AOK = False
-
-            if _AOK and _ae is not None:
-                mic_vol  = self.audio_panel.mic_volume.get() / 100.0
-                sys_vol  = self.audio_panel.sys_volume.get() / 100.0
-                mic_mute = self.audio_panel.mic_mute.get()
-                sys_mute = self.audio_panel.sys_mute.get()
-
-                flags = _ae.start(mic_vol, sys_vol, mic_mute, sys_mute)
-                mic_ok = bool(flags & 0x1)
-                sys_ok = bool(flags & 0x2)
-                log.info(f"C++ AudioEngine started: mic={'OK' if mic_ok else 'FAIL'} "
-                         f"sys={'OK' if sys_ok else 'FAIL'}")
-
-                if mic_ok or sys_ok:
-                    self._using_cpp_audio = True
-                    self.audio_recording  = mic_ok
-                    self.sys_audio_recording = sys_ok
-                    self.audio_channels   = 2
-
-                    def _cpp_vu_poll():
-                        while getattr(self, '_using_cpp_audio', False) and (
-                                self.audio_recording or self.sys_audio_recording):
-                            m, s = _ae.get_levels()
-                            self.audio_panel.update_mic_level(m)
-                            self.audio_panel.update_sys_level(s)
-                            time.sleep(0.05)
-
-                    self._cpp_vu_thread = threading.Thread(target=_cpp_vu_poll, daemon=True)
-                    self._cpp_vu_thread.start()
-                    if mic_ok:
-                        log.info("Mic recording started via C++ WASAPI engine")
-                    if sys_ok:
-                        log.info("System audio recording started via C++ WASAPI engine")
-                    return
-
-            # ----------------------------------------------------------------
-            # Fallback: original PyAudio path
-            # ----------------------------------------------------------------
+        if not (_AOK and _ae):
+            log.warning("hr_audio.dll not available — audio recording disabled")
+            self.audio_recording = False
             self._using_cpp_audio = False
-            self.audio_channels = self.get_audio_channels()
-            silence = b'\x00' * 1024 * 2 * self.audio_channels
+            return
 
-            self.audio_p = pyaudio.PyAudio()
-            self.audio_stream = self.audio_p.open(
-                format=pyaudio.paInt16,
-                channels=self.audio_channels,
-                rate=44100,
-                input=True,
-                frames_per_buffer=1024
-            )
-            self.audio_recording = True
+        mic_vol  = self.audio_panel.mic_volume.get() / 100.0
+        sys_vol  = self.audio_panel.sys_volume.get() / 100.0
+        mic_mute = self.audio_panel.mic_mute.get()
+        sys_mute = self.audio_panel.sys_mute.get()
 
-            try:
-                from homrec_native import core as _nc_mic
-            except Exception:
-                _nc_mic = None
+        flags = _ae.start(mic_vol, sys_vol, mic_mute, sys_mute)
+        mic_ok = bool(flags & 0x1)
+        sys_ok = bool(flags & 0x2)
+        log.info(f"C++ AudioEngine started: mic={'OK' if mic_ok else 'FAIL'} "
+                 f"sys={'OK' if sys_ok else 'FAIL'}")
 
-            def record_mic() -> None:
-                while self.audio_recording and not self.stop_flag:
-                    if not self.paused:
-                        if not self.audio_panel._mic_mute_cached:
-                            try:
-                                data = self.audio_stream.read(1024, exception_on_overflow=False)
-                                vol = self.audio_panel._mic_vol_cached
-                                if vol != 1.0:
-                                    data = audioop.mul(data, 2, vol)
-                                self.audio_frames.append(data)
-                                if _nc_mic is not None:
-                                    level = _nc_mic.audio_rms_level(data)
-                                else:
-                                    level = min(100, int(audioop.rms(data, 2) / 150))
-                                self.audio_panel.update_mic_level(level)
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                self.audio_stream.read(1024, exception_on_overflow=False)
-                            except Exception:
-                                pass
-                            self.audio_frames.append(silence)
-                    else:
-                        self.audio_frames.append(silence)
-                        time.sleep(1024 / 44100)
+        self._using_cpp_audio = mic_ok or sys_ok
+        self.audio_recording      = mic_ok
+        self.sys_audio_recording  = sys_ok
+        self.audio_channels       = 2  # WASAPI engine always outputs stereo
 
-            self.audio_thread = threading.Thread(target=record_mic, daemon=True)
-            self.audio_thread.start()
-            log.info(f"Mic recording started via PyAudio ({self.audio_channels} channel(s))")
+        if self._using_cpp_audio:
+            def _cpp_vu_poll():
+                while getattr(self, '_using_cpp_audio', False) and (
+                        self.audio_recording or self.sys_audio_recording):
+                    m, s = _ae.get_levels()
+                    self.audio_panel.update_mic_level(m)
+                    self.audio_panel.update_sys_level(s)
+                    time.sleep(0.05)
 
-            try:
-                if not self.audio_panel.sys_mute.get():
-                    self.sys_audio_p = pyaudio.PyAudio()
-                    supports_loopback_flag = self._pyaudio_supports_loopback(self.sys_audio_p)
-                    log.info(f"PyAudio as_loopback support: {supports_loopback_flag}")
-                    loopback_idx = self._find_wasapi_loopback(
-                        self.sys_audio_p, require_input=not supports_loopback_flag)
-
-                    if loopback_idx is not None:
-                        flag_variants = []
-                        if supports_loopback_flag:
-                            flag_variants.append(True)
-                        flag_variants.append(False)
-                        opened = False
-                        sys_channels = 2
-                        for use_loopback_flag in flag_variants:
-                            for ch in (2, 1):
-                                try:
-                                    kwargs = dict(format=pyaudio.paInt16, channels=ch,
-                                                  rate=44100, input=True,
-                                                  input_device_index=loopback_idx,
-                                                  frames_per_buffer=1024)
-                                    if use_loopback_flag:
-                                        kwargs['as_loopback'] = True
-                                    self.sys_audio_stream = self.sys_audio_p.open(**kwargs)
-                                    opened = True; sys_channels = ch
-                                    log.info(f"System audio stream opened (as_loopback={use_loopback_flag}, ch={ch})")
-                                    break
-                                except (TypeError, OSError) as e:
-                                    log.warning(f"sys audio open failed (as_loopback={use_loopback_flag}, ch={ch}): {e}")
-                            if opened:
-                                break
-
-                        if opened:
-                            self.sys_audio_recording = True
-                            silence_sys = b'\x00' * 1024 * 2 * sys_channels
-                            self._sys_channels = sys_channels
-
-                            def record_sys() -> None:
-                                while self.sys_audio_recording and not self.stop_flag:
-                                    if not self.paused:
-                                        try:
-                                            data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                            muted = self.audio_panel._sys_mute_cached
-                                            vol   = self.audio_panel._sys_vol_cached
-                                            if muted:
-                                                self.sys_audio_frames.append(silence_sys)
-                                                self.audio_panel.update_sys_level(0)
-                                            else:
-                                                if vol != 1.0:
-                                                    data = audioop.mul(data, 2, vol)
-                                                self.sys_audio_frames.append(data)
-                                                self.audio_panel.update_sys_level(
-                                                    min(100, int(audioop.rms(data, 2) / 150)))
-                                        except Exception as e:
-                                            log.debug(f"sys audio read error: {e}")
-                                    else:
-                                        self.sys_audio_frames.append(silence_sys)
-                                        time.sleep(1024 / 44100)
-
-                            self.sys_audio_thread = threading.Thread(target=record_sys, daemon=True)
-                            self.sys_audio_thread.start()
-                            log.info(f"System audio via WASAPI loopback (device={loopback_idx})")
-                        else:
-                            log.warning("Could not open WASAPI loopback stream")
-                            loopback_idx = None
-
-                    if loopback_idx is None:
-                        log.warning("WASAPI loopback not found, trying PyAudio Stereo Mix")
-                        if self.sys_audio_p is None:
-                            self.sys_audio_p = pyaudio.PyAudio()
-                        stereo_mix_idx = None; stereo_mix_ch = 2
-                        keywords = ['stereo mix','what u hear','loopback','mixer','wave out',
-                                    'стерео','микшер','что слышит']
-                        for i in range(self.sys_audio_p.get_device_count()):
-                            try:
-                                dev = self.sys_audio_p.get_device_info_by_index(i)
-                                raw = dev.get('name', '')
-                                try: nm = raw.encode('cp1251').decode('utf-8')
-                                except: nm = raw
-                                max_in = int(dev.get('maxInputChannels', 0))
-                                log.debug(f"PyAudio device [{i}]: {nm!r} in={max_in}")
-                                if max_in > 0 and any(k in nm.lower() for k in keywords):
-                                    stereo_mix_idx = i; stereo_mix_ch = min(max_in, 2)
-                                    log.info(f"PyAudio Stereo Mix found: [{i}] {nm!r} ch={stereo_mix_ch}")
-                                    break
-                            except Exception: continue
-
-                        if stereo_mix_idx is not None:
-                            opened2 = False
-                            for ch2 in ([stereo_mix_ch] if stereo_mix_ch == 1 else [2, 1]):
-                                try:
-                                    self.sys_audio_stream = self.sys_audio_p.open(
-                                        format=pyaudio.paInt16, channels=ch2,
-                                        rate=44100, input=True,
-                                        input_device_index=stereo_mix_idx,
-                                        frames_per_buffer=1024)
-                                    opened2 = True; stereo_mix_ch = ch2
-                                    log.info(f"PyAudio Stereo Mix stream opened (ch={ch2})")
-                                    break
-                                except Exception as e:
-                                    log.warning(f"PyAudio Stereo Mix open failed (ch={ch2}): {e}")
-                            if opened2:
-                                self.sys_audio_recording = True
-                                self._sys_channels = stereo_mix_ch
-                                _silence2 = b'\x00' * 1024 * 2 * stereo_mix_ch
-                                def record_sys_mix() -> None:
-                                    while self.sys_audio_recording and not self.stop_flag:
-                                        if not self.paused:
-                                            try:
-                                                data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                                muted = self.audio_panel._sys_mute_cached
-                                                vol   = self.audio_panel._sys_vol_cached
-                                                if muted:
-                                                    self.sys_audio_frames.append(_silence2)
-                                                    self.audio_panel.update_sys_level(0)
-                                                else:
-                                                    if vol != 1.0:
-                                                        data = audioop.mul(data, 2, vol)
-                                                    self.sys_audio_frames.append(data)
-                                                    self.audio_panel.update_sys_level(
-                                                        min(100, int(audioop.rms(data, 2) / 150)))
-                                            except Exception as e:
-                                                log.debug(f"sys mix read error: {e}")
-                                        else:
-                                            self.sys_audio_frames.append(_silence2)
-                                            time.sleep(1024 / 44100)
-                                self.sys_audio_thread = threading.Thread(target=record_sys_mix, daemon=True)
-                                self.sys_audio_thread.start()
-                                log.info("System audio recording started via PyAudio Stereo Mix")
-                                loopback_idx = "pyaudio_mix"
-
-                    if loopback_idx is None:
-                        log.warning("No WASAPI/Stereo Mix found, trying dshow fallback")
-                        try: self.sys_audio_p.terminate()
-                        except: pass
-                        self.sys_audio_p = None
-                        self.sys_audio_filename = self.filename.replace('.mp4', '_sys.wav')
-                        devices = self.get_dshow_audio_devices()
-                        sys_device = None
-                        for d in devices:
-                            dl = d.lower()
-                            if any(k in dl for k in ['stereo mix','what u hear','loopback',
-                                                       'стерео микшер','что слышит']):
-                                sys_device = d; break
-                        if not sys_device and devices:
-                            sys_device = devices[0]
-                        if sys_device and self.ffmpeg_path:
-                            vol = self.audio_panel.sys_volume.get() / 100.0
-                            vf  = f'volume={vol:.2f}' if vol != 1.0 else 'anull'
-                            sys_cmd = [self.ffmpeg_path, '-y', '-f', 'dshow',
-                                       '-i', f'audio={sys_device}', '-af', vf,
-                                       '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2',
-                                       self.sys_audio_filename]
-                            self.sys_ffmpeg_proc = subprocess.Popen(
-                                sys_cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, stdin=subprocess.PIPE,
-                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
-                            self.sys_audio_recording = True
-                            log.info(f"System audio recording via dshow: {sys_device}")
-                        else:
-                            log.warning("No system audio device found at all")
-                            self.sys_audio_filename = None
-                            self.sys_audio_recording = False
-            except Exception as e:
-                log.warning(f"System audio unavailable: {e}")
-                self.sys_audio_filename = None
-                self.sys_audio_recording = False
-
-        except Exception as e:
-            log.error(f"Audio error: {e}")
+            self._cpp_vu_thread = threading.Thread(target=_cpp_vu_poll, daemon=True)
+            self._cpp_vu_thread.start()
+            if mic_ok:
+                log.info("Mic recording started via C++ WASAPI engine")
+            if sys_ok:
+                log.info("System audio recording started via C++ WASAPI engine")
+        else:
+            log.warning("C++ AudioEngine: neither mic nor system audio could be opened")
             self.audio_recording = False
 
     def stop_audio_recording(self) -> str | None:
-        # ----------------------------------------------------------------
-        # C++ engine path
-        # ----------------------------------------------------------------
-        if getattr(self, '_using_cpp_audio', False):
-            self._using_cpp_audio = False
+        """Stop C++ WASAPI audio engine and flush PCM to WAV files.
+
+        Returns the path to the final merged (or single-track) WAV file,
+        or None if no audio was captured.
+        """
+        if not getattr(self, '_using_cpp_audio', False):
+            # Engine was never started (e.g. hr_audio.dll absent)
             self.audio_recording     = False
             self.sys_audio_recording = False
-
-            try:
-                from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
-            except Exception:
-                _ae = None; _AOK = False
-
-            if not (_AOK and _ae):
-                return None
-
-            audio_filename = self.filename.replace('.mp4', '_audio.wav')
-            mic_wav = self.filename.replace('.mp4', '_mic_tmp.wav')
-            sys_wav = self.filename.replace('.mp4', '_sys.wav')
-
-            has_mic = not self.audio_panel.mic_mute.get()
-            has_sys = not self.audio_panel.sys_mute.get()
-
-            flags = _ae.stop(
-                mic_wav if has_mic else None,
-                sys_wav if has_sys else None,
-            )
-            mic_written = bool(flags & 0x1)
-            sys_written = bool(flags & 0x2)
-            log.info(f"C++ AudioEngine stopped: mic_wav={mic_written} sys_wav={sys_written}")
-
-            if mic_written and sys_written:
-                ok = _ae.mix_wav(mic_wav, sys_wav, audio_filename)
-                if ok:
-                    try: import os; os.remove(mic_wav); os.remove(sys_wav)
-                    except: pass
-                    log.info(f"Mixed audio saved (C++): {audio_filename}")
-                    return audio_filename
-                else:
-                    log.warning("C++ mix_wav failed, using mic only")
-                    try: import os; os.rename(mic_wav, audio_filename)
-                    except: pass
-                    return audio_filename
-            elif mic_written:
-                try: import os; os.rename(mic_wav, audio_filename)
-                except: pass
-                log.info(f"Mic audio saved (C++): {audio_filename}")
-                return audio_filename
-            elif sys_written:
-                try: import os; os.rename(sys_wav, audio_filename)
-                except: pass
-                log.info(f"System audio saved (C++): {audio_filename}")
-                return audio_filename
             return None
 
-        # ----------------------------------------------------------------
-        # PyAudio fallback path (оригинальный код)
-        # ----------------------------------------------------------------
-        self.audio_recording = False
+        self._using_cpp_audio    = False
+        self.audio_recording     = False
         self.sys_audio_recording = False
 
-        if self.audio_stream:
-            try:
-                self.audio_stream.stop_stream()
-                self.audio_stream.close()
-            except Exception:
-                pass
-        self.audio_stream = None
-        if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
-            try:
-                self.sys_audio_stream.stop_stream()
-                self.sys_audio_stream.close()
-            except Exception:
-                pass
-            self.sys_audio_stream = None
+        try:
+            from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+        except Exception:
+            _ae = None
+            _AOK = False
 
-        if self.audio_thread and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=1)
-        self.audio_thread = None
-        if hasattr(self, 'sys_audio_thread') and self.sys_audio_thread and self.sys_audio_thread.is_alive():
-            self.sys_audio_thread.join(timeout=1)
-        self.sys_audio_thread = None
-
-        if self.audio_p:
-            try: self.audio_p.terminate()
-            except: pass
-        self.audio_p = None
-        if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
-            try: self.sys_audio_p.terminate()
-            except: pass
-            self.sys_audio_p = None
-
-        if self.sys_ffmpeg_proc and self.sys_ffmpeg_proc.poll() is None:
-            try:
-                self.sys_ffmpeg_proc.stdin.write(b'q\n')
-                self.sys_ffmpeg_proc.stdin.flush()
-            except: pass
-            try:
-                self.sys_ffmpeg_proc.wait(timeout=3)
-            except:
-                try: self.sys_ffmpeg_proc.kill()
-                except: pass
-        self.sys_ffmpeg_proc = None
-        time.sleep(0.15)
-
-        mic_frames = self.audio_frames
-        sys_frames = self.sys_audio_frames
-        self.audio_frames = []
-        self.sys_audio_frames = []
-
-        has_mic = bool(mic_frames) and not self.audio_panel.mic_mute.get()
-
-        sys_wav = self.sys_audio_filename
-        self.sys_audio_filename = None
-
-        has_sys_frames = bool(sys_frames) and not self.audio_panel.sys_mute.get()
-        has_sys_file   = bool(sys_wav) and os.path.exists(sys_wav or '') and not self.audio_panel.sys_mute.get()
-
-        if has_sys_frames and not has_sys_file:
-            sys_wav = self.filename.replace('.mp4', '_sys.wav')
-            try:
-                sys_ch = getattr(self, '_sys_channels', 2)
-                wf = wave.open(sys_wav, 'wb')
-                wf.setnchannels(sys_ch); wf.setsampwidth(2); wf.setframerate(44100)
-                CHUNK = 256
-                for _ci in range(0, len(sys_frames), CHUNK):
-                    wf.writeframes(b''.join(sys_frames[_ci:_ci+CHUNK]))
-                wf.close()
-                has_sys_file = True
-                log.info(f"System audio (WASAPI) written: {sys_wav}")
-            except Exception as e:
-                log.warning(f"Failed to write system audio frames: {e}")
-                has_sys_file = False
-
-        has_sys = has_sys_file
-
-        if not has_mic and not has_sys:
+        if not (_AOK and _ae):
             return None
 
         audio_filename = self.filename.replace('.mp4', '_audio.wav')
+        mic_wav        = self.filename.replace('.mp4', '_mic_tmp.wav')
+        sys_wav        = self.filename.replace('.mp4', '_sys.wav')
 
-        if has_mic and has_sys:
-            try:
-                mic_tmp = audio_filename + '_mic_tmp.wav'
-                mix_cmd = [self.ffmpeg_path, '-y',
-                           '-i', mic_tmp, '-i', sys_wav,
-                           '-filter_complex', 'amix=inputs=2:duration=longest:normalize=0',
-                           '-acodec', 'pcm_s16le', audio_filename]
-                wf = wave.open(mic_tmp, 'wb')
-                wf.setnchannels(self.audio_channels); wf.setsampwidth(2); wf.setframerate(44100)
-                CHUNK = 256
-                for _ci in range(0, len(mic_frames), CHUNK):
-                    wf.writeframes(b''.join(mic_frames[_ci:_ci+CHUNK]))
-                wf.close()
-                result = subprocess.run(mix_cmd, capture_output=True, timeout=20,
-                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
-                if result.returncode != 0:
-                    log.warning(f"amix ffmpeg error: {result.stderr.decode(errors='replace')[-400:]}")
-                    raise RuntimeError(f"ffmpeg amix returncode={result.returncode}")
-                try: os.remove(mic_tmp); os.remove(sys_wav)
-                except: pass
-                log.info(f"Mixed audio saved: {audio_filename}")
+        has_mic = not self.audio_panel.mic_mute.get()
+        has_sys = not self.audio_panel.sys_mute.get()
+
+        flags       = _ae.stop(mic_wav if has_mic else None,
+                               sys_wav if has_sys else None)
+        mic_written = bool(flags & 0x1)
+        sys_written = bool(flags & 0x2)
+        log.info(f"C++ AudioEngine stopped: mic_wav={mic_written} sys_wav={sys_written}")
+
+        if mic_written and sys_written:
+            ok = _ae.mix_wav(mic_wav, sys_wav, audio_filename)
+            if ok:
+                try:
+                    os.remove(mic_wav)
+                    os.remove(sys_wav)
+                except Exception:
+                    pass
+                log.info(f"Mixed audio saved (C++): {audio_filename}")
                 return audio_filename
-            except Exception as e:
-                log.warning(f"Mix failed, using mic only: {e}")
-                has_sys = False
+            # mix failed — use mic only
+            log.warning("C++ mix_wav failed, falling back to mic only")
+            try:
+                os.rename(mic_wav, audio_filename)
+            except Exception:
+                pass
+            return audio_filename
 
-        if has_sys and not has_mic:
+        if mic_written:
+            try:
+                os.rename(mic_wav, audio_filename)
+            except Exception:
+                pass
+            log.info(f"Mic audio saved (C++): {audio_filename}")
+            return audio_filename
+
+        if sys_written:
             try:
                 os.rename(sys_wav, audio_filename)
-                log.info(f"System audio saved: {audio_filename}")
-                return audio_filename
-            except: return sys_wav
+            except Exception:
+                pass
+            log.info(f"System audio saved (C++): {audio_filename}")
+            return audio_filename
 
-        try:
-            wf = wave.open(audio_filename, 'wb')
-            wf.setnchannels(self.audio_channels); wf.setsampwidth(2); wf.setframerate(44100)
-            CHUNK = 256
-            for i in range(0, len(mic_frames), CHUNK):
-                wf.writeframes(b''.join(mic_frames[i:i+CHUNK]))
-            wf.close()
-            log.info(f"Mic audio saved: {audio_filename}")
-        except Exception as e:
-            log.warning(f"Mic WAV write failed: {e}")
-            return None
-        return audio_filename
+        return None
 
     def select_folder(self) -> None:
         folder = filedialog.askdirectory(initialdir=self.app.output_folder)
@@ -5028,36 +4753,43 @@ class HomRecScreen:
         self.update_preview_size()
     
     def get_audio_channels(self) -> int:
+        """Return the number of audio channels for the default mic.
+
+        With the C++ WASAPI engine (hr_audio.dll) audio is always captured as
+        stereo (2 ch).  For the legacy PyAudio fallback we probe the device.
+        """
         try:
-            p = pyaudio.PyAudio()
+            from homrec_native import AUDIO_OK
+            if AUDIO_OK:
+                return 2
+        except Exception:
+            pass
+
+        if not _PYAUDIO_AVAILABLE:
+            return 2
+        try:
+            p = _pyaudio_mod.PyAudio()
             try:
-                stream = p.open(
-                    format=pyaudio.paInt16,
-                    channels=2,
-                    rate=44100,
-                    input=True,
-                    frames_per_buffer=1024
-                )
+                stream = p.open(format=_pyaudio_mod.paInt16, channels=2,
+                                rate=44100, input=True, frames_per_buffer=1024)
                 stream.close()
                 return 2
-            except:
+            except Exception:
                 try:
-                    stream = p.open(
-                        format=pyaudio.paInt16,
-                        channels=1,
-                        rate=44100,
-                        input=True,
-                        frames_per_buffer=1024
-                    )
+                    stream = p.open(format=_pyaudio_mod.paInt16, channels=1,
+                                    rate=44100, input=True, frames_per_buffer=1024)
                     stream.close()
                     return 1
-                except:
+                except Exception:
                     return 1
-        except:
-            return 1
+            finally:
+                try: p.terminate()
+                except Exception: pass
+        except Exception:
+            return 2
     
     @staticmethod
-    def _pyaudio_supports_loopback(p: "pyaudio.PyAudio") -> bool:
+    def _pyaudio_supports_loopback(p: "_pyaudio_mod.PyAudio") -> bool:
         """Return True if this PyAudio build accepts the as_loopback kwarg.
 
         Standard PyAudio does NOT support as_loopback — only the pyaudio-wasapi
@@ -5066,7 +4798,7 @@ class HomRecScreen:
         it raises TypeError first the kwarg itself is unsupported.
         """
         try:
-            p.open(format=pyaudio.paInt16, channels=1, rate=44100,
+            p.open(format=_pyaudio_mod.paInt16, channels=1, rate=44100,
                    input=True, input_device_index=99999,
                    frames_per_buffer=512, as_loopback=True)
         except TypeError:
@@ -5075,7 +4807,7 @@ class HomRecScreen:
             return True    # kwarg accepted, device error is expected
         return True
 
-    def _find_wasapi_loopback(self, p: "pyaudio.PyAudio",
+    def _find_wasapi_loopback(self, p: "_pyaudio_mod.PyAudio",
                                require_input: bool = False) -> int | None:
         """Find WASAPI loopback device index for system audio capture (Windows only).
 
@@ -5096,7 +4828,7 @@ class HomRecScreen:
         if sys.platform != 'win32':
             return None
         try:
-            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            wasapi_info = p.get_host_api_info_by_type(_pyaudio_mod.paWASAPI)
         except OSError:
             log.warning("WASAPI not available on this system")
             return None
@@ -5427,464 +5159,136 @@ class HomRecScreen:
         return args
 
     def start_audio_recording(self) -> None:
+        """Start audio capture using the C++ WASAPI engine (hr_audio.dll).
+
+        The legacy PyAudio path has been removed.  If hr_audio.dll is absent
+        the method sets audio_recording=False and logs a warning.
+        """
+        self.audio_thread = None
+        self.audio_frames = []
+        self.sys_audio_frames = []
+        self.sys_audio_recording = False
+        self.sys_audio_filename = None
+        self.sys_ffmpeg_proc = None
+
         try:
-            if self.audio_thread and self.audio_thread.is_alive():
-                self.audio_recording = False
-                self.audio_thread.join(timeout=2)
-            self.audio_thread = None
-            self.audio_frames = []
-            self.sys_audio_frames = []
+            from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+        except Exception:
+            _ae = None
+            _AOK = False
 
-            self.sys_audio_recording = False
-            if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
-                try:
-                    self.sys_audio_stream.stop_stream()
-                    self.sys_audio_stream.close()
-                except Exception:
-                    pass
-                self.sys_audio_stream = None
-            if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
-                try:
-                    self.sys_audio_p.terminate()
-                except Exception:
-                    pass
-                self.sys_audio_p = None
-            self.sys_audio_filename = None
-            self.sys_ffmpeg_proc = None
-
-            # ----------------------------------------------------------------
-            # Try C++ WASAPI engine first (hr_audio.dll)
-            # ----------------------------------------------------------------
-            try:
-                from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
-            except Exception:
-                _ae = None
-                _AOK = False
-
-            if _AOK and _ae is not None:
-                mic_vol  = self.audio_panel.mic_volume.get() / 100.0
-                sys_vol  = self.audio_panel.sys_volume.get() / 100.0
-                mic_mute = self.audio_panel.mic_mute.get()
-                sys_mute = self.audio_panel.sys_mute.get()
-
-                flags = _ae.start(mic_vol, sys_vol, mic_mute, sys_mute)
-                mic_ok = bool(flags & 0x1)
-                sys_ok = bool(flags & 0x2)
-                log.info(f"C++ AudioEngine started: mic={'OK' if mic_ok else 'FAIL'} "
-                         f"sys={'OK' if sys_ok else 'FAIL'}")
-
-                if mic_ok or sys_ok:
-                    self._using_cpp_audio = True
-                    self.audio_recording  = mic_ok
-                    self.sys_audio_recording = sys_ok
-                    self.audio_channels   = 2
-
-                    def _cpp_vu_poll():
-                        while getattr(self, '_using_cpp_audio', False) and (
-                                self.audio_recording or self.sys_audio_recording):
-                            m, s = _ae.get_levels()
-                            self.audio_panel.update_mic_level(m)
-                            self.audio_panel.update_sys_level(s)
-                            time.sleep(0.05)
-
-                    self._cpp_vu_thread = threading.Thread(target=_cpp_vu_poll, daemon=True)
-                    self._cpp_vu_thread.start()
-                    if mic_ok:
-                        log.info("Mic recording started via C++ WASAPI engine")
-                    if sys_ok:
-                        log.info("System audio recording started via C++ WASAPI engine")
-                    return
-
-            # ----------------------------------------------------------------
-            # Fallback: original PyAudio path
-            # ----------------------------------------------------------------
+        if not (_AOK and _ae):
+            log.warning("hr_audio.dll not available — audio recording disabled")
+            self.audio_recording = False
             self._using_cpp_audio = False
-            self.audio_channels = self.get_audio_channels()
-            silence = b'\x00' * 1024 * 2 * self.audio_channels
+            return
 
-            self.audio_p = pyaudio.PyAudio()
-            self.audio_stream = self.audio_p.open(
-                format=pyaudio.paInt16,
-                channels=self.audio_channels,
-                rate=44100,
-                input=True,
-                frames_per_buffer=1024
-            )
-            self.audio_recording = True
+        mic_vol  = self.audio_panel.mic_volume.get() / 100.0
+        sys_vol  = self.audio_panel.sys_volume.get() / 100.0
+        mic_mute = self.audio_panel.mic_mute.get()
+        sys_mute = self.audio_panel.sys_mute.get()
 
-            try:
-                from homrec_native import core as _nc_mic
-            except Exception:
-                _nc_mic = None
+        flags = _ae.start(mic_vol, sys_vol, mic_mute, sys_mute)
+        mic_ok = bool(flags & 0x1)
+        sys_ok = bool(flags & 0x2)
+        log.info(f"C++ AudioEngine started: mic={'OK' if mic_ok else 'FAIL'} "
+                 f"sys={'OK' if sys_ok else 'FAIL'}")
 
-            def record_mic() -> None:
-                while self.audio_recording and not self.stop_flag:
-                    if not self.paused:
-                        if not self.audio_panel._mic_mute_cached:
-                            try:
-                                data = self.audio_stream.read(1024, exception_on_overflow=False)
-                                vol = self.audio_panel._mic_vol_cached
-                                if vol != 1.0:
-                                    data = audioop.mul(data, 2, vol)
-                                self.audio_frames.append(data)
-                                if _nc_mic is not None:
-                                    level = _nc_mic.audio_rms_level(data)
-                                else:
-                                    level = min(100, int(audioop.rms(data, 2) / 150))
-                                self.audio_panel.update_mic_level(level)
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                self.audio_stream.read(1024, exception_on_overflow=False)
-                            except Exception:
-                                pass
-                            self.audio_frames.append(silence)
-                    else:
-                        self.audio_frames.append(silence)
-                        time.sleep(1024 / 44100)
+        self._using_cpp_audio    = mic_ok or sys_ok
+        self.audio_recording     = mic_ok
+        self.sys_audio_recording = sys_ok
+        self.audio_channels      = 2
 
-            self.audio_thread = threading.Thread(target=record_mic, daemon=True)
-            self.audio_thread.start()
-            log.info(f"Mic recording started via PyAudio ({self.audio_channels} channel(s))")
+        if self._using_cpp_audio:
+            def _cpp_vu_poll():
+                while getattr(self, '_using_cpp_audio', False) and (
+                        self.audio_recording or self.sys_audio_recording):
+                    m, s = _ae.get_levels()
+                    self.audio_panel.update_mic_level(m)
+                    self.audio_panel.update_sys_level(s)
+                    time.sleep(0.05)
 
-            try:
-                if not self.audio_panel.sys_mute.get():
-                    self.sys_audio_p = pyaudio.PyAudio()
-                    supports_loopback_flag = self._pyaudio_supports_loopback(self.sys_audio_p)
-                    log.info(f"PyAudio as_loopback support: {supports_loopback_flag}")
-                    loopback_idx = self._find_wasapi_loopback(
-                        self.sys_audio_p, require_input=not supports_loopback_flag)
-
-                    if loopback_idx is not None:
-                        flag_variants = []
-                        if supports_loopback_flag:
-                            flag_variants.append(True)
-                        flag_variants.append(False)
-                        opened = False
-                        sys_channels = 2
-                        for use_loopback_flag in flag_variants:
-                            for ch in (2, 1):
-                                try:
-                                    kwargs = dict(format=pyaudio.paInt16, channels=ch,
-                                                  rate=44100, input=True,
-                                                  input_device_index=loopback_idx,
-                                                  frames_per_buffer=1024)
-                                    if use_loopback_flag:
-                                        kwargs['as_loopback'] = True
-                                    self.sys_audio_stream = self.sys_audio_p.open(**kwargs)
-                                    opened = True; sys_channels = ch
-                                    log.info(f"System audio stream opened (as_loopback={use_loopback_flag}, ch={ch})")
-                                    break
-                                except (TypeError, OSError) as e:
-                                    log.warning(f"sys audio open failed (as_loopback={use_loopback_flag}, ch={ch}): {e}")
-                            if opened:
-                                break
-
-                        if opened:
-                            self.sys_audio_recording = True
-                            silence_sys = b'\x00' * 1024 * 2 * sys_channels
-                            self._sys_channels = sys_channels
-
-                            def record_sys() -> None:
-                                while self.sys_audio_recording and not self.stop_flag:
-                                    if not self.paused:
-                                        try:
-                                            data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                            muted = self.audio_panel._sys_mute_cached
-                                            vol   = self.audio_panel._sys_vol_cached
-                                            if muted:
-                                                self.sys_audio_frames.append(silence_sys)
-                                                self.audio_panel.update_sys_level(0)
-                                            else:
-                                                if vol != 1.0:
-                                                    data = audioop.mul(data, 2, vol)
-                                                self.sys_audio_frames.append(data)
-                                                self.audio_panel.update_sys_level(
-                                                    min(100, int(audioop.rms(data, 2) / 150)))
-                                        except Exception as e:
-                                            log.debug(f"sys audio read error: {e}")
-                                    else:
-                                        self.sys_audio_frames.append(silence_sys)
-                                        time.sleep(1024 / 44100)
-
-                            self.sys_audio_thread = threading.Thread(target=record_sys, daemon=True)
-                            self.sys_audio_thread.start()
-                            log.info(f"System audio via WASAPI loopback (device={loopback_idx})")
-                        else:
-                            log.warning("Could not open WASAPI loopback stream")
-                            loopback_idx = None
-
-                    if loopback_idx is None:
-                        log.warning("WASAPI loopback not found, trying PyAudio Stereo Mix")
-                        if self.sys_audio_p is None:
-                            self.sys_audio_p = pyaudio.PyAudio()
-                        stereo_mix_idx = None; stereo_mix_ch = 2
-                        keywords = ['stereo mix','what u hear','loopback','mixer','wave out',
-                                    'стерео','микшер','что слышит']
-                        for i in range(self.sys_audio_p.get_device_count()):
-                            try:
-                                dev = self.sys_audio_p.get_device_info_by_index(i)
-                                raw = dev.get('name', '')
-                                try: nm = raw.encode('cp1251').decode('utf-8')
-                                except: nm = raw
-                                max_in = int(dev.get('maxInputChannels', 0))
-                                log.debug(f"PyAudio device [{i}]: {nm!r} in={max_in}")
-                                if max_in > 0 and any(k in nm.lower() for k in keywords):
-                                    stereo_mix_idx = i; stereo_mix_ch = min(max_in, 2)
-                                    log.info(f"PyAudio Stereo Mix found: [{i}] {nm!r} ch={stereo_mix_ch}")
-                                    break
-                            except Exception: continue
-
-                        if stereo_mix_idx is not None:
-                            opened2 = False
-                            for ch2 in ([stereo_mix_ch] if stereo_mix_ch == 1 else [2, 1]):
-                                try:
-                                    self.sys_audio_stream = self.sys_audio_p.open(
-                                        format=pyaudio.paInt16, channels=ch2,
-                                        rate=44100, input=True,
-                                        input_device_index=stereo_mix_idx,
-                                        frames_per_buffer=1024)
-                                    opened2 = True; stereo_mix_ch = ch2
-                                    log.info(f"PyAudio Stereo Mix stream opened (ch={ch2})")
-                                    break
-                                except Exception as e:
-                                    log.warning(f"PyAudio Stereo Mix open failed (ch={ch2}): {e}")
-                            if opened2:
-                                self.sys_audio_recording = True
-                                self._sys_channels = stereo_mix_ch
-                                _silence2 = b'\x00' * 1024 * 2 * stereo_mix_ch
-                                def record_sys_mix() -> None:
-                                    while self.sys_audio_recording and not self.stop_flag:
-                                        if not self.paused:
-                                            try:
-                                                data = self.sys_audio_stream.read(1024, exception_on_overflow=False)
-                                                muted = self.audio_panel._sys_mute_cached
-                                                vol   = self.audio_panel._sys_vol_cached
-                                                if muted:
-                                                    self.sys_audio_frames.append(_silence2)
-                                                    self.audio_panel.update_sys_level(0)
-                                                else:
-                                                    if vol != 1.0:
-                                                        data = audioop.mul(data, 2, vol)
-                                                    self.sys_audio_frames.append(data)
-                                                    self.audio_panel.update_sys_level(
-                                                        min(100, int(audioop.rms(data, 2) / 150)))
-                                            except Exception as e:
-                                                log.debug(f"sys mix read error: {e}")
-                                        else:
-                                            self.sys_audio_frames.append(_silence2)
-                                            time.sleep(1024 / 44100)
-                                self.sys_audio_thread = threading.Thread(target=record_sys_mix, daemon=True)
-                                self.sys_audio_thread.start()
-                                log.info("System audio recording started via PyAudio Stereo Mix")
-                                loopback_idx = "pyaudio_mix"
-
-                    if loopback_idx is None:
-                        log.warning("No WASAPI/Stereo Mix found, trying dshow fallback")
-                        try: self.sys_audio_p.terminate()
-                        except: pass
-                        self.sys_audio_p = None
-                        self.sys_audio_filename = self.filename.replace('.mp4', '_sys.wav')
-                        devices = self.get_dshow_audio_devices()
-                        sys_device = None
-                        for d in devices:
-                            dl = d.lower()
-                            if any(k in dl for k in ['stereo mix','what u hear','loopback',
-                                                       'стерео микшер','что слышит']):
-                                sys_device = d; break
-                        if not sys_device and devices:
-                            sys_device = devices[0]
-                        if sys_device and self.ffmpeg_path:
-                            vol = self.audio_panel.sys_volume.get() / 100.0
-                            vf  = f'volume={vol:.2f}' if vol != 1.0 else 'anull'
-                            sys_cmd = [self.ffmpeg_path, '-y', '-f', 'dshow',
-                                       '-i', f'audio={sys_device}', '-af', vf,
-                                       '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2',
-                                       self.sys_audio_filename]
-                            self.sys_ffmpeg_proc = subprocess.Popen(
-                                sys_cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, stdin=subprocess.PIPE,
-                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
-                            self.sys_audio_recording = True
-                            log.info(f"System audio recording via dshow: {sys_device}")
-                        else:
-                            log.warning("No system audio device found at all")
-                            self.sys_audio_filename = None
-                            self.sys_audio_recording = False
-            except Exception as e:
-                log.warning(f"System audio unavailable: {e}")
-                self.sys_audio_filename = None
-                self.sys_audio_recording = False
-
-        except Exception as e:
-            log.error(f"Audio error: {e}")
+            self._cpp_vu_thread = threading.Thread(target=_cpp_vu_poll, daemon=True)
+            self._cpp_vu_thread.start()
+            if mic_ok:
+                log.info("Mic recording started via C++ WASAPI engine")
+            if sys_ok:
+                log.info("System audio recording started via C++ WASAPI engine")
+        else:
+            log.warning("C++ AudioEngine: neither mic nor system audio could be opened")
             self.audio_recording = False
 
     def stop_audio_recording(self) -> str | None:
-        # v1.5.0 FIX: non-blocking teardown — no more 30s hangs ---------
+        """Stop C++ WASAPI audio engine and flush PCM to WAV.
 
-        # Step 1: signal all threads to stop (instant)
-        self.audio_recording = False
+        Returns the path to the merged (or single-track) WAV, or None.
+        """
+        if not getattr(self, '_using_cpp_audio', False):
+            self.audio_recording     = False
+            self.sys_audio_recording = False
+            return None
+
+        self._using_cpp_audio    = False
+        self.audio_recording     = False
         self.sys_audio_recording = False
 
-        # Step 2: close PyAudio streams first so threads unblock on .read()
-        if self.audio_stream:
-            try:
-                self.audio_stream.stop_stream()
-                self.audio_stream.close()
-            except Exception:
-                pass
-        self.audio_stream = None
-        if hasattr(self, 'sys_audio_stream') and self.sys_audio_stream:
-            try:
-                self.sys_audio_stream.stop_stream()
-                self.sys_audio_stream.close()
-            except Exception:
-                pass
-            self.sys_audio_stream = None
+        try:
+            from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
+        except Exception:
+            _ae = None
+            _AOK = False
 
-        # Step 3: join audio threads with SHORT timeout (streams closed → they exit fast)
-        if self.audio_thread and self.audio_thread.is_alive():
-            self.audio_thread.join(timeout=1)
-        self.audio_thread = None
-        if hasattr(self, 'sys_audio_thread') and self.sys_audio_thread and self.sys_audio_thread.is_alive():
-            self.sys_audio_thread.join(timeout=1)
-        self.sys_audio_thread = None
-
-        # Step 4: terminate PyAudio instances
-        if self.audio_p:
-            try:
-                self.audio_p.terminate()
-            except Exception:
-                pass
-        self.audio_p = None
-        if hasattr(self, 'sys_audio_p') and self.sys_audio_p:
-            try:
-                self.sys_audio_p.terminate()
-            except Exception:
-                pass
-            self.sys_audio_p = None
-
-        # Step 5: stop dshow ffmpeg fallback — KILL immediately, don't wait
-        if self.sys_ffmpeg_proc and self.sys_ffmpeg_proc.poll() is None:
-            try:
-                self.sys_ffmpeg_proc.stdin.write(b'q\n')
-                self.sys_ffmpeg_proc.stdin.flush()
-            except Exception:
-                pass
-            try:
-                self.sys_ffmpeg_proc.wait(timeout=3)  # brief grace period
-            except Exception:
-                try:
-                    self.sys_ffmpeg_proc.kill()  # don't wait → instant
-                except Exception:
-                    pass
-        self.sys_ffmpeg_proc = None
-        time.sleep(0.15)  # minimal OS flush (was 0.5)
-
-        mic_frames = self.audio_frames
-        sys_frames = self.sys_audio_frames
-        self.audio_frames = []
-        self.sys_audio_frames = []
-
-        has_mic = bool(mic_frames) and not self.audio_panel.mic_mute.get()
-
-        # sys audio: either WASAPI frames or dshow wav file
-        sys_wav = self.sys_audio_filename
-        self.sys_audio_filename = None
-
-        has_sys_frames = bool(sys_frames) and not self.audio_panel.sys_mute.get()
-        has_sys_file = bool(sys_wav) and os.path.exists(sys_wav or '') and not self.audio_panel.sys_mute.get()
-
-        # Write WASAPI frames to a wav so the mix logic below is uniform
-        if has_sys_frames and not has_sys_file:
-            sys_wav = self.filename.replace('.mp4', '_sys.wav')
-            try:
-                sys_ch = getattr(self, '_sys_channels', 2)
-                wf = wave.open(sys_wav, 'wb')
-                wf.setnchannels(sys_ch)
-                wf.setsampwidth(2)
-                wf.setframerate(44100)
-                CHUNK = 256
-                for _ci in range(0, len(sys_frames), CHUNK):
-                    wf.writeframes(b''.join(sys_frames[_ci:_ci+CHUNK]))
-                wf.close()
-                has_sys_file = True
-                log.info(f"System audio (WASAPI) written: {sys_wav}")
-            except Exception as e:
-                log.warning(f"Failed to write system audio frames: {e}")
-                has_sys_file = False
-
-        has_sys = has_sys_file
-
-        if not has_mic and not has_sys:
+        if not (_AOK and _ae):
             return None
 
         audio_filename = self.filename.replace('.mp4', '_audio.wav')
+        mic_wav        = self.filename.replace('.mp4', '_mic_tmp.wav')
+        sys_wav        = self.filename.replace('.mp4', '_sys.wav')
 
-        if has_mic and has_sys:
-            # Mix mic WAV + sys WAV using ffmpeg amix
-            try:
-                mic_tmp = audio_filename + '_mic_tmp.wav'
-                mix_cmd = [
-                    self.ffmpeg_path,
-                    '-y',
-                    '-i', mic_tmp,
-                    '-i', sys_wav,
-                    '-filter_complex', 'amix=inputs=2:duration=longest:normalize=0',
-                    '-acodec', 'pcm_s16le',
-                    audio_filename
-                ]
-                wf = wave.open(mic_tmp, 'wb')
-                wf.setnchannels(self.audio_channels)
-                wf.setsampwidth(2)
-                wf.setframerate(44100)
-                CHUNK = 256
-                for _ci in range(0, len(mic_frames), CHUNK):
-                    wf.writeframes(b''.join(mic_frames[_ci:_ci+CHUNK]))
-                wf.close()
-                # mix timeout reduced: 60 s is pathological, 20 s is enough
-                result = subprocess.run(mix_cmd, capture_output=True, timeout=20,
-                               creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0)
-                if result.returncode != 0:
-                    log.warning(f"amix ffmpeg error: {result.stderr.decode(errors='replace')[-400:]}")
-                    raise RuntimeError(f"ffmpeg amix returncode={result.returncode}")
+        has_mic = not self.audio_panel.mic_mute.get()
+        has_sys = not self.audio_panel.sys_mute.get()
+
+        flags       = _ae.stop(mic_wav if has_mic else None,
+                               sys_wav if has_sys else None)
+        mic_written = bool(flags & 0x1)
+        sys_written = bool(flags & 0x2)
+        log.info(f"C++ AudioEngine stopped: mic_wav={mic_written} sys_wav={sys_written}")
+
+        if mic_written and sys_written:
+            ok = _ae.mix_wav(mic_wav, sys_wav, audio_filename)
+            if ok:
                 try:
-                    os.remove(mic_tmp)
+                    os.remove(mic_wav)
                     os.remove(sys_wav)
-                except:
+                except Exception:
                     pass
-                log.info(f"Mixed audio saved: {audio_filename}")
+                log.info(f"Mixed audio saved (C++): {audio_filename}")
                 return audio_filename
-            except Exception as e:
-                log.warning(f"Mix failed, using mic only: {e}")
-                has_sys = False
+            log.warning("C++ mix_wav failed, falling back to mic only")
+            try:
+                os.rename(mic_wav, audio_filename)
+            except Exception:
+                pass
+            return audio_filename
 
-        if has_sys and not has_mic:
+        if mic_written:
+            try:
+                os.rename(mic_wav, audio_filename)
+            except Exception:
+                pass
+            log.info(f"Mic audio saved (C++): {audio_filename}")
+            return audio_filename
+
+        if sys_written:
             try:
                 os.rename(sys_wav, audio_filename)
-                log.info(f"System audio saved: {audio_filename}")
-                return audio_filename
-            except:
-                return sys_wav
+            except Exception:
+                pass
+            log.info(f"System audio saved (C++): {audio_filename}")
+            return audio_filename
 
-        # Only mic — chunked write to avoid b''.join() OOM on long recordings
-        try:
-            wf = wave.open(audio_filename, 'wb')
-            wf.setnchannels(self.audio_channels)
-            wf.setsampwidth(2)
-            wf.setframerate(44100)
-            CHUNK = 256  # write 256 frames at a time
-            for i in range(0, len(mic_frames), CHUNK):
-                wf.writeframes(b''.join(mic_frames[i:i+CHUNK]))
-            wf.close()
-            log.info(f"Mic audio saved: {audio_filename}")
-        except Exception as e:
-            log.warning(f"Mic WAV write failed: {e}")
-            return None
-        return audio_filename
-    
+        return None
+
     def select_folder(self) -> None:
         folder = filedialog.askdirectory(initialdir=self.output_folder)
         if folder:
@@ -6258,7 +5662,8 @@ class HomRecScreen:
             # --- Output flags that reduce frame drops -----------------------
             output_extra = [
                 '-vsync', '0',                  # passthrough timestamps, no dup/drop
-                '-flush_packets', '1',          # don't buffer output packets
+                '-flush_packets', '1',        
+  # don't buffer output packets
                 '-max_muxing_queue_size', '1024',  # avoid DTS-order drops on startup
             ]
 
