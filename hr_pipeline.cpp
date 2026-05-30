@@ -1,3 +1,19 @@
+// NOMINMAX must come before any Windows header to avoid min/max macro conflicts
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #define NOMINMAX
+  #define HR_EXPORT extern "C" __declspec(dllexport)
+  #include <windows.h>
+  // SetThreadDescription requires Win10 1607+ SDK; guard for older MinGW
+  #if defined(NTDDI_WIN10_RS1) || (_WIN32_WINNT >= 0x0A00)
+    #include <processthreadsapi.h>
+    #define HR_HAS_SET_THREAD_DESC 1
+  #endif
+#else
+  #define HR_EXPORT extern "C" __attribute__((visibility("default")))
+  #include <unistd.h>
+#endif
+
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -7,16 +23,6 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
-
-#ifdef _WIN32
-  #define HR_EXPORT extern "C" __declspec(dllexport)
-  #define WIN32_LEAN_AND_MEAN
-  #define NOMINMAX
-  #include <windows.h>
-#else
-  #define HR_EXPORT extern "C" __attribute__((visibility("default")))
-  #include <unistd.h>
-#endif
 
 static constexpr int HR_DX_OK      =  0;
 static constexpr int HR_DX_TIMEOUT =  1;
@@ -249,7 +255,9 @@ struct Pipeline {
 #ifdef _WIN32
         // OPT: TIME_CRITICAL вместо ABOVE_NORMAL — защита от 15 мс вытеснений
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#ifdef HR_HAS_SET_THREAD_DESC
         SetThreadDescription(GetCurrentThread(), L"HomRec Capture");
+#endif
 #endif
         const int64_t frame_ns = (fps > 0)
                                  ? (1'000'000'000LL / fps)

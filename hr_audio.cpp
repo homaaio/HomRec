@@ -4,7 +4,14 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
-#include <functiondiscoverykeys_devcpd.h>
+// functiondiscoverykeys_devcpd.h is missing in older MinGW-w64 (<= 13.x).
+// Define the only symbol we need — PKEY_Device_FriendlyName — inline.
+// The GUID value is stable (part of the Windows SDK ABI).
+#ifndef PKEY_Device_FriendlyName
+#  include <propkeydef.h>   // DEFINE_PROPERTYKEY macro
+DEFINE_PROPERTYKEY(PKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd,
+    0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0, 14);
+#endif
 #include <endpointvolume.h>
 
 #include <atomic>
