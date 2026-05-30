@@ -786,6 +786,111 @@ audio_engine = AudioEngine() if AUDIO_OK else None
 
 
 # ---------------------------------------------------------------------------
+# hr_tools — C++ engine: check_ffmpeg, dshow devices, GPU probe, codec args,
+#            audio/video merge.  Wraps hr_tools.dll / hr_tools.so.
+# ---------------------------------------------------------------------------
+_tools_lib = _load("hr_tools")
+TOOLS_OK = _tools_lib is not None
+
+if TOOLS_OK:
+    # hr_check_ffmpeg(hint: wstr, out: wstr, out_len: int) -> int
+    _tools_lib.hr_check_ffmpeg.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int]
+    _tools_lib.hr_check_ffmpeg.restype  = ctypes.c_int
+
+    # hr_get_dshow_devices(ffpath: wstr, out: wstr, buf_chars: int) -> int
+    _tools_lib.hr_get_dshow_devices.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int]
+    _tools_lib.hr_get_dshow_devices.restype  = ctypes.c_int
+
+    # hr_probe_gpu(ffpath: wstr, out_enc: wstr, out_len: int) -> int
+    _tools_lib.hr_probe_gpu.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int]
+    _tools_lib.hr_probe_gpu.restype  = ctypes.c_int
+
+    # hr_build_codec_args(codec, quality, fps, cpu_count, out_buf, buf_chars) -> int
+    _tools_lib.hr_build_codec_args.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_wchar_p, ctypes.c_int]
+    _tools_lib.hr_build_codec_args.restype  = ctypes.c_int
+
+    # hr_merge_av(ffpath, video_file, audio_file) -> int
+    _tools_lib.hr_merge_av.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p]
+    _tools_lib.hr_merge_av.restype  = ctypes.c_int
+
+    log.info("hr_tools loaded")
+
+
+class ToolsEngine:
+    """Thin Python wrapper around hr_tools.dll (C++ implementation).
+
+    Falls back gracefully to None returns when the DLL is absent —
+    callers should check TOOLS_OK or use the returned values defensively.
+    """
+    available: bool = TOOLS_OK
+    _BUF = 4096  # wchar buffer size for path/device strings
+
+    # -- ffmpeg ---------------------------------------------------------------
+    def find_ffmpeg(self, hint: str = "") -> str | None:
+        """Return path to ffmpeg executable, or None if not found."""
+        if not TOOLS_OK:
+            return None
+        buf = ctypes.create_unicode_buffer(self._BUF)
+        ok  = _tools_lib.hr_check_ffmpeg(hint or "", buf, self._BUF)
+        return buf.value if ok else None
+
+    # -- dshow devices --------------------------------------------------------
+    def get_dshow_devices(self, ffmpeg_path: str) -> list[str]:
+        """Return list of dshow audio input device names."""
+        if not TOOLS_OK:
+            return []
+        buf   = ctypes.create_unicode_buffer(self._BUF * 4)
+        count = _tools_lib.hr_get_dshow_devices(ffmpeg_path, buf, self._BUF * 4)
+        if count <= 0:
+            return []
+        return [d for d in buf.value.split("\n") if d]
+
+    # -- GPU probe ------------------------------------------------------------
+    def probe_gpu(self, ffmpeg_path: str) -> str | None:
+        """Probe for a hardware encoder; returns encoder name or None.
+
+        Designed to be called from a daemon thread (blocks ~2-10 s).
+        """
+        if not TOOLS_OK:
+            return None
+        buf = ctypes.create_unicode_buffer(64)
+        ok  = _tools_lib.hr_probe_gpu(ffmpeg_path, buf, 64)
+        return buf.value if ok else None
+
+    # -- codec args -----------------------------------------------------------
+    def build_codec_args(self, codec: str, quality: int, fps: int,
+                         cpu_count: int) -> list[str]:
+        """Return a list of ffmpeg codec argument strings."""
+        if not TOOLS_OK:
+            return ["-c:v", codec]
+        buf = ctypes.create_unicode_buffer(self._BUF)
+        _tools_lib.hr_build_codec_args(codec, quality, fps, cpu_count,
+                                        buf, self._BUF)
+        return buf.value.split()
+
+    # -- merge ----------------------------------------------------------------
+    def merge_av(self, ffmpeg_path: str, video_file: str,
+                 audio_file: str) -> bool:
+        """Merge audio_file into video_file (replaces video_file).
+
+        Returns True on success.
+        """
+        if not TOOLS_OK:
+            return False
+        result = _tools_lib.hr_merge_av(ffmpeg_path, video_file, audio_file)
+        return bool(result)
+
+
+tools_engine = ToolsEngine() if TOOLS_OK else None
+
+
+# ---------------------------------------------------------------------------
 # Build helper
 # ---------------------------------------------------------------------------
 def ensure_built(src_dir: str | None = None) -> bool:
