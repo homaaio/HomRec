@@ -255,9 +255,12 @@ struct Pipeline {
 #ifdef _WIN32
         // OPT: TIME_CRITICAL вместо ABOVE_NORMAL — защита от 15 мс вытеснений
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-#ifdef HR_HAS_SET_THREAD_DESC
-        SetThreadDescription(GetCurrentThread(), L"HomRec Capture");
-#endif
+{
+    typedef HRESULT (WINAPI *PFN_STD)(HANDLE, PCWSTR);
+    static auto fn = (PFN_STD)GetProcAddress(
+        GetModuleHandleW(L"KernelBase.dll"), "SetThreadDescription");
+    if (fn) fn(GetCurrentThread(), L"HomRec Capture");
+}
 #endif
         const int64_t frame_ns = (fps > 0)
                                  ? (1'000'000'000LL / fps)
