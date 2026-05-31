@@ -1,17 +1,3 @@
-/*
- * hr_tools.cpp — HomRec Tools Engine
- *
- * Exported (C ABI, hr_tools.dll):
- *
- *   hr_check_ffmpeg (hint_path, out_path, out_len) -> 1/0
- *   hr_get_dshow_devices (ffmpeg_path, out_buf, buf_chars) -> device count
- *   hr_probe_gpu (ffmpeg_path, out_encoder, out_len) -> 1/0
- *   hr_build_codec_args (codec, quality, fps, cpu_count, out_buf, buf_chars) -> token count
- *   hr_merge_av (ffmpeg_path, video_file, audio_file) -> 1/0
- *
- * All strings are wchar_t (UTF-16) for seamless ctypes on Windows.
- */
-
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -31,9 +17,9 @@
   #define HR_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // Internal: run a command, return combined stdout+stderr output
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 static std::wstring run_cmd(const std::wstring& cmd, DWORD timeout_ms = 8000)
 {
     SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
@@ -90,9 +76,9 @@ static bool probe_ff(const std::wstring& path, wchar_t* out, int len)
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // hr_check_ffmpeg
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 HR_EXPORT int hr_check_ffmpeg(const wchar_t* hint, wchar_t* out, int out_len)
 {
     if (hint && *hint && probe_ff(hint, out, out_len)) return 1;
@@ -121,9 +107,9 @@ HR_EXPORT int hr_check_ffmpeg(const wchar_t* hint, wchar_t* out, int out_len)
     return 0;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // hr_get_dshow_devices
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 HR_EXPORT int hr_get_dshow_devices(const wchar_t* ffpath,
                                     wchar_t* out, int out_len)
 {
@@ -157,9 +143,9 @@ HR_EXPORT int hr_get_dshow_devices(const wchar_t* ffpath,
     return (int)devs.size();
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // hr_probe_gpu  (run on background thread from Python)
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 struct GpuCand { const wchar_t* name; const wchar_t* extra_args; };
 static const GpuCand k_gpu[] = {
     { L"h264_nvenc", L" -f lavfi -i nullsrc=s=32x32:d=0.1 -c:v h264_nvenc -f null -" },
@@ -189,10 +175,10 @@ HR_EXPORT int hr_probe_gpu(const wchar_t* ffpath, wchar_t* out_enc, int out_len)
     return 0;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // hr_build_codec_args
 // Returns space-separated ffmpeg argument string in out_buf.
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
                                    int quality, int fps, int cpu_count,
                                    wchar_t* out_buf, int buf_chars)
@@ -239,9 +225,9 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
     return tok;
 }
 
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 // hr_merge_av
-// ─────────────────────────────────────────────────────────────
+// -------------------------------------------------------------
 HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
                            const wchar_t* video_file,
                            const wchar_t* audio_file)

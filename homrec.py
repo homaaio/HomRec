@@ -958,7 +958,7 @@ class AudioPanel:
         """
         import time as _t
 
-        # ── Try C++ path ──────────────────────────────────────────────────────
+        # -- Try C++ path ------------------------------------------------------
         try:
             from homrec_native import audio_engine as _ae, AUDIO_OK as _AOK
         except Exception:
@@ -997,7 +997,7 @@ class AudioPanel:
                 return
             # mic not available — fall through to PyAudio
 
-        # ── PyAudio fallback ──────────────────────────────────────────────────
+        # -- PyAudio fallback --------------------------------------------------
         if not _PYAUDIO_AVAILABLE:
             return
         p = None
@@ -2484,7 +2484,7 @@ class HomRecScreen:
             log.warning("merge_audio_video: no ffmpeg path")
             return False
 
-        # ── C++ path ──────────────────────────────────────────────────────
+        # -- C++ path ------------------------------------------------------
         try:
             from homrec_native import tools_engine as _te, TOOLS_OK as _TOK
             if _TOK and _te:
@@ -2496,7 +2496,7 @@ class HomRecScreen:
         except Exception as e:
             log.warning(f"merge_audio_video: C++ path error: {e}")
 
-        # ── Python subprocess fallback ─────────────────────────────────────
+        # -- Python subprocess fallback -------------------------------------
         tmp = video_file.replace('.mp4', '_merge_tmp.mp4')
         try:
             cmd = [self.ffmpeg_path,

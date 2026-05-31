@@ -4,9 +4,6 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
-// functiondiscoverykeys_devcpd.h is missing in older MinGW-w64 (<= 13.x).
-// Define the only symbol we need — PKEY_Device_FriendlyName — inline.
-// The GUID value is stable (part of the Windows SDK ABI).
 #include <propkeydef.h>
 #ifndef PKEY_Device_FriendlyName
 EXTERN_C const PROPERTYKEY PKEY_Device_FriendlyName = {
@@ -453,8 +450,6 @@ HR_EXPORT int hr_audio_start(float mic_vol, float sys_vol,
     return result;
 }
 
-/*  hr_audio_set_volumes(mic_vol, sys_vol, mic_mute, sys_mute)
-    Потокобезопасно меняет громкость/мут в реальном времени. */
 HR_EXPORT void hr_audio_set_volumes(float mic_vol, float sys_vol,
                                      int mic_mute, int sys_mute)
 {
@@ -465,8 +460,6 @@ HR_EXPORT void hr_audio_set_volumes(float mic_vol, float sys_vol,
     g_state->sys_mute.store(sys_mute != 0);
 }
 
-/*  hr_audio_get_levels(out_mic, out_sys)
-    Записывает текущие уровни VU (0-100) в переданные указатели. */
 HR_EXPORT void hr_audio_get_levels(int* out_mic, int* out_sys)
 {
     if (!g_state) { if(out_mic) *out_mic=0; if(out_sys) *out_sys=0; return; }
@@ -474,16 +467,11 @@ HR_EXPORT void hr_audio_get_levels(int* out_mic, int* out_sys)
     if (out_sys) *out_sys = g_state->sys_level.load();
 }
 
-/*  hr_audio_pause(paused)  — 1 = пауза, 0 = продолжить */
 HR_EXPORT void hr_audio_pause(int paused)
 {
     if (g_state) g_state->paused.store(paused != 0);
 }
 
-/*  hr_audio_stop(mic_wav_path, sys_wav_path)
-    Останавливает запись, сбрасывает буферы в WAV-файлы.
-    Передайте nullptr если файл не нужен.
-    Возвращает: bit0 = mic_wav записан, bit1 = sys_wav записан. */
 HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
                              const char* sys_wav_path)
 {

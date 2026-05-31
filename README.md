@@ -1,5 +1,4 @@
 # HomRec
-
 **Screen recorder built for weak PCs.**  
 No lags. No bloat. No GPU required.
 
@@ -7,7 +6,6 @@ No lags. No bloat. No GPU required.
 [![Python](https://img.shields.io/badge/python-3.8+-yellow?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/homaaio/homrec/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-@homaexe-2aabee?style=flat-square&logo=telegram)](https://t.me/homaexe)
-
 
 ---
 
@@ -28,7 +26,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | 🖥️ **Multi-monitor** | Select which monitor to record |
 | 📊 **PC Analytics** | CPU, RAM and disk in one combined window |
 | ⌨️ **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
-| 🌍 **Languages** | English and Russian UI (You can add more with .hrl files!)|
+| 🌍 **Languages** | English and Russian UI (You can add more with .hrl files!) |
 | 🎨 **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
 | 📁 **Custom output folder** | Choose where recordings are saved |
 | 📈 **Recording stats** | Live FPS, duration, frame count in status bar |
@@ -47,9 +45,9 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 **2.** Unzip anywhere you want — no installer needed
 
-**3.** Download `ffmpeg.exe` from [ffmpeg.org](https://ffmpeg.org/download.html) and place it in the HomRec folder
+**3.** Launch `!hr.exe`
 
-**4.** Launch `hr.exe`
+> ffmpeg is already included in the archive — no extra downloads needed.
 
 > **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus — the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
 
@@ -97,7 +95,6 @@ python homrec.py
 opencv-python
 Pillow
 mss
-pyaudio-wasapi   # fork of pyaudio with WASAPI loopback support (desktop audio)
 numpy
 psutil           # optional — PC Analytics panel
 pystray          # optional — system tray support
@@ -108,17 +105,16 @@ Install all at once:
 pip install -r requirements.txt
 ```
 
-> **Desktop audio capture** requires `pyaudio-wasapi` instead of the standard `pyaudio`.  
-> Standard `pyaudio` does **not** support WASAPI loopback, so desktop audio will not be recorded.  
-> Install it with: `pip install pyaudio-wasapi`
+> Audio capture (microphone + desktop) is handled natively via built-in WASAPI C++ libraries — no extra audio packages required.
+
+---
 
 ## 📣 Stay updated
 
 ### **[t.me/homaexe](https://t.me/homaexe)** / **[x.com/homrec_dev](https://x.com/homrec_dev)**
+
 ---
 
 <div align="center">
-
-Made with ❤️ by **homaaio**
-
+Made with ❤️ by <b>homaaio</b>
 </div>

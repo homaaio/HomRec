@@ -1,26 +1,3 @@
-"""
-homrec_native.py  -  HomRec v1.8.0
-ctypes-обёртка над нативными C/C++ библиотеками.
-
-Изменения v1.8.0:
-  - Убран дублирующийся singleton dxcap (был создан дважды в конце файла).
-  - Python-fallbacks оставлены только там, где они реально нужны
-    (audio_rms, timestamp); тяжёлые пути без нативной либы падают явно.
-  - Добавлен _PipelineAPI — обёртка над hr_pipeline.dll.
-    Позволяет переключать запись без пересоздания pipeline (hr_pl_set_recording).
-  - _PreviewAPI.thumbnail: убран .tobytes() — передаётся указатель напрямую
-    через ctypes data_as, нулевая копия.
-  - Все argtypes объявлены через списки констант — не пересоздаются при каждом вызове.
-
-Использование:
-    from homrec_native import core, ringbuf, framequeue, preview, encoder
-    from homrec_native import stopwatch, dxcap, pipeline
-    from homrec_native import NATIVE_OK, RINGBUF_OK, FRAMEQUEUE_OK
-    from homrec_native import PREVIEW_OK, ENCODER_OK, STOPWATCH_OK
-    from homrec_native import DXCAP_OK, PIPELINE_OK
-    from homrec_native import HR_DX_OK, HR_DX_TIMEOUT, HR_DX_LOST, HR_DX_ERROR
-"""
-
 from __future__ import annotations
 
 import ctypes
