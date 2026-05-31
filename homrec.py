@@ -37,6 +37,7 @@ except ImportError:
     wave = None              # type: ignore
 import shutil
 import platform
+import webbrowser
 
 import logging
 import queue
@@ -2317,6 +2318,8 @@ class SettingsDialog:
         self.dialog.destroy()
         messagebox.showinfo(self.app.lang["info"], self.app.lang["settings_saved"])
 
+from hr_console_bridge import NativeConsole  # native Win32 console
+
 class HomRecScreen:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -2434,6 +2437,11 @@ class HomRecScreen:
         self.update_preview()
         self.root.after(500, self._warm_up_gpu_probe)
         
+        # Developer console (Ctrl+Shift+T)
+        self._console = NativeConsole(self)
+        self.root.bind("<Control-Shift-T>", lambda e: self._console.toggle())
+        self.root.bind("<Control-Shift-t>", lambda e: self._console.toggle())
+
         self.root.bind('<Configure>', self.on_window_resize)
         self._apply_hotkeys()
         self._setup_drag_drop()

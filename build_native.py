@@ -25,6 +25,7 @@ Output DLLs (placed next to this script):
     hr_pipeline.dll         central capture/encode pipeline
     hr_tools.dll            ffmpeg helpers: GPU probe, codec args,
                             dshow devices, audio/video merge      [NEW]
+    hr_console.dll          Win32 native developer console        [NEW]
 """
 
 import subprocess
@@ -34,7 +35,7 @@ import platform
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# ── ANSI colours ─────────────────────────────────────────────────────────────
+# -- ANSI colours -------------------------------------------------------------
 _USE_COLOR = sys.stdout.isatty() and (
     platform.system() != "Windows" or os.environ.get("WT_SESSION")
 )
@@ -112,9 +113,9 @@ def main() -> None:
 
     print(f"Compiler : {ver}\n")
 
-    # ── Build targets (order matters — pipeline last) ─────────────────────────
+    # -- Build targets (order matters — pipeline last) -------------------------
     targets = [
-        # ── C modules ─────────────────────────────────────────────────────────
+        # -- C modules ---------------------------------------------------------
         (
             ["gcc", "-O3", "-march=native", *SSE2, "-shared", *fPIC, "-lm",
              "-o", f"homrec_core{so}", "homrec_core.c"],
@@ -128,7 +129,7 @@ def main() -> None:
             "hr_encoder_helpers.c",
         ),
 
-        # ── C++ utility modules ───────────────────────────────────────────────
+        # -- C++ utility modules -----------------------------------------------
         (
             ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
              "-o", f"hr_ringbuf{so}", "hr_ringbuf.cpp"],
@@ -154,7 +155,7 @@ def main() -> None:
             "hr_stopwatch.cpp",
         ),
 
-        # ── Display / capture ─────────────────────────────────────────────────
+        # -- Display / capture -------------------------------------------------
         (
             ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
              "-o", f"hr_display_info{so}", "hr_display_info.cpp"],
@@ -169,7 +170,7 @@ def main() -> None:
             "hr_dxgi_capture.cpp",
         ),
 
-        # ── Audio engine (WASAPI) ─────────────────────────────────────────────
+        # -- Audio engine (WASAPI) ---------------------------------------------
         (
             ["g++", "-O2", "-std=c++17", "-shared", *fPIC, *LNKST,
              "-o", f"hr_audio{so}", "hr_audio.cpp",
@@ -178,7 +179,7 @@ def main() -> None:
             "hr_audio.cpp",
         ),
 
-        # ── Pipeline (central capture/encode — links DirectX + audio) ─────────
+        # -- Pipeline (central capture/encode — links DirectX + audio) ---------
         (
             ["g++", "-O3", "-std=c++17", "-shared", *fPIC, *LNKST,
              "-o", f"hr_pipeline{so}", "hr_pipeline.cpp",
@@ -187,7 +188,16 @@ def main() -> None:
             "hr_pipeline.cpp",
         ),
 
-        # ── Tools engine (NEW: GPU probe, codec args, dshow, merge) ───────────
+        # -- Developer console (Win32 native, zero tkinter overhead) ----------
+        (
+            ["g++", "-O2", "-std=c++17", "-shared", *fPIC, *LNKST,
+             "-o", f"hr_console{so}", "hr_console.cpp",
+             *([ "-lcomctl32", "-lshell32", "-luser32", "-lgdi32"] if is_win else [])],
+            "hr_console          (Win32 developer console)",
+            "hr_console.cpp",
+        ),
+
+        # -- Tools engine (NEW: GPU probe, codec args, dshow, merge) -----------
         (
             ["g++", "-O2", "-std=c++17", "-shared", *fPIC, *LNKST,
              "-o", f"hr_tools{so}", "hr_tools.cpp"],
@@ -206,7 +216,7 @@ def main() -> None:
         else:
             failed += 1
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # -- Summary ---------------------------------------------------------------
     total = ok + failed
     print(f"\n{'═' * 60}")
     print(f"{BOLD}Result: {GREEN}{ok}{RESET}{BOLD}/{total}{RESET} libraries compiled successfully"
@@ -217,7 +227,7 @@ def main() -> None:
         if is_win:
             print()
             print(f"  DLL              Purpose")
-            print(f"  {'─'*55}")
+            print(f"  {'-'*55}")
             print(f"  hr_audio.dll     WASAPI audio — replaces PyAudio entirely")
             print(f"  hr_tools.dll     GPU probe, codec args, dshow, av-merge [NEW]")
             print(f"  hr_dxgi_capture  DirectX screen capture (enable in Settings)")
@@ -230,7 +240,7 @@ def main() -> None:
         print("  • Ensure all .cpp / .c source files are present in this folder")
         print("  • Python 3.10+ required")
 
-    # ── List built files ──────────────────────────────────────────────────────
+    # -- List built files ------------------------------------------------------
     dlls = [f for f in sorted(os.listdir(HERE)) if f.endswith(so)]
     if dlls:
         print(f"\nBuilt files in {HERE}:")
