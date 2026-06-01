@@ -1,29 +1,16 @@
 /*
- * hr_console.cpp  —  HomRec Developer Console  (Win32 native, no dependencies)
+ * hr_console.cpp  —  HomRec Developer Console
  *
- * Architecture
- * ============
- *  • Pure Win32 / GDI window — zero Python overhead while visible.
- *  • The DLL exposes a tiny C API; Python sets up callback pointers once
- *    and then only calls hr_console_toggle().
- *  • Runs the window on its own dedicated thread so it never blocks the
- *    Tkinter main loop.
- *  • Command parsing and dispatch are done entirely in C++.
- *  • Callbacks into Python are invoked on the console thread via
- *    PostMessage → WM_APP_EXEC, so they land on the *Python* side through
- *    a one-shot background thread (same pattern HomRec already uses).
+ * Pure Win32 / GDI, статически слинкован с libstdc++ и libgcc
+ * (флаги -static-libgcc -static-libstdc++ в build_native.py).
+ * Никаких внешних runtime-зависимостей.
  *
- * Exported functions
- * ==================
- *  hr_console_init   (callbacks, log_path, github_url)  – call once at startup
- *  hr_console_toggle ()                                  – open / close
- *  hr_console_print  (text, tag)                         – write from Python
- *  hr_console_set_recording_state (int is_recording)     – keep UI in sync
- *
- * Tag codes for hr_console_print
- * ================================
- *  0 = normal   1 = ok/green   2 = warn/yellow
- *  3 = err/red  4 = dim/grey   5 = accent/blue
+ * API (все функции extern "C" __declspec(dllexport)):
+ *   hr_con_init   (start_cb, stop_cb, quit_cb, open_log_cb, open_url_cb,
+ *                  log_path_w, github_url_w)
+ *   hr_con_toggle ()
+ *   hr_con_set_recording (int)
+ *   hr_con_log_connected () -> int
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -31,8 +18,6 @@
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
-#include <shellapi.h>
-#include <commctrl.h>
 #include <richedit.h>
 
 #include <string>
@@ -43,750 +28,473 @@
 #include <functional>
 #include <mutex>
 #include <atomic>
-#include <cstring>
-#include <cassert>
-
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "shell32.lib")
 
 #ifdef _WIN32
 #  define HR_EXPORT extern "C" __declspec(dllexport)
 #else
-#  define HR_EXPORT extern "C" __attribute__((visibility("default")))
+#  define HR_EXPORT extern "C"
 #endif
 
-// ============================================================
-//  Callback typedefs (called from console thread via thunk)
-// ============================================================
-typedef void (*CB_START_RECORDING)  ();
-typedef void (*CB_STOP_RECORDING)   ();
-typedef void (*CB_QUIT_APP)         ();
-typedef void (*CB_OPEN_LOG)         ();   // open homrec.log in editor
-typedef void (*CB_OPEN_URL)         (const wchar_t* url);
+// ─── Callbacks ────────────────────────────────────────────────────────────────
+typedef void (*CB_VOID)();
+typedef void (*CB_URL) (const wchar_t*);
 
-// ============================================================
-//  Colours  (Catppuccin-Mocha palette, matches dark theme)
-// ============================================================
-static const COLORREF COL_BG          = 0x002E1E1E;  // #1e1e2e
-static const COLORREF COL_SURFACE     = 0x00443231;  // #313244
-static const COLORREF COL_INPUT_BG    = 0x00251811;  // slightly darker
-static const COLORREF COL_TEXT        = 0x00F4D6CD;  // #cdd6f4
-static const COLORREF COL_ACCENT      = 0x00FAB489;  // #89b4fa
-static const COLORREF COL_SUCCESS     = 0x00A1E3A6;  // #a6e3a1
-static const COLORREF COL_WARNING     = 0x00AFF9F9;  // #f9e2af  (swap R/B for GDI)
-static const COLORREF COL_ERROR       = 0x00A88BF3;  // #f38ba8
-static const COLORREF COL_DIM         = 0x00C8ADa6;  // #a6adc8
-static const COLORREF COL_HEADER_BG   = 0x00443231;
+// ─── Palette (Catppuccin Mocha) ───────────────────────────────────────────────
+// GDI stores BGR so we swap R and B vs the CSS hex
+static const COLORREF C_BG      = 0x002E1E1E;
+static const COLORREF C_SURFACE = 0x00443231;
+static const COLORREF C_INPUTBG = 0x00201811;
+static const COLORREF C_TEXT    = 0x00F4D6CD;
+static const COLORREF C_ACCENT  = 0x00FAB489;
+static const COLORREF C_GREEN   = 0x00A1E3A6;
+static const COLORREF C_YELLOW  = 0x00AEF2F9;
+static const COLORREF C_RED     = 0x00A88BF3;
+static const COLORREF C_DIM     = 0x00C8ADA6;
 
-// tag → COLORREF
-static const COLORREF TAG_COLORS[6] = {
-    COL_TEXT, COL_SUCCESS, COL_WARNING, COL_ERROR, COL_DIM, COL_ACCENT
+// tag → colour  (0=normal 1=ok 2=warn 3=err 4=dim 5=accent)
+static const COLORREF TAG_COL[6] = {
+    C_TEXT, C_GREEN, C_YELLOW, C_RED, C_DIM, C_ACCENT
 };
 
-// ============================================================
-//  State (single console instance)
-// ============================================================
-struct ConsoleState {
-    // Callbacks (set by Python once)
-    CB_START_RECORDING  cb_start    = nullptr;
-    CB_STOP_RECORDING   cb_stop     = nullptr;
-    CB_QUIT_APP         cb_quit     = nullptr;
-    CB_OPEN_LOG         cb_open_log = nullptr;
-    CB_OPEN_URL         cb_open_url = nullptr;
+// ─── State ────────────────────────────────────────────────────────────────────
+static CB_VOID  g_cb_start    = nullptr;
+static CB_VOID  g_cb_stop     = nullptr;
+static CB_VOID  g_cb_quit     = nullptr;
+static CB_VOID  g_cb_open_log = nullptr;
+static CB_URL   g_cb_open_url = nullptr;
+static wchar_t  g_log_path[MAX_PATH] = {};
+static wchar_t  g_gh_url[512]        = {};
 
-    wchar_t log_path   [MAX_PATH] = {};
-    wchar_t github_url [512]      = {};
+static HWND  g_hwnd     = nullptr;
+static HWND  g_out      = nullptr;   // RichEdit
+static HWND  g_input    = nullptr;   // Edit
+static HWND  g_prompt   = nullptr;   // Static "»"
+static HWND  g_hdr      = nullptr;   // header Static
+static HFONT g_fmono    = nullptr;
+static HFONT g_fbold    = nullptr;
+static HBRUSH g_br_bg   = nullptr;
+static HBRUSH g_br_surf = nullptr;
+static HBRUSH g_br_inp  = nullptr;
 
-    // Window
-    HWND  hwnd        = nullptr;
-    HWND  hwnd_out    = nullptr;   // RichEdit output
-    HWND  hwnd_input  = nullptr;   // single-line edit
-    HWND  hwnd_prompt = nullptr;   // static "»" label
-    HWND  hwnd_hdr    = nullptr;   // header bar (static)
-    HFONT font_mono   = nullptr;
-    HFONT font_hdr    = nullptr;
+static WNDPROC g_orig_edit = nullptr;
 
-    HANDLE thread     = nullptr;
-    DWORD  thread_id  = 0;
+static std::atomic<bool> g_visible     {false};
+static std::atomic<bool> g_recording   {false};
+static std::atomic<bool> g_log_conn    {true};
 
-    std::atomic<bool> visible        { false };
-    std::atomic<bool> is_recording   { false };
+// ─── Message queue (any thread → console thread) ──────────────────────────────
+struct Msg { std::wstring text; int tag; };
+static std::mutex          g_msg_mx;
+static std::vector<Msg>    g_msg_q;
 
-    // Input history
-    std::deque<std::wstring> history;
-    int   hist_idx = -1;
-    static constexpr int MAX_HIST = 200;
+// ─── Exec queue (console thread spawns tiny thread for each callback) ─────────
+static std::mutex                          g_ex_mx;
+static std::vector<std::function<void()>>  g_ex_q;
 
-    // Pending write queue (cross-thread)
-    struct Msg { std::wstring text; int tag; };
-    std::mutex          msg_mutex;
-    std::vector<Msg>    msg_queue;
+static const UINT WMA_FLUSH = WM_APP + 1;
+static const UINT WMA_EXEC  = WM_APP + 2;
 
-    // Deferred execute queue (post from console thread → run on another thread)
-    std::mutex              exec_mutex;
-    std::vector<std::function<void()>> exec_queue;
+// ─── Input history ────────────────────────────────────────────────────────────
+static std::deque<std::wstring> g_hist;
+static int g_hist_idx = 0;
 
-    // Log handler state (disconnect/connect)
-    std::atomic<bool>   log_connected { true };
-};
-
-static ConsoleState g_con;
-
-// ============================================================
-//  WM_APP sub-messages
-// ============================================================
-static const UINT WM_APP_FLUSH_MSGS = WM_APP + 1;  // flush msg_queue → RichEdit
-static const UINT WM_APP_EXEC       = WM_APP + 2;  // run one exec_queue item
-
-// ============================================================
+// ═════════════════════════════════════════════════════════════════════════════
 //  Helpers
-// ============================================================
-static std::wstring ToLower(std::wstring s) {
-    std::transform(s.begin(), s.end(), s.begin(), ::towlower);
-    return s;
+// ═════════════════════════════════════════════════════════════════════════════
+
+static void post_exec(std::function<void()> fn) {
+    { std::lock_guard<std::mutex> lk(g_ex_mx); g_ex_q.push_back(std::move(fn)); }
+    if (g_hwnd) PostMessageW(g_hwnd, WMA_EXEC, 0, 0);
 }
 
-static std::vector<std::wstring> Split(const std::wstring& s) {
+static void write_line(const wchar_t* text, int tag) {
+    { std::lock_guard<std::mutex> lk(g_msg_mx); g_msg_q.push_back({text, tag}); }
+    if (g_hwnd) PostMessageW(g_hwnd, WMA_FLUSH, 0, 0);
+}
+
+static void wok  (const wchar_t* s) { write_line((std::wstring(L"  \u2714  ") + s).c_str(), 1); }
+static void werr (const wchar_t* s) { write_line((std::wstring(L"  \u2716  ") + s).c_str(), 3); }
+static void winfo(const wchar_t* s) { write_line((std::wstring(L"  \u00b7  ") + s).c_str(), 4); }
+
+static void flush_msgs() {
+    std::vector<Msg> local;
+    { std::lock_guard<std::mutex> lk(g_msg_mx); local.swap(g_msg_q); }
+    if (!g_out || local.empty()) return;
+    SendMessageW(g_out, WM_SETREDRAW, FALSE, 0);
+    for (auto& m : local) {
+        LONG len = GetWindowTextLengthW(g_out);
+        CHARRANGE cr{len, len};
+        SendMessageW(g_out, EM_EXSETSEL, 0, (LPARAM)&cr);
+        CHARFORMATW cf{};
+        cf.cbSize = sizeof(cf);
+        cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
+        cf.crTextColor = TAG_COL[m.tag < 6 ? m.tag : 0];
+        wcscpy_s(cf.szFaceName, L"Consolas");
+        cf.yHeight = 200;
+        SendMessageW(g_out, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+        std::wstring line = m.text + L"\r\n";
+        SendMessageW(g_out, EM_REPLACESEL, FALSE, (LPARAM)line.c_str());
+    }
+    SendMessageW(g_out, WM_SETREDRAW, TRUE, 0);
+    SendMessageW(g_out, EM_SCROLLCARET, 0, 0);
+    InvalidateRect(g_out, nullptr, FALSE);
+}
+
+static std::vector<std::wstring> split(const std::wstring& s) {
     std::vector<std::wstring> v;
-    std::wistringstream ss(s);
-    std::wstring tok;
-    while (ss >> tok) v.push_back(tok);
+    std::wistringstream ss(s); std::wstring t;
+    while (ss >> t) v.push_back(t);
     return v;
 }
-
-static bool HasFlag(const std::vector<std::wstring>& args, const wchar_t* f) {
-    for (auto& a : args) if (a == f) return true;
-    return false;
+static std::wstring tolw(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(), ::towlower); return s;
 }
-
-// Remove flag tokens from args, return cleaned list
-static std::vector<std::wstring> StripFlags(
-    const std::vector<std::wstring>& args,
+static bool has(const std::vector<std::wstring>& v, const wchar_t* f) {
+    for (auto& x : v) if (x == f) return true; return false;
+}
+static std::vector<std::wstring> strip_flags(
+    const std::vector<std::wstring>& v,
     std::initializer_list<const wchar_t*> flags)
 {
     std::vector<std::wstring> out;
-    for (auto& a : args) {
-        bool found = false;
-        for (auto f : flags) if (a == f) { found = true; break; }
-        if (!found) out.push_back(a);
+    for (auto& x : v) {
+        bool skip = false;
+        for (auto f : flags) if (x == f) { skip = true; break; }
+        if (!skip) out.push_back(x);
     }
     return out;
 }
 
-// ============================================================
-//  RichEdit helpers
-// ============================================================
-static void RE_AppendLine(HWND re, const wchar_t* text, int tag)
-{
-    // Move caret to end
-    LONG len = GetWindowTextLengthW(re);
-    CHARRANGE cr{ len, len };
-    SendMessageW(re, EM_EXSETSEL, 0, (LPARAM)&cr);
+// ═════════════════════════════════════════════════════════════════════════════
+//  Commands
+// ═════════════════════════════════════════════════════════════════════════════
 
-    // Set colour
-    CHARFORMATW cf{};
-    cf.cbSize      = sizeof(cf);
-    cf.dwMask      = CFM_COLOR | CFM_FACE | CFM_SIZE;
-    cf.crTextColor = TAG_COLORS[tag < 6 ? tag : 0];
-    wcscpy_s(cf.szFaceName, L"Consolas");
-    cf.yHeight     = 200;  // 10pt in twips (1pt = 20 twips)
-    SendMessageW(re, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+static void dispatch(const std::wstring& raw); // forward
 
-    // Append
-    std::wstring line = std::wstring(text) + L"\r\n";
-    SendMessageW(re, EM_REPLACESEL, FALSE, (LPARAM)line.c_str());
-
-    // Scroll to end
-    SendMessageW(re, EM_SCROLLCARET, 0, 0);
-}
-
-static void FlushMsgQueue()
-{
-    std::vector<ConsoleState::Msg> local;
-    {
-        std::lock_guard<std::mutex> lk(g_con.msg_mutex);
-        local.swap(g_con.msg_queue);
-    }
-    if (!g_con.hwnd_out) return;
-    SendMessageW(g_con.hwnd_out, WM_SETREDRAW, FALSE, 0);
-    for (auto& m : local)
-        RE_AppendLine(g_con.hwnd_out, m.text.c_str(), m.tag);
-    SendMessageW(g_con.hwnd_out, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(g_con.hwnd_out, nullptr, FALSE);
-}
-
-// Thread-safe write (can be called from any thread)
-static void Write(const wchar_t* text, int tag = 0)
-{
-    {
-        std::lock_guard<std::mutex> lk(g_con.msg_mutex);
-        g_con.msg_queue.push_back({ text, tag });
-    }
-    if (g_con.hwnd)
-        PostMessageW(g_con.hwnd, WM_APP_FLUSH_MSGS, 0, 0);
-}
-
-static void WriteOk   (const wchar_t* msg) { Write((std::wstring(L"  ✔  ") + msg).c_str(), 1); }
-static void WriteErr  (const wchar_t* msg) { Write((std::wstring(L"  ✖  ") + msg).c_str(), 3); }
-static void WriteInfo (const wchar_t* msg) { Write((std::wstring(L"  ·  ") + msg).c_str(), 4); }
-static void WriteAccent(const wchar_t* msg){ Write(msg, 5); }
-
-// ============================================================
-//  Post a lambda to run in a tiny background thread
-//  (keeps the console thread unblocked during Python callbacks)
-// ============================================================
-static void PostExec(std::function<void()> fn)
-{
-    {
-        std::lock_guard<std::mutex> lk(g_con.exec_mutex);
-        g_con.exec_queue.push_back(std::move(fn));
-    }
-    PostMessageW(g_con.hwnd, WM_APP_EXEC, 0, 0);
-}
-
-// ============================================================
-//  Command handlers
-// ============================================================
-
-static void CmdHelp(const std::vector<std::wstring>& args, bool silent)
-{
-    bool no_web = HasFlag(args, L"-w");
+static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
+    bool no_web = has(args, L"-w");
     if (!silent) {
-        Write(L"  Available commands:", 5);
-        static const wchar_t* TABLE[][2] = {
-            { L"!help",       L"Show this help  [-w: skip opening GitHub]"         },
-            { L"!rec",        L"Start / stop recording"                            },
-            { L"!open",       L"Open a resource  [--log: open homrec.log]"         },
-            { L"!exit",       L"Force-quit and terminate all internal processes"   },
-            { L"!date",       L"Run command(s): !date [first] [second]"            },
-            { L"!homrec",     L"( \u0361\u00b0 \u035c\u0296 \u0361\u00b0)"        },
-            { L"!disconnect", L"Disconnect subsystem  [--log: pause homrec.log]"   },
-            { L"!connect",    L"Connect subsystem     [--log: resume homrec.log]"  },
+        write_line(L"  Available commands:", 5);
+        static const wchar_t* T[][2] = {
+            {L"  !help       [-w]",        L"Show this help. Without -w opens GitHub"},
+            {L"  !rec",                    L"Start / stop recording"},
+            {L"  !open       [--log]",     L"Open homrec.log in editor"},
+            {L"  !exit",                   L"Force-quit, kill all processes"},
+            {L"  !date       [a] [b]",     L"Run command a, then b"},
+            {L"  !homrec",                 L"( \u0361\u00b0 \u035c\u0296 \u0361\u00b0)"},
+            {L"  !disconnect [--log]",     L"Pause writing homrec.log"},
+            {L"  !connect    [--log]",     L"Resume writing homrec.log"},
         };
-        for (auto& row : TABLE) {
-            Write((std::wstring(L"    ") + row[0]).c_str(), 5);
-            WriteInfo(row[1]);
+        for (auto& r : T) {
+            write_line(r[0], 5);
+            winfo(r[1]);
         }
-        Write(L"", 4);
-        Write(L"  Global flags:", 0);
-        WriteInfo(L"-s / --silent   suppress console output for that command");
-        Write(L"", 4);
+        write_line(L"", 4);
+        winfo(L"Global flag: -s / --silent  suppress output for that command");
+        write_line(L"", 4);
     }
-    if (!no_web && g_con.cb_open_url) {
-        PostExec([=]{ g_con.cb_open_url(g_con.github_url); });
-        WriteOk((std::wstring(L"Opened GitHub: ") + g_con.github_url).c_str());
-    }
+    if (!no_web && g_cb_open_url)
+        post_exec([=]{ g_cb_open_url(g_gh_url); });
 }
 
-static void CmdRec(const std::vector<std::wstring>&, bool silent)
-{
-    if (!g_con.is_recording.load()) {
-        if (g_con.cb_start) PostExec([=]{ g_con.cb_start(); });
-        if (!silent) WriteOk(L"Recording started");
+static void cmd_rec(const std::vector<std::wstring>&, bool silent) {
+    if (!g_recording.load()) {
+        if (g_cb_start) post_exec([=]{ g_cb_start(); });
+        if (!silent) wok(L"Recording started");
     } else {
-        if (g_con.cb_stop)  PostExec([=]{ g_con.cb_stop(); });
-        if (!silent) WriteOk(L"Recording stopped");
+        if (g_cb_stop)  post_exec([=]{ g_cb_stop(); });
+        if (!silent) wok(L"Recording stopped");
     }
 }
 
-static void CmdOpen(const std::vector<std::wstring>& args, bool silent)
-{
-    if (HasFlag(args, L"--log")) {
-        if (g_con.cb_open_log) {
-            PostExec([=]{ g_con.cb_open_log(); });
-            if (!silent) WriteOk((std::wstring(L"Opened: ") + g_con.log_path).c_str());
-        } else {
-            WriteErr(L"cb_open_log callback not set");
-        }
-    } else {
-        WriteErr(L"Usage: !open --log");
-    }
+static void cmd_open(const std::vector<std::wstring>& args, bool silent) {
+    if (!has(args, L"--log")) { werr(L"Usage: !open --log"); return; }
+    if (g_cb_open_log) post_exec([=]{ g_cb_open_log(); });
+    if (!silent) wok((std::wstring(L"Opened: ") + g_log_path).c_str());
 }
 
-static void CmdExit(const std::vector<std::wstring>&, bool silent)
-{
-    if (!silent) WriteOk(L"Forcing exit\u2026");
-    if (g_con.cb_quit) PostExec([=]{ g_con.cb_quit(); });
+static void cmd_exit(const std::vector<std::wstring>&, bool silent) {
+    if (!silent) wok(L"Forcing exit\u2026");
+    if (g_cb_quit) post_exec([=]{ g_cb_quit(); });
 }
 
-// Forward declaration for !date
-static void Dispatch(const std::wstring& line);
-
-static void CmdDate(const std::vector<std::wstring>& args, bool silent)
-{
-    if (args.empty()) { WriteErr(L"Usage: !date [cmd1] [cmd2]"); return; }
-    auto cmds = StripFlags(args, {});
-    int limit = (int)std::min((size_t)2, cmds.size());
-    for (int i = 0; i < limit; ++i) {
-        std::wstring tok = cmds[i];
+static void cmd_date(const std::vector<std::wstring>& args, bool silent) {
+    if (args.empty()) { werr(L"Usage: !date [cmd1] [cmd2]"); return; }
+    int lim = (int)std::min(args.size(), (size_t)2);
+    for (int i = 0; i < lim; i++) {
+        std::wstring tok = args[i];
         if (tok[0] != L'!') tok = L'!' + tok;
-        if (!silent) WriteInfo((std::wstring(L"Running: ") + tok).c_str());
-        Dispatch(tok + (silent ? L" -s" : L""));
+        if (!silent) winfo((L"Running: " + tok).c_str());
+        dispatch(tok + (silent ? L" -s" : L""));
     }
 }
 
-static void CmdHomrec(const std::vector<std::wstring>&, bool silent)
-{
+static void cmd_homrec(const std::vector<std::wstring>&, bool silent) {
     if (!silent) {
-        WriteAccent(L"  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591");
-        WriteAccent(L"  \u2591\u2591  ( \u0361\u00b0 \u035c\u0296 \u0361\u00b0)  \u2591\u2591\u2591\u2591\u2591");
-        WriteAccent(L"  \u2591\u2591  HomRec\u2122 approves  \u2591");
-        WriteAccent(L"  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591");
+        write_line(L"  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591", 5);
+        write_line(L"  \u2591\u2591  ( \u0361\u00b0 \u035c\u0296 \u0361\u00b0)  \u2591\u2591\u2591\u2591\u2591", 5);
+        write_line(L"  \u2591\u2591  HomRec\u2122 approves  \u2591", 5);
+        write_line(L"  \u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591", 5);
     }
 }
 
-static void CmdDisconnect(const std::vector<std::wstring>& args, bool silent)
-{
-    if (!HasFlag(args, L"--log")) { WriteErr(L"Usage: !disconnect --log"); return; }
-    g_con.log_connected.store(false);
-    if (!silent) WriteOk(L"homrec.log disconnected (Python logger will stop writing)");
+static void cmd_disconnect(const std::vector<std::wstring>& args, bool silent) {
+    if (!has(args, L"--log")) { werr(L"Usage: !disconnect --log"); return; }
+    g_log_conn.store(false);
+    if (!silent) wok(L"homrec.log disconnected");
 }
 
-static void CmdConnect(const std::vector<std::wstring>& args, bool silent)
-{
-    if (!HasFlag(args, L"--log")) { WriteErr(L"Usage: !connect --log"); return; }
-    g_con.log_connected.store(true);
-    if (!silent) WriteOk(L"homrec.log reconnected");
+static void cmd_connect(const std::vector<std::wstring>& args, bool silent) {
+    if (!has(args, L"--log")) { werr(L"Usage: !connect --log"); return; }
+    g_log_conn.store(true);
+    if (!silent) wok(L"homrec.log reconnected");
 }
 
-// ============================================================
-//  Dispatcher
-// ============================================================
-static void Dispatch(const std::wstring& raw)
-{
-    auto parts = Split(raw);
+static void dispatch(const std::wstring& raw) {
+    auto parts = split(raw);
     if (parts.empty()) return;
+    auto cmd  = tolw(parts[0]);
+    std::vector<std::wstring> args(parts.begin()+1, parts.end());
+    bool silent = has(args,L"-s") || has(args,L"--silent");
+    auto clean  = strip_flags(args, {L"-s",L"--silent"});
 
-    auto cmd   = ToLower(parts[0]);
-    std::vector<std::wstring> args(parts.begin() + 1, parts.end());
-
-    bool silent = HasFlag(args, L"-s") || HasFlag(args, L"--silent");
-    auto clean  = StripFlags(args, { L"-s", L"--silent" });
-
-    if      (cmd == L"!help")       CmdHelp(clean, silent);
-    else if (cmd == L"!rec")        CmdRec(clean, silent);
-    else if (cmd == L"!open")       CmdOpen(clean, silent);
-    else if (cmd == L"!exit")       CmdExit(clean, silent);
-    else if (cmd == L"!date")       CmdDate(clean, silent);
-    else if (cmd == L"!homrec")     CmdHomrec(clean, silent);
-    else if (cmd == L"!disconnect") CmdDisconnect(clean, silent);
-    else if (cmd == L"!connect")    CmdConnect(clean, silent);
-    else {
-        WriteErr((std::wstring(L"Unknown command: ") + cmd + L"  (try !help)").c_str());
-    }
+    if      (cmd==L"!help")       cmd_help(clean,silent);
+    else if (cmd==L"!rec")        cmd_rec(clean,silent);
+    else if (cmd==L"!open")       cmd_open(clean,silent);
+    else if (cmd==L"!exit")       cmd_exit(clean,silent);
+    else if (cmd==L"!date")       cmd_date(clean,silent);
+    else if (cmd==L"!homrec")     cmd_homrec(clean,silent);
+    else if (cmd==L"!disconnect") cmd_disconnect(clean,silent);
+    else if (cmd==L"!connect")    cmd_connect(clean,silent);
+    else werr((L"Unknown command: " + cmd + L"  (try !help)").c_str());
 }
 
-// ============================================================
-//  Input commit
-// ============================================================
-static void CommitInput()
-{
+static void commit_input() {
     wchar_t buf[1024]{};
-    GetWindowTextW(g_con.hwnd_input, buf, (int)(sizeof(buf)/sizeof(buf[0])));
+    GetWindowTextW(g_input, buf, 1023);
     std::wstring line = buf;
-
-    // Trim
     while (!line.empty() && (line.front()==L' '||line.front()==L'\t')) line.erase(line.begin());
     while (!line.empty() && (line.back() ==L' '||line.back() ==L'\t')) line.pop_back();
     if (line.empty()) return;
-
-    SetWindowTextW(g_con.hwnd_input, L"");
-
-    // History
-    g_con.history.push_back(line);
-    if ((int)g_con.history.size() > ConsoleState::MAX_HIST)
-        g_con.history.pop_front();
-    g_con.hist_idx = (int)g_con.history.size();
-
-    // Echo
-    Write((L"> " + line).c_str(), 5);
-
-    // Dispatch
-    Dispatch(line);
+    SetWindowTextW(g_input, L"");
+    g_hist.push_back(line);
+    if ((int)g_hist.size() > 200) g_hist.pop_front();
+    g_hist_idx = (int)g_hist.size();
+    write_line((L"> " + line).c_str(), 5);
+    dispatch(line);
 }
 
-// ============================================================
-//  Window metrics
-// ============================================================
-static const int HDR_H     = 32;
-static const int INPUT_H   = 36;
-static const int PADDING   = 8;
-static const int PROMPT_W  = 28;
+// ═════════════════════════════════════════════════════════════════════════════
+//  Window
+// ═════════════════════════════════════════════════════════════════════════════
 
-static void LayoutChildren(HWND hwnd)
-{
-    RECT rc; GetClientRect(hwnd, &rc);
-    int W = rc.right, H = rc.bottom;
+static const int HDR_H   = 32;
+static const int INP_H   = 36;
+static const int PAD     = 8;
+static const int PROMPT_W= 28;
 
-    // Header bar
-    SetWindowPos(g_con.hwnd_hdr, nullptr,
-                 0, 0, W, HDR_H, SWP_NOZORDER | SWP_NOACTIVATE);
-
-    // Output (RichEdit) — fills middle
-    int out_y = HDR_H + PADDING;
-    int out_h = H - out_y - INPUT_H - PADDING * 2;
-    SetWindowPos(g_con.hwnd_out, nullptr,
-                 PADDING, out_y, W - PADDING*2, out_h,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-
-    // Input row
-    int inp_y = H - INPUT_H - PADDING;
-    SetWindowPos(g_con.hwnd_prompt, nullptr,
-                 PADDING, inp_y, PROMPT_W, INPUT_H,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(g_con.hwnd_input, nullptr,
-                 PADDING + PROMPT_W, inp_y,
-                 W - PADDING*2 - PROMPT_W, INPUT_H,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
+static void layout(HWND hw) {
+    RECT rc; GetClientRect(hw, &rc);
+    int W=rc.right, H=rc.bottom;
+    SetWindowPos(g_hdr,    nullptr, 0, 0, W, HDR_H, SWP_NOZORDER|SWP_NOACTIVATE);
+    int oy=HDR_H+PAD, oh=H-oy-INP_H-PAD*2;
+    SetWindowPos(g_out,    nullptr, PAD, oy, W-PAD*2, oh, SWP_NOZORDER|SWP_NOACTIVATE);
+    int iy=H-INP_H-PAD;
+    SetWindowPos(g_prompt, nullptr, PAD, iy, PROMPT_W, INP_H, SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(g_input,  nullptr, PAD+PROMPT_W, iy, W-PAD*2-PROMPT_W, INP_H, SWP_NOZORDER|SWP_NOACTIVATE);
 }
 
-// ============================================================
-//  Subclass proc for the input edit (handle Up/Down history)
-// ============================================================
-static WNDPROC g_orig_edit_proc = nullptr;
-
-static LRESULT CALLBACK InputSubclassProc(
-    HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
+static LRESULT CALLBACK edit_proc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_KEYDOWN) {
-        if (wp == VK_RETURN) {
-            CommitInput();
-            return 0;
-        }
+        if (wp == VK_RETURN) { commit_input(); return 0; }
         if (wp == VK_UP) {
-            if (g_con.hist_idx > 0) {
-                g_con.hist_idx--;
-                SetWindowTextW(hwnd, g_con.history[g_con.hist_idx].c_str());
-                // Move caret to end
-                int len = GetWindowTextLengthW(hwnd);
-                SendMessageW(hwnd, EM_SETSEL, len, len);
+            if (g_hist_idx > 0) {
+                g_hist_idx--;
+                SetWindowTextW(hw, g_hist[g_hist_idx].c_str());
+                int n=GetWindowTextLengthW(hw);
+                SendMessageW(hw, EM_SETSEL, n, n);
             }
             return 0;
         }
         if (wp == VK_DOWN) {
-            if (g_con.hist_idx < (int)g_con.history.size() - 1) {
-                g_con.hist_idx++;
-                SetWindowTextW(hwnd, g_con.history[g_con.hist_idx].c_str());
-                int len = GetWindowTextLengthW(hwnd);
-                SendMessageW(hwnd, EM_SETSEL, len, len);
+            if (g_hist_idx < (int)g_hist.size()-1) {
+                g_hist_idx++;
+                SetWindowTextW(hw, g_hist[g_hist_idx].c_str());
+                int n=GetWindowTextLengthW(hw);
+                SendMessageW(hw, EM_SETSEL, n, n);
             } else {
-                g_con.hist_idx = (int)g_con.history.size();
-                SetWindowTextW(hwnd, L"");
+                g_hist_idx=(int)g_hist.size();
+                SetWindowTextW(hw, L"");
             }
             return 0;
         }
     }
-    if (msg == WM_CHAR && wp == VK_RETURN) return 0;  // suppress ding
-    return CallWindowProcW(g_orig_edit_proc, hwnd, msg, wp, lp);
+    if (msg==WM_CHAR && wp==VK_RETURN) return 0;
+    return CallWindowProcW(g_orig_edit, hw, msg, wp, lp);
 }
 
-// ============================================================
-//  WM_CTLCOLOR* — paint child backgrounds
-// ============================================================
-static HBRUSH g_br_bg      = nullptr;
-static HBRUSH g_br_surface = nullptr;
-static HBRUSH g_br_input   = nullptr;
+static const wchar_t* WC = L"HomRecCon";
 
-// ============================================================
-//  Main window proc
-// ============================================================
-static LRESULT CALLBACK ConWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg)
-    {
-    case WM_CREATE:
-        break;
-
-    case WM_SIZE:
-        LayoutChildren(hwnd);
-        return 0;
-
-    case WM_CLOSE:
-        ShowWindow(hwnd, SW_HIDE);
-        g_con.visible.store(false);
-        return 0;
-
+static LRESULT CALLBACK wnd_proc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_SIZE:    layout(hw); return 0;
+    case WM_CLOSE:   ShowWindow(hw,SW_HIDE); g_visible.store(false); return 0;
     case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) {
-            ShowWindow(hwnd, SW_HIDE);
-            g_con.visible.store(false);
-            return 0;
-        }
+        if (wp==VK_ESCAPE) { ShowWindow(hw,SW_HIDE); g_visible.store(false); return 0; }
         break;
-
     case WM_ERASEBKGND: {
-        HDC dc = (HDC)wp;
-        RECT rc; GetClientRect(hwnd, &rc);
-        FillRect(dc, &rc, g_br_bg);
-        return 1;
+        RECT r; GetClientRect(hw,&r);
+        FillRect((HDC)wp,&r,g_br_bg); return 1;
     }
-
     case WM_CTLCOLORSTATIC: {
-        HDC dc = (HDC)wp;
-        HWND ctrl = (HWND)lp;
-        SetBkMode(dc, TRANSPARENT);
-        if (ctrl == g_con.hwnd_hdr) {
-            SetTextColor(dc, COL_ACCENT);
-            SetBkColor(dc, COL_SURFACE);
-            return (LRESULT)g_br_surface;
+        HDC dc=(HDC)wp; HWND ctrl=(HWND)lp;
+        SetBkMode(dc,TRANSPARENT);
+        if (ctrl==g_hdr||ctrl==g_prompt) {
+            SetTextColor(dc, ctrl==g_hdr ? C_ACCENT : C_ACCENT);
+            SetBkColor(dc, ctrl==g_hdr ? C_SURFACE : C_INPUTBG);
+            return (LRESULT)(ctrl==g_hdr ? g_br_surf : g_br_inp);
         }
-        if (ctrl == g_con.hwnd_prompt) {
-            SetTextColor(dc, COL_ACCENT);
-            SetBkColor(dc, COL_INPUT_BG);
-            return (LRESULT)g_br_input;
-        }
-        SetTextColor(dc, COL_TEXT);
-        SetBkColor(dc, COL_BG);
+        SetTextColor(dc,C_TEXT); SetBkColor(dc,C_BG);
         return (LRESULT)g_br_bg;
     }
-
-    case WM_CTLCOLOREDIT: {
-        HDC dc = (HDC)wp;
-        SetTextColor(dc, COL_TEXT);
-        SetBkColor(dc, COL_INPUT_BG);
-        return (LRESULT)g_br_input;
-    }
-
-    case WM_APP_FLUSH_MSGS:
-        FlushMsgQueue();
-        return 0;
-
-    case WM_APP_EXEC: {
+    case WM_CTLCOLOREDIT:
+        SetTextColor((HDC)wp,C_TEXT); SetBkColor((HDC)wp,C_INPUTBG);
+        return (LRESULT)g_br_inp;
+    case WMA_FLUSH: flush_msgs(); return 0;
+    case WMA_EXEC: {
         std::function<void()> fn;
-        {
-            std::lock_guard<std::mutex> lk(g_con.exec_mutex);
-            if (!g_con.exec_queue.empty()) {
-                fn = std::move(g_con.exec_queue.front());
-                g_con.exec_queue.erase(g_con.exec_queue.begin());
-            }
-        }
+        { std::lock_guard<std::mutex> lk(g_ex_mx);
+          if (!g_ex_q.empty()) { fn=std::move(g_ex_q.front()); g_ex_q.erase(g_ex_q.begin()); } }
         if (fn) {
-            // Run callback on a tiny background thread so we don't block
-            // the console message loop
             struct Ctx { std::function<void()> f; };
-            auto* ctx = new Ctx{ std::move(fn) };
-            HANDLE h = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
-                auto* c = (Ctx*)p;
-                c->f();
-                delete c;
-                return 0;
-            }, ctx, 0, nullptr);
+            auto* ctx = new Ctx{std::move(fn)};
+            HANDLE h = CreateThread(nullptr,0,[](LPVOID p)->DWORD{
+                auto* c=(Ctx*)p; c->f(); delete c; return 0;
+            },ctx,0,nullptr);
             if (h) CloseHandle(h);
         }
         return 0;
     }
-
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
+    case WM_DESTROY: PostQuitMessage(0); return 0;
     }
-    return DefWindowProcW(hwnd, msg, wp, lp);
+    return DefWindowProcW(hw,msg,wp,lp);
 }
 
-// ============================================================
-//  Create the console window
-// ============================================================
-static const wchar_t* CLASS_NAME = L"HomRec_Console_Win";
-
-static void CreateConsoleWindow()
-{
-    // Load RichEdit
-    LoadLibraryW(L"msftedit.dll");     // v4.1 (preferred)
-
-    // Register class
-    WNDCLASSEXW wc{};
-    wc.cbSize        = sizeof(wc);
-    wc.style         = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc   = ConWndProc;
-    wc.hInstance     = GetModuleHandleW(nullptr);
-    wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = CLASS_NAME;
-    RegisterClassExW(&wc);
-
-    // Brushes
-    g_br_bg      = CreateSolidBrush(COL_BG);
-    g_br_surface = CreateSolidBrush(COL_SURFACE);
-    g_br_input   = CreateSolidBrush(COL_INPUT_BG);
-
-    // Fonts
-    g_con.font_mono = CreateFontW(
-        -MulDiv(10, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72),
-        0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-
-    g_con.font_hdr  = CreateFontW(
-        -MulDiv(10, GetDeviceCaps(GetDC(nullptr), LOGPIXELSY), 72),
-        0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+static DWORD CALLBACK con_thread(LPVOID) {
+    LoadLibraryW(L"msftedit.dll");
 
     HINSTANCE hi = GetModuleHandleW(nullptr);
+    WNDCLASSEXW wc{}; wc.cbSize=sizeof(wc);
+    wc.style=CS_HREDRAW|CS_VREDRAW; wc.lpfnWndProc=wnd_proc;
+    wc.hInstance=hi; wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1); wc.lpszClassName=WC;
+    RegisterClassExW(&wc);
 
-    // Main window (tool window so it has its own taskbar entry on Win11)
-    HWND hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_APPWINDOW,
-        CLASS_NAME,
-        L"HomRec Console",
+    g_br_bg   = CreateSolidBrush(C_BG);
+    g_br_surf = CreateSolidBrush(C_SURFACE);
+    g_br_inp  = CreateSolidBrush(C_INPUTBG);
+
+    HDC sdc = GetDC(nullptr);
+    int ppy = GetDeviceCaps(sdc, LOGPIXELSY);
+    ReleaseDC(nullptr, sdc);
+    auto make_font = [&](bool bold) {
+        return CreateFontW(-MulDiv(10,ppy,72),0,0,0,
+            bold?FW_BOLD:FW_NORMAL,FALSE,FALSE,FALSE,
+            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,FIXED_PITCH|FF_MODERN,L"Consolas");
+    };
+    g_fmono = make_font(false);
+    g_fbold = make_font(true);
+
+    HWND hw = CreateWindowExW(
+        WS_EX_APPWINDOW, WC, L"HomRec Console",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 820, 460,
-        nullptr, nullptr, hi, nullptr);
-    g_con.hwnd = hwnd;
+        CW_USEDEFAULT,CW_USEDEFAULT,820,460,
+        nullptr,nullptr,hi,nullptr);
+    g_hwnd = hw;
 
-    // Header static
-    g_con.hwnd_hdr = CreateWindowExW(
-        0, L"STATIC", L"  \u2328  HomRec Console   \u2014   Ctrl+Shift+T to toggle",
-        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
-        0, 0, 0, 0,
-        hwnd, nullptr, hi, nullptr);
-    SendMessageW(g_con.hwnd_hdr, WM_SETFONT, (WPARAM)g_con.font_hdr, TRUE);
+    g_hdr = CreateWindowExW(0,L"STATIC",
+        L"  \u2328  HomRec Console   \u2014   Ctrl+Shift+T",
+        WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
+        0,0,0,0,hw,nullptr,hi,nullptr);
+    SendMessageW(g_hdr,WM_SETFONT,(WPARAM)g_fbold,TRUE);
 
-    // RichEdit output (read-only, no focus navigation by mouse)
-    g_con.hwnd_out = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
-        MSFTEDIT_CLASS,
-        L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL |
-        ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_NOHIDESEL,
-        0, 0, 0, 0,
-        hwnd, nullptr, hi, nullptr);
-    SendMessageW(g_con.hwnd_out, WM_SETFONT, (WPARAM)g_con.font_mono, TRUE);
-    SendMessageW(g_con.hwnd_out, EM_SETBKGNDCOLOR, 0, (LPARAM)0x00111B1B);  // #11111b
-    SendMessageW(g_con.hwnd_out, EM_SETEVENTMASK, 0, 0);  // no notifications
-    // Limit to ~4 MB to avoid runaway memory
-    SendMessageW(g_con.hwnd_out, EM_LIMITTEXT, 4 * 1024 * 1024, 0);
+    g_out = CreateWindowExW(WS_EX_CLIENTEDGE,
+        MSFTEDIT_CLASS,L"",
+        WS_CHILD|WS_VISIBLE|WS_VSCROLL|
+        ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|ES_NOHIDESEL,
+        0,0,0,0,hw,nullptr,hi,nullptr);
+    SendMessageW(g_out,WM_SETFONT,(WPARAM)g_fmono,TRUE);
+    SendMessageW(g_out,EM_SETBKGNDCOLOR,0,(LPARAM)0x001B1B11);
+    SendMessageW(g_out,EM_LIMITTEXT,4*1024*1024,0);
+    { CHARFORMATW cf{}; cf.cbSize=sizeof(cf);
+      cf.dwMask=CFM_COLOR|CFM_FACE|CFM_SIZE|CFM_CHARSET;
+      cf.crTextColor=C_TEXT; cf.bCharSet=DEFAULT_CHARSET;
+      wcscpy_s(cf.szFaceName,L"Consolas"); cf.yHeight=200;
+      SendMessageW(g_out,EM_SETCHARFORMAT,SCF_ALL,(LPARAM)&cf); }
 
-    // Set default character format for output
-    {
-        CHARFORMATW cf{};
-        cf.cbSize      = sizeof(cf);
-        cf.dwMask      = CFM_COLOR | CFM_FACE | CFM_SIZE | CFM_CHARSET;
-        cf.crTextColor = COL_TEXT;
-        cf.bCharSet    = DEFAULT_CHARSET;
-        wcscpy_s(cf.szFaceName, L"Consolas");
-        cf.yHeight     = 200;
-        SendMessageW(g_con.hwnd_out, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-    }
+    g_prompt = CreateWindowExW(0,L"STATIC",L"  \u00bb",
+        WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
+        0,0,0,0,hw,nullptr,hi,nullptr);
+    SendMessageW(g_prompt,WM_SETFONT,(WPARAM)g_fbold,TRUE);
 
-    // Prompt label "»"
-    g_con.hwnd_prompt = CreateWindowExW(
-        0, L"STATIC", L"  \u00bb",
-        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
-        0, 0, 0, 0,
-        hwnd, nullptr, hi, nullptr);
-    SendMessageW(g_con.hwnd_prompt, WM_SETFONT, (WPARAM)g_con.font_hdr, TRUE);
+    g_input = CreateWindowExW(0,L"EDIT",L"",
+        WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL,
+        0,0,0,0,hw,nullptr,hi,nullptr);
+    SendMessageW(g_input,WM_SETFONT,(WPARAM)g_fmono,TRUE);
+    g_orig_edit=(WNDPROC)SetWindowLongPtrW(g_input,GWLP_WNDPROC,(LONG_PTR)edit_proc);
 
-    // Input edit
-    g_con.hwnd_input = CreateWindowExW(
-        0, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        0, 0, 0, 0,
-        hwnd, nullptr, hi, nullptr);
-    SendMessageW(g_con.hwnd_input, WM_SETFONT, (WPARAM)g_con.font_mono, TRUE);
-    // Subclass to intercept Return / Up / Down
-    g_orig_edit_proc = (WNDPROC)SetWindowLongPtrW(
-        g_con.hwnd_input, GWLP_WNDPROC, (LONG_PTR)InputSubclassProc);
+    layout(hw);
 
-    LayoutChildren(hwnd);
-}
+    // Banner
+    write_line(L"HomRec Developer Console", 0);
+    winfo(L"type !help to see all commands  |  Esc or \u00d7 to close");
+    write_line(L"", 4);
 
-// ============================================================
-//  Banner
-// ============================================================
-static void PrintBanner()
-{
-    Write(L"HomRec Developer Console", 0);
-    Write(L"  type !help to see all commands  |  Esc or \u00d7 to close", 4);
-    Write(L"", 4);
-}
+    ShowWindow(hw,SW_SHOW);
+    UpdateWindow(hw);
+    SetForegroundWindow(hw);
+    SetFocus(g_input);
+    g_visible.store(true);
 
-// ============================================================
-//  Window thread
-// ============================================================
-static DWORD CALLBACK ConsoleThread(LPVOID)
-{
-    CreateConsoleWindow();
-    PrintBanner();
+    MSG m;
+    while (GetMessageW(&m,nullptr,0,0)) { TranslateMessage(&m); DispatchMessageW(&m); }
 
-    // Show immediately
-    ShowWindow(g_con.hwnd, SW_SHOW);
-    UpdateWindow(g_con.hwnd);
-    SetForegroundWindow(g_con.hwnd);
-    SetFocus(g_con.hwnd_input);
-    g_con.visible.store(true);
-
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-    // Window destroyed — clean up
-    g_con.hwnd        = nullptr;
-    g_con.hwnd_out    = nullptr;
-    g_con.hwnd_input  = nullptr;
-    g_con.hwnd_prompt = nullptr;
-    g_con.hwnd_hdr    = nullptr;
-    g_con.thread      = nullptr;
-    g_con.thread_id   = 0;
-    g_con.visible.store(false);
+    g_hwnd=nullptr; g_out=nullptr; g_input=nullptr;
+    g_prompt=nullptr; g_hdr=nullptr;
+    g_visible.store(false);
     return 0;
 }
 
-// ============================================================
+// ═════════════════════════════════════════════════════════════════════════════
 //  Public API
-// ============================================================
+// ═════════════════════════════════════════════════════════════════════════════
 
-HR_EXPORT void hr_console_init(
-    CB_START_RECORDING  cb_start,
-    CB_STOP_RECORDING   cb_stop,
-    CB_QUIT_APP         cb_quit,
-    CB_OPEN_LOG         cb_open_log,
-    CB_OPEN_URL         cb_open_url,
-    const wchar_t*      log_path,
-    const wchar_t*      github_url)
+HR_EXPORT void hr_con_init(
+    CB_VOID cb_start, CB_VOID cb_stop, CB_VOID cb_quit,
+    CB_VOID cb_open_log, CB_URL cb_open_url,
+    const wchar_t* log_path, const wchar_t* gh_url)
 {
-    g_con.cb_start    = cb_start;
-    g_con.cb_stop     = cb_stop;
-    g_con.cb_quit     = cb_quit;
-    g_con.cb_open_log = cb_open_log;
-    g_con.cb_open_url = cb_open_url;
-
-    if (log_path)    wcsncpy_s(g_con.log_path,    log_path,    _TRUNCATE);
-    if (github_url)  wcsncpy_s(g_con.github_url,  github_url,  _TRUNCATE);
+    g_cb_start=cb_start; g_cb_stop=cb_stop; g_cb_quit=cb_quit;
+    g_cb_open_log=cb_open_log; g_cb_open_url=cb_open_url;
+    if (log_path) wcsncpy_s(g_log_path, log_path, _TRUNCATE);
+    if (gh_url)   wcsncpy_s(g_gh_url,   gh_url,   _TRUNCATE);
 }
 
-HR_EXPORT void hr_console_toggle()
-{
-    if (!g_con.hwnd || !IsWindow(g_con.hwnd)) {
-        // Spawn fresh thread
-        HANDLE h = CreateThread(nullptr, 0, ConsoleThread, nullptr, 0, &g_con.thread_id);
-        g_con.thread = h;
+HR_EXPORT void hr_con_toggle() {
+    if (!g_hwnd || !IsWindow(g_hwnd)) {
+        HANDLE h = CreateThread(nullptr,0,con_thread,nullptr,0,nullptr);
+        if (h) CloseHandle(h);
         return;
     }
-    if (g_con.visible.load()) {
-        ShowWindow(g_con.hwnd, SW_HIDE);
-        g_con.visible.store(false);
+    if (g_visible.load()) {
+        ShowWindow(g_hwnd,SW_HIDE); g_visible.store(false);
     } else {
-        ShowWindow(g_con.hwnd, SW_SHOW);
-        SetForegroundWindow(g_con.hwnd);
-        SetFocus(g_con.hwnd_input);
-        g_con.visible.store(true);
+        ShowWindow(g_hwnd,SW_SHOW);
+        SetForegroundWindow(g_hwnd); SetFocus(g_input);
+        g_visible.store(true);
     }
 }
 
-HR_EXPORT void hr_console_print(const wchar_t* text, int tag)
-{
-    // tag: 0=normal 1=ok 2=warn 3=err 4=dim 5=accent
-    Write(text, tag);
-}
-
-HR_EXPORT void hr_console_set_recording_state(int is_recording)
-{
-    g_con.is_recording.store(is_recording != 0);
-}
-
-HR_EXPORT int hr_console_log_connected()
-{
-    return g_con.log_connected.load() ? 1 : 0;
-}
+HR_EXPORT void hr_con_set_recording(int v) { g_recording.store(v!=0); }
+HR_EXPORT int  hr_con_log_connected()      { return g_log_conn.load()?1:0; }
