@@ -11,7 +11,7 @@ No lags. No bloat. No GPU required.
 
 ## What is HomRec?
 
-If you've ever tried recording your screen with OBS or Bandicam on an old laptop or office PC — and everything lagged — **HomRec is made for you.**
+If you've ever tried recording your screen with OBS or Bandicam on an old laptop or office PC and everything lagged — **HomRec is made for you.**
 
 Written from the ground up to use the minimum possible CPU and RAM. No fancy effects, no GPU requirement, no background services. Just open, record, done.
 
