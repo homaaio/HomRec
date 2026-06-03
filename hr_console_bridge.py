@@ -1,6 +1,8 @@
 """
 hr_console_bridge.py  —  Python shim для hr_console.dll
-Версия 2.0: добавлены команды !edit, !create, !start --window, $rm, !connect --function
+Версия 3.0: добавлены !start --rec, !rule, !edit --file/--window/--rule, !create --rule/--ae,
+           !connect --window/--rule, !disconnect --window/--rule/--ae/--function,
+           математика {int.random(a,b)} в именах
 Исправлены баги:
   - LogFilter не защищал от crash при раннем вызове до инициализации DLL
   - _quit() мог зависнуть если root уже уничтожен
@@ -36,6 +38,23 @@ CB_COMMAND = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)   # новый: произ
 #  Вспомогательные утилиты разбора аргументов
 # ────────────────────────────────────────────────────────────────────────────────
 
+
+import random as _random
+
+
+def _resolve_math(s: str) -> str:
+    """Заменяет {int.random(a, b)} на случайное целое в строке s."""
+    import re
+    def _replace(m):
+        try:
+            a, b = int(m.group(1).strip()), int(m.group(2).strip())
+            if a > b:
+                a, b = b, a
+            return str(_random.randint(a, b))
+        except Exception:
+            return m.group(0)
+    return re.sub(r'\{int\.random\((\d+),\s*(\d+)\)\}', _replace, s)
+
 def _parse_named(raw: str, key: str) -> str | None:
     """Извлечь значение #key="value" или #key=value из строки raw."""
     import re
@@ -45,7 +64,7 @@ def _parse_named(raw: str, key: str) -> str | None:
         m = re.search(r'#' + re.escape(key) + r'="([^"]*)"', raw)
     if not m:
         m = re.search(r'#' + re.escape(key) + r"='([^']*)'", raw)
-    return m.group(1) if m else None
+    return _resolve_math(m.group(1)) if m else None
 
 
 def _parse_flags(raw: str) -> set[str]:
@@ -108,6 +127,116 @@ class WindowRegistry:
     def all_names(self) -> list[str]:
         return list(self._data.keys())
 
+
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Менеджер правил (хранилище)
+# ────────────────────────────────────────────────────────────────────────────────
+
+class RuleRegistry:
+    """
+    Хранит правила созданные через !create --rule.
+    Данные в <base>/create/rules.json
+    Каждое правило: {"body": str, "connected": bool}
+    """
+    def __init__(self, base_dir: str):
+        self._path = Path(base_dir) / "create" / "rules.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._data: dict[str, dict] = {}
+        self._load()
+
+    def _load(self):
+        try:
+            if self._path.exists():
+                self._data = json.loads(self._path.read_text("utf-8"))
+        except Exception as e:
+            log.warning("RuleRegistry load error: %s", e)
+            self._data = {}
+
+    def _save(self):
+        try:
+            self._path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), "utf-8")
+        except Exception as e:
+            log.warning("RuleRegistry save error: %s", e)
+
+    def add(self, name: str, body: str, connected: bool = True):
+        self._data[name] = {"body": body, "connected": connected}
+        self._save()
+
+    def remove(self, name: str) -> bool:
+        if name in self._data:
+            del self._data[name]
+            self._save()
+            return True
+        return False
+
+    def exists(self, name: str) -> bool:
+        return name in self._data
+
+    def get(self, name: str) -> dict | None:
+        return self._data.get(name)
+
+    def set_connected(self, name: str, connected: bool) -> bool:
+        if name in self._data:
+            self._data[name]["connected"] = connected
+            self._save()
+            return True
+        return False
+
+    def all_names(self) -> list[str]:
+        return list(self._data.keys())
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Менеджер AE-объектов (Anything Else)
+# ────────────────────────────────────────────────────────────────────────────────
+
+class AERegistry:
+    """
+    Хранит «anything else» объекты: цвета и другие.
+    Данные в <base>/create/ae.json
+    Формат: {"name": {"type": "color", "rgb": [r,g,b], "hex": "#..."}, ...}
+    """
+    def __init__(self, base_dir: str):
+        self._path = Path(base_dir) / "create" / "ae.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._data: dict[str, dict] = {}
+        self._load()
+
+    def _load(self):
+        try:
+            if self._path.exists():
+                self._data = json.loads(self._path.read_text("utf-8"))
+        except Exception as e:
+            log.warning("AERegistry load error: %s", e)
+            self._data = {}
+
+    def _save(self):
+        try:
+            self._path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), "utf-8")
+        except Exception as e:
+            log.warning("AERegistry save error: %s", e)
+
+    def add(self, name: str, ae_type: str, data: dict):
+        self._data[name] = {"type": ae_type, **data}
+        self._save()
+
+    def remove(self, name: str) -> bool:
+        if name in self._data:
+            del self._data[name]
+            self._save()
+            return True
+        return False
+
+    def exists(self, name: str) -> bool:
+        return name in self._data
+
+    def get(self, name: str) -> dict | None:
+        return self._data.get(name)
+
+    def all_names(self) -> list[str]:
+        return list(self._data.keys())
 
 # ────────────────────────────────────────────────────────────────────────────────
 #  Хоткей-менеджер
@@ -189,8 +318,10 @@ class NativeConsole:
         self._lib = None  # BUG FIX: инициализировать до _load()
 
         base = _get_base_dir()
-        self._win_reg = WindowRegistry(base)
-        self._hotkeys = HotkeyManager(base, self)
+        self._win_reg  = WindowRegistry(base)
+        self._rule_reg = RuleRegistry(base)
+        self._ae_reg   = AERegistry(base)
+        self._hotkeys  = HotkeyManager(base, self)
 
         self._lib = self._load()
         if not self._lib:
@@ -355,13 +486,16 @@ class NativeConsole:
 
     def _dispatch_extended(self, raw: str):
         """
-        Разбирает и выполняет расширенные команды:
-          !edit --settings #name=shortcut  [1|0]
-          !create --window #name="..."     [-o] [-s] [-n]
-          !create --window --notepad #name="..."
-          !start --window #name="..."
-          $rm --window from homrec.create  [-q]
-          !connect --function: <cmd> to|; <key>
+        Разбирает и выполняет расширенные команды (v3.0):
+          !start --rec 1|0
+          !rule  --get from connect #name="..."
+          !rule  --check #name="..."
+          !edit  --file|--window|--rule|--settings #name="..."
+          !create --window|--rule|--ae ...
+          !start  --window #name="..."
+          !connect --window|--rule|--function: ...
+          !disconnect --window|--rule|--ae|--function: ...
+          $rm --window #name="..." [-q]
         """
         raw = raw.strip()
 
@@ -380,47 +514,109 @@ class NativeConsole:
             self._cmd_create(raw)
             return
 
-        # ── !start ────────────────────────────────────────────────────────────────
+        # ── !start --rec ──────────────────────────────────────────────────────────
+        if raw.startswith("!start") and "--rec" in raw:
+            self._cmd_start_rec(raw)
+            return
+
+        # ── !start --window ───────────────────────────────────────────────────────
         if raw.startswith("!start"):
             self._cmd_start_window(raw)
             return
 
-        # ── !connect --function ───────────────────────────────────────────────────
+        # ── !rule ─────────────────────────────────────────────────────────────────
+        if raw.startswith("!rule"):
+            self._cmd_rule(raw)
+            return
+
+        # ── !connect ──────────────────────────────────────────────────────────────
         if raw.startswith("!connect"):
-            self._cmd_connect_function(raw)
+            self._cmd_connect(raw)
+            return
+
+        # ── !disconnect ───────────────────────────────────────────────────────────
+        if raw.startswith("!disconnect"):
+            self._cmd_disconnect(raw)
             return
 
     # ── Реализации команд ────────────────────────────────────────────────────────
 
     def _cmd_edit(self, raw: str):
         """
-        !edit --settings #name=shortcut 1
-          Включает/выключает ярлык приложения на рабочем столе.
+        !edit --file    #name="example"  — открыть файл на редактирование
+        !edit --window  #name="example"  — открыть окно
+        !edit --rule    #name="example"; <new body>  — изменить тело правила
+        !edit --settings #name=shortcut [1|0]  — ярлык на рабочем столе
         """
-        flags = _parse_flags(raw)
-
-        if "--settings" not in raw:
-            log.warning("!edit: неизвестный модуль (поддерживается --settings)")
-            return
-
-        name = _parse_named(raw, "name")
-        if not name:
-            log.warning("!edit --settings: не указан #name")
-            return
-
-        # Извлечь значение (последний токен, не флаг и не #name=...)
         import re
-        tokens = raw.split()
-        value_tokens = [t for t in tokens
-                        if not t.startswith("!") and not t.startswith("--")
-                        and not t.startswith("#") and not t.startswith("-")]
-        value = value_tokens[-1] if value_tokens else "1"
 
-        if name == "shortcut":
-            enable = value.strip() in ("1", "true", "on", "yes")
-            self._toggle_desktop_shortcut(enable)
-        else:
-            log.warning("!edit --settings: неизвестный параметр #name=%s", name)
+        if "--file" in raw:
+            name = _parse_named(raw, "name")
+            if not name:
+                log.warning("!edit --file: не указан #name")
+                return
+            entry = self._win_reg.get(name)
+            if entry and entry.get("kind") == "notepad":
+                fp = entry.get("file", "")
+                if fp:
+                    self._open_notepad_file(fp)
+                    log.info("!edit --file '%s': открыт %s", name, fp)
+                else:
+                    log.warning("!edit --file '%s': нет пути к файлу", name)
+            else:
+                log.warning("!edit --file: '%s' не найдено или не является notepad", name)
+            return
+
+        if "--window" in raw:
+            name = _parse_named(raw, "name")
+            if not name:
+                log.warning("!edit --window: не указан #name")
+                return
+            self._cmd_start_window(f'!start --window #name="{name}"')
+            log.info("!edit --window '%s': открыто", name)
+            return
+
+        if "--rule" in raw:
+            # Синтаксис: !edit --rule #name="example"; <new body>
+            m = re.search(r'#name=["\']?([^"\'\s;]+)["\']?\s*;\s*(.+)', raw)
+            if not m:
+                name = _parse_named(raw, "name")
+                if name and self._rule_reg.exists(name):
+                    entry = self._rule_reg.get(name)
+                    log.info("!edit --rule '%s': текущее тело: %s", name, entry.get("body", ""))
+                else:
+                    log.warning("!edit --rule: синтаксис: !edit --rule #name=\"x\"; <new body>")
+                return
+            name     = _resolve_math(m.group(1).strip())
+            new_body = m.group(2).strip()
+            if self._rule_reg.exists(name):
+                entry = self._rule_reg.get(name)
+                entry["body"] = new_body
+                self._rule_reg.add(name, new_body, entry.get("connected", True))
+                log.info("!edit --rule '%s': тело обновлено", name)
+            else:
+                log.warning("!edit --rule: правило '%s' не найдено", name)
+            return
+
+        if "--settings" in raw:
+            flags = _parse_flags(raw)
+            name = _parse_named(raw, "name")
+            if not name:
+                log.warning("!edit --settings: не указан #name")
+                return
+            tokens = raw.split()
+            value_tokens = [t for t in tokens
+                            if not t.startswith("!") and not t.startswith("--")
+                            and not t.startswith("#") and not t.startswith("-")]
+            value = value_tokens[-1] if value_tokens else "1"
+            if name == "shortcut":
+                enable = value.strip() in ("1", "true", "on", "yes")
+                self._toggle_desktop_shortcut(enable)
+            else:
+                log.warning("!edit --settings: неизвестный параметр #name=%s", name)
+            return
+
+        log.warning("!edit: неизвестный режим. Используйте --file/--window/--rule/--settings")
 
     def _toggle_desktop_shortcut(self, enable: bool):
         """Создать или удалить ярлык на рабочем столе (Windows)."""
@@ -458,55 +654,123 @@ class NativeConsole:
 
     def _cmd_create(self, raw: str):
         """
-        !create --window #name="example" [-o] [-s]
-        !create --window --notepad #name="example"
+        !create --window #name="example" [-o] [-s] [-n] [-c] [-d]
+        !create --window --notepad [as .ext] #name="example"
+        !create --rule   #name="example"; <body>  [-c] [-d]
+        !create --ae     #type=color{rgb=(r,g,b)} #name="example"
+        !create --ae     #type=color{hex=(#RRGGBB)} #name="example"
 
         Флаги:
-          -o   только создать, не открывать
-          -s   тихий режим (не выводить сообщения)
-          -n   не добавлять в реестр (временное окно)
+          -o   не открывать окно сразу
+          -s   тихий режим
+          -n   не добавлять в реестр
+          -c   автоматически подключить (!connect) после создания
+          -d   создать как disconnected
         """
-        flags = _parse_flags(raw)
-        is_notepad = "--notepad" in raw
-        only_create = "-o" in flags   # не открывать
+        import re
+
+        flags       = _parse_flags(raw)
+        is_notepad  = "--notepad" in raw
+        is_rule     = "--rule" in raw
+        is_ae       = "--ae" in raw
+        is_window   = "--window" in raw and not is_rule and not is_ae
+        only_create = "-o" in flags
         silent      = "-s" in flags
         no_register = "-n" in flags
+        auto_connect= "-c" in flags
+        disconnected= "-d" in flags
 
         name = _parse_named(raw, "name")
         if not name:
-            log.warning("!create --window: не указан #name")
+            log.warning("!create: не указан #name")
             return
 
-        base  = _get_base_dir()
+        base = _get_base_dir()
+
+        # ── --rule ────────────────────────────────────────────────────────────────
+        if is_rule:
+            # Синтаксис: !create --rule #name="example"; <body>
+            m = re.search(r'#name=["\']?([^"\'\s;]+)["\']?\s*;\s*(.+)', raw)
+            body = m.group(2).strip() if m else ""
+            connected = not disconnected
+            self._rule_reg.add(name, body, connected)
+            if auto_connect and not connected:
+                self._rule_reg.set_connected(name, True)
+            if not silent:
+                log.info("!create --rule '%s': создано, body='%s', connected=%s",
+                         name, body, self._rule_reg.get(name, {}).get("connected"))
+            return
+
+        # ── --ae ──────────────────────────────────────────────────────────────────
+        if is_ae:
+            ae_type_raw = _parse_named(raw, "type")
+            if not ae_type_raw:
+                log.warning("!create --ae: не указан #type")
+                return
+            # Parse color
+            ae_type = ae_type_raw.split("{")[0].lower()  # e.g. "color"
+            ae_data: dict = {"connected": not disconnected}
+
+            if ae_type == "color":
+                # rgb=(r,g,b) or hex=(#RRGGBB)
+                rgb_m = re.search(r'rgb=\((\d+),\s*(\d+),\s*(\d+)\)', raw)
+                hex_m = re.search(r'hex=\(#?([0-9A-Fa-f]{6})\)', raw)
+                if rgb_m:
+                    r2, g2, b2 = int(rgb_m.group(1)), int(rgb_m.group(2)), int(rgb_m.group(3))
+                    ae_data["rgb"] = [r2, g2, b2]
+                    ae_data["hex"] = "#{:02X}{:02X}{:02X}".format(r2, g2, b2)
+                elif hex_m:
+                    hx = hex_m.group(1).upper()
+                    ae_data["hex"] = "#" + hx
+                    ae_data["rgb"] = [int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)]
+                else:
+                    log.warning("!create --ae color: не найдено rgb=(...) или hex=(...)")
+                    return
+
+            self._ae_reg.add(name, ae_type, ae_data)
+            if not silent:
+                log.info("!create --ae [%s] '%s': %s", ae_type, name, ae_data)
+            return
+
+        # ── --window ──────────────────────────────────────────────────────────────
         kind  = "notepad" if is_notepad else "window"
-        extra: dict = {}
+        extra: dict = {"enabled": not disconnected}
 
         if is_notepad:
-            # Создать пустой файл блокнота в папке /create
+            # Support: --notepad as .ext (custom extension)
+            ext_m = re.search(r'as\s+\.([\w]+)', raw)
+            ext   = "." + ext_m.group(1) if ext_m else ".txt"
+
             create_dir = Path(base) / "create"
             create_dir.mkdir(parents=True, exist_ok=True)
-            file_path = create_dir / f"{name}.txt"
+            file_path = create_dir / f"{name}{ext}"
             if not file_path.exists():
                 file_path.write_text("", encoding="utf-8")
             extra["file"] = str(file_path)
+            extra["ext"]  = ext
 
             if not no_register:
                 self._win_reg.add(name, "notepad", extra)
 
-            if not only_create:
+            if not only_create and not disconnected:
                 self._open_notepad_file(str(file_path))
             if not silent:
-                log.info("!create --notepad: '%s' → %s", name, file_path)
+                log.info("!create --notepad [%s] '%s' → %s", ext, name, file_path)
         else:
-            # Создать пустое Tk-окно
             if not no_register:
                 self._win_reg.add(name, "window", extra)
 
-            if not only_create:
+            if not only_create and not disconnected:
                 self._open_tk_window(name)
             if not silent:
-                log.info("!create --window: '%s' создано%s", name,
-                         ", не открыто (-o)" if only_create else "")
+                log.info("!create --window '%s'%s%s",
+                         name,
+                         ", не открыто (-o)" if only_create else "",
+                         ", disconnected (-d)" if disconnected else "")
+
+        if auto_connect and not disconnected:
+            self._cmd_connect(f'!connect --window #name="{name}" 1')
+
 
     def _cmd_start_window(self, raw: str):
         """
@@ -585,29 +849,203 @@ class NativeConsole:
         self._win_reg.remove(name)
         log.info("$rm: окно '%s' удалено из реестра", name)
 
-    def _cmd_connect_function(self, raw: str):
+    def _cmd_connect(self, raw: str):
         """
-        !connect --function: <команда> to <клавиша>
-        !connect --function: <команда> ; <клавиша>
-
-        Примеры:
-          !connect --function: !create --window #name="test" to ctrl+shift+t
-          !connect --function: !rec ; f9
+        !connect --window  #name="..." 1|0
+        !connect --rule    #name="..."  [-s/-q]
+        !connect --function: <cmd> to|; <key> [#name="..."]
         """
         import re
 
-        # Ищем разделитель 'to' или ';'
-        m = re.search(r'--function:\s*(.+?)\s+(?:to|;)\s+(\S+)\s*$', raw, re.IGNORECASE)
-        if not m:
-            log.warning("!connect --function: неверный синтаксис.\n"
-                        "  Пример: !connect --function: !rec to f9")
+        # ── --window ──────────────────────────────────────────────────────────────
+        if "--window" in raw:
+            name = _parse_named(raw, "name")
+            if not name:
+                log.warning("!connect --window: не указан #name")
+                return
+            # Check value token after the command (1 = enable, 0 = disable)
+            tokens = raw.split()
+            val = None
+            for t in tokens:
+                if t in ("0", "1"):
+                    val = int(t)
+            entry = self._win_reg.get(name)
+            if entry is None:
+                log.warning("!connect --window: окно '%s' не найдено", name)
+                return
+            # Store enabled state
+            entry["enabled"] = (val != 0) if val is not None else True
+            self._win_reg.add(name, entry.get("kind", "window"), entry)
+            if val != 0:
+                self._cmd_start_window(f"!start --window #name=\"{name}\"")
+            log.info("!connect --window '%s' → enabled=%s", name, entry["enabled"])
             return
 
-        cmd_part = m.group(1).strip()
-        key_part = m.group(2).strip()
+        # ── --rule ────────────────────────────────────────────────────────────────
+        if "--rule" in raw:
+            name = _parse_named(raw, "name")
+            if not name:
+                log.warning("!connect --rule: не указан #name")
+                return
+            if not self._rule_reg.exists(name):
+                log.warning("!connect --rule: правило '%s' не найдено", name)
+                return
+            self._rule_reg.set_connected(name, True)
+            log.info("!connect --rule '%s' → connected", name)
+            return
+
+        # ── --function: ───────────────────────────────────────────────────────────
+        m = re.search(r'--function:\s*(.+?)\s+(?:to|;)\s+(\S+)\s*(?:#name=["\']?([^"\'\s]+)["\']?)?\s*$',
+                      raw, re.IGNORECASE)
+        if not m:
+            log.warning("!connect --function: неверный синтаксис.\n"
+                        "  Пример: !connect --function: !rec to f9 [#name=\"myfunc\"]")
+            return
+
+        cmd_part  = m.group(1).strip()
+        key_part  = m.group(2).strip()
+        func_name = m.group(3)
 
         self._hotkeys.bind(key_part, cmd_part)
-        log.info("!connect: '%s' привязано к клавише '%s'", cmd_part, key_part)
+        log.info("!connect: '%s' привязано к '%s'%s",
+                 cmd_part, key_part, f" (name={func_name})" if func_name else "")
+
+    # Keep old alias for backward compatibility
+    def _cmd_connect_function(self, raw: str):
+        self._cmd_connect(raw)
+
+
+    def _cmd_start_rec(self, raw: str):
+        """!start --rec 1|0  — запустить или остановить запись."""
+        tokens = raw.split()
+        val = None
+        for i, t in enumerate(tokens):
+            if t == "--rec" and i + 1 < len(tokens):
+                try:
+                    val = int(tokens[i + 1])
+                except ValueError:
+                    pass
+        if val is None:
+            log.warning("!start --rec: нужно указать 1 (старт) или 0 (стоп)")
+            return
+        if val == 1:
+            if not getattr(self.app, "recording", False):
+                if self._root_alive():
+                    self.app.root.after(0, self.app.start_recording)
+                if self._lib:
+                    self._lib.hr_con_set_recording(1)
+                log.info("!start --rec 1: запись начата")
+            else:
+                log.info("!start --rec 1: уже идёт запись")
+        else:
+            if getattr(self.app, "recording", False):
+                if self._root_alive():
+                    self.app.root.after(0, self.app.stop_recording)
+                if self._lib:
+                    self._lib.hr_con_set_recording(0)
+                log.info("!start --rec 0: запись остановлена")
+            else:
+                log.info("!start --rec 0: запись не была активна")
+
+    def _cmd_rule(self, raw: str):
+        """
+        !rule --get from connect #name="example"
+        !rule --check #name="example"
+        """
+        name = _parse_named(raw, "name")
+        if not name:
+            log.warning("!rule: не указан #name")
+            return
+
+        if "--check" in raw:
+            entry = self._rule_reg.get(name)
+            if entry is None:
+                log.warning("!rule --check: правило '%s' не найдено", name)
+            else:
+                status = "активно (connected)" if entry.get("connected", True) else "отключено (disconnected)"
+                log.info("!rule --check '%s': %s | body: %s", name, status, entry.get("body", ""))
+            return
+
+        if "--get" in raw and "from connect" in raw:
+            # Пример: получить правило из подключённого источника (заглушка — расширяется пользователем)
+            entry = self._rule_reg.get(name)
+            if entry:
+                log.info("!rule --get '%s': %s", name, entry)
+            else:
+                log.warning("!rule --get: правило '%s' не найдено в реестре", name)
+            return
+
+        log.warning("!rule: неизвестный режим. Используйте --get from connect или --check")
+
+    def _cmd_disconnect(self, raw: str):
+        """
+        !disconnect --window  #name="..."
+        !disconnect --rule    #name="..."
+        !disconnect --ae      #type=... #name="..."
+        !disconnect --function: <cmd> to|; <key>
+        """
+        import re
+
+        if "--window" in raw:
+            name = _parse_named(raw, "name")
+            if not name:
+                log.warning("!disconnect --window: не указан #name")
+                return
+            entry = self._win_reg.get(name)
+            if entry is None:
+                log.warning("!disconnect --window: окно '%s' не найдено", name)
+                return
+            entry["enabled"] = False
+            self._win_reg.add(name, entry.get("kind", "window"), entry)
+            log.info("!disconnect --window '%s' → disabled", name)
+            return
+
+        if "--rule" in raw:
+            name = _parse_named(raw, "name")
+            if not name:
+                log.warning("!disconnect --rule: не указан #name")
+                return
+            if not self._rule_reg.set_connected(name, False):
+                log.warning("!disconnect --rule: правило '%s' не найдено", name)
+            else:
+                log.info("!disconnect --rule '%s' → disconnected", name)
+            return
+
+        if "--ae" in raw:
+            ae_type = _parse_named(raw, "type")
+            name    = _parse_named(raw, "name")
+            if not name:
+                log.warning("!disconnect --ae: не указан #name")
+                return
+            if self._ae_reg.remove(name):
+                log.info("!disconnect --ae [%s] '%s' → removed", ae_type, name)
+            else:
+                log.warning("!disconnect --ae: '%s' не найдено", name)
+            return
+
+        if "--function" in raw:
+            m = re.search(r'--function:\s*(.+?)\s+(?:to|;)\s+(\S+)', raw, re.IGNORECASE)
+            if not m:
+                log.warning("!disconnect --function: неверный синтаксис")
+                return
+            key_part = m.group(2).strip()
+            bindings = self._hotkeys.all_bindings()
+            if key_part in bindings:
+                del bindings[key_part]
+                # Re-save
+                self._hotkeys._bindings = bindings
+                self._hotkeys._save()
+                if self._hotkeys._kb:
+                    try:
+                        self._hotkeys._kb.remove_hotkey(key_part)
+                    except Exception:
+                        pass
+                log.info("!disconnect --function: клавиша '%s' отвязана", key_part)
+            else:
+                log.warning("!disconnect --function: клавиша '%s' не найдена", key_part)
+            return
+
+        log.warning("!disconnect: неизвестный режим. Используйте --window/--rule/--ae/--function")
 
     # ── Вспомогательные методы ───────────────────────────────────────────────────
 

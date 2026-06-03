@@ -42,6 +42,8 @@
 #include <functional>
 #include <mutex>
 #include <atomic>
+#include <cstdlib>
+#include <ctime>
 
 #ifdef _WIN32
 #  define HR_EXPORT extern "C" __declspec(dllexport)
@@ -193,6 +195,39 @@ static std::vector<std::wstring> strip_flags(
     return out;
 }
 
+
+// ─── Математика в аргументах: {int.random(a, b)} ──────────────────────────────
+static std::wstring resolve_math(std::wstring s) {
+    // Заменяет все вхождения {int.random(a, b)} на случайное целое [a, b]
+    // Работает рекурсивно пока есть совпадения
+    for (;;) {
+        auto pos = s.find(L"{int.random(");
+        if (pos == std::wstring::npos) break;
+        auto end = s.find(L")}", pos);
+        if (end == std::wstring::npos) break;
+        // Извлечь содержимое: "a, b"
+        std::wstring inner = s.substr(pos + 12, end - pos - 12);
+        // Разбить по запятой
+        auto comma = inner.find(L',');
+        if (comma == std::wstring::npos) break;
+        std::wstring sa = inner.substr(0, comma);
+        std::wstring sb = inner.substr(comma + 1);
+        // Trim spaces
+        while (!sa.empty() && sa.front()==L' ') sa.erase(sa.begin());
+        while (!sa.empty() && sa.back() ==L' ') sa.pop_back();
+        while (!sb.empty() && sb.front()==L' ') sb.erase(sb.begin());
+        while (!sb.empty() && sb.back() ==L' ') sb.pop_back();
+        try {
+            int a = std::stoi(sa);
+            int b = std::stoi(sb);
+            if (a > b) std::swap(a, b);
+            int val = a + rand() % (b - a + 1);
+            s = s.substr(0, pos) + std::to_wstring(val) + s.substr(end + 2);
+        } catch (...) { break; }
+    }
+    return s;
+}
+
 // ─── Переслать команду в Python ───────────────────────────────────────────────
 static void forward_to_python(const std::wstring& raw) {
     if (g_cb_command) {
@@ -214,26 +249,35 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
     if (!silent) {
         write_line(L"  Available commands:", 5);
         static const wchar_t* T[][2] = {
-            {L"  !help             [-w]",       L"Show this help. Without -w opens GitHub"},
-            {L"  !rec",                         L"Start / stop recording"},
-            {L"  !open             [--log]",    L"Open homrec.log in editor"},
-            {L"  !exit",                        L"Force-quit, kill all processes"},
-            {L"  !date             [a] [b]",    L"Run command a, then b"},
-            {L"  !homrec",                      L"( \u0361\u00b0 \u035c\u0296 \u0361\u00b0)"},
-            {L"  !disconnect       [--log]",    L"Pause writing homrec.log"},
-            {L"  !connect          [--log]",    L"Resume writing homrec.log"},
-            {L"  !edit  --settings #name=shortcut [1|0]",
-                                               L"Toggle desktop shortcut"},
-            {L"  !create --window  #name=\"...\" [-o][-s][-n]",
-                                               L"Create (and open) a custom window"},
-            {L"  !create --window --notepad #name=\"...\"",
-                                               L"Create notepad in .\\create\\"},
-            {L"  !start --window   #name=\"...\"",
-                                               L"Re-open a created window"},
-            {L"  $rm    --window   #name=\"...\" [-q]",
-                                               L"Delete window from homrec.create"},
-            {L"  !connect --function: <cmd> to|; <key>",
-                                               L"Bind a command to a hotkey"},
+            {L"  !help                       [-w]",     L"Show this help; without -w opens GitHub"},
+            {L"  !rec",                                 L"Toggle recording"},
+            {L"  !start --rec 1|0",                     L"Start(1) or stop(0) recording"},
+            {L"  !open                       [--log]",  L"Open homrec.log in editor"},
+            {L"  !exit",                                L"Force-quit"},
+            {L"  !date                       [a] [b]",  L"Run command a, then b"},
+            {L"  !homrec",                              L"( ͡° ͜ʖ ͡°)"},
+            {L"  !disconnect                 [--log]",  L"Pause homrec.log"},
+            {L"  !connect                    [--log]",  L"Resume homrec.log"},
+            {L"  !rule  --get from connect #name=\"...\"",L"Fetch rule from connected source"},
+            {L"  !rule  --check #name=\"...\"",         L"Check if rule is active"},
+            {L"  !edit  --file    #name=\"...\"",        L"Edit a created file"},
+            {L"  !edit  --window  #name=\"...\"",        L"Edit a created window"},
+            {L"  !edit  --rule    #name=\"...\"; ..",    L"Edit rule body"},
+            {L"  !edit  --settings #name=shortcut [1|0]",L"Toggle desktop shortcut"},
+            {L"  !create --window #name=\"...\" [-o][-s][-n][-c][-d]",L"Create window"},
+            {L"  !create --window --notepad [as .ext] #name=\"...\"",L"Create notepad"},
+            {L"  !create --rule   #name=\"...\"; <body> [-c][-d]",L"Create rule"},
+            {L"  !create --ae #type=color{rgb=(r,g,b)} #name=\"...\"",L"Create AE object"},
+            {L"  !start  --window #name=\"...\"",        L"Re-open a created window"},
+            {L"  !connect --window  #name=\"...\" 1",   L"Enable/disable window"},
+            {L"  !connect --rule    #name=\"...\"",      L"Connect a rule"},
+            {L"  !connect --function: <cmd> to|; <key> [#name=\"...\"]",L"Bind hotkey"},
+            {L"  !disconnect --window  #name=\"...\"",  L"Disable window"},
+            {L"  !disconnect --rule    #name=\"...\"",  L"Disconnect rule"},
+            {L"  !disconnect --ae #type=... #name=\"...\"",L"Disconnect AE object"},
+            {L"  !disconnect --function: <cmd> to|; <key>",L"Unbind hotkey"},
+            {L"  $rm  --window #name=\"...\" [-q]",     L"Delete window"},
+            {L"  {int.random(a, b)}",                   L"Random int [a,b] in any argument"},
         };
         for (auto& r : T) {
             write_line(r[0], 5);
@@ -248,13 +292,46 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
         post_exec([=]{ g_cb_open_url(g_gh_url); });
 }
 
-static void cmd_rec(const std::vector<std::wstring>&, bool silent) {
+static void cmd_rec(const std::vector<std::wstring>& args, bool silent) {
+    // !rec              — toggle
+    // !start --rec 1    — start
+    // !start --rec 0    — stop
+    // This function is also called with explicit value via cmd_start_rec
     if (!g_recording.load()) {
         if (g_cb_start) post_exec([=]{ g_cb_start(); });
+        g_recording.store(true);
         if (!silent) wok(L"Recording started");
     } else {
         if (g_cb_stop)  post_exec([=]{ g_cb_stop(); });
+        g_recording.store(false);
         if (!silent) wok(L"Recording stopped");
+    }
+}
+
+static void cmd_start_rec(const std::vector<std::wstring>& args, bool silent,
+                           const std::wstring& raw) {
+    // !start --rec 1  or  !start --rec 0
+    // Find the value token after --rec
+    int val = -1;
+    for (size_t i = 0; i + 1 < args.size(); i++) {
+        if (args[i] == L"--rec") {
+            if (args[i+1] == L"1") val = 1;
+            else if (args[i+1] == L"0") val = 0;
+            break;
+        }
+    }
+    if (val == -1) { werr(L"Usage: !start --rec 1|0"); return; }
+    bool already = g_recording.load();
+    if (val == 1 && !already) {
+        if (g_cb_start) post_exec([=]{ g_cb_start(); });
+        g_recording.store(true);
+        if (!silent) wok(L"Recording started");
+    } else if (val == 0 && already) {
+        if (g_cb_stop)  post_exec([=]{ g_cb_stop(); });
+        g_recording.store(false);
+        if (!silent) wok(L"Recording stopped");
+    } else {
+        if (!silent) winfo(val == 1 ? L"Already recording" : L"Not recording");
     }
 }
 
@@ -291,10 +368,9 @@ static void cmd_homrec(const std::vector<std::wstring>&, bool silent) {
     }
 }
 
-static void cmd_disconnect(const std::vector<std::wstring>& args, bool silent) {
-    if (!has(args, L"--log")) { werr(L"Usage: !disconnect --log"); return; }
-    g_log_conn.store(false);
-    if (!silent) wok(L"homrec.log disconnected");
+static void cmd_disconnect(const std::vector<std::wstring>& args, bool silent,
+                           const std::wstring& raw = L"") {
+    _cmd_disconnect_impl(args, silent, raw);
 }
 
 static void cmd_connect_log(const std::vector<std::wstring>& args, bool silent) {
@@ -307,8 +383,10 @@ static void cmd_connect_log(const std::vector<std::wstring>& args, bool silent) 
 
 static void cmd_edit(const std::vector<std::wstring>& args, bool silent,
                      const std::wstring& raw) {
-    if (!has(args, L"--settings")) {
-        werr(L"Usage: !edit --settings #name=shortcut [1|0]"); return;
+    bool ok = has(args, L"--settings") || has(args, L"--file") ||
+              has(args, L"--window")   || has(args, L"--rule");
+    if (!ok) {
+        werr(L"Usage: !edit --file|--window|--rule|--settings #name=\"...\""); return;
     }
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
@@ -316,25 +394,38 @@ static void cmd_edit(const std::vector<std::wstring>& args, bool silent,
 
 static void cmd_create(const std::vector<std::wstring>& args, bool silent,
                        const std::wstring& raw) {
-    if (!has(args, L"--window")) {
-        werr(L"Usage: !create --window #name=\"...\" [-o][-s][-n]"); return;
+    bool is_window = has(args, L"--window");
+    bool is_rule   = has(args, L"--rule");
+    bool is_ae     = has(args, L"--ae");
+    if (!is_window && !is_rule && !is_ae) {
+        werr(L"Usage: !create --window|--rule|--ae #name=\"...\""); return;
     }
-    // Подсказка пользователю о флагах
     if (!silent) {
-        if (has(args, L"-o"))
-            winfo(L"Флаг -o: окно будет создано, но не открыто");
-        if (has(args, L"--notepad"))
-            winfo(L"Флаг --notepad: создаётся файл в папке .\\create\\");
+        if (is_window) {
+            if (has(args, L"-o"))   winfo(L"-o: создать без открытия");
+            if (has(args, L"-c"))   winfo(L"-c: автоматически подключить");
+            if (has(args, L"-d"))   winfo(L"-d: создать как disconnected");
+            if (has(args, L"--notepad")) winfo(L"--notepad: файл в .\\create\\");
+        }
+        if (is_rule) {
+            if (has(args, L"-c"))   winfo(L"-c: автоматически подключить правило");
+            if (has(args, L"-d"))   winfo(L"-d: правило отключено сразу");
+        }
+        winfo((L"Sending to Python: " + raw).c_str());
     }
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
     if (!silent) wok(L"!create отправлена в Python-обработчик");
 }
 
 static void cmd_start_window(const std::vector<std::wstring>& args, bool silent,
                               const std::wstring& raw) {
+    // !start --rec 1|0  — handled separately, but guard here too
+    if (has(args, L"--rec")) {
+        cmd_start_rec(args, silent, raw);
+        return;
+    }
     if (!has(args, L"--window")) {
-        werr(L"Usage: !start --window #name=\"...\""); return;
+        werr(L"Usage: !start --window #name=\"...\" | !start --rec 1|0"); return;
     }
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
@@ -355,16 +446,57 @@ static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
 
 static void cmd_connect_function(const std::vector<std::wstring>& args, bool silent,
                                   const std::wstring& raw) {
-    // !connect --function: <cmd> to|; <key>
-    // Проверяем что это не --log
     if (has(args, L"--log")) {
         cmd_connect_log(args, silent);
         return;
     }
-    // Иначе — привязка к клавише
+    // All --window, --rule, --function variants go to Python
+    bool ok = false;
+    for (auto& a : args)
+        if (a == L"--window" || a == L"--rule" || a.find(L"--function") == 0) ok = true;
+    if (!ok) {
+        werr(L"Usage: !connect --window|--rule|--function: ... | --log"); return;
+    }
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
-    if (!silent) wok(L"!connect --function отправлена в Python-обработчик");
+    if (!silent) wok(L"!connect отправлена в Python-обработчик");
+}
+
+static void cmd_disconnect(const std::vector<std::wstring>& args_d, bool silent_d,
+                           const std::wstring& raw_d);  // forward decl
+
+static void _cmd_disconnect_impl(const std::vector<std::wstring>& args, bool silent,
+                                 const std::wstring& raw) {
+    if (has(args, L"--log")) {
+        // Reuse existing log-disconnect logic
+        g_log_conn.store(false);
+        if (!silent) wok(L"homrec.log disconnected");
+        return;
+    }
+    bool ok = false;
+    for (auto& a : args)
+        if (a==L"--window"||a==L"--rule"||a==L"--ae"||a.find(L"--function")==0) ok=true;
+    if (!ok) {
+        werr(L"Usage: !disconnect --window|--rule|--ae|--function: ...|--log"); return;
+    }
+    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
+    forward_to_python(raw);
+    if (!silent) wok(L"!disconnect отправлена в Python-обработчик");
+}
+
+// ─── !rule ───────────────────────────────────────────────────────────────────
+
+static void cmd_rule(const std::vector<std::wstring>& args, bool silent,
+                     const std::wstring& raw) {
+    bool get_mode   = has(args, L"--get");
+    bool check_mode = has(args, L"--check");
+    if (!get_mode && !check_mode) {
+        werr(L"Usage: !rule --get from connect #name=\"...\" | !rule --check #name=\"...\"");
+        return;
+    }
+    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
+    forward_to_python(raw);
+    if (!silent) wok(L"!rule отправлена в Python-обработчик");
 }
 
 // ─── Главный диспетчер ───────────────────────────────────────────────────────
@@ -383,10 +515,9 @@ static void dispatch(const std::wstring& raw) {
     else if (cmd==L"!exit")        cmd_exit(clean,silent);
     else if (cmd==L"!date")        cmd_date(clean,silent);
     else if (cmd==L"!homrec")      cmd_homrec(clean,silent);
-    else if (cmd==L"!disconnect")  cmd_disconnect(clean,silent);
-    // !connect: либо --log, либо --function
+    else if (cmd==L"!disconnect")  cmd_disconnect(clean,silent,raw);
     else if (cmd==L"!connect")     cmd_connect_function(clean,silent,raw);
-    // Новые команды
+    else if (cmd==L"!rule")        cmd_rule(clean,silent,raw);
     else if (cmd==L"!edit")        cmd_edit(clean,silent,raw);
     else if (cmd==L"!create")      cmd_create(clean,silent,raw);
     else if (cmd==L"!start")       cmd_start_window(clean,silent,raw);
@@ -414,6 +545,7 @@ static void commit_input() {
         if ((int)g_hist.size() > 200) g_hist.pop_front();
     }
     g_hist_idx = (int)g_hist.size();
+    line = resolve_math(line);
     write_line((L"> " + line).c_str(), 5);
     dispatch(line);
 }
@@ -526,6 +658,7 @@ static LRESULT CALLBACK wnd_proc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static DWORD CALLBACK con_thread(LPVOID) {
+    srand((unsigned)time(nullptr));   // Инициализация генератора случайных чисел
     LoadLibraryW(L"msftedit.dll");
 
     HINSTANCE hi = GetModuleHandleW(nullptr);
@@ -559,7 +692,7 @@ static DWORD CALLBACK con_thread(LPVOID) {
     g_hwnd = hw;
 
     g_hdr = CreateWindowExW(0,L"STATIC",
-        L"  \u2328  HomRec Console v2.0   \u2014   Ctrl+Shift+T  |  !help",
+        L"  \u2328  HomRec Console v3.0   \u2014   Ctrl+Shift+T  |  !help",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
         0,0,0,0,hw,nullptr,hi,nullptr);
     SendMessageW(g_hdr,WM_SETFONT,(WPARAM)g_fbold,TRUE);
@@ -591,7 +724,7 @@ static DWORD CALLBACK con_thread(LPVOID) {
 
     layout(hw);
 
-    write_line(L"HomRec Developer Console v2.0", 0);
+    write_line(L"HomRec Developer Console v3.0", 0);
     winfo(L"type !help to see all commands  |  Esc or \u00d7 to close");
     write_line(L"", 4);
 
