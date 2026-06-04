@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HomRec — Documentation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --base:    #1e1e2e;
+  --mantle:  #181825;
+  --crust:   #11111b;
+  --surface0:#313244;
+  --surface1:#45475a;
+  --surface2:#585b70;
+  --overlay0:#6c7086;
+  --overlay1:#7f849c;
+  --text:    #cdd6f4;
+  --subtext1:#bac2de;
+  --subtext0:#a6adc8;
+  --blue:    #89b4fa;
+  --green:   #a6e3a1;
+  --yellow:  #f9e2af;
+  --peach:   #fab387;
+  --red:     #f38ba8;
+  --mauve:   #cba6f7;
+  --teal:    #94e2d5;
+  --sky:     #89dceb;
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--crust);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  line-height: 1.8;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,.04) 3px, rgba(0,0,0,.04) 4px);
+  pointer-events: none; z-index: 9999;
+}
+
+/* ── NAV ── */
+nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+  height: 56px;
+  background: rgba(17,17,27,.9);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--surface0);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 48px;
+}
+.nav-logo {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800; font-size: 20px;
+  color: var(--blue); letter-spacing: -.5px;
+  display: flex; align-items: baseline; gap: 10px;
+  text-decoration: none;
+}
+.nav-logo span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 400;
+  color: var(--overlay0);
+}
+.nav-back {
+  font-size: 12px; color: var(--subtext0);
+  text-decoration: none; letter-spacing: .3px;
+  transition: color .2s;
+  display: flex; align-items: center; gap: 6px;
+}
+.nav-back:hover { color: var(--text); }
+
+/* ── LAYOUT ── */
+.docs-wrap {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+  padding-top: 56px;
+}
+
+/* ── SIDEBAR ── */
+.sidebar {
+  position: sticky; top: 56px;
+  height: calc(100vh - 56px);
+  overflow-y: auto;
+  background: var(--mantle);
+  border-right: 1px solid var(--surface0);
+  padding: 32px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface1) transparent;
+}
+.sidebar::-webkit-scrollbar { width: 4px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--surface1); border-radius: 2px; }
+
+.sb-section { margin-bottom: 32px; }
+.sb-section-title {
+  font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--overlay0); font-weight: 500;
+  padding: 0 24px; margin-bottom: 8px;
+}
+.sb-section ul { list-style: none; }
+.sb-link {
+  display: block;
+  font-size: 13px; color: var(--subtext0);
+  text-decoration: none;
+  padding: 6px 24px;
+  border-left: 2px solid transparent;
+  transition: color .15s, border-color .15s, background .15s;
+  line-height: 1.5;
+}
+.sb-link:hover { color: var(--text); background: rgba(137,180,250,.05); }
+.sb-link.active { color: var(--blue); border-left-color: var(--blue); background: rgba(137,180,250,.07); }
+.sb-link.sub { padding-left: 40px; font-size: 12px; color: var(--overlay1); }
+.sb-link.sub.active { color: var(--blue); border-left-color: var(--blue); }
+
+/* ── CONTENT ── */
+.docs-content {
+  padding: 56px 72px 96px;
+  max-width: 860px;
+}
+
+/* ── TYPOGRAPHY ── */
+.doc-section {
+  margin-bottom: 72px;
+  padding-bottom: 72px;
+  border-bottom: 1px solid var(--surface0);
+}
+.doc-section:last-child { border-bottom: none; }
+
+h2.doc-h2 {
+  font-family: 'Syne', sans-serif;
+  font-size: 28px; font-weight: 800;
+  color: var(--text); letter-spacing: -1px;
+  margin-bottom: 8px; line-height: 1.2;
+}
+h2.doc-h2 .tag-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; font-weight: 400;
+  color: var(--overlay0); margin-right: 4px;
+}
+
+.doc-sub {
+  font-size: 14px; color: var(--subtext0);
+  margin-bottom: 32px; line-height: 1.8;
+  max-width: 640px;
+}
+
+h3.doc-h3 {
+  font-family: 'Syne', sans-serif;
+  font-size: 18px; font-weight: 700;
+  color: var(--subtext1); letter-spacing: -.3px;
+  margin-top: 40px; margin-bottom: 12px;
+}
+h3.doc-h3 code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 15px; font-weight: 500;
+  color: var(--peach);
+  background: rgba(250,179,135,.1);
+  padding: 2px 8px; border-radius: 4px;
+}
+
+p.doc-p {
+  font-size: 14px; color: var(--subtext0);
+  line-height: 1.85; margin-bottom: 14px;
+  max-width: 680px;
+}
+
+code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: var(--surface0);
+  color: var(--blue);
+  padding: 1px 7px; border-radius: 3px;
+}
+
+pre {
+  background: var(--mantle);
+  border: 1px solid var(--surface0);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin: 16px 0 20px;
+  overflow-x: auto;
+  position: relative;
+}
+pre code {
+  background: none; padding: 0;
+  font-size: 13px; line-height: 1.85;
+  color: var(--subtext1);
+}
+.cm { color: var(--overlay0) !important; font-style: italic; }
+.kw { color: var(--blue) !important; }
+.fn { color: var(--peach) !important; }
+.st { color: var(--green) !important; }
+.fl { color: var(--teal) !important; }
+.nm { color: var(--mauve) !important; }
+.op { color: var(--yellow) !important; }
+
+/* pre label */
+pre[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute; top: 10px; right: 14px;
+  font-size: 10px; letter-spacing: 1px;
+  color: var(--overlay0); text-transform: uppercase;
+}
+
+/* ── TABLE ── */
+.doc-table {
+  width: 100%; border-collapse: collapse;
+  margin: 16px 0 24px; font-size: 13px;
+}
+.doc-table th {
+  text-align: left; font-size: 10px;
+  letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--overlay0); font-weight: 400;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--surface0);
+}
+.doc-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(69,71,90,.4);
+  color: var(--subtext0); vertical-align: top;
+  line-height: 1.65;
+}
+.doc-table tr:last-child td { border-bottom: none; }
+.doc-table td:first-child {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--yellow); font-size: 12px;
+  white-space: nowrap;
+}
+.doc-table td code {
+  font-size: 11px;
+}
+
+/* ── CMD CARDS ── */
+.cmd-grid { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; }
+.cmd-card {
+  background: var(--mantle);
+  border: 1px solid var(--surface0);
+  border-radius: 7px;
+  padding: 14px 18px;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 16px; align-items: start;
+  transition: border-color .15s;
+}
+.cmd-card:hover { border-color: var(--surface1); }
+.cmd-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; color: var(--peach); font-weight: 500;
+  line-height: 1.6;
+}
+.cmd-desc { font-size: 13px; color: var(--subtext0); line-height: 1.65; }
+
+/* ── NOTE / WARN ── */
+.note {
+  background: rgba(137,180,250,.08);
+  border-left: 3px solid var(--blue);
+  border-radius: 0 6px 6px 0;
+  padding: 14px 18px;
+  margin: 16px 0;
+  font-size: 13px; color: var(--subtext1); line-height: 1.75;
+}
+.warn {
+  background: rgba(249,226,175,.07);
+  border-left: 3px solid var(--yellow);
+  border-radius: 0 6px 6px 0;
+  padding: 14px 18px;
+  margin: 16px 0;
+  font-size: 13px; color: var(--subtext1); line-height: 1.75;
+}
+
+/* ── ARCH DIAGRAM ── */
+.arch-box {
+  background: var(--mantle);
+  border: 1px solid var(--surface0);
+  border-radius: 8px;
+  padding: 24px 28px;
+  margin: 20px 0;
+  font-size: 13px; line-height: 1.9;
+}
+.arch-layer {
+  background: var(--base);
+  border: 1px solid var(--surface1);
+  border-radius: 6px;
+  padding: 16px 20px;
+  margin-bottom: 8px;
+}
+.arch-layer-title {
+  font-family: 'Syne', sans-serif;
+  font-size: 13px; font-weight: 700;
+  color: var(--text); margin-bottom: 6px;
+  letter-spacing: -.2px;
+}
+.arch-layer-body { font-size: 12px; color: var(--subtext0); line-height: 1.7; }
+.arch-arrow {
+  text-align: center;
+  color: var(--overlay0); font-size: 18px;
+  margin: 4px 0;
+}
+
+/* ── STORAGE TABLE ── */
+.file-list { display: flex; flex-direction: column; gap: 6px; margin: 16px 0; }
+.file-row {
+  display: flex; gap: 16px; align-items: flex-start;
+  background: var(--mantle);
+  border: 1px solid var(--surface0);
+  border-radius: 6px; padding: 12px 16px;
+}
+.file-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--teal);
+  min-width: 200px; flex-shrink: 0;
+}
+.file-desc { font-size: 13px; color: var(--subtext0); }
+
+/* ── FOOTER ── */
+footer {
+  background: var(--mantle);
+  border-top: 1px solid var(--surface0);
+  padding: 40px 72px;
+  display: flex; justify-content: space-between;
+  align-items: center; flex-wrap: wrap; gap: 16px;
+}
+.footer-brand {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800; font-size: 20px;
+  color: var(--blue); letter-spacing: -.5px;
+}
+.footer-links { display: flex; gap: 24px; }
+.footer-links a { font-size: 13px; color: var(--subtext0); text-decoration: none; transition: color .2s; }
+.footer-links a:hover { color: var(--text); }
+
+@media (max-width: 900px) {
+  nav { padding: 0 20px; }
+  .docs-wrap { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+  .docs-content { padding: 40px 24px 80px; }
+  footer { padding: 32px 24px; flex-direction: column; }
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-logo" href="index.html">HomRec <span>docs</span></a>
+  <a class="nav-back" href="index.html">← Back to main</a>
+</nav>
+
+<div class="docs-wrap">
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="sidebar">
+    <div class="sb-section">
+      <div class="sb-section-title">Getting started</div>
+      <ul>
+        <li><a class="sb-link active" href="#install">Installation</a></li>
+        <li><a class="sb-link" href="#hotkeys">Hotkeys</a></li>
+        <li><a class="sb-link" href="#deps">Dependencies</a></li>
+      </ul>
+    </div>
+    <div class="sb-section">
+      <div class="sb-section-title">Developer Console</div>
+      <ul>
+        <li><a class="sb-link" href="#console">Overview</a></li>
+        <li><a class="sb-link" href="#conventions">Conventions</a></li>
+        <li><a class="sb-link" href="#flags">Global flags</a></li>
+        <li><a class="sb-link" href="#math">Math in arguments</a></li>
+      </ul>
+    </div>
+    <div class="sb-section">
+      <div class="sb-section-title">Commands</div>
+      <ul>
+        <li><a class="sb-link" href="#recording">Recording</a></li>
+        <li><a class="sb-link" href="#windows">Windows</a></li>
+        <li><a class="sb-link" href="#rules">Rules</a></li>
+        <li><a class="sb-link" href="#ae">AE Objects</a></li>
+        <li><a class="sb-link" href="#connect">Connect & Disconnect</a></li>
+        <li><a class="sb-link" href="#hotkey-cmds">Hotkey bindings</a></li>
+        <li><a class="sb-link" href="#inspection">Registry inspection</a></li>
+        <li><a class="sb-link" href="#history">History & Aliases</a></li>
+        <li><a class="sb-link" href="#execution">Command execution</a></li>
+        <li><a class="sb-link" href="#timers">Timers & Watchers</a></li>
+        <li><a class="sb-link" href="#utilities">Utilities</a></li>
+        <li><a class="sb-link" href="#log">Log</a></li>
+        <li><a class="sb-link" href="#system">System commands</a></li>
+        <li><a class="sb-link" href="#rm">Deleting objects</a></li>
+      </ul>
+    </div>
+    <div class="sb-section">
+      <div class="sb-section-title">Architecture</div>
+      <ul>
+        <li><a class="sb-link" href="#arch">DLL ↔ Python</a></li>
+        <li><a class="sb-link" href="#storage">Storage files</a></li>
+      </ul>
+    </div>
+    <div class="sb-section">
+      <div class="sb-section-title">Examples</div>
+      <ul>
+        <li><a class="sb-link" href="#examples">Recipes</a></li>
+      </ul>
+    </div>
+  </aside>
+
+  <!-- ── CONTENT ── -->
+  <main class="docs-content">
+
+    <!-- INSTALL -->
+    <div class="doc-section" id="install">
+      <h2 class="doc-h2">Installation</h2>
+      <p class="doc-sub">Two ways to run HomRec — a prebuilt executable that requires nothing extra, or from source if you want to dig in.</p>
+
+      <h3 class="doc-h3">Option A — .exe (recommended)</h3>
+      <p class="doc-p">FFmpeg is already bundled inside the archive — no extra downloads.</p>
+      <div class="cmd-grid">
+        <div class="cmd-card"><div class="cmd-name">1. Download</div><div class="cmd-desc">Go to <a href="https://github.com/homaaio/homrec/releases" style="color:var(--blue)">Releases</a> and grab the latest <code>.zip</code></div></div>
+        <div class="cmd-card"><div class="cmd-name">2. Unzip</div><div class="cmd-desc">Extract anywhere — no installer, no admin rights required</div></div>
+        <div class="cmd-card"><div class="cmd-name">3. Run</div><div class="cmd-desc">Launch <code>!hr.exe</code></div></div>
+      </div>
+      <div class="warn">Some antiviruses (Kaspersky, Avast) may flag HomRec because it's a new program. It is not a virus — full source is on GitHub. Add the HomRec folder to exceptions if needed.</div>
+
+      <h3 class="doc-h3">Option B — from source</h3>
+<pre data-lang="bash"><code><span class="cm"># 1. Clone the repo</span>
+<span class="kw">git</span> clone https://github.com/homaaio/homrec.git
+<span class="kw">cd</span> homrec
+
+<span class="cm"># 2. Install Python dependencies</span>
+<span class="kw">pip</span> install -r requirements.txt
+
+<span class="cm"># 3. Place ffmpeg.exe in the HomRec folder, or add to PATH</span>
+<span class="cm">#    Download from https://ffmpeg.org/download.html</span>
+
+<span class="cm"># 4. Run</span>
+<span class="kw">python</span> homrec.py</code></pre>
+    </div>
+
+    <!-- HOTKEYS -->
+    <div class="doc-section" id="hotkeys">
+      <h2 class="doc-h2">Hotkeys</h2>
+      <p class="doc-sub">Global hotkeys work even when the HomRec window is not focused. Custom bindings can be added via the developer console.</p>
+
+      <table class="doc-table">
+        <tr><th>Key</th><th>Action</th></tr>
+        <tr><td>F9</td><td>Start / Stop recording</td></tr>
+        <tr><td>F10</td><td>Pause / Resume recording</td></tr>
+        <tr><td>F11</td><td>Toggle fullscreen</td></tr>
+        <tr><td>Ctrl+Shift+T</td><td>Open / close developer console</td></tr>
+        <tr><td>Esc</td><td>Close developer console</td></tr>
+      </table>
+
+      <p class="doc-p">To bind custom hotkeys use <code>!connect --function</code> in the console:</p>
+<pre data-lang="console"><code><span class="fn">!connect</span> --function !rec <span class="kw">to</span> ctrl+shift+r
+<span class="fn">!connect</span> --function <span class="st">"!start --rec 1"</span> <span class="kw">to</span> ctrl+F9 <span class="nm">#name=</span><span class="st">"start-rec"</span></code></pre>
+    </div>
+
+    <!-- DEPS -->
+    <div class="doc-section" id="deps">
+      <h2 class="doc-h2">Dependencies</h2>
+      <p class="doc-sub">Six Python packages. Two are optional.</p>
+
+      <table class="doc-table">
+        <tr><th>Package</th><th>Purpose</th><th>Required</th></tr>
+        <tr><td>opencv-python</td><td>Video encoding and frame processing</td><td>Yes</td></tr>
+        <tr><td>Pillow</td><td>Image handling</td><td>Yes</td></tr>
+        <tr><td>mss</td><td>Fast screen capture</td><td>Yes</td></tr>
+        <tr><td>numpy</td><td>Frame buffer operations</td><td>Yes</td></tr>
+        <tr><td>psutil</td><td>PC Analytics panel (CPU, RAM, disk)</td><td>Optional</td></tr>
+        <tr><td>pystray</td><td>System tray support</td><td>Optional</td></tr>
+      </table>
+
+      <div class="note">Audio capture (microphone + desktop) is handled via native WASAPI C++ libraries — no extra audio packages needed.</div>
+    </div>
+
+    <!-- CONSOLE -->
+    <div class="doc-section" id="console">
+      <h2 class="doc-h2">Developer Console</h2>
+      <p class="doc-sub">Open with <kbd style="background:var(--surface0);padding:2px 7px;border-radius:3px;font-size:12px;">Ctrl+Shift+T</kbd>. Close with <code>Esc</code> or the × button. Type <code>!help</code> for a quick command list without leaving the console.</p>
+      <p class="doc-p">The console gives you full programmatic control over HomRec — start and stop recording, create automation rules, bind hotkeys, run scripts, and inspect internal state.</p>
+    </div>
+
+    <!-- CONVENTIONS -->
+    <div class="doc-section" id="conventions">
+      <h2 class="doc-h2">Conventions</h2>
+      <p class="doc-sub">Named parameters, rule step syntax, and common patterns shared across all commands.</p>
+
+      <h3 class="doc-h3">Named parameters</h3>
+      <p class="doc-p">Parameters are passed as <code>#key="value"</code> or <code>#key=value</code>. Always wrap values that contain spaces in quotes.</p>
+<pre data-lang="console"><code><span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"My Dashboard"</span> <span class="nm">#bg=</span>black <span class="nm">#size=</span>(800x600)</code></pre>
+
+      <table class="doc-table">
+        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+        <tr><td>#name="..."</td><td>string</td><td>Object name (window, rule, AE, alias…)</td></tr>
+        <tr><td>#ms=N</td><td>int</td><td>Time in milliseconds</td></tr>
+        <tr><td>#count=N</td><td>int</td><td>Number of repetitions</td></tr>
+        <tr><td>#file="..."</td><td>string</td><td>File path</td></tr>
+        <tr><td>#val="..."</td><td>string</td><td>Generic value (context-dependent)</td></tr>
+      </table>
+
+      <h3 class="doc-h3">Rule step syntax</h3>
+      <p class="doc-p">Steps inside a rule body are separated by <code>;</code>. The keyword <code>then</code> is a harmless separator and is ignored during execution.</p>
+<pre data-lang="console"><code><span class="fn">!create</span> --rule <span class="nm">#name=</span><span class="st">"auto"</span>; <span class="fn">!start</span> --rec 1 then; <span class="fn">!echo</span> --ok <span class="st">"done"</span></code></pre>
+    </div>
+
+    <!-- FLAGS -->
+    <div class="doc-section" id="flags">
+      <h2 class="doc-h2">Global flags</h2>
+      <p class="doc-sub">These flags can be appended to any command.</p>
+      <table class="doc-table">
+        <tr><th>Flag</th><th>Effect</th></tr>
+        <tr><td>-s / --silent</td><td>Suppress all console output for this command</td></tr>
+        <tr><td>-q</td><td>Skip confirmation prompts</td></tr>
+        <tr><td>-return / -ret</td><td>Print only <code>1</code> (success) or <code>0</code> (failure) instead of text</td></tr>
+      </table>
+<pre data-lang="console"><code><span class="fn">!connect</span> --rule <span class="nm">#name=</span><span class="st">"logger"</span> -s
+<span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"debug"</span> -return</code></pre>
+    </div>
+
+    <!-- MATH -->
+    <div class="doc-section" id="math">
+      <h2 class="doc-h2">Math in arguments</h2>
+      <p class="doc-sub">The expression <code>{int.random(a, b)}</code> can be used anywhere in any command — it is replaced by a random integer in <code>[a, b]</code> before parsing.</p>
+<pre data-lang="console"><code><span class="fn">!echo</span> Random: {int.random(1, 100)}
+<span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"win_{int.random(1,999)}"</span>
+<span class="fn">!delay</span> <span class="nm">#ms=</span>{int.random(500, 2000)} <span class="fn">!rec</span></code></pre>
+    </div>
+
+    <!-- RECORDING -->
+    <div class="doc-section" id="recording">
+      <h2 class="doc-h2">Recording</h2>
+
+      <h3 class="doc-h3"><code>!rec</code></h3>
+      <p class="doc-p">Toggle recording — starts if not active, stops if active.</p>
+<pre data-lang="console"><code><span class="fn">!rec</span></code></pre>
+
+      <h3 class="doc-h3"><code>!start --rec 1|0</code></h3>
+      <p class="doc-p">Explicitly start (<code>1</code>) or stop (<code>0</code>) recording. Does nothing if already in the requested state.</p>
+<pre data-lang="console"><code><span class="fn">!start</span> --rec 1   <span class="cm"># start recording</span>
+<span class="fn">!start</span> --rec 0   <span class="cm"># stop recording</span></code></pre>
+    </div>
+
+    <!-- WINDOWS -->
+    <div class="doc-section" id="windows">
+      <h2 class="doc-h2">Windows</h2>
+      <p class="doc-sub">Windows are stored in <code>create/windows.json</code>. Each window has a name, style properties, and an <code>enabled</code> status.</p>
+
+      <h3 class="doc-h3"><code>!create --window</code></h3>
+<pre data-lang="console"><code><span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"..."</span> [<span class="nm">#bg=</span>COLOR] [<span class="nm">#fg=</span>COLOR] [<span class="nm">#size=</span>(WxH)]
+                 [-o] [-s] [-n] [-c] [-d]
+                 [--topmost] [--borderless] [--resizable] [--minimized]
+                 [--center] [--opacity <span class="nm">#val=</span>N] [--icon <span class="nm">#path=</span><span class="st">"..."</span>]
+                 [--title <span class="nm">#val=</span><span class="st">"..."</span>]</code></pre>
+
+      <table class="doc-table">
+        <tr><th>Parameter / Flag</th><th>Description</th></tr>
+        <tr><td>#name="..."</td><td><strong>Required.</strong> Window name</td></tr>
+        <tr><td>#bg=COLOR</td><td>Background color (CSS name or hex)</td></tr>
+        <tr><td>#fg=COLOR</td><td>Text / foreground color</td></tr>
+        <tr><td>#size=(WxH)</td><td>Window dimensions, e.g. <code>(1024x768)</code></td></tr>
+        <tr><td>-o</td><td>Register only — do not open immediately</td></tr>
+        <tr><td>-c</td><td>Auto-connect after creation</td></tr>
+        <tr><td>-d</td><td>Create as disconnected (window not opened)</td></tr>
+        <tr><td>--topmost / -t</td><td>Always on top</td></tr>
+        <tr><td>--borderless / -b</td><td>Borderless window</td></tr>
+        <tr><td>--resizable / -r</td><td>Resizable window</td></tr>
+        <tr><td>--center</td><td>Center on screen when opened</td></tr>
+        <tr><td>--opacity #val=N</td><td>Opacity level (0–100)</td></tr>
+      </table>
+
+<pre data-lang="console"><code><span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"Dashboard"</span> <span class="nm">#bg=</span>#1e1e2e <span class="nm">#fg=</span>#cdd6f4 <span class="nm">#size=</span>(800x500)
+<span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"debug"</span> -o -d
+<span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"top"</span> --topmost --center <span class="nm">#size=</span>(400x300)</code></pre>
+
+      <h3 class="doc-h3"><code>!create --window --notepad</code></h3>
+      <p class="doc-p">Creates a file inside <code>./create/</code> and opens it in the system editor.</p>
+<pre data-lang="console"><code><span class="fn">!create</span> --window --notepad <span class="nm">#name=</span><span class="st">"notes"</span>
+<span class="fn">!create</span> --window --notepad as .md <span class="nm">#name=</span><span class="st">"readme"</span>
+<span class="fn">!create</span> --window --notepad as .py <span class="nm">#name=</span><span class="st">"script"</span></code></pre>
+
+      <h3 class="doc-h3"><code>!start --window</code> / <code>!edit --window</code></h3>
+      <p class="doc-p">Re-opens a window previously registered via <code>!create --window</code>. Both commands are equivalent.</p>
+
+      <h3 class="doc-h3"><code>$rm --window</code></h3>
+<pre data-lang="console"><code><span class="fn">$rm</span> --window <span class="nm">#name=</span><span class="st">"debug"</span> -q
+<span class="fn">$rm</span> --window <span class="nm">#name=</span><span class="st">"notes"</span> --purge
+<span class="fn">$rm</span> --all --window -y</code></pre>
+    </div>
+
+    <!-- RULES -->
+    <div class="doc-section" id="rules">
+      <h2 class="doc-h2">Rules</h2>
+      <p class="doc-sub">Rules are sequences of commands stored in <code>create/rules.json</code>. When a rule is <em>connected</em>, its body executes immediately.</p>
+
+      <h3 class="doc-h3"><code>!create --rule</code></h3>
+<pre data-lang="console"><code><span class="fn">!create</span> --rule <span class="nm">#name=</span><span class="st">"start"</span>; <span class="fn">!start</span> --rec 1; <span class="fn">!echo</span> --ok <span class="st">"recording started"</span>
+<span class="fn">!create</span> --rule <span class="nm">#name=</span><span class="st">"once-only"</span>; <span class="fn">!echo</span> <span class="st">"runs once"</span> --once
+<span class="fn">!create</span> --rule <span class="nm">#name=</span><span class="st">"loop3"</span>; <span class="fn">!echo</span> <span class="st">"tick"</span> --loop <span class="nm">#count=</span>3  -c</code></pre>
+
+      <table class="doc-table">
+        <tr><th>Flag / Param</th><th>Description</th></tr>
+        <tr><td>#name="..."</td><td><strong>Required.</strong> Rule name</td></tr>
+        <tr><td>; step1; step2</td><td>Rule body, steps separated by <code>;</code></td></tr>
+        <tr><td>-c</td><td>Execute immediately after creation</td></tr>
+        <tr><td>-d</td><td>Save as disconnected</td></tr>
+        <tr><td>--once</td><td>Execute only once</td></tr>
+        <tr><td>--loop #count=N</td><td>Repeat steps N times</td></tr>
+        <tr><td>--delay #ms=N</td><td>Delay between steps</td></tr>
+        <tr><td>--on-fail #cmd="..."</td><td>Command to run on step failure</td></tr>
+      </table>
+
+      <h3 class="doc-h3"><code>!connect --rule</code> / <code>!disconnect --rule</code></h3>
+<pre data-lang="console"><code><span class="fn">!connect</span>    --rule <span class="nm">#name=</span><span class="st">"auto"</span>
+<span class="fn">!disconnect</span> --rule <span class="nm">#name=</span><span class="st">"auto"</span>
+<span class="fn">!connect</span>    --rule <span class="nm">#name=</span><span class="st">"auto"</span> --toggle
+<span class="fn">!connect</span>    --rule --all</code></pre>
+
+      <h3 class="doc-h3"><code>!edit --rule</code></h3>
+      <p class="doc-p">Replace the rule body. If no steps are provided, the current body is printed.</p>
+<pre data-lang="console"><code><span class="fn">!edit</span> --rule <span class="nm">#name=</span><span class="st">"auto"</span>; <span class="fn">!start</span> --rec 1; <span class="fn">!echo</span> <span class="st">"updated"</span></code></pre>
+    </div>
+
+    <!-- AE -->
+    <div class="doc-section" id="ae">
+      <h2 class="doc-h2">AE Objects</h2>
+      <p class="doc-sub">AE (Anything Else) — extensible objects of arbitrary type, stored in <code>create/ae.json</code>. Currently the <code>color</code> type is supported.</p>
+<pre data-lang="console"><code><span class="fn">!create</span> --ae <span class="nm">#type=</span>color{rgb=(255,100,50)} <span class="nm">#name=</span><span class="st">"accent"</span>
+<span class="fn">!create</span> --ae <span class="nm">#type=</span>color{hex=(#FF6432)}    <span class="nm">#name=</span><span class="st">"orange"</span>
+<span class="fn">!disconnect</span> --ae <span class="nm">#type=</span>color <span class="nm">#name=</span><span class="st">"accent"</span></code></pre>
+    </div>
+
+    <!-- CONNECT -->
+    <div class="doc-section" id="connect">
+      <h2 class="doc-h2">Connect & Disconnect</h2>
+      <p class="doc-sub">Enable or disable windows and rules. State is persisted in JSON registry files.</p>
+
+      <h3 class="doc-h3"><code>!connect --window</code></h3>
+<pre data-lang="console"><code><span class="fn">!connect</span> --window <span class="nm">#name=</span><span class="st">"Dashboard"</span> 1   <span class="cm"># enable and open</span>
+<span class="fn">!connect</span> --window <span class="nm">#name=</span><span class="st">"Dashboard"</span> 0   <span class="cm"># disable</span>
+<span class="fn">!connect</span> --window <span class="nm">#name=</span><span class="st">"Dashboard"</span> --toggle
+<span class="fn">!connect</span> --window --all 1</code></pre>
+    </div>
+
+    <!-- HOTKEY CMDS -->
+    <div class="doc-section" id="hotkey-cmds">
+      <h2 class="doc-h2">Hotkey bindings</h2>
+      <p class="doc-sub">Bindings are stored in <code>create/hotkeys.json</code> and restored on startup.</p>
+
+      <h3 class="doc-h3"><code>!connect --function</code></h3>
+<pre data-lang="console"><code><span class="fn">!connect</span> --function <span class="fn">!rec</span> <span class="kw">to</span> ctrl+shift+r
+<span class="fn">!connect</span> --function <span class="st">"!start --rec 1"</span> <span class="kw">to</span> ctrl+F9 <span class="nm">#name=</span><span class="st">"start-rec"</span>
+<span class="fn">!disconnect</span> <span class="nm">#name=</span><span class="st">"start-rec"</span>    <span class="cm"># unbind by alias</span></code></pre>
+    </div>
+
+    <!-- INSPECTION -->
+    <div class="doc-section" id="inspection">
+      <h2 class="doc-h2">Registry inspection</h2>
+
+      <h3 class="doc-h3"><code>!ls</code></h3>
+      <p class="doc-p">List registry objects.</p>
+<pre data-lang="console"><code><span class="fn">!ls</span>
+<span class="fn">!ls</span> --rules --connected
+<span class="fn">!ls</span> --windows -v
+<span class="fn">!ls</span> --json
+<span class="fn">!ls</span> --count</code></pre>
+
+      <h3 class="doc-h3"><code>!status</code></h3>
+      <p class="doc-p">System state snapshot — recording active, log connected, active windows/rules, hotkey count.</p>
+
+      <h3 class="doc-h3"><code>!info</code></h3>
+<pre data-lang="console"><code><span class="fn">!info</span> --window <span class="nm">#name=</span><span class="st">"Dashboard"</span>
+<span class="fn">!info</span> --rule   <span class="nm">#name=</span><span class="st">"auto"</span>
+<span class="fn">!info</span> --hotkey <span class="nm">#key=</span><span class="st">"ctrl+shift+r"</span>
+<span class="fn">!info</span> --ae     <span class="nm">#name=</span><span class="st">"accent"</span> --json</code></pre>
+    </div>
+
+    <!-- HISTORY -->
+    <div class="doc-section" id="history">
+      <h2 class="doc-h2">History & Aliases</h2>
+
+      <h3 class="doc-h3"><code>!history</code></h3>
+<pre data-lang="console"><code><span class="fn">!history</span> <span class="nm">#count=</span>50
+<span class="fn">!history</span> --search <span class="st">"create"</span>
+<span class="fn">!history</span> --clear</code></pre>
+      <p class="doc-p">The input field also supports ↑ / ↓ keyboard navigation through history.</p>
+
+      <h3 class="doc-h3"><code>!alias</code></h3>
+      <p class="doc-p">Aliases are persisted in <code>create/aliases.json</code>. Once created, type the alias name as a command directly.</p>
+<pre data-lang="console"><code><span class="fn">!alias</span> <span class="nm">#name=</span><span class="st">"sr"</span>  <span class="nm">#cmd=</span><span class="st">"!start --rec 1"</span>
+<span class="fn">!alias</span> <span class="nm">#name=</span><span class="st">"sp"</span>  <span class="nm">#cmd=</span><span class="st">"!start --rec 0"</span>
+<span class="fn">!alias</span> --list
+<span class="fn">!alias</span> --remove <span class="nm">#name=</span><span class="st">"sr"</span>
+sr     <span class="cm"># executes !start --rec 1</span></code></pre>
+    </div>
+
+    <!-- EXECUTION -->
+    <div class="doc-section" id="execution">
+      <h2 class="doc-h2">Command execution</h2>
+
+      <h3 class="doc-h3"><code>!repeat</code></h3>
+<pre data-lang="console"><code><span class="fn">!repeat</span> <span class="nm">#count=</span>5 <span class="fn">!echo</span> <span class="st">"hello"</span></code></pre>
+
+      <h3 class="doc-h3"><code>!delay</code></h3>
+      <p class="doc-p">Non-blocking. The command runs in a background thread; the console remains interactive.</p>
+<pre data-lang="console"><code><span class="fn">!delay</span> <span class="nm">#ms=</span>3000 <span class="fn">!rec</span>
+<span class="fn">!delay</span> <span class="nm">#ms=</span>500  <span class="fn">!echo</span> --ok <span class="st">"done"</span></code></pre>
+
+      <h3 class="doc-h3"><code>!batch</code></h3>
+<pre data-lang="console"><code><span class="fn">!batch</span> <span class="fn">!start</span> --rec 1 && <span class="fn">!echo</span> --ok <span class="st">"started"</span> && <span class="fn">!timer</span> <span class="nm">#name=</span>t1 <span class="nm">#ms=</span>5000 <span class="fn">!start</span> --rec 0
+<span class="fn">!batch</span> <span class="fn">!ls</span> && <span class="fn">!status</span> -x</code></pre>
+
+      <h3 class="doc-h3"><code>!run</code></h3>
+      <p class="doc-p">Execute a <code>.hrc</code> script file line by line. Lines starting with <code>#</code> are comments.</p>
+<pre data-lang="console"><code><span class="fn">!run</span> <span class="nm">#file=</span><span class="st">"setup.hrc"</span>
+<span class="fn">!run</span> <span class="nm">#file=</span><span class="st">"scripts/init.hrc"</span> --echo-each --encoding cp1251</code></pre>
+    </div>
+
+    <!-- TIMERS -->
+    <div class="doc-section" id="timers">
+      <h2 class="doc-h2">Timers & Watchers</h2>
+
+      <h3 class="doc-h3"><code>!timer</code> — one-shot</h3>
+<pre data-lang="console"><code><span class="fn">!timer</span> <span class="nm">#name=</span><span class="st">"stop-rec"</span> <span class="nm">#ms=</span>10000 <span class="fn">!start</span> --rec 0
+<span class="fn">!timer</span> --cancel <span class="nm">#name=</span><span class="st">"stop-rec"</span>
+<span class="fn">!timer</span> --list</code></pre>
+
+      <h3 class="doc-h3"><code>!watch</code> — periodic</h3>
+<pre data-lang="console"><code><span class="fn">!watch</span> <span class="nm">#name=</span><span class="st">"ping-loop"</span> <span class="nm">#ms=</span>5000 <span class="fn">!ping</span>
+<span class="fn">!watch</span> <span class="nm">#name=</span><span class="st">"screenshot"</span> <span class="nm">#ms=</span>60000 <span class="fn">!echo</span> <span class="st">"tick"</span> --max-runs <span class="nm">#count=</span>10
+<span class="fn">!watch</span> --stop <span class="nm">#name=</span><span class="st">"ping-loop"</span></code></pre>
+
+      <table class="doc-table">
+        <tr><th>Flag</th><th>Description</th></tr>
+        <tr><td>#ms=N</td><td>Interval between runs in ms</td></tr>
+        <tr><td>--max-runs #count=N</td><td>Auto-stop after N executions</td></tr>
+        <tr><td>--jitter #ms=N</td><td>Random deviation of interval ±N ms</td></tr>
+        <tr><td>--stop #name</td><td>Stop a named watcher</td></tr>
+        <tr><td>--list</td><td>List all active watchers</td></tr>
+      </table>
+    </div>
+
+    <!-- UTILITIES -->
+    <div class="doc-section" id="utilities">
+      <h2 class="doc-h2">Console utilities</h2>
+
+      <h3 class="doc-h3"><code>!echo</code></h3>
+<pre data-lang="console"><code><span class="fn">!echo</span> --ok   <span class="st">"task completed"</span>
+<span class="fn">!echo</span> --warn <span class="st">"caution: {int.random(1,100)}"</span>
+<span class="fn">!echo</span> --err  <span class="st">"critical failure"</span>
+<span class="fn">!echo</span> $USER started the console</code></pre>
+
+      <h3 class="doc-h3"><code>!clip</code></h3>
+<pre data-lang="console"><code><span class="fn">!clip</span> --copy <span class="st">"HomRec v3.0"</span>
+<span class="fn">!clip</span> --paste
+<span class="fn">!clip</span> --clear</code></pre>
+
+      <h3 class="doc-h3"><code>!env</code></h3>
+      <p class="doc-p">In-memory environment variables. Available as <code>$name</code> in any command.</p>
+<pre data-lang="console"><code><span class="fn">!env</span> --set  <span class="nm">#name=</span><span class="st">"mode"</span> <span class="nm">#val=</span><span class="st">"debug"</span>
+<span class="fn">!echo</span> Mode: $mode
+<span class="fn">!env</span> --list
+<span class="fn">!env</span> --unset <span class="nm">#name=</span><span class="st">"mode"</span></code></pre>
+    </div>
+
+    <!-- LOG -->
+    <div class="doc-section" id="log">
+      <h2 class="doc-h2">Log</h2>
+
+      <h3 class="doc-h3"><code>!log</code></h3>
+<pre data-lang="console"><code><span class="fn">!log</span> --tail <span class="nm">#count=</span>50
+<span class="fn">!log</span> --search <span class="st">"error"</span>
+<span class="fn">!log</span> --search <span class="st">"connect"</span> --invert
+<span class="fn">!log</span> --level err
+<span class="fn">!log</span> --since <span class="nm">#time=</span><span class="st">"14:00"</span>
+<span class="fn">!log</span> --clear</code></pre>
+
+      <h3 class="doc-h3"><code>!open --log</code> / <code>!connect --log</code> / <code>!disconnect --log</code></h3>
+      <p class="doc-p">Open the log in the system editor, or pause/resume writing to <code>homrec.log</code>.</p>
+    </div>
+
+    <!-- SYSTEM -->
+    <div class="doc-section" id="system">
+      <h2 class="doc-h2">System commands</h2>
+
+      <div class="cmd-grid">
+        <div class="cmd-card"><div class="cmd-name">!ping</div><div class="cmd-desc">Check DLL ↔ Python bridge. Prints <code>pong</code> and round-trip time in ms.</div></div>
+        <div class="cmd-card"><div class="cmd-name">!version</div><div class="cmd-desc">Print console version (C++ DLL), Python bridge version, and interpreter version.</div></div>
+        <div class="cmd-card"><div class="cmd-name">!exit</div><div class="cmd-desc">Force-quit the application. Stops recording, kills ffmpeg, removes tray icon.</div></div>
+        <div class="cmd-card"><div class="cmd-name">!clear</div><div class="cmd-desc">Clear the console output area.</div></div>
+        <div class="cmd-card"><div class="cmd-name">!help [-w]</div><div class="cmd-desc">Print command list. Without <code>-w</code> also opens the full documentation in the browser.</div></div>
+      </div>
+    </div>
+
+    <!-- RM -->
+    <div class="doc-section" id="rm">
+      <h2 class="doc-h2">Deleting objects</h2>
+
+      <h3 class="doc-h3"><code>$rm</code></h3>
+<pre data-lang="console"><code><span class="fn">$rm</span> --window <span class="nm">#name=</span><span class="st">"debug"</span> -q
+<span class="fn">$rm</span> --rule   <span class="nm">#name=</span><span class="st">"auto"</span>
+<span class="fn">$rm</span> --ae     <span class="nm">#name=</span><span class="st">"accent"</span> -q
+<span class="fn">$rm</span> --all --window -y
+<span class="fn">$rm</span> --all --rule --if-disconnected -y
+<span class="fn">$rm</span> --window <span class="nm">#name=</span><span class="st">"notes"</span> --purge -q</code></pre>
+
+      <table class="doc-table">
+        <tr><th>Flag</th><th>Description</th></tr>
+        <tr><td>-q / -y</td><td>No confirmation prompt</td></tr>
+        <tr><td>--purge</td><td>Also delete the physical file and linked hotkeys</td></tr>
+        <tr><td>--if-disconnected</td><td>Delete only if currently disabled</td></tr>
+        <tr><td>--all</td><td>Delete all objects of the specified type</td></tr>
+      </table>
+    </div>
+
+    <!-- ARCH -->
+    <div class="doc-section" id="arch">
+      <h2 class="doc-h2">Architecture: DLL ↔ Python</h2>
+      <p class="doc-sub">The console is split into two layers communicating via a callback bridge.</p>
+
+      <div class="arch-box">
+        <div class="arch-layer">
+          <div class="arch-layer-title">hr_console.dll — Win32 / GDI (C++)</div>
+          <div class="arch-layer-body">
+            User types a command. Built-in dispatcher handles:<br>
+            <code>!help</code> <code>!rec</code> <code>!open</code> <code>!exit</code> <code>!date</code> <code>!homrec</code><br>
+            Everything else → <code>forward_to_python(raw)</code> via <code>CB_COMMAND</code> callback
+          </div>
+        </div>
+        <div class="arch-arrow">↓ CB_COMMAND callback</div>
+        <div class="arch-layer">
+          <div class="arch-layer-title">hr_console_bridge.py (Python)</div>
+          <div class="arch-layer-body">
+            <code>NativeConsole._dispatch_extended</code> handles all extended commands:<br>
+            <code>!create</code> <code>!connect</code> <code>!disconnect</code> <code>$rm</code> <code>!ls</code><br>
+            <code>!alias</code> <code>!timer</code> <code>!watch</code> <code>!batch</code> and more
+          </div>
+        </div>
+      </div>
+
+      <h3 class="doc-h3">Public API (DLL)</h3>
+      <table class="doc-table">
+        <tr><th>Function</th><th>Description</th></tr>
+        <tr><td>hr_con_init(...)</td><td>Initialise: register callbacks and paths</td></tr>
+        <tr><td>hr_con_set_command_cb(cb)</td><td>Register the Python handler for extended commands</td></tr>
+        <tr><td>hr_con_toggle()</td><td>Show / hide the console window</td></tr>
+        <tr><td>hr_con_set_recording(int)</td><td>Sync recording state with the UI</td></tr>
+        <tr><td>hr_con_log_connected()</td><td>Returns <code>1</code> if log writing is active, <code>0</code> if paused</td></tr>
+      </table>
+    </div>
+
+    <!-- STORAGE -->
+    <div class="doc-section" id="storage">
+      <h2 class="doc-h2">Storage files</h2>
+      <p class="doc-sub">All registry state is persisted as JSON files in the <code>create/</code> directory.</p>
+
+      <div class="file-list">
+        <div class="file-row"><div class="file-name">create/windows.json</div><div class="file-desc">Window registry — <code>WindowRegistry</code></div></div>
+        <div class="file-row"><div class="file-name">create/rules.json</div><div class="file-desc">Rule registry — <code>RuleRegistry</code></div></div>
+        <div class="file-row"><div class="file-name">create/ae.json</div><div class="file-desc">AE objects — <code>AERegistry</code></div></div>
+        <div class="file-row"><div class="file-name">create/aliases.json</div><div class="file-desc">Command aliases — <code>AliasRegistry</code></div></div>
+        <div class="file-row"><div class="file-name">create/hotkeys.json</div><div class="file-desc">Hotkey bindings — <code>HotkeyManager</code></div></div>
+      </div>
+    </div>
+
+    <!-- EXAMPLES -->
+    <div class="doc-section" id="examples">
+      <h2 class="doc-h2">Examples</h2>
+
+      <h3 class="doc-h3">Auto-stop after 10 minutes</h3>
+<pre data-lang="console"><code><span class="fn">!create</span> --rule <span class="nm">#name=</span><span class="st">"rec-10min"</span>
+  ; <span class="fn">!start</span> --rec 1
+  ; <span class="fn">!timer</span> <span class="nm">#name=</span><span class="st">"stop"</span> <span class="nm">#ms=</span>600000 <span class="fn">!start</span> --rec 0  -c</code></pre>
+
+      <h3 class="doc-h3">Workspace setup script</h3>
+<pre data-lang="workspace.hrc"><code><span class="cm"># workspace.hrc</span>
+<span class="fn">!create</span> --window <span class="nm">#name=</span><span class="st">"main"</span> <span class="nm">#bg=</span>#1e1e2e <span class="nm">#fg=</span>#cdd6f4 <span class="nm">#size=</span>(1024x768)
+<span class="fn">!create</span> --window --notepad as .md <span class="nm">#name=</span><span class="st">"notes"</span>
+<span class="fn">!alias</span> <span class="nm">#name=</span><span class="st">"rec"</span>  <span class="nm">#cmd=</span><span class="st">"!start --rec 1"</span>
+<span class="fn">!alias</span> <span class="nm">#name=</span><span class="st">"stop"</span> <span class="nm">#cmd=</span><span class="st">"!start --rec 0"</span>
+<span class="fn">!connect</span> --function !rec  <span class="kw">to</span> ctrl+F9  <span class="nm">#name=</span><span class="st">"start recording"</span>
+<span class="fn">!connect</span> --function !stop <span class="kw">to</span> ctrl+F10 <span class="nm">#name=</span><span class="st">"stop recording"</span>
+<span class="fn">!echo</span> --ok <span class="st">"workspace ready"</span></code></pre>
+      <p class="doc-p">Run with: <code>!run #file="workspace.hrc" --echo-each</code></p>
+
+      <h3 class="doc-h3">Periodic status monitoring</h3>
+<pre data-lang="console"><code><span class="fn">!watch</span> <span class="nm">#name=</span><span class="st">"monitor"</span> <span class="nm">#ms=</span>30000 <span class="fn">!status</span></code></pre>
+
+      <h3 class="doc-h3">Bind a toggle shortcut</h3>
+<pre data-lang="console"><code><span class="fn">!alias</span> <span class="nm">#name=</span><span class="st">"tr"</span> <span class="nm">#cmd=</span><span class="st">"!rec"</span>
+<span class="fn">!connect</span> --function !tr <span class="kw">to</span> ctrl+shift+space <span class="nm">#name=</span><span class="st">"toggle-rec"</span></code></pre>
+      <p class="doc-p">Now Ctrl+Shift+Space starts or stops recording from anywhere.</p>
+    </div>
+
+  </main>
+</div>
+
+<footer>
+  <div class="footer-brand">HomRec</div>
+  <div class="footer-links">
+    <a href="index.html">Home</a>
+    <a href="https://github.com/homaaio/homrec" target="_blank">GitHub</a>
+    <a href="https://t.me/homaexe" target="_blank">Telegram</a>
+    <a href="https://x.com/homrec_dev" target="_blank">X / Twitter</a>
+  </div>
+</footer>
+
+<script>
+  // sidebar active link on scroll
+  const sections = document.querySelectorAll('.doc-section[id]');
+  const links = document.querySelectorAll('.sb-link');
+
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        const a = document.querySelector(`.sb-link[href="#${e.target.id}"]`);
+        if (a) a.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+
+  sections.forEach(s => io.observe(s));
+</script>
+</body>
+</html>
