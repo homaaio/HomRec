@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HomRec — Temporarily Closed</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000000;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            padding: 1.5rem;
+        }
+
+        .card {
+            max-width: 560px;
+            width: 100%;
+            background: #0a0a0a;
+            border: 1px solid #2a2a2a;
+            border-radius: 2.5rem;
+            padding: 2.8rem 2rem;
+            text-align: center;
+            box-shadow: 0 25px 45px -12px rgba(255,255,255,0.05), 0 0 0 1px rgba(255,255,255,0.02) inset;
+        }
+
+        .logo-icon {
+            font-size: 4rem;
+            font-weight: 800;
+            letter-spacing: -1px;
+            background: linear-gradient(135deg, #ffffff 30%, #aaaaaa 90%);
+            background-clip: text;
+            -webkit-background-clip: text;
+            color: transparent;
+            margin-bottom: 1.5rem;
+        }
+
+        h1 {
+            color: #ffffff;
+            font-size: 2rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            letter-spacing: -0.5px;
+        }
+
+        .closed-badge {
+            display: inline-block;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            padding: 0.3rem 1.2rem;
+            border-radius: 40px;
+            font-size: 0.8rem;
+            color: #aaa;
+            margin-bottom: 1.8rem;
+        }
+
+        .message {
+            color: #b0b0b0;
+            font-size: 1rem;
+            line-height: 1.5;
+            margin-bottom: 2rem;
+        }
+
+        .divider {
+            width: 60px;
+            height: 2px;
+            background: #222;
+            margin: 1.5rem auto;
+        }
+
+        .footer-note {
+            color: #4a4a4a;
+            font-size: 0.7rem;
+            margin-top: 1.5rem;
+        }
+
+        hr {
+            border-color: #1f1f1f;
+            margin: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="logo-icon">HomRec</div>
+        <div class="closed-badge">⚠️ OFFLINE</div>
+        <h1>Temporarily Closed</h1>
+        <div class="message">
+            The HomRec website is currently under maintenance.<br>
+            We’ll be back soon with improvements.
+        </div>
+        <div class="divider"></div>
+        <div class="footer-note">
+            HomRec · high-fidelity recorder
+        </div>
+    </div>
+</body>
+</html>
