@@ -33,8 +33,12 @@ CB_VOID    = ctypes.CFUNCTYPE(None)
 CB_URL     = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)
 CB_COMMAND = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)   # новый: произвольная команда из DLL
 
-CONSOLE_VERSION = "3.0"
-BRIDGE_VERSION  = "3.0"
+CONSOLE_VERSION = "1.2.0"
+BRIDGE_VERSION  = "1.2.0"
+
+# HomRec application version constants
+HOMREC_VERSION = "1.6.1"
+CORE_VERSION   = "1.4.3"
 
 # ────────────────────────────────────────────────────────────────────────────────
 #  Вспомогательные утилиты разбора аргументов
@@ -485,6 +489,9 @@ class NativeConsole:
             lib.hr_con_log_connected.argtypes = []
             lib.hr_con_log_connected.restype  = ctypes.c_int
 
+            lib.hr_con_write.argtypes = [ctypes.c_wchar_p, ctypes.c_int]
+            lib.hr_con_write.restype  = None
+
             return lib
         except Exception as e:
             log.warning("hr_console.dll load failed: %s", e)
@@ -658,6 +665,8 @@ class NativeConsole:
             self._cmd_ping(raw); return
         if cmd == "!version":
             self._cmd_version(raw); return
+        if cmd == "!homrec":
+            self._cmd_homrec(raw); return
         if cmd == "!log":
             self._cmd_log(raw); return
 
@@ -1489,19 +1498,58 @@ class NativeConsole:
                  name, ms, f"±{jitter_ms}ms" if jitter_ms else "",
                  cmd, f"  (max {max_runs})" if max_runs else "")
 
+    # ─── Console output helper ────────────────────────────────────────────────
+
+    def _con_write(self, text: str, tag: int = 0):
+        """Вывести строку напрямую в окно DLL-консоли (тег: 0=text 1=ok 2=warn 3=err 4=dim 5=accent)."""
+        if self._lib:
+            try:
+                self._lib.hr_con_write(text, tag)
+                return
+            except Exception as e:
+                log.warning("_con_write: %s", e)
+        log.info(text)
+
+    def _con_ok  (self, s: str): self._con_write("  \u2714  " + s, 1)
+    def _con_info(self, s: str): self._con_write("  \u00b7  " + s, 4)
+    def _con_warn(self, s: str): self._con_write("  \u26a0  " + s, 2)
+    def _con_err (self, s: str): self._con_write("  \u2716  " + s, 3)
+
     # ─── !ping ────────────────────────────────────────────────────────────────
 
     def _cmd_ping(self, raw: str):
         import time
         t0 = time.perf_counter()
         elapsed = (time.perf_counter() - t0) * 1000
-        log.info("pong  (%.3f ms)", elapsed)
+        self._con_ok(f"pong  ({elapsed:.3f} ms)")
 
     # ─── !version ─────────────────────────────────────────────────────────────
 
     def _cmd_version(self, raw: str):
-        log.info("Console: v%s  |  Python bridge: %s  |  Python: %s",
-                 CONSOLE_VERSION, BRIDGE_VERSION, sys.version.split()[0])
+        self._con_write(f"  Console  {CONSOLE_VERSION}  |  Bridge  {BRIDGE_VERSION}  |  Python  {sys.version.split()[0]}", 5)
+
+    # ─── !homrec ──────────────────────────────────────────────────────────────
+
+    def _cmd_homrec(self, raw: str):
+        """
+        !homrec --version   → prints version banner
+        !homrec --help      → prints available !homrec sub-commands
+        """
+        tokens = raw.split()
+        if "--version" in tokens or "-v" in tokens:
+            self._con_write(
+                f"Version HomRec - {HOMREC_VERSION}, "
+                f"Core version - {CORE_VERSION}, "
+                f"Console version {CONSOLE_VERSION}",
+                5,
+            )
+            return
+        if "--help" in tokens or "-h" in tokens:
+            self._con_write("  !homrec sub-commands:", 5)
+            self._con_info("  --version  / -v   Show version info")
+            self._con_info("  --help     / -h   Show this help")
+            return
+        self._con_warn("!homrec: unknown option. Try  !homrec --version  or  !homrec --help")
 
     # ─── !log ─────────────────────────────────────────────────────────────────
 
