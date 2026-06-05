@@ -1,4 +1,4 @@
-# HomRec Developer Console v3.0 — Command Reference
+# HomRec Developer Console v1.2.0 — Command Reference
 
 > **Open console:** `Ctrl+Shift+T` · **Close:** `Esc` or × button  
 > **Quick help inside the console:** `!help`
@@ -792,10 +792,10 @@ Prints `pong` and the round-trip time in milliseconds. Useful for diagnosing bri
 
 ---
 
-### `!version` — component versions
+### `!homrec --version` — component versions
 
 ```
-!version
+!homrec --version
 ```
 
 Prints the console version (C++ DLL), Python bridge version, and Python interpreter version.
