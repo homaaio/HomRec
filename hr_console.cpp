@@ -557,7 +557,16 @@ static bool dispatch(const std::wstring& raw) {
     }
     else if (cmd==L"!exit")       cmd_exit(clean,silent);
     else if (cmd==L"!date")       cmd_date(clean,silent);
-    else if (cmd==L"!homrec")     cmd_homrec(clean,silent);
+    else if (cmd==L"!homrec") {
+        bool has_version = has(clean, L"--version") || has(clean, L"-v");
+        bool has_help    = has(clean, L"--help")    || has(clean, L"-h");
+        if (has_version || has_help) {
+            if (!silent) winfo((L"→ Python: " + raw_clean).c_str());
+            forward_to_python(raw_clean);
+        } else {
+            cmd_homrec(clean, silent);
+        }
+    }
     else if (cmd==L"!rule") {
         if (!has(clean, L"--get") && !has(clean, L"--check")) ok = false;
         else cmd_rule(clean,silent,raw_clean);
@@ -858,3 +867,14 @@ HR_EXPORT void hr_con_toggle() {
 
 HR_EXPORT void hr_con_set_recording(int v) { g_recording.store(v!=0); }
 HR_EXPORT int  hr_con_log_connected()      { return g_log_conn.load()?1:0; }
+
+/*
+ * hr_con_write
+ * Выводит строку в консоль с заданным тегом цвета:
+ *   0=text  1=green(ok)  2=yellow(warn)  3=red(err)  4=dim(info)  5=accent
+ * Можно вызывать из Python-бриджа для отправки ответов обратно в консоль.
+ */
+HR_EXPORT void hr_con_write(const wchar_t* text, int tag) {
+    if (!text) return;
+    write_line(text, tag);
+}

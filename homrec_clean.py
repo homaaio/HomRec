@@ -487,17 +487,6 @@ class HomRecApp:
     # СТАРТ ЗАПИСИ  —  главный оптимизированный метод
     # ════════════════════════════════════════════════════════════════════
     def start_recording(self):
-        """
-        v1.7.0 — запись через hr_pipeline.dll + ffmpeg rawvideo pipe.
-
-        Схема:
-          Python создаёт именованный пайп (Windows) или POSIX pipe.
-          hr_pipeline захватывает экран (DXGI) → BGRA→YUV420p → пишет в пайп.
-          ffmpeg читает -f rawvideo -pix_fmt yuv420p из пайпа → кодирует.
-          Нет mss.grab() в горячем пути. Нет PIL в горячем пути.
-
-        Fallback: если PIPELINE_OK=False → откат на gdigrab (как в v1.5.0).
-        """
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.filename = f"{self.output_folder}/HomRec_{ts}.mp4"
@@ -631,7 +620,6 @@ class HomRecApp:
 
         log.info("Recording started (pipeline mode)")
 
-    # -- Fallback: gdigrab (как в v1.5.0) ------------------------------
     def _start_recording_gdigrab(self, w, h, fps, ox, oy):
         """Fallback когда hr_pipeline.dll недоступна."""
         needs_scale = (w != self.original_width or h != self.original_height)
@@ -805,7 +793,6 @@ class HomRecApp:
         interval = 80 if not getattr(self, 'recording', False) else 80
         self.root.after(interval, self.update_preview)
 
-    # -- Codec args (без изменений от v1.5.0) ---------------------------
     def _build_codec_args(self) -> list:
         codec   = getattr(self, 'video_codec', 'libx264')
         hw      = getattr(self, 'hw_accel',    'auto')
@@ -1473,11 +1460,6 @@ if _HOMREC_IMPORTED:
         from homrec import HomRecScreen as _OriginalApp
         # Наследуемся от оригинала, переопределяем только методы записи
         class HomRecScreen(_OriginalApp):
-            """
-            HomRec v1.7.0 — наследует весь UI из v1.5.0 / v1.5.0,
-            переопределяет только start_recording / stop_recording / _capture_loop
-            и добавляет C++ pipeline.
-            """
 
             def start_recording(self):
                 """Override: использует hr_pipeline если доступен."""

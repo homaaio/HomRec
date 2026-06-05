@@ -19,7 +19,8 @@ except ImportError:
 import ctypes
 import sys
 import subprocess
-
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 # PyAudio / audioop — optional legacy fallback (not required when hr_audio.dll is present)
 try:
     import pyaudio as _pyaudio_mod
@@ -74,7 +75,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.5.0"
+CURRENT_VERSION = "1.6.0"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -110,7 +111,7 @@ def _version_gt(a: str, b: str) -> bool:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.5.0",
+        "app_title": "HomRec v1.6.0",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -202,7 +203,7 @@ LANGUAGES = {
         "audio_file": "🎵 Audio file:",
     },
     "ru": {
-        "app_title": "HomRec v1.5.0",
+        "app_title": "HomRec v1.6.0",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -375,7 +376,7 @@ def optimize_for_performance() -> None:
     except Exception as _e:
         log.warning(f"Native ext not loaded at startup: {_e}")
 
-    log.info("Performance optimizations applied (v1.5.0)")
+    log.info("Performance optimizations applied (v1.6.0)")
 
 class AudioLevelMeter(tk.Canvas):
     """Smooth gradient audio level meter with peak indicator (no segments)."""
@@ -2318,7 +2319,7 @@ class SettingsDialog:
         self.dialog.destroy()
         messagebox.showinfo(self.app.lang["info"], self.app.lang["settings_saved"])
 
-from hr_console_bridge import NativeConsole  # native Win32 console
+from hr_console_bridge import NativeConsole
 
 class HomRecScreen:
     def __init__(self, root: tk.Tk) -> None:
@@ -2449,7 +2450,7 @@ class HomRecScreen:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_tray()
-        log.info("HomRec v1.5.0 started, language: %s", self.current_language)
+        log.info("HomRec v1.6.0 started, language: %s", self.current_language)
         # Check for updates 2 seconds after startup (non-blocking)
         self.root.after(2000, self._start_update_check)
         # Show welcome dialog on first launch
@@ -2553,7 +2554,7 @@ class HomRecScreen:
                 pass
 
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.5.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.0")
 
         # Pre-render two frames of the REC badge (for a simple pulse animation)
         self._rec_icon_img = None
@@ -3050,7 +3051,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.5.0", 
+        tk.Label(title_frame, text="v1.6.0", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
@@ -3277,13 +3278,6 @@ class HomRecScreen:
     
     @staticmethod
     def _pyaudio_supports_loopback(p: "_pyaudio_mod.PyAudio") -> bool:
-        """Return True if this PyAudio build accepts the as_loopback kwarg.
-
-        Standard PyAudio does NOT support as_loopback — only the pyaudio-wasapi
-        fork does.  We detect support with a harmless probe: open a stream with
-        an intentionally bad device index so it raises OSError/IOError, but if
-        it raises TypeError first the kwarg itself is unsupported.
-        """
         try:
             p.open(format=_pyaudio_mod.paInt16, channels=1, rate=44100,
                    input=True, input_device_index=99999,
@@ -3296,22 +3290,6 @@ class HomRecScreen:
 
     def _find_wasapi_loopback(self, p: "_pyaudio_mod.PyAudio",
                                require_input: bool = False) -> int | None:
-        """Find WASAPI loopback device index for system audio capture (Windows only).
-
-        With pyaudio-wasapi, any output device can be opened as loopback via
-        as_loopback=True.  With standard PyAudio that flag does not exist, so
-        we must find a real input-capable loopback/Stereo Mix device.
-
-        Args:
-            require_input: when True, only return devices that already expose
-                input channels (maxInputChannels >= 1).  Pass True when
-                as_loopback is NOT supported so we never hand back an
-                output-only device that cannot be opened without the flag.
-
-        Priority: explicit loopback/Stereo Mix input device → default output
-        device as_loopback fallback (only when require_input is False).
-        Returns None on non-Windows or if WASAPI is not available.
-        """
         if sys.platform != 'win32':
             return None
         try:
@@ -3320,11 +3298,6 @@ class HomRecScreen:
             log.warning("WASAPI not available on this system")
             return None
 
-        # FIX: collect first WASAPI output device as fallback; also track the
-        # "defaultOutputDevice" index reported by wasapi_info if present.
-        # wasapi_info['defaultOutputDevice'] is a device *count* index on some
-        # PyAudio builds and -1/absent on others — so we also keep the first
-        # WASAPI output we encounter as a safe secondary fallback.
         default_out_idx = None
         first_wasapi_out_idx = None
         wasapi_default_dev = wasapi_info.get('defaultOutputDevice', -1)
@@ -3887,18 +3860,6 @@ class HomRecScreen:
         return frames
 
     def _capture_loop(self) -> None:
-        """
-        v1.5.0 - Background preview thread.
-
-        During RECORDING ffmpeg already captures the screen via gdigrab —
-        running mss.grab() in parallel steals CPU and memory bandwidth from it,
-        causing frame drops.  The preview thread therefore:
-          • skips grab() entirely while recording (just re-displays the last frame)
-          • resumes normal grab() when idle (no recording) for live preview
-
-        Hot path uses native C extension (homrec_native) when available.
-        Falls back to original Pillow path transparently.
-        """
         import mss as _mss
         sct = _mss.mss()
 
@@ -4019,10 +3980,6 @@ class HomRecScreen:
             time.sleep(0.083)
 
     def update_preview(self) -> None:
-        """UI thread: converts PIL→PhotoImage and updates the label.
-        FIX v1.5.0: None in queue means preview is disabled - show placeholder
-        instead of freezing on the last captured frame.
-        """
         try:
             img = self._preview_queue.get_nowait()
             if img is None:
@@ -4090,23 +4047,6 @@ class HomRecScreen:
             self.stop_recording()
     
     def start_recording(self) -> None:
-        """Start recording — optimised FFmpeg pipeline (v1.5.0)
-
-        Performance optimisations for stable 55-60 FPS capture:
-          - -thread_queue_size 512: larger input queue prevents gdigrab stalls
-            when the encoder is briefly busy; without this every encoder hiccup
-            causes a dropped frame at the capture side.
-          - -vsync passthrough (0): discard ffmpeg's timestamp-repair logic which
-            can cause duplicate or dropped frames when the capture timer drifts.
-          - -flush_packets 1: write packets immediately, unblocking the capture
-            thread faster after each I-frame.
-          - -max_muxing_queue_size 1024: prevents "DTS out of order" packet drops
-            during the first seconds of recording.
-          - FFmpeg process priority raised to HIGH on Windows so the OS scheduler
-            doesn't pre-empt it during the 16 ms capture window.
-          - Preview thread sleeps 500 ms during recording (already done) so it
-            competes neither for GDI bandwidth nor CPU time with gdigrab.
-        """
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.filename = f"{self.output_folder}/HomRec_{timestamp}.mp4"
@@ -4240,10 +4180,6 @@ class HomRecScreen:
             log.exception("Failed to start recording")
     
     def _ffmpeg_reader(self) -> None:
-        """Read ffmpeg stderr to get frame count.
-        v1.5.0: exits cleanly when stop_ffmpeg_reader is set or ffmpeg terminates.
-        readline() unblocks naturally when the pipe closes (ffmpeg exits).
-        """
         while not self.stop_flag and not self.stop_ffmpeg_reader               and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
             try:
                 line = self.ffmpeg_proc.stderr.readline()
@@ -4309,11 +4245,8 @@ class HomRecScreen:
         self.file_label.config(text="Processing…")
 
         def _finalize():
-            # -- v1.5.0: improved finalization with better timeouts ---------
-            # Signal ffmpeg reader thread to stop (in case ffmpeg is already dead)
             self.stop_ffmpeg_reader = True
 
-            # Step 1: завершаем ffmpeg через 'q', fallback kill
             if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
                 try:
                     self.ffmpeg_proc.stdin.write(b'q')
