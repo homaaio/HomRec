@@ -1,5 +1,24 @@
 welcome to changelog :D
 
+[Version 1.6.1] - 2026-06-05
+
+=== Added ===
+
+More C++ scripts
+Command "!homrec --version"
+
+=== Fixed ===
+
+Version bumped to 1.6.1
+Console version bumped to 1.2.0
+Core version bumped to 1.4.3
+
+[Version 1.6.0] - 2026-06-04
+
+=== Added ===
+
+Console. You can check https://github.com/homaaio/HomRec/blob/main/commands.md for more about it
+
 [Version 1.5.0] - 2026-05-29
 
 === Added ===
