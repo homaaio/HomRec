@@ -75,7 +75,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.6.0"
+CURRENT_VERSION = "1.6.2"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -111,7 +111,7 @@ def _version_gt(a: str, b: str) -> bool:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.6.0",
+        "app_title": "HomRec v1.6.2",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -201,9 +201,10 @@ LANGUAGES = {
         "notification": "Show summary",
         "made_by": "Homa4ella",
         "audio_file": "🎵 Audio file:",
+        "show_log": "Show Log",
     },
     "ru": {
-        "app_title": "HomRec v1.6.0",
+        "app_title": "HomRec v1.6.2",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -286,6 +287,7 @@ LANGUAGES = {
         "notification": "Показывать сводку",
         "made_by": "Homa4ella",
         "audio_file": "🎵 Аудио файл:",
+        "show_log": "Показать лог",
         "help_menu": "Справка",
         "check_updates": "Проверить обновления",
         "report_issue": "Сообщить об ошибке",
@@ -376,7 +378,7 @@ def optimize_for_performance() -> None:
     except Exception as _e:
         log.warning(f"Native ext not loaded at startup: {_e}")
 
-    log.info("Performance optimizations applied (v1.6.0)")
+    log.info("Performance optimizations applied (v1.6.2)")
 
 class AudioLevelMeter(tk.Canvas):
     """Smooth gradient audio level meter with peak indicator (no segments)."""
@@ -2450,7 +2452,7 @@ class HomRecScreen:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_tray()
-        log.info("HomRec v1.6.0 started, language: %s", self.current_language)
+        log.info("HomRec v1.6.2 started, language: %s", self.current_language)
         # Check for updates 2 seconds after startup (non-blocking)
         self.root.after(2000, self._start_update_check)
         # Show welcome dialog on first launch
@@ -2554,7 +2556,7 @@ class HomRecScreen:
                 pass
 
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.2")
 
         # Pre-render two frames of the REC badge (for a simple pulse animation)
         self._rec_icon_img = None
@@ -2740,6 +2742,9 @@ class HomRecScreen:
                                           value=_lcode,
                                           command=lambda c=_lcode: self.change_language(c))
         
+        view_menu.add_command(label=self.lang["show_log"], command=self.show_log)
+        view_menu.add_separator()
+
         theme_menu = tk.Menu(view_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
         view_menu.add_cascade(label=self.lang["theme"], menu=theme_menu)
         for _tid, _tlabel in [("dark", "Dark"), ("light", "Light"),
@@ -2855,6 +2860,95 @@ class HomRecScreen:
 
         refresh()
     
+    def show_log(self) -> None:
+        """Open a window showing the current homrec.log contents."""
+        log_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+        log_path = os.path.join(log_dir, "homrec.log")
+
+        dlg = tk.Toplevel(self.root)
+        self._set_icon(dlg)
+        dlg.title("HomRec Log")
+        dlg.geometry("720x460")
+        dlg.configure(bg=self.colors["bg"])
+        dlg.transient(self.root)
+        dlg.resizable(True, True)
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + self.root.winfo_width() // 2 - 360
+        y = self.root.winfo_y() + self.root.winfo_height() // 2 - 230
+        dlg.geometry(f"+{x}+{y}")
+
+        # Header
+        hdr = tk.Frame(dlg, bg=self.colors.get("surface", "#313244"), pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="📋  HomRec Log", bg=self.colors.get("surface", "#313244"),
+                 fg=self.colors["accent"], font=("Segoe UI", 11, "bold")).pack(side="left", padx=14)
+        tk.Label(hdr, text=log_path, bg=self.colors.get("surface", "#313244"),
+                 fg=self.colors.get("text_secondary", "#a6adc8"),
+                 font=("Segoe UI", 8)).pack(side="left", padx=6)
+        tk.Frame(dlg, bg=self.colors["accent"], height=2).pack(fill="x")
+
+        # Text area with scrollbar
+        txt_frame = tk.Frame(dlg, bg=self.colors["bg"])
+        txt_frame.pack(fill="both", expand=True, padx=8, pady=8)
+
+        vsb = tk.Scrollbar(txt_frame)
+        vsb.pack(side="right", fill="y")
+        hsb = tk.Scrollbar(txt_frame, orient="horizontal")
+        hsb.pack(side="bottom", fill="x")
+
+        txt = tk.Text(txt_frame, bg=self.colors.get("surface", "#1e1e2e"),
+                      fg=self.colors.get("text", "#cdd6f4"),
+                      font=("Consolas", 9), relief="flat",
+                      wrap="none", state="disabled",
+                      yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        vsb.config(command=txt.yview)
+        hsb.config(command=txt.xview)
+
+        def _load():
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                txt.insert("end", content)
+            except FileNotFoundError:
+                txt.insert("end", f"Log file not found:\n{log_path}")
+            except Exception as e:
+                txt.insert("end", f"Error reading log: {e}")
+            txt.config(state="disabled")
+            txt.see("end")
+
+        _load()
+
+        # Buttons
+        btn_frame = tk.Frame(dlg, bg=self.colors["bg"])
+        btn_frame.pack(fill="x", padx=8, pady=(0, 8))
+
+        def _open_folder():
+            try:
+                if sys.platform == "win32":
+                    os.startfile(log_dir)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", log_dir])
+                else:
+                    subprocess.Popen(["xdg-open", log_dir])
+            except Exception as e:
+                log.warning(f"Failed to open log folder: {e}")
+
+        tk.Button(btn_frame, text="🔄 Refresh", command=_load,
+                  bg=self.colors.get("surface_light", "#45475a"), fg=self.colors["text"],
+                  font=("Segoe UI", 9), relief="flat", padx=14, pady=5,
+                  cursor="hand2").pack(side="left", padx=(0, 6))
+        tk.Button(btn_frame, text="📂 Open Folder", command=_open_folder,
+                  bg=self.colors.get("surface_light", "#45475a"), fg=self.colors["text"],
+                  font=("Segoe UI", 9), relief="flat", padx=14, pady=5,
+                  cursor="hand2").pack(side="left")
+        tk.Button(btn_frame, text="Close", command=dlg.destroy,
+                  bg=self.colors.get("surface", "#313244"), fg=self.colors["text"],
+                  font=("Segoe UI", 9), relief="flat", padx=14, pady=5,
+                  cursor="hand2").pack(side="right")
+
     def change_language(self, lang: str) -> None:
         if lang != self.current_language:
             self.current_language = lang
@@ -3051,7 +3145,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.6.0", 
+        tk.Label(title_frame, text="v1.6.2", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
