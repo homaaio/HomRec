@@ -42,6 +42,8 @@ static HR_INLINE uint8_t _clamp8(int v) {
 }
 
 
+// GB24 -> YUV420p (I420)
+
 HR_EXPORT void hr_rgb_to_yuv420p(
     const uint8_t * HR_RESTRICT rgb,
     uint8_t       * HR_RESTRICT yuv_out,
