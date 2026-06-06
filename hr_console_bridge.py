@@ -37,7 +37,7 @@ CONSOLE_VERSION = "1.2.0"
 BRIDGE_VERSION  = "1.2.0"
 
 # HomRec application version constants
-HOMREC_VERSION = "1.6.1"
+HOMREC_VERSION = "1.6.2"
 CORE_VERSION   = "1.4.3"
 
 # ────────────────────────────────────────────────────────────────────────────────
