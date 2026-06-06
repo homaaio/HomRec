@@ -1,5 +1,16 @@
 welcome to changelog :D
 
+[Version 1.6.2] - 2026-06-06
+
+=== Added ===
+
+In the View menu, there is a new item Show Log (appears before the Theme submenu)
+
+=== Fixed ====
+
+Version bumped to 1.6.2
+
+
 [Version 1.6.1] - 2026-06-05
 
 === Added ===
