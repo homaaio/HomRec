@@ -41,9 +41,7 @@ static HR_INLINE uint8_t _clamp8(int v) {
     return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
 }
 
-/* -------------------------------------------------------------------------
- * RGB24 -> YUV420p (I420)
- * ---------------------------------------------------------------------- */
+
 HR_EXPORT void hr_rgb_to_yuv420p(
     const uint8_t * HR_RESTRICT rgb,
     uint8_t       * HR_RESTRICT yuv_out,
@@ -119,9 +117,6 @@ HR_EXPORT void hr_rgb_to_yuv420p(
     }
 }
 
-/* -------------------------------------------------------------------------
- * BGRA -> YUV420p (I420)  — основной путь при DXGI захвате
- * ---------------------------------------------------------------------- */
 HR_EXPORT void hr_bgra_to_yuv420p(
     const uint8_t * HR_RESTRICT bgra,
     uint8_t       * HR_RESTRICT yuv_out,
@@ -222,9 +217,7 @@ HR_EXPORT void hr_yuv420p_to_rgb(
     }
 }
 
-/* -------------------------------------------------------------------------
- * Gamma LUT
- * ---------------------------------------------------------------------- */
+
 HR_EXPORT void hr_gamma_lut_apply(uint8_t *pixels, size_t n_bytes, int gamma_x100)
 {
     if (HR_UNLIKELY(!pixels || n_bytes == 0 || gamma_x100 == 100)) return;
@@ -237,10 +230,7 @@ HR_EXPORT void hr_gamma_lut_apply(uint8_t *pixels, size_t n_bytes, int gamma_x10
     for (size_t i = 0; i < n_bytes; ++i) pixels[i] = lut[pixels[i]];
 }
 
-/* -------------------------------------------------------------------------
- * Fast box thumbnail  (integer ratios only)
- * OPT: степени двойки заменены сдвигом; остальное — делением.
- * ---------------------------------------------------------------------- */
+
 HR_EXPORT int hr_build_thumbnail_lq(
     const uint8_t * HR_RESTRICT src,
     uint8_t       * HR_RESTRICT dst,
@@ -284,13 +274,6 @@ HR_EXPORT int hr_build_thumbnail_lq(
     return 1;
 }
 
-/* -------------------------------------------------------------------------
- * Non-temporal memcpy
- * OPT: исправлен на реальные NT stores (_mm_stream_si128).
- * v1.7.0 использовал _mm_storeu_si128 — обычный кэшируемый store,
- * который не обходит кэш и не даёт никакой экономии полосы памяти.
- * _mm_stream_si128 пишет напрямую в RAM, минуя L1/L2/L3.
- * ---------------------------------------------------------------------- */
 HR_EXPORT void hr_memcpy_nt(void *dst, const void *src, size_t n)
 {
 #if defined(__SSE2__)
