@@ -3,950 +3,823 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import logging
-import math
 import os
 import sys
-import struct
-import time as _time
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
-
-log = logging.getLogger("homrec.native")
+log = logging.getLogger("homrec.native2")
 
 # ---------------------------------------------------------------------------
-# Locate shared libraries
+# Library loader
 # ---------------------------------------------------------------------------
 
 def _lib_path(name: str) -> str:
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).parent
-    else:
-        base = Path(__file__).parent
-
+    base = Path(sys.executable).parent if getattr(sys, "frozen", False) \
+           else Path(__file__).parent
     for ext in (".dll", ".so", ".dylib"):
         p = base / (name + ext)
         if p.exists():
             return str(p)
-
     found = ctypes.util.find_library(name)
     if found:
         return found
-
-    raise FileNotFoundError(f"Native library '{name}' not found near {base}.")
+    raise FileNotFoundError(f"Native library '{name}' not found near {base}")
 
 
 def _load(name: str) -> Optional[ctypes.CDLL]:
     try:
         return ctypes.CDLL(_lib_path(name))
-    except Exception as exc:
-        log.warning("%s not loaded: %s", name, exc)
+    except Exception as e:
+        log.warning("%s not loaded: %s", name, e)
         return None
 
 
-# ---------------------------------------------------------------------------
-# Load libraries
-# ---------------------------------------------------------------------------
+_app   = _load("hr_app_logic")
+_prof  = _load("hr_profile_io")
+_utils = _load("hr_ui_utils")
 
-_core_lib = _load("homrec_core")
-NATIVE_OK = _core_lib is not None
-if NATIVE_OK:
-    _core_lib.hr_bgrx_to_rgb.argtypes       = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
-    _core_lib.hr_bgrx_to_rgb.restype        = None
-    _core_lib.hr_resize_bilinear.argtypes   = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
-                                                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _core_lib.hr_resize_bilinear.restype    = None
-    _core_lib.hr_resize_nearest.argtypes    = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
-                                                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _core_lib.hr_resize_nearest.restype     = None
-    _core_lib.hr_audio_rms.argtypes         = [ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_audio_rms.restype          = ctypes.c_float
-    _core_lib.hr_blend_rgba.argtypes        = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_blend_rgba.restype         = None
-    _core_lib.hr_yuv420_luminance.argtypes  = [ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_yuv420_luminance.restype   = ctypes.c_float
-    _core_lib.hr_timestamp_str.argtypes     = [ctypes.c_char_p, ctypes.c_size_t]
-    _core_lib.hr_timestamp_str.restype      = ctypes.c_int
-    _core_lib.hr_rgb_brightness.argtypes    = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int]
-    _core_lib.hr_rgb_brightness.restype     = None
-    log.info("homrec_core loaded")
-
-_rb_lib = _load("hr_ringbuf")
-RINGBUF_OK = _rb_lib is not None
-if RINGBUF_OK:
-    _rb_lib.hr_rb_create.argtypes           = [ctypes.c_size_t];      _rb_lib.hr_rb_create.restype  = ctypes.c_void_p
-    _rb_lib.hr_rb_destroy.argtypes          = [ctypes.c_void_p];      _rb_lib.hr_rb_destroy.restype = None
-    _rb_lib.hr_rb_write.argtypes            = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
-    _rb_lib.hr_rb_write.restype             = ctypes.c_size_t
-    _rb_lib.hr_rb_read.argtypes             = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
-    _rb_lib.hr_rb_read.restype              = ctypes.c_size_t
-    _rb_lib.hr_rb_available_read.argtypes   = [ctypes.c_void_p]; _rb_lib.hr_rb_available_read.restype  = ctypes.c_size_t
-    _rb_lib.hr_rb_available_write.argtypes  = [ctypes.c_void_p]; _rb_lib.hr_rb_available_write.restype = ctypes.c_size_t
-    _rb_lib.hr_rb_reset.argtypes            = [ctypes.c_void_p]; _rb_lib.hr_rb_reset.restype = None
-    log.info("hr_ringbuf loaded")
-
-_fq_lib = _load("hr_framequeue")
-FRAMEQUEUE_OK = _fq_lib is not None
-if FRAMEQUEUE_OK:
-    _fq_lib.hr_fq_create.argtypes   = [ctypes.c_size_t]; _fq_lib.hr_fq_create.restype  = ctypes.c_void_p
-    _fq_lib.hr_fq_destroy.argtypes  = [ctypes.c_void_p]; _fq_lib.hr_fq_destroy.restype = None
-    _fq_lib.hr_fq_push.argtypes     = [ctypes.c_void_p, ctypes.c_void_p]; _fq_lib.hr_fq_push.restype = ctypes.c_int
-    _fq_lib.hr_fq_pop.argtypes      = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-    _fq_lib.hr_fq_pop.restype       = ctypes.c_int
-    _fq_lib.hr_fq_size.argtypes     = [ctypes.c_void_p]; _fq_lib.hr_fq_size.restype = ctypes.c_size_t
-    log.info("hr_framequeue loaded")
-
-_pv_lib = _load("hr_preview")
-PREVIEW_OK = _pv_lib is not None
-if PREVIEW_OK:
-    _pv_lib.hr_pv_thumbnail.argtypes      = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
-                                              ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _pv_lib.hr_pv_thumbnail.restype       = None
-    _pv_lib.hr_pv_draw_border.argtypes    = [ctypes.POINTER(ctypes.c_uint8),
-                                              ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                              ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_int]
-    _pv_lib.hr_pv_draw_border.restype     = None
-    _pv_lib.hr_pv_gray_overlay.argtypes   = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_uint8]
-    _pv_lib.hr_pv_gray_overlay.restype    = None
-    _pv_lib.hr_pv_flip_horizontal.argtypes= [ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
-    _pv_lib.hr_pv_flip_horizontal.restype = None
-    log.info("hr_preview loaded")
-
-_enc_lib = _load("hr_encoder_helpers")
-ENCODER_OK = _enc_lib is not None
-if ENCODER_OK:
-    _enc_lib.hr_rgb_to_yuv420p.argtypes     = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
-    _enc_lib.hr_rgb_to_yuv420p.restype      = None
-    _enc_lib.hr_bgra_to_yuv420p.argtypes    = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
-    _enc_lib.hr_bgra_to_yuv420p.restype     = None
-    _enc_lib.hr_yuv420p_to_rgb.argtypes     = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int, ctypes.c_int]
-    _enc_lib.hr_yuv420p_to_rgb.restype      = None
-    _enc_lib.hr_gamma_lut_apply.argtypes    = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_int]
-    _enc_lib.hr_gamma_lut_apply.restype     = None
-    _enc_lib.hr_build_thumbnail_lq.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint8),
-                                                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _enc_lib.hr_build_thumbnail_lq.restype  = ctypes.c_int
-    log.info("hr_encoder_helpers loaded")
-
-_sw_lib = _load("hr_stopwatch")
-STOPWATCH_OK = _sw_lib is not None
-if STOPWATCH_OK:
-    _sw_lib.hr_sw_create.argtypes        = []; _sw_lib.hr_sw_create.restype      = ctypes.c_void_p
-    _sw_lib.hr_sw_destroy.argtypes       = [ctypes.c_void_p]; _sw_lib.hr_sw_destroy.restype   = None
-    _sw_lib.hr_sw_start.argtypes         = [ctypes.c_void_p]; _sw_lib.hr_sw_start.restype     = None
-    _sw_lib.hr_sw_elapsed_ns.argtypes    = [ctypes.c_void_p]; _sw_lib.hr_sw_elapsed_ns.restype = ctypes.c_int64
-    _sw_lib.hr_sw_elapsed_ms.argtypes    = [ctypes.c_void_p]; _sw_lib.hr_sw_elapsed_ms.restype = ctypes.c_double
-    _sw_lib.hr_sw_sleep_until_ns.argtypes= [ctypes.c_void_p, ctypes.c_int64]
-    _sw_lib.hr_sw_sleep_until_ns.restype = None
-    _sw_lib.hr_sw_now_ns.argtypes        = []; _sw_lib.hr_sw_now_ns.restype = ctypes.c_int64
-    log.info("hr_stopwatch loaded")
-
-_dx_lib = _load("hr_dxgi_capture")
-DXCAP_OK = _dx_lib is not None
-if DXCAP_OK:
-    _dx_lib.hr_dx_create.argtypes       = [ctypes.c_int, ctypes.c_int]; _dx_lib.hr_dx_create.restype  = ctypes.c_void_p
-    _dx_lib.hr_dx_destroy.argtypes      = [ctypes.c_void_p];             _dx_lib.hr_dx_destroy.restype = None
-    _dx_lib.hr_dx_get_size.argtypes     = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
-    _dx_lib.hr_dx_get_size.restype      = ctypes.c_int
-    _dx_lib.hr_dx_capture.argtypes      = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_int]
-    _dx_lib.hr_dx_capture.restype       = ctypes.c_int
-    _dx_lib.hr_dx_reset.argtypes        = [ctypes.c_void_p]; _dx_lib.hr_dx_reset.restype       = ctypes.c_int
-    _dx_lib.hr_dx_adapter_count.argtypes= []; _dx_lib.hr_dx_adapter_count.restype = ctypes.c_int
-    _dx_lib.hr_dx_output_count.argtypes = [ctypes.c_int]; _dx_lib.hr_dx_output_count.restype  = ctypes.c_int
-    _dx_lib.hr_dx_output_desc.argtypes  = [ctypes.c_int, ctypes.c_int,
-                                            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
-                                            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
-                                            ctypes.c_char_p, ctypes.c_int]
-    _dx_lib.hr_dx_output_desc.restype   = ctypes.c_int
-    log.info("hr_dxgi_capture loaded")
-
-_pl_lib = _load("hr_pipeline")
-PIPELINE_OK = _pl_lib is not None
-if PIPELINE_OK:
-    _pl_lib.hr_pl_create.argtypes         = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                              ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    _pl_lib.hr_pl_create.restype          = ctypes.c_void_p
-    _pl_lib.hr_pl_destroy.argtypes        = [ctypes.c_void_p]; _pl_lib.hr_pl_destroy.restype  = None
-    _pl_lib.hr_pl_start.argtypes          = [ctypes.c_void_p]; _pl_lib.hr_pl_start.restype    = ctypes.c_int
-    _pl_lib.hr_pl_stop.argtypes           = [ctypes.c_void_p]; _pl_lib.hr_pl_stop.restype     = None
-    _pl_lib.hr_pl_pause.argtypes          = [ctypes.c_void_p, ctypes.c_int]
-    _pl_lib.hr_pl_pause.restype           = None
-    _pl_lib.hr_pl_set_recording.argtypes  = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
-    _pl_lib.hr_pl_set_recording.restype   = None
-    _pl_lib.hr_pl_get_preview.argtypes    = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8),
-                                              ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
-    _pl_lib.hr_pl_get_preview.restype     = ctypes.c_int
-    _pl_lib.hr_pl_stats.argtypes          = [ctypes.c_void_p,
-                                              ctypes.POINTER(ctypes.c_int64),
-                                              ctypes.POINTER(ctypes.c_int64),
-                                              ctypes.POINTER(ctypes.c_double)]
-    _pl_lib.hr_pl_stats.restype           = None
-    _pl_lib.hr_pl_set_fps.argtypes        = [ctypes.c_void_p, ctypes.c_int]; _pl_lib.hr_pl_set_fps.restype = None
-    _pl_lib.hr_pl_set_preview_size.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
-    _pl_lib.hr_pl_set_preview_size.restype  = None
-    log.info("hr_pipeline loaded")
+APP_OK   = _app   is not None
+PROF_OK  = _prof  is not None
+UTILS_OK = _utils is not None
 
 # ---------------------------------------------------------------------------
-# Return codes
+# hr_app_logic bindings
 # ---------------------------------------------------------------------------
-HR_DX_OK      =  0
-HR_DX_TIMEOUT =  1
-HR_DX_LOST    =  2
-HR_DX_ERROR   = -1
+
+if APP_OK:
+    # version
+    _app.hr_version_string.argtypes  = [ctypes.c_char_p, ctypes.c_int]
+    _app.hr_version_string.restype   = None
+    _app.hr_version_gt.argtypes      = [ctypes.c_char_p, ctypes.c_char_p]
+    _app.hr_version_gt.restype       = ctypes.c_int
+
+    # find_ffmpeg
+    _app.hr_find_ffmpeg.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    _app.hr_find_ffmpeg.restype  = ctypes.c_int
+
+    # optimize
+    _app.hr_optimize_process.argtypes = []
+    _app.hr_optimize_process.restype  = ctypes.c_int
+
+    # monitor
+    class _MonitorInfo(ctypes.Structure):
+        _fields_ = [
+            ("left",   ctypes.c_int),
+            ("top",    ctypes.c_int),
+            ("width",  ctypes.c_int),
+            ("height", ctypes.c_int),
+            ("index",  ctypes.c_int),
+            ("name",   ctypes.c_char * 32),
+        ]
+    _app.hr_get_monitor_info.argtypes = [ctypes.c_int, ctypes.POINTER(_MonitorInfo)]
+    _app.hr_get_monitor_info.restype  = ctypes.c_int
+    _app.hr_monitor_count.argtypes    = []
+    _app.hr_monitor_count.restype     = ctypes.c_int
+
+    # windows
+    _app.hr_enum_windows.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    _app.hr_enum_windows.restype  = ctypes.c_int
+
+    # GPU probe
+    _app.hr_probe_gpu_encoder.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    _app.hr_probe_gpu_encoder.restype  = ctypes.c_int
+
+    # codec args
+    _app.hr_build_codec_args.argtypes = [
+        ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_char_p, ctypes.c_int,
+    ]
+    _app.hr_build_codec_args.restype = None
+
+    # ffmpeg process
+    _app.hr_launch_ffmpeg.argtypes  = [ctypes.POINTER(ctypes.c_char_p)]
+    _app.hr_launch_ffmpeg.restype   = ctypes.c_void_p
+    _app.hr_stop_ffmpeg.argtypes    = [ctypes.c_void_p, ctypes.c_int]
+    _app.hr_stop_ffmpeg.restype     = ctypes.c_int
+    _app.hr_free_ffmpeg.argtypes    = [ctypes.c_void_p]
+    _app.hr_free_ffmpeg.restype     = None
+    _app.hr_ffmpeg_running.argtypes = [ctypes.c_void_p]
+    _app.hr_ffmpeg_running.restype  = ctypes.c_int
+
+    # merge
+    _app.hr_merge_audio_video.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+    _app.hr_merge_audio_video.restype  = ctypes.c_int
+
+    # timing
+    _app.hr_monotonic_ms.argtypes    = []
+    _app.hr_monotonic_ms.restype     = ctypes.c_int64
+    _app.hr_format_elapsed.argtypes  = [ctypes.c_double, ctypes.c_char_p, ctypes.c_int]
+    _app.hr_format_elapsed.restype   = None
+
+    # file types
+    _app.hr_register_file_types.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    _app.hr_register_file_types.restype  = ctypes.c_int
+
+    # single instance
+    _app.hr_acquire_single_instance.argtypes = [ctypes.c_char_p]
+    _app.hr_acquire_single_instance.restype  = ctypes.c_int
+
+    # update
+    _app.hr_fetch_latest_version.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    _app.hr_fetch_latest_version.restype  = ctypes.c_int
+
+
+# ---------------------------------------------------------------------------
+# hr_profile_io bindings
+# ---------------------------------------------------------------------------
+
+if PROF_OK:
+    # raw binary I/O
+    _prof.hr_hrc_write.argtypes  = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    _prof.hr_hrc_write.restype   = ctypes.c_int
+    _prof.hr_hrc_read.argtypes   = [ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    _prof.hr_hrc_read.restype    = ctypes.c_int
+    _prof.hr_hrc_detect.argtypes = [ctypes.c_char_p]
+    _prof.hr_hrc_detect.restype  = ctypes.c_int
+
+    # profile object
+    _prof.hr_profile_create.argtypes  = []
+    _prof.hr_profile_create.restype   = ctypes.c_void_p
+    _prof.hr_profile_destroy.argtypes = [ctypes.c_void_p]
+    _prof.hr_profile_destroy.restype  = None
+
+    _prof.hr_profile_load_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _prof.hr_profile_load_json.restype  = ctypes.c_int
+    _prof.hr_profile_save_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _prof.hr_profile_save_json.restype  = ctypes.c_int
+    _prof.hr_profile_load_hrc.argtypes  = [ctypes.c_void_p, ctypes.c_char_p]
+    _prof.hr_profile_load_hrc.restype   = ctypes.c_int
+    _prof.hr_profile_save_hrc.argtypes  = [ctypes.c_void_p, ctypes.c_char_p]
+    _prof.hr_profile_save_hrc.restype   = ctypes.c_int
+
+    _prof.hr_profile_get_str.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _prof.hr_profile_get_str.restype  = ctypes.c_char_p
+    _prof.hr_profile_set_str.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+    _prof.hr_profile_set_str.restype  = None
+    _prof.hr_profile_get_int.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _prof.hr_profile_get_int.restype  = ctypes.c_int
+    _prof.hr_profile_set_int.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    _prof.hr_profile_set_int.restype  = None
+    _prof.hr_profile_get_double.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _prof.hr_profile_get_double.restype  = ctypes.c_double
+    _prof.hr_profile_set_double.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_double]
+    _prof.hr_profile_set_double.restype  = None
+
+    # directory scan
+    _prof.hr_scan_dir_ext.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                                       ctypes.c_char_p, ctypes.c_int]
+    _prof.hr_scan_dir_ext.restype  = ctypes.c_int
+
+    # theme / lang helpers
+    _prof.hr_theme_get_color.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                                          ctypes.c_char_p, ctypes.c_int]
+    _prof.hr_theme_get_color.restype  = ctypes.c_int
+    _prof.hr_lang_get_value.argtypes  = [ctypes.c_char_p, ctypes.c_char_p,
+                                          ctypes.c_char_p, ctypes.c_int]
+    _prof.hr_lang_get_value.restype   = ctypes.c_int
+    _prof.hr_lang_schema_version.argtypes    = [ctypes.c_char_p]
+    _prof.hr_lang_schema_version.restype     = ctypes.c_int
+    _prof.hr_lang_count_missing_keys.argtypes= [ctypes.c_char_p, ctypes.c_char_p]
+    _prof.hr_lang_count_missing_keys.restype = ctypes.c_int
+
+
+# ---------------------------------------------------------------------------
+# hr_ui_utils bindings
+# ---------------------------------------------------------------------------
+
+if UTILS_OK:
+    # stopwatch
+    _utils.hr_stopwatch_create.argtypes  = []
+    _utils.hr_stopwatch_create.restype   = ctypes.c_void_p
+    _utils.hr_stopwatch_destroy.argtypes = [ctypes.c_void_p]
+    _utils.hr_stopwatch_destroy.restype  = None
+    _utils.hr_stopwatch_start.argtypes   = [ctypes.c_void_p]
+    _utils.hr_stopwatch_start.restype    = None
+    _utils.hr_stopwatch_pause.argtypes   = [ctypes.c_void_p]
+    _utils.hr_stopwatch_pause.restype    = None
+    _utils.hr_stopwatch_resume.argtypes  = [ctypes.c_void_p]
+    _utils.hr_stopwatch_resume.restype   = None
+    _utils.hr_stopwatch_elapsed_ms.argtypes = [ctypes.c_void_p]
+    _utils.hr_stopwatch_elapsed_ms.restype  = ctypes.c_int64
+    _utils.hr_stopwatch_format.argtypes  = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    _utils.hr_stopwatch_format.restype   = None
+
+    # audio level
+    _utils.hr_audio_rms_int16.argtypes = [ctypes.POINTER(ctypes.c_int16), ctypes.c_int]
+    _utils.hr_audio_rms_int16.restype  = ctypes.c_int
+    _utils.hr_lerp_color.argtypes      = [ctypes.c_float]
+    _utils.hr_lerp_color.restype       = ctypes.c_uint32
+    _utils.hr_peak_decay.argtypes      = [ctypes.c_int,
+                                           ctypes.POINTER(ctypes.c_int),
+                                           ctypes.POINTER(ctypes.c_int)]
+    _utils.hr_peak_decay.restype       = None
+
+    # rec badge
+    _utils.hr_render_rec_badge.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_char_p]
+    _utils.hr_render_rec_badge.restype  = None
+
+    # sys stats
+    class _SysStats(ctypes.Structure):
+        _fields_ = [
+            ("cpu_percent",   ctypes.c_float),
+            ("ram_total_mb",  ctypes.c_uint64),
+            ("ram_avail_mb",  ctypes.c_uint64),
+            ("ram_percent",   ctypes.c_float),
+            ("disk_total_gb", ctypes.c_uint64),
+            ("disk_free_gb",  ctypes.c_uint64),
+            ("disk_percent",  ctypes.c_float),
+            ("cpu_count",     ctypes.c_int),
+        ]
+    _utils.hr_get_sys_stats.argtypes = [ctypes.c_char_p, ctypes.POINTER(_SysStats)]
+    _utils.hr_get_sys_stats.restype  = ctypes.c_int
+
+    # notify
+    _utils.hr_notify_beep.argtypes   = []
+    _utils.hr_notify_beep.restype    = None
+    _utils.hr_flash_window.argtypes  = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_int]
+    _utils.hr_flash_window.restype   = None
+
+    # appid
+    _utils.hr_set_app_user_model_id.argtypes = [ctypes.c_char_p]
+    _utils.hr_set_app_user_model_id.restype  = None
+
+    # countdown
+    _utils.hr_countdown_async.argtypes = [
+        ctypes.c_int,
+        ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_void_p),
+        ctypes.CFUNCTYPE(None, ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    _utils.hr_countdown_async.restype = None
+
+    # fps tracker
+    _utils.hr_fps_tracker_create.argtypes  = []
+    _utils.hr_fps_tracker_create.restype   = ctypes.c_void_p
+    _utils.hr_fps_tracker_destroy.argtypes = [ctypes.c_void_p]
+    _utils.hr_fps_tracker_destroy.restype  = None
+    _utils.hr_fps_tracker_tick.argtypes    = [ctypes.c_void_p]
+    _utils.hr_fps_tracker_tick.restype     = ctypes.c_float
+
+    # paths / files
+    _utils.hr_file_size_mb.argtypes     = [ctypes.c_char_p]
+    _utils.hr_file_size_mb.restype      = ctypes.c_float
+    _utils.hr_make_output_dir.argtypes  = [ctypes.c_char_p]
+    _utils.hr_make_output_dir.restype   = ctypes.c_int
+    _utils.hr_open_folder.argtypes      = [ctypes.c_char_p]
+    _utils.hr_open_folder.restype       = None
+    _utils.hr_path_exists.argtypes      = [ctypes.c_char_p]
+    _utils.hr_path_exists.restype       = ctypes.c_int
+    _utils.hr_filename_from_template.argtypes = [ctypes.c_char_p, ctypes.c_char_p,
+                                                  ctypes.c_char_p, ctypes.c_int]
+    _utils.hr_filename_from_template.restype  = None
+
 
 # ===========================================================================
-# API classes
+# Pythonic wrappers  (высокоуровневый API, вызываемый из homrec.py)
 # ===========================================================================
 
-class _CoreAPI:
-    """Pixel manipulation — Python fallbacks только для audio/timestamp."""
-
-    def bgrx_to_rgb_np(self, bgrx: bytes, width: int, height: int) -> np.ndarray:
-        n_pix = width * height
-        dst = np.empty(n_pix * 3, dtype=np.uint8)
-        if NATIVE_OK:
-            _core_lib.hr_bgrx_to_rgb(
-                ctypes.c_char_p(bgrx),
-                dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_size_t(n_pix))
-        else:
-            arr = np.frombuffer(bgrx, dtype=np.uint8).reshape(n_pix, 4)
-            dst = arr[:, 2::-1].reshape(-1).copy()
-        return dst.reshape(height, width, 3)
-
-    def resize_bilinear_np(self, src: np.ndarray, sw: int, sh: int, dw: int, dh: int) -> np.ndarray:
-        ch = src.shape[2] if src.ndim == 3 else 1
-        dst = np.empty(dh * dw * ch, dtype=np.uint8)
-        src_c = np.ascontiguousarray(src)
-        _core_lib.hr_resize_bilinear(
-            src_c.ctypes.data_as(ctypes.c_char_p),
-            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_int(sw), ctypes.c_int(sh),
-            ctypes.c_int(dw), ctypes.c_int(dh), ctypes.c_int(ch))
-        return dst.reshape(dh, dw, ch)
-
-    def resize_nearest_np(self, src: np.ndarray, sw: int, sh: int, dw: int, dh: int) -> np.ndarray:
-        ch = src.shape[2] if src.ndim == 3 else 1
-        dst = np.empty(dh * dw * ch, dtype=np.uint8)
-        src_c = np.ascontiguousarray(src)
-        _core_lib.hr_resize_nearest(
-            src_c.ctypes.data_as(ctypes.c_char_p),
-            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_int(sw), ctypes.c_int(sh),
-            ctypes.c_int(dw), ctypes.c_int(dh), ctypes.c_int(ch))
-        return dst.reshape(dh, dw, ch)
-
-    def audio_rms_level(self, pcm_bytes: bytes) -> int:
-        n = len(pcm_bytes) // 2
-        if n == 0:
-            return 0
-        if NATIVE_OK:
-            rms = _core_lib.hr_audio_rms(ctypes.c_char_p(pcm_bytes), ctypes.c_size_t(n))
-        else:
-            arr = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.int32)
-            rms = float(np.sqrt(np.mean(arr ** 2)))
-        return min(100, int(rms / 300))
-
-    def blend_badge(self, base_rgb: np.ndarray, badge_rgba: np.ndarray, x: int, y: int) -> None:
-        bh, bw = badge_rgba.shape[:2]
-        fh, fw = base_rgb.shape[:2]
-        bh = min(bh, fh - y)
-        bw = min(bw, fw - x)
-        if bh <= 0 or bw <= 0:
-            return
-        roi  = base_rgb[y:y+bh, x:x+bw]
-        ovl  = badge_rgba[:bh, :bw]
-        roi_c = np.ascontiguousarray(roi.reshape(-1, 3))
-        ovl_c = np.ascontiguousarray(ovl.reshape(-1, 4))
-        if NATIVE_OK:
-            _core_lib.hr_blend_rgba(
-                roi_c.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_char_p(ovl_c.tobytes()),
-                ctypes.c_size_t(bh * bw))
-            base_rgb[y:y+bh, x:x+bw] = roi_c.reshape(bh, bw, 3)
-        else:
-            alpha = ovl[:, :, 3:4].astype(np.float32) / 255.0
-            base_rgb[y:y+bh, x:x+bw] = (ovl[:, :, :3] * alpha + roi * (1.0 - alpha)).astype(np.uint8)
-
-    def apply_brightness(self, frame: np.ndarray, delta: int) -> np.ndarray:
-        if delta == 0:
-            return frame
-        fc = np.ascontiguousarray(frame.reshape(-1))
-        if NATIVE_OK:
-            _core_lib.hr_rgb_brightness(
-                fc.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_size_t(fc.size), ctypes.c_int(delta))
-            frame[:] = fc
-        else:
-            frame[:] = np.clip(frame.astype(np.int16) + delta, 0, 255).astype(np.uint8)
-        return frame
-
-    def yuv420_luminance(self, y_plane: bytes) -> float:
-        if not y_plane:
-            return 0.0
-        if NATIVE_OK:
-            return float(_core_lib.hr_yuv420_luminance(
-                ctypes.c_char_p(y_plane), ctypes.c_size_t(len(y_plane))))
-        return float(np.frombuffer(y_plane, dtype=np.uint8).mean())
-
-    def timestamp(self) -> str:
-        if NATIVE_OK:
-            buf = ctypes.create_string_buffer(32)
-            if _core_lib.hr_timestamp_str(buf, ctypes.c_size_t(32)) > 0:
-                return buf.value.decode("ascii")
-        from datetime import datetime
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+_ENC = "utf-8"
 
 
-class _EncoderAPI:
-    """YUV-конвертация, gamma, thumbnail."""
+# --- Version ----------------------------------------------------------------
 
-    def bgra_to_yuv420p(self, bgra: bytes, width: int, height: int) -> np.ndarray:
-        dst = np.empty(width * height * 3 // 2, dtype=np.uint8)
-        _enc_lib.hr_bgra_to_yuv420p(
-            ctypes.c_char_p(bgra),
-            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_int(width), ctypes.c_int(height))
-        return dst
-
-    def rgb_to_yuv420p(self, rgb: bytes, width: int, height: int) -> np.ndarray:
-        dst = np.empty(width * height * 3 // 2, dtype=np.uint8)
-        _enc_lib.hr_rgb_to_yuv420p(
-            ctypes.c_char_p(rgb),
-            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_int(width), ctypes.c_int(height))
-        return dst
-
-    def yuv420p_to_rgb(self, yuv: bytes, width: int, height: int) -> np.ndarray:
-        dst = np.empty(width * height * 3, dtype=np.uint8)
-        _enc_lib.hr_yuv420p_to_rgb(
-            ctypes.c_char_p(yuv),
-            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_int(width), ctypes.c_int(height))
-        return dst.reshape(height, width, 3)
-
-    def apply_gamma(self, frame: np.ndarray, gamma_x100: int) -> None:
-        if gamma_x100 == 100:
-            return
-        fc = np.ascontiguousarray(frame.reshape(-1))
-        _enc_lib.hr_gamma_lut_apply(
-            fc.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_size_t(fc.size), ctypes.c_int(gamma_x100))
-        frame[:] = fc.reshape(frame.shape)
-
-    def thumbnail_lq(self, src: np.ndarray,
-                     sw: int, sh: int, dw: int, dh: int) -> Optional[np.ndarray]:
-        dst = np.empty(dw * dh * 3, dtype=np.uint8)
-        src_c = np.ascontiguousarray(src)
-        ok = _enc_lib.hr_build_thumbnail_lq(
-            src_c.ctypes.data_as(ctypes.c_char_p),
-            dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_int(sw), ctypes.c_int(sh), ctypes.c_int(dw), ctypes.c_int(dh))
-        return dst.reshape(dh, dw, 3) if ok else None
+def version_string() -> str:
+    if not APP_OK:
+        return "1.6.2"
+    buf = ctypes.create_string_buffer(32)
+    _app.hr_version_string(buf, 32)
+    return buf.value.decode(_ENC)
 
 
-class _StopwatchAPI:
-    """Высокоточный таймер кадров."""
-
-    def create(self) -> object:
-        if STOPWATCH_OK:
-            return ("native", _sw_lib.hr_sw_create())
-        return ("python", _time.perf_counter_ns())
-
-    def destroy(self, handle: object) -> None:
-        kind, h = handle
-        if kind == "native":
-            _sw_lib.hr_sw_destroy(ctypes.c_void_p(h))
-
-    def start(self, handle: object) -> None:
-        kind, h = handle
-        if kind == "native":
-            _sw_lib.hr_sw_start(ctypes.c_void_p(h))
-
-    def elapsed_ms(self, handle: object) -> float:
-        kind, h = handle
-        if kind == "native":
-            return float(_sw_lib.hr_sw_elapsed_ms(ctypes.c_void_p(h)))
-        return (_time.perf_counter_ns() - h) / 1_000_000.0
-
-    def sleep_until_ns(self, handle: object, target_ns: int) -> None:
-        kind, h = handle
-        if kind == "native":
-            _sw_lib.hr_sw_sleep_until_ns(ctypes.c_void_p(h), ctypes.c_int64(target_ns))
-        else:
-            start = h
-            remaining = target_ns - (_time.perf_counter_ns() - start)
-            if remaining > 2_000_000:
-                _time.sleep((remaining - 2_000_000) / 1e9)
-            while (_time.perf_counter_ns() - start) < target_ns:
-                pass
-
-
-class _RingBufAPI:
-    """Lock-free PCM ring-buffer."""
-
-    def create(self, capacity: int = 2 * 1024 * 1024) -> object:
-        if RINGBUF_OK:
-            return ("native", _rb_lib.hr_rb_create(ctypes.c_size_t(capacity)))
-        return ("python", bytearray())
-
-    def destroy(self, handle: object) -> None:
-        kind, h = handle
-        if kind == "native":
-            _rb_lib.hr_rb_destroy(ctypes.c_void_p(h))
-
-    def write(self, handle: object, data: bytes) -> int:
-        kind, h = handle
-        if kind == "native":
-            return int(_rb_lib.hr_rb_write(ctypes.c_void_p(h), ctypes.c_char_p(data), ctypes.c_size_t(len(data))))
-        buf: bytearray = h; buf += data; return len(data)
-
-    def read(self, handle: object, n_bytes: int) -> bytes:
-        kind, h = handle
-        if kind == "native":
-            buf = ctypes.create_string_buffer(n_bytes)
-            got = _rb_lib.hr_rb_read(ctypes.c_void_p(h), buf, ctypes.c_size_t(n_bytes))
-            return bytes(buf[:got])
-        buf: bytearray = h; chunk = bytes(buf[:n_bytes]); del buf[:n_bytes]; return chunk
-
-    def available(self, handle: object) -> int:
-        kind, h = handle
-        if kind == "native":
-            return int(_rb_lib.hr_rb_available_read(ctypes.c_void_p(h)))
-        return len(h)
-
-    def reset(self, handle: object) -> None:
-        kind, h = handle
-        if kind == "native":
-            _rb_lib.hr_rb_reset(ctypes.c_void_p(h))
-        else:
-            h.clear()
-
-
-class _PreviewAPI:
-    """Preview thumbnail + эффекты."""
-
-    def thumbnail(self, src: np.ndarray, dst_w: int, dst_h: int) -> np.ndarray:
-        sh, sw = src.shape[:2]
-        if PREVIEW_OK and src.flags["C_CONTIGUOUS"]:
-            dst = np.empty(dst_h * dst_w * 3, dtype=np.uint8)
-            # OPT: data_as вместо .tobytes() — нулевая копия
-            _pv_lib.hr_pv_thumbnail(
-                src.ctypes.data_as(ctypes.c_char_p),
-                dst.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(sw), ctypes.c_int(sh),
-                ctypes.c_int(dst_w), ctypes.c_int(dst_h))
-            return dst.reshape(dst_h, dst_w, 3)
-        import cv2
-        return cv2.resize(src, (dst_w, dst_h), interpolation=cv2.INTER_LINEAR)
-
-    def draw_border(self, frame: np.ndarray,
-                    r: int = 232, g: int = 30, b: int = 30,
-                    thickness: int = 4) -> None:
-        if not frame.flags["C_CONTIGUOUS"]:
-            return
-        fh, fw = frame.shape[:2]
-        if PREVIEW_OK:
-            _pv_lib.hr_pv_draw_border(
-                frame.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(fw), ctypes.c_int(fh), ctypes.c_int(fw * 3),
-                ctypes.c_uint8(r), ctypes.c_uint8(g), ctypes.c_uint8(b),
-                ctypes.c_int(thickness))
-        else:
-            t = thickness
-            frame[:t, :] = (r, g, b); frame[-t:, :] = (r, g, b)
-            frame[:, :t] = (r, g, b); frame[:, -t:] = (r, g, b)
-
-    def gray_overlay(self, frame: np.ndarray, alpha: int = 120) -> None:
-        if not frame.flags["C_CONTIGUOUS"]:
-            return
-        fh, fw = frame.shape[:2]
-        if PREVIEW_OK:
-            _pv_lib.hr_pv_gray_overlay(
-                frame.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_size_t(fh * fw),
-                ctypes.c_uint8(max(0, min(255, alpha))))
-        else:
-            a = max(0, min(255, alpha)) / 255.0
-            frame[:] = np.clip(128 * a + frame * (1.0 - a), 0, 255).astype(np.uint8)
-
-    def flip_horizontal(self, frame: np.ndarray) -> None:
-        if PREVIEW_OK and frame.flags["C_CONTIGUOUS"]:
-            fh, fw = frame.shape[:2]
-            _pv_lib.hr_pv_flip_horizontal(
-                frame.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-                ctypes.c_int(fw), ctypes.c_int(fh))
-        else:
-            frame[:] = frame[:, ::-1, :]
-
-
-class _DxgiCaptureAPI:
-    """DXGI Desktop Duplication — GPU-захват экрана."""
-
-    def create(self, adapter: int = 0, output: int = 0) -> Optional[int]:
-        if not DXCAP_OK:
-            return None
-        h = _dx_lib.hr_dx_create(ctypes.c_int(adapter), ctypes.c_int(output))
-        if not h:
-            log.warning("hr_dx_create failed (adapter=%d output=%d)", adapter, output)
-            return None
-        return h
-
-    def destroy(self, handle) -> None:
-        if handle and DXCAP_OK:
-            _dx_lib.hr_dx_destroy(ctypes.c_void_p(handle))
-
-    def reset(self, handle) -> bool:
-        if not handle or not DXCAP_OK:
+def version_gt(a: str, b: str) -> bool:
+    if not APP_OK:
+        try:
+            return tuple(int(x) for x in a.split(".")) > tuple(int(x) for x in b.split("."))
+        except Exception:
             return False
-        return bool(_dx_lib.hr_dx_reset(ctypes.c_void_p(handle)))
-
-    def get_size(self, handle) -> tuple:
-        if not handle or not DXCAP_OK:
-            return (0, 0)
-        w, h = ctypes.c_int(0), ctypes.c_int(0)
-        _dx_lib.hr_dx_get_size(ctypes.c_void_p(handle), ctypes.byref(w), ctypes.byref(h))
-        return (w.value, h.value)
-
-    def capture_into(self, handle, buf: np.ndarray, timeout_ms: int = 33) -> int:
-        if not handle or not DXCAP_OK:
-            return HR_DX_ERROR
-        return int(_dx_lib.hr_dx_capture(
-            ctypes.c_void_p(handle),
-            buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.c_int(timeout_ms)))
-
-    def capture(self, handle, width: int, height: int,
-                timeout_ms: int = 33) -> Optional[np.ndarray]:
-        buf = np.empty(height * width * 4, dtype=np.uint8)
-        rc  = self.capture_into(handle, buf, timeout_ms)
-        return buf.reshape(height, width, 4) if rc == HR_DX_OK else None
-
-    def adapter_count(self) -> int:
-        return int(_dx_lib.hr_dx_adapter_count()) if DXCAP_OK else 0
-
-    def output_count(self, adapter: int = 0) -> int:
-        return int(_dx_lib.hr_dx_output_count(ctypes.c_int(adapter))) if DXCAP_OK else 0
-
-    def output_desc(self, adapter: int = 0, output: int = 0) -> dict:
-        if not DXCAP_OK:
-            return {}
-        x, y, w, h = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
-        name_buf = ctypes.create_string_buffer(256)
-        ok = _dx_lib.hr_dx_output_desc(
-            ctypes.c_int(adapter), ctypes.c_int(output),
-            ctypes.byref(x), ctypes.byref(y),
-            ctypes.byref(w), ctypes.byref(h),
-            name_buf, ctypes.c_int(256))
-        if not ok:
-            return {}
-        return {"x": x.value, "y": y.value, "width": w.value, "height": h.value,
-                "name": name_buf.value.decode("utf-8", errors="replace")}
-
-    def list_outputs(self) -> list:
-        result = []
-        for ai in range(self.adapter_count()):
-            for oi in range(self.output_count(ai)):
-                d = self.output_desc(ai, oi)
-                if d:
-                    d["adapter"] = ai; d["output"] = oi
-                    result.append(d)
-        return result
+    return bool(_app.hr_version_gt(a.encode(_ENC), b.encode(_ENC)))
 
 
-class _PipelineAPI:
+# --- find_ffmpeg ------------------------------------------------------------
+
+def find_ffmpeg(exe_dir: str | None = None) -> str | None:
+    if not APP_OK:
+        return None
+    buf = ctypes.create_string_buffer(1024)
+    d = exe_dir.encode(_ENC) if exe_dir else None
+    ok = _app.hr_find_ffmpeg(d, buf, 1024)
+    return buf.value.decode(_ENC) if ok else None
+
+
+# --- optimize_for_performance -----------------------------------------------
+
+def optimize_for_performance() -> None:
+    if APP_OK:
+        _app.hr_optimize_process()
+
+
+# --- monitor info -----------------------------------------------------------
+
+def get_monitor_info(idx: int) -> dict | None:
+    if not APP_OK:
+        return None
+    from ctypes import POINTER
+    mi = _app.__class__.__mro__  # just to avoid re-defining _MonitorInfo
+    # Re-use the already-defined struct via _app directly
+    class _MI(ctypes.Structure):
+        _fields_ = [("left",ctypes.c_int),("top",ctypes.c_int),
+                    ("width",ctypes.c_int),("height",ctypes.c_int),
+                    ("index",ctypes.c_int),("name",ctypes.c_char*32)]
+    obj = _MI()
+    ok = _app.hr_get_monitor_info(idx, ctypes.byref(obj))
+    if not ok:
+        return None
+    return {"left": obj.left, "top": obj.top,
+            "width": obj.width, "height": obj.height,
+            "index": obj.index, "name": obj.name.decode(_ENC)}
+
+
+def monitor_count() -> int:
+    return _app.hr_monitor_count() if APP_OK else 1
+
+
+# --- window enumeration -----------------------------------------------------
+
+def enum_windows() -> list[str]:
+    if not APP_OK:
+        return []
+    buf = ctypes.create_string_buffer(32768)
+    count = _app.hr_enum_windows(buf, 32768)
+    if count <= 0:
+        return []
+    titles = []
+    raw = buf.raw
+    pos = 0
+    while pos < len(raw):
+        end = raw.find(b'\x00', pos)
+        if end == pos:
+            break
+        titles.append(raw[pos:end].decode(_ENC, errors="replace"))
+        pos = end + 1
+    return titles
+
+
+# --- GPU probe --------------------------------------------------------------
+
+def probe_gpu_encoder(ffmpeg_path: str) -> str | None:
+    if not APP_OK:
+        return None
+    buf = ctypes.create_string_buffer(64)
+    ok = _app.hr_probe_gpu_encoder(ffmpeg_path.encode(_ENC), buf, 64)
+    return buf.value.decode(_ENC) if ok else None
+
+
+# --- codec args -------------------------------------------------------------
+
+def build_codec_args(codec: str, quality: int, fps: int, cpu_count: int) -> list[str]:
+    if not APP_OK:
+        return ["-c:v", codec]
+    buf = ctypes.create_string_buffer(1024)
+    _app.hr_build_codec_args(
+        codec.encode(_ENC), quality, fps, cpu_count, buf, 1024)
+    return buf.value.decode(_ENC).split()
+
+
+# --- FFmpeg process ---------------------------------------------------------
+
+class FfmpegProcess:
+    """Wraps an hr_app_logic ffmpeg process handle."""
+
+    def __init__(self, argv: list[str]) -> None:
+        if not APP_OK:
+            raise RuntimeError("hr_app_logic not loaded")
+        enc = [a.encode(_ENC) for a in argv]
+        enc.append(None)
+        arr = (ctypes.c_char_p * len(enc))(*enc)
+        self._handle = _app.hr_launch_ffmpeg(arr)
+        if not self._handle:
+            raise OSError("hr_launch_ffmpeg returned NULL")
+
+    def running(self) -> bool:
+        return bool(_app.hr_ffmpeg_running(self._handle))
+
+    def stop(self, timeout_ms: int = 5000) -> bool:
+        return bool(_app.hr_stop_ffmpeg(self._handle, timeout_ms))
+
+    def __del__(self) -> None:
+        if self._handle:
+            _app.hr_free_ffmpeg(self._handle)
+            self._handle = None
+
+
+# --- merge audio/video ------------------------------------------------------
+
+def merge_audio_video(ffmpeg_path: str, video_path: str, audio_path: str) -> bool:
+    if not APP_OK:
+        return False
+    return bool(_app.hr_merge_audio_video(
+        ffmpeg_path.encode(_ENC),
+        video_path.encode(_ENC),
+        audio_path.encode(_ENC),
+    ))
+
+
+# --- timing -----------------------------------------------------------------
+
+def monotonic_ms() -> int:
+    return int(_app.hr_monotonic_ms()) if APP_OK else 0
+
+
+def format_elapsed(elapsed_sec: float) -> str:
+    if not APP_OK:
+        t = int(elapsed_sec)
+        return f"{t//3600:02d}:{(t%3600)//60:02d}:{t%60:02d}"
+    buf = ctypes.create_string_buffer(16)
+    _app.hr_format_elapsed(elapsed_sec, buf, 16)
+    return buf.value.decode(_ENC)
+
+
+# --- file types registration -------------------------------------------------
+
+def register_file_types(exe_path: str, icons_dir: str) -> bool:
+    if not APP_OK:
+        return False
+    return bool(_app.hr_register_file_types(
+        exe_path.encode(_ENC), icons_dir.encode(_ENC)))
+
+
+# --- single instance --------------------------------------------------------
+
+def acquire_single_instance(mutex_name: str) -> bool:
+    if not APP_OK:
+        return True
+    return bool(_app.hr_acquire_single_instance(mutex_name.encode(_ENC)))
+
+
+# --- update check -----------------------------------------------------------
+
+def fetch_latest_version(repo: str) -> str | None:
+    if not APP_OK:
+        return None
+    buf = ctypes.create_string_buffer(32)
+    ok = _app.hr_fetch_latest_version(repo.encode(_ENC), buf, 32)
+    return buf.value.decode(_ENC) if ok else None
+
+
+# ===========================================================================
+# Profile I/O wrappers
+# ===========================================================================
+
+# --- raw binary I/O ---------------------------------------------------------
+
+def hrc_write(path: str, json_body: str, file_type: int = 0) -> bool:
+    """file_type: 0=hrc, 1=hrl, 2=hrt"""
+    if not PROF_OK:
+        return False
+    return bool(_prof.hr_hrc_write(
+        path.encode(_ENC), json_body.encode(_ENC), file_type))
+
+
+def hrc_read(path: str, expected_type: int = 0) -> str | None:
+    """Returns JSON body string, or None on error."""
+    if not PROF_OK:
+        return None
+    # Find required size
+    needed = _prof.hr_hrc_read(path.encode(_ENC), expected_type, None, 0)
+    if needed >= 0:
+        return None
+    needed = -needed
+    buf = ctypes.create_string_buffer(needed)
+    r = _prof.hr_hrc_read(path.encode(_ENC), expected_type, buf, needed)
+    return buf.value.decode(_ENC) if r > 0 else None
+
+
+def hrc_detect(path: str) -> str | None:
+    """Returns 'hrc', 'hrl', 'hrt', or None."""
+    if not PROF_OK:
+        return None
+    r = _prof.hr_hrc_detect(path.encode(_ENC))
+    return {0: "hrc", 1: "hrl", 2: "hrt"}.get(r)
+
+
+# --- Profile object ---------------------------------------------------------
+
+class NativeProfile:
     """
-    Обёртка над hr_pipeline.dll — единый C++-поток: DXGI → YUV → pipe + preview.
-
-    Пример (запись):
-        pl = pipeline.create(w=1920, h=1080, fps=60, pipe_fd=pipe_write_fd,
-                             pv_w=960, pv_h=540)
-        pipeline.start(pl)
-        # ... пауза/возобновление:
-        pipeline.pause(pl, True)
-        pipeline.pause(pl, False)
-        # ... остановить запись не пересоздавая pipeline:
-        pipeline.set_recording(pl, active=False)
-        # ... снова начать запись на новый pipe:
-        pipeline.set_recording(pl, active=True, pipe_fd=new_fd)
-        pipeline.stop(pl)
-        pipeline.destroy(pl)
+    Wraps the C++ HrProfileFull struct.
+    Acts as a drop-in for Python dict-based settings.
     """
-
-    def create(self, w: int, h: int, fps: int,
-               pipe_fd: int = 0, pv_w: int = 960, pv_h: int = 540) -> Optional[int]:
-        if not PIPELINE_OK:
-            return None
-        h_ = _pl_lib.hr_pl_create(
-            ctypes.c_int(w), ctypes.c_int(h), ctypes.c_int(fps),
-            ctypes.c_int(pipe_fd), ctypes.c_int(pv_w), ctypes.c_int(pv_h))
-        if not h_:
-            log.warning("hr_pl_create failed (%dx%d @%d fps)", w, h, fps)
-            return None
-        return h_
-
-    def destroy(self, handle) -> None:
-        if handle and PIPELINE_OK:
-            _pl_lib.hr_pl_destroy(ctypes.c_void_p(handle))
-
-    def start(self, handle) -> bool:
-        if not handle or not PIPELINE_OK:
-            return False
-        return bool(_pl_lib.hr_pl_start(ctypes.c_void_p(handle)))
-
-    def stop(self, handle) -> None:
-        if handle and PIPELINE_OK:
-            _pl_lib.hr_pl_stop(ctypes.c_void_p(handle))
-
-    def pause(self, handle, paused: bool) -> None:
-        if handle and PIPELINE_OK:
-            _pl_lib.hr_pl_pause(ctypes.c_void_p(handle), ctypes.c_int(1 if paused else 0))
-
-    def set_recording(self, handle, active: bool, pipe_fd: int = 0) -> None:
-        """Включить/выключить запись без пересоздания pipeline."""
-        if handle and PIPELINE_OK:
-            _pl_lib.hr_pl_set_recording(
-                ctypes.c_void_p(handle),
-                ctypes.c_int(1 if active else 0),
-                ctypes.c_int(pipe_fd))
-
-    def get_preview(self, handle, out_buf: np.ndarray) -> tuple:
-        """
-        Копирует последний thumbnail в out_buf (RGB, C-contiguous).
-        Возвращает (width, height) или (0, 0) если нет кадра.
-        """
-        if not handle or not PIPELINE_OK:
-            return (0, 0)
-        w, h = ctypes.c_int(0), ctypes.c_int(0)
-        ok = _pl_lib.hr_pl_get_preview(
-            ctypes.c_void_p(handle),
-            out_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
-            ctypes.byref(w), ctypes.byref(h))
-        return (w.value, h.value) if ok else (0, 0)
-
-    def stats(self, handle) -> dict:
-        if not handle or not PIPELINE_OK:
-            return {"frames": 0, "drops": 0, "fps": 0.0}
-        frames = ctypes.c_int64(0)
-        drops  = ctypes.c_int64(0)
-        fps    = ctypes.c_double(0.0)
-        _pl_lib.hr_pl_stats(ctypes.c_void_p(handle),
-                             ctypes.byref(frames),
-                             ctypes.byref(drops),
-                             ctypes.byref(fps))
-        return {"frames": frames.value, "drops": drops.value, "fps": fps.value}
-
-    def set_fps(self, handle, fps: int) -> None:
-        if handle and PIPELINE_OK:
-            _pl_lib.hr_pl_set_fps(ctypes.c_void_p(handle), ctypes.c_int(fps))
-
-    def set_preview_size(self, handle, pw: int, ph: int) -> None:
-        if handle and PIPELINE_OK:
-            _pl_lib.hr_pl_set_preview_size(ctypes.c_void_p(handle),
-                                            ctypes.c_int(pw), ctypes.c_int(ph))
-
-
-# ---------------------------------------------------------------------------
-# Module-level singletons
-# ---------------------------------------------------------------------------
-core      = _CoreAPI()
-encoder   = _EncoderAPI()
-stopwatch = _StopwatchAPI()
-ringbuf   = _RingBufAPI()
-framequeue_api = None   # используй _fq_lib напрямую или обернись при необходимости
-preview   = _PreviewAPI()
-dxcap     = _DxgiCaptureAPI()
-pipeline  = _PipelineAPI()
-
-
-# ---------------------------------------------------------------------------
-# hr_audio — C++ WASAPI audio engine
-# ---------------------------------------------------------------------------
-
-_audio_lib = _load("hr_audio")
-AUDIO_OK = _audio_lib is not None
-
-if AUDIO_OK:
-    _audio_lib.hr_audio_init.argtypes        = []
-    _audio_lib.hr_audio_init.restype         = ctypes.c_int
-
-    _audio_lib.hr_audio_start.argtypes       = [ctypes.c_float, ctypes.c_float,
-                                                 ctypes.c_int, ctypes.c_int]
-    _audio_lib.hr_audio_start.restype        = ctypes.c_int
-
-    _audio_lib.hr_audio_set_volumes.argtypes = [ctypes.c_float, ctypes.c_float,
-                                                 ctypes.c_int, ctypes.c_int]
-    _audio_lib.hr_audio_set_volumes.restype  = None
-
-    _audio_lib.hr_audio_get_levels.argtypes  = [ctypes.POINTER(ctypes.c_int),
-                                                 ctypes.POINTER(ctypes.c_int)]
-    _audio_lib.hr_audio_get_levels.restype   = None
-
-    _audio_lib.hr_audio_pause.argtypes       = [ctypes.c_int]
-    _audio_lib.hr_audio_pause.restype        = None
-
-    _audio_lib.hr_audio_stop.argtypes        = [ctypes.c_char_p, ctypes.c_char_p]
-    _audio_lib.hr_audio_stop.restype         = ctypes.c_int
-
-    _audio_lib.hr_audio_mix_wav.argtypes     = [ctypes.c_char_p, ctypes.c_char_p,
-                                                 ctypes.c_char_p]
-    _audio_lib.hr_audio_mix_wav.restype      = ctypes.c_int
-
-    _audio_lib.hr_audio_rms.argtypes         = [ctypes.c_void_p, ctypes.c_int]
-    _audio_lib.hr_audio_rms.restype          = ctypes.c_int
-
-    _audio_lib.hr_audio_init()
-    log.info("hr_audio loaded (C++ WASAPI engine)")
-
-
-class AudioEngine:
-    """Python wrapper over hr_audio.dll — replaces PyAudio+audioop audio logic."""
-
-    available: bool = AUDIO_OK
 
     def __init__(self) -> None:
-        self._mic_level = ctypes.c_int(0)
-        self._sys_level = ctypes.c_int(0)
+        if not PROF_OK:
+            raise RuntimeError("hr_profile_io not loaded")
+        self._h = _prof.hr_profile_create()
+        if not self._h:
+            raise MemoryError("hr_profile_create returned NULL")
 
-    def start(self, mic_vol: float = 1.0, sys_vol: float = 1.0,
-              mic_mute: bool = False, sys_mute: bool = False) -> int:
-        """Start recording. Returns bitmask: bit0=mic_ok, bit1=sys_ok."""
-        if not AUDIO_OK:
-            return 0
-        return _audio_lib.hr_audio_start(
-            ctypes.c_float(mic_vol), ctypes.c_float(sys_vol),
-            ctypes.c_int(int(mic_mute)), ctypes.c_int(int(sys_mute))
-        )
+    def __del__(self) -> None:
+        if self._h:
+            _prof.hr_profile_destroy(self._h)
+            self._h = None
 
-    def set_volumes(self, mic_vol: float, sys_vol: float,
-                    mic_mute: bool, sys_mute: bool) -> None:
-        if not AUDIO_OK: return
-        _audio_lib.hr_audio_set_volumes(
-            ctypes.c_float(mic_vol), ctypes.c_float(sys_vol),
-            ctypes.c_int(int(mic_mute)), ctypes.c_int(int(sys_mute))
-        )
+    # Persistence
+    def load_json(self, path: str) -> bool:
+        return bool(_prof.hr_profile_load_json(self._h, path.encode(_ENC)))
 
-    def get_levels(self) -> tuple[int, int]:
-        """Returns (mic_level 0-100, sys_level 0-100)."""
-        if not AUDIO_OK: return 0, 0
-        _audio_lib.hr_audio_get_levels(
-            ctypes.byref(self._mic_level),
-            ctypes.byref(self._sys_level)
-        )
-        return self._mic_level.value, self._sys_level.value
+    def save_json(self, path: str) -> bool:
+        return bool(_prof.hr_profile_save_json(self._h, path.encode(_ENC)))
 
-    def pause(self, paused: bool) -> None:
-        if not AUDIO_OK: return
-        _audio_lib.hr_audio_pause(ctypes.c_int(int(paused)))
+    def load_hrc(self, path: str) -> bool:
+        return bool(_prof.hr_profile_load_hrc(self._h, path.encode(_ENC)))
 
-    def stop(self, mic_wav: str | None = None,
-             sys_wav: str | None = None) -> int:
-        """Stop and flush to WAV files. Returns bitmask: bit0=mic, bit1=sys."""
-        if not AUDIO_OK: return 0
-        mic_b = mic_wav.encode() if mic_wav else None
-        sys_b = sys_wav.encode() if sys_wav else None
-        return _audio_lib.hr_audio_stop(mic_b, sys_b)
+    def save_hrc(self, path: str) -> bool:
+        return bool(_prof.hr_profile_save_hrc(self._h, path.encode(_ENC)))
 
-    @staticmethod
-    def mix_wav(mic_path: str, sys_path: str, out_path: str) -> bool:
-        """Mix two WAV files in pure C++ (no subprocess). Returns True on success."""
-        if not AUDIO_OK: return False
-        r = _audio_lib.hr_audio_mix_wav(
-            mic_path.encode(), sys_path.encode(), out_path.encode()
-        )
-        return r == 0
+    # Generic accessors
+    def get_str(self, field: str) -> str:
+        r = _prof.hr_profile_get_str(self._h, field.encode(_ENC))
+        return r.decode(_ENC) if r else ""
 
+    def set_str(self, field: str, val: str) -> None:
+        _prof.hr_profile_set_str(self._h, field.encode(_ENC), val.encode(_ENC))
 
-# Singleton для использования в homrec.py
-audio_engine = AudioEngine() if AUDIO_OK else None
+    def get_int(self, field: str) -> int:
+        return int(_prof.hr_profile_get_int(self._h, field.encode(_ENC)))
 
+    def set_int(self, field: str, val: int) -> None:
+        _prof.hr_profile_set_int(self._h, field.encode(_ENC), int(val))
 
-# ---------------------------------------------------------------------------
-# hr_tools — C++ engine: check_ffmpeg, dshow devices, GPU probe, codec args,
-#            audio/video merge.  Wraps hr_tools.dll / hr_tools.so.
-# ---------------------------------------------------------------------------
-_tools_lib = _load("hr_tools")
-TOOLS_OK = _tools_lib is not None
+    def get_double(self, field: str) -> float:
+        return float(_prof.hr_profile_get_double(self._h, field.encode(_ENC)))
 
-if TOOLS_OK:
-    # hr_check_ffmpeg(hint: wstr, out: wstr, out_len: int) -> int
-    _tools_lib.hr_check_ffmpeg.argtypes = [
-        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int]
-    _tools_lib.hr_check_ffmpeg.restype  = ctypes.c_int
+    def set_double(self, field: str, val: float) -> None:
+        _prof.hr_profile_set_double(self._h, field.encode(_ENC), float(val))
 
-    # hr_get_dshow_devices(ffpath: wstr, out: wstr, buf_chars: int) -> int
-    _tools_lib.hr_get_dshow_devices.argtypes = [
-        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int]
-    _tools_lib.hr_get_dshow_devices.restype  = ctypes.c_int
-
-    # hr_probe_gpu(ffpath: wstr, out_enc: wstr, out_len: int) -> int
-    _tools_lib.hr_probe_gpu.argtypes = [
-        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int]
-    _tools_lib.hr_probe_gpu.restype  = ctypes.c_int
-
-    # hr_build_codec_args(codec, quality, fps, cpu_count, out_buf, buf_chars) -> int
-    _tools_lib.hr_build_codec_args.argtypes = [
-        ctypes.c_wchar_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        ctypes.c_wchar_p, ctypes.c_int]
-    _tools_lib.hr_build_codec_args.restype  = ctypes.c_int
-
-    # hr_merge_av(ffpath, video_file, audio_file) -> int
-    _tools_lib.hr_merge_av.argtypes = [
-        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_wchar_p]
-    _tools_lib.hr_merge_av.restype  = ctypes.c_int
-
-    log.info("hr_tools loaded")
-
-
-class ToolsEngine:
-    """Thin Python wrapper around hr_tools.dll (C++ implementation).
-
-    Falls back gracefully to None returns when the DLL is absent —
-    callers should check TOOLS_OK or use the returned values defensively.
-    """
-    available: bool = TOOLS_OK
-    _BUF = 4096  # wchar buffer size for path/device strings
-
-    # -- ffmpeg ---------------------------------------------------------------
-    def find_ffmpeg(self, hint: str = "") -> str | None:
-        """Return path to ffmpeg executable, or None if not found."""
-        if not TOOLS_OK:
-            return None
-        buf = ctypes.create_unicode_buffer(self._BUF)
-        ok  = _tools_lib.hr_check_ffmpeg(hint or "", buf, self._BUF)
-        return buf.value if ok else None
-
-    # -- dshow devices --------------------------------------------------------
-    def get_dshow_devices(self, ffmpeg_path: str) -> list[str]:
-        """Return list of dshow audio input device names."""
-        if not TOOLS_OK:
-            return []
-        buf   = ctypes.create_unicode_buffer(self._BUF * 4)
-        count = _tools_lib.hr_get_dshow_devices(ffmpeg_path, buf, self._BUF * 4)
-        if count <= 0:
-            return []
-        return [d for d in buf.value.split("\n") if d]
-
-    # -- GPU probe ------------------------------------------------------------
-    def probe_gpu(self, ffmpeg_path: str) -> str | None:
-        """Probe for a hardware encoder; returns encoder name or None.
-
-        Designed to be called from a daemon thread (blocks ~2-10 s).
-        """
-        if not TOOLS_OK:
-            return None
-        buf = ctypes.create_unicode_buffer(64)
-        ok  = _tools_lib.hr_probe_gpu(ffmpeg_path, buf, 64)
-        return buf.value if ok else None
-
-    # -- codec args -----------------------------------------------------------
-    def build_codec_args(self, codec: str, quality: int, fps: int,
-                         cpu_count: int) -> list[str]:
-        """Return a list of ffmpeg codec argument strings."""
-        if not TOOLS_OK:
-            return ["-c:v", codec]
-        buf = ctypes.create_unicode_buffer(self._BUF)
-        _tools_lib.hr_build_codec_args(codec, quality, fps, cpu_count,
-                                        buf, self._BUF)
-        return buf.value.split()
-
-    # -- merge ----------------------------------------------------------------
-    def merge_av(self, ffmpeg_path: str, video_file: str,
-                 audio_file: str) -> bool:
-        """Merge audio_file into video_file (replaces video_file).
-
-        Returns True on success.
-        """
-        if not TOOLS_OK:
-            return False
-        result = _tools_lib.hr_merge_av(ffmpeg_path, video_file, audio_file)
-        return bool(result)
-
-
-tools_engine = ToolsEngine() if TOOLS_OK else None
-
-
-# ---------------------------------------------------------------------------
-# Build helper
-# ---------------------------------------------------------------------------
-def ensure_built(src_dir: str | None = None) -> bool:
-    if NATIVE_OK and RINGBUF_OK and FRAMEQUEUE_OK:
-        return True
-    if getattr(sys, "frozen", False):
-        return False
-    if src_dir is None:
-        src_dir = str(Path(__file__).parent)
-
-    import subprocess, platform
-    is_win = platform.system() == "Windows"
-    so     = ".dll" if is_win else ".so"
-    fPIC   = [] if is_win else ["-fPIC"]
-
-    targets = [
-        (["gcc", "-O3", "-march=native", "-shared", *fPIC, "-lm",
-          "-o", f"homrec_core{so}", "homrec_core.c"], "homrec_core"),
-        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
-          "-o", f"hr_ringbuf{so}", "hr_ringbuf.cpp"], "hr_ringbuf"),
-        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
-          "-o", f"hr_framequeue{so}", "hr_framequeue.cpp"], "hr_framequeue"),
-        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
-          "-o", f"hr_preview{so}", "hr_preview.cpp"], "hr_preview"),
-        (["gcc", "-O3", "-march=native", "-shared", *fPIC, "-lm",
-          "-o", f"hr_encoder_helpers{so}", "hr_encoder_helpers.c"], "hr_encoder_helpers"),
-        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
-          *([] if not is_win else ["-lwinmm"]),
-          "-o", f"hr_stopwatch{so}", "hr_stopwatch.cpp"], "hr_stopwatch"),
-        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
-          "-o", f"hr_display_info{so}", "hr_display_info.cpp"], "hr_display_info"),
-        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
-          *([] if not is_win else ["-ld3d11", "-ldxgi", "-lole32"]),
-          "-o", f"hr_dxgi_capture{so}", "hr_dxgi_capture.cpp"], "hr_dxgi_capture"),
-        (["g++", "-O2", "-std=c++17", "-shared", *fPIC,
-          *([] if not is_win else ["-lole32", "-lwinmm", "-luuid"]),
-          "-o", f"hr_audio{so}", "hr_audio.cpp"], "hr_audio"),
-        (["g++", "-O3", "-std=c++17", "-shared", *fPIC,
-          *([] if not is_win else ["-ld3d11", "-ldxgi", "-lole32", "-lwinmm"]),
-          "-o", f"hr_pipeline{so}", "hr_pipeline.cpp"], "hr_pipeline"),
+    # Convenience: dump to Python dict (for passing to existing Python code)
+    _STR_FIELDS = [
+        "output_folder", "recording_mode", "video_codec", "hw_accel",
+        "enc_preset", "pix_fmt", "audio_aac_bitrate", "theme", "language",
+        "ui_font", "hotkey_start_stop", "hotkey_pause", "hotkey_fullscreen",
+        "filename_template",
     ]
+    _INT_FIELDS = [
+        "target_fps", "quality", "enc_crf", "audio_sample_rate",
+        "audio_out_channels", "mic_volume", "sys_volume",
+        "mic_mute", "sys_mute", "audio_enabled",
+        "always_on_top", "minimize_to_tray", "countdown", "timestamp",
+        "cursor", "show_summary", "notify_sound", "notify_flash",
+        "auto_stop_min", "replay_buffer_sec", "auto_save_profile",
+        "disable_preview", "schema_version",
+    ]
+    _DBL_FIELDS = ["scale_factor", "ui_scale"]
 
-    results = []
-    for cmd, label in targets:
+    def to_dict(self) -> dict:
+        d: dict = {}
+        for f in self._STR_FIELDS:
+            d[f] = self.get_str(f)
+        for f in self._INT_FIELDS:
+            d[f] = self.get_int(f)
+        for f in self._DBL_FIELDS:
+            d[f] = self.get_double(f)
+        return d
+
+    def from_dict(self, d: dict) -> None:
+        for f in self._STR_FIELDS:
+            if f in d:
+                self.set_str(f, str(d[f]))
+        for f in self._INT_FIELDS:
+            if f in d:
+                self.set_int(f, int(d[f]))
+        for f in self._DBL_FIELDS:
+            if f in d:
+                self.set_double(f, float(d[f]))
+
+
+# --- directory scanning -----------------------------------------------------
+
+def scan_dir_ext(dir_path: str, ext: str) -> list[str]:
+    """Returns list of basenames (without ext) from dir_path matching ext."""
+    if not PROF_OK:
+        return []
+    buf = ctypes.create_string_buffer(32768)
+    count = _prof.hr_scan_dir_ext(
+        dir_path.encode(_ENC), ext.encode(_ENC), buf, 32768)
+    if count <= 0:
+        return []
+    result = []
+    raw = buf.raw
+    pos = 0
+    while pos < len(raw):
+        end = raw.find(b'\x00', pos)
+        if end == pos:
+            break
+        result.append(raw[pos:end].decode(_ENC, errors="replace"))
+        pos = end + 1
+    return result
+
+
+# ===========================================================================
+# UI Utils wrappers
+# ===========================================================================
+
+# --- Stopwatch --------------------------------------------------------------
+
+class Stopwatch:
+    """C++-backed monotonic stopwatch with pause/resume support."""
+
+    def __init__(self) -> None:
+        if not UTILS_OK:
+            raise RuntimeError("hr_ui_utils not loaded")
+        self._h = _utils.hr_stopwatch_create()
+
+    def __del__(self) -> None:
+        if self._h:
+            _utils.hr_stopwatch_destroy(self._h)
+            self._h = None
+
+    def start(self) -> None:
+        _utils.hr_stopwatch_start(self._h)
+
+    def pause(self) -> None:
+        _utils.hr_stopwatch_pause(self._h)
+
+    def resume(self) -> None:
+        _utils.hr_stopwatch_resume(self._h)
+
+    def elapsed_ms(self) -> int:
+        return int(_utils.hr_stopwatch_elapsed_ms(self._h))
+
+    def elapsed_sec(self) -> float:
+        return self.elapsed_ms() / 1000.0
+
+    def format(self) -> str:
+        buf = ctypes.create_string_buffer(16)
+        _utils.hr_stopwatch_format(self._h, buf, 16)
+        return buf.value.decode(_ENC)
+
+
+# --- Audio level meter helpers ----------------------------------------------
+
+def audio_rms_int16(pcm_bytes: bytes) -> int:
+    """Compute 0-100 level from raw PCM int16 bytes."""
+    if not UTILS_OK:
+        return 0
+    n = len(pcm_bytes) // 2
+    if n == 0:
+        return 0
+    arr = (ctypes.c_int16 * n).from_buffer_copy(pcm_bytes)
+    return int(_utils.hr_audio_rms_int16(arr, n))
+
+
+def lerp_color(t: float) -> str:
+    """Returns '#rrggbb' string for VU meter fill colour."""
+    if not UTILS_OK:
+        return "#a6e3a1"
+    packed = _utils.hr_lerp_color(ctypes.c_float(t))
+    r = (packed >> 16) & 0xFF
+    g = (packed >>  8) & 0xFF
+    b =  packed        & 0xFF
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def peak_decay(level: int, peak: int, peak_decay_count: int) -> tuple[int, int]:
+    """Returns (new_peak, new_peak_decay_count)."""
+    if not UTILS_OK:
+        return peak, peak_decay_count
+    p  = ctypes.c_int(peak)
+    pd = ctypes.c_int(peak_decay_count)
+    _utils.hr_peak_decay(level, ctypes.byref(p), ctypes.byref(pd))
+    return p.value, pd.value
+
+
+# --- REC badge --------------------------------------------------------------
+
+def render_rec_badge(bright: bool, w: int = 72, h: int = 28) -> bytes:
+    """Returns raw RGBA bytes (w*h*4)."""
+    if not UTILS_OK:
+        return bytes(w * h * 4)
+    buf = ctypes.create_string_buffer(w * h * 4)
+    _utils.hr_render_rec_badge(1 if bright else 0, w, h, buf)
+    return bytes(buf)
+
+
+# --- System analytics -------------------------------------------------------
+
+def get_sys_stats(disk_path: str) -> dict:
+    """Returns dict with cpu_percent, ram_*, disk_* keys."""
+    if not UTILS_OK:
+        return {}
+
+    class _SS(ctypes.Structure):
+        _fields_ = [
+            ("cpu_percent",   ctypes.c_float),
+            ("ram_total_mb",  ctypes.c_uint64),
+            ("ram_avail_mb",  ctypes.c_uint64),
+            ("ram_percent",   ctypes.c_float),
+            ("disk_total_gb", ctypes.c_uint64),
+            ("disk_free_gb",  ctypes.c_uint64),
+            ("disk_percent",  ctypes.c_float),
+            ("cpu_count",     ctypes.c_int),
+        ]
+
+    ss = _SS()
+    ok = _utils.hr_get_sys_stats(disk_path.encode(_ENC), ctypes.byref(ss))
+    if not ok:
+        return {}
+    return {
+        "cpu_percent":   round(float(ss.cpu_percent), 1),
+        "cpu_count":     ss.cpu_count,
+        "ram_total_mb":  ss.ram_total_mb,
+        "ram_avail_mb":  ss.ram_avail_mb,
+        "ram_percent":   round(float(ss.ram_percent), 1),
+        "disk_total_gb": ss.disk_total_gb,
+        "disk_free_gb":  ss.disk_free_gb,
+        "disk_percent":  round(float(ss.disk_percent), 1),
+    }
+
+
+# --- Notifications ----------------------------------------------------------
+
+def notify_beep() -> None:
+    if UTILS_OK:
+        _utils.hr_notify_beep()
+
+
+def flash_window(hwnd: int, n_times: int = 3, interval_ms: int = 120) -> None:
+    if UTILS_OK:
+        _utils.hr_flash_window(hwnd, n_times, interval_ms)
+
+
+def set_app_user_model_id(app_id: str) -> None:
+    if UTILS_OK:
+        _utils.hr_set_app_user_model_id(app_id.encode(_ENC))
+
+
+# --- FPS tracker ------------------------------------------------------------
+
+class FpsTracker:
+    def __init__(self) -> None:
+        if not UTILS_OK:
+            raise RuntimeError("hr_ui_utils not loaded")
+        self._h = _utils.hr_fps_tracker_create()
+
+    def __del__(self) -> None:
+        if self._h:
+            _utils.hr_fps_tracker_destroy(self._h)
+            self._h = None
+
+    def tick(self) -> float:
+        return float(_utils.hr_fps_tracker_tick(self._h))
+
+
+# --- Path / file helpers ----------------------------------------------------
+
+def file_size_mb(path: str) -> float:
+    if not UTILS_OK:
         try:
-            r = subprocess.run(cmd, capture_output=True, cwd=src_dir, timeout=60)
-            if r.returncode != 0:
-                log.warning("Build %s failed: %s", label, r.stderr.decode()[:400])
-                results.append(False)
-            else:
-                log.info("Built %s OK", label)
-                results.append(True)
-        except Exception as exc:
-            log.warning("Build %s error: %s", label, exc)
-            results.append(False)
-    return all(results)
+            return os.path.getsize(path) / (1024 * 1024)
+        except Exception:
+            return -1.0
+    return float(_utils.hr_file_size_mb(path.encode(_ENC)))
 
 
-if __name__ == "__main__":
-    print(f"NATIVE_OK={NATIVE_OK}  RINGBUF_OK={RINGBUF_OK}  FRAMEQUEUE_OK={FRAMEQUEUE_OK}")
-    print(f"PREVIEW_OK={PREVIEW_OK}  ENCODER_OK={ENCODER_OK}  STOPWATCH_OK={STOPWATCH_OK}")
-    print(f"DXCAP_OK={DXCAP_OK}  PIPELINE_OK={PIPELINE_OK}")
+def make_output_dir(path: str) -> bool:
+    if not UTILS_OK:
+        os.makedirs(path, exist_ok=True)
+        return True
+    return bool(_utils.hr_make_output_dir(path.encode(_ENC)))
 
-    bgrx = bytes([0, 128, 255, 0] * 4)
-    rgb  = core.bgrx_to_rgb_np(bgrx, 4, 1)
-    assert rgb[0, 0].tolist() == [255, 128, 0], f"unexpected {rgb[0, 0]}"
-    print("bgrx_to_rgb: OK")
 
-    sine = struct.pack("<" + "h" * 44100,
-                      *[int(32767 * math.sin(2 * math.pi * 440 * i / 44100))
-                        for i in range(44100)])
-    level = core.audio_rms_level(sine)
-    print(f"audio_rms 440 Hz: {level}  (expected ~75)")
+def open_folder(path: str) -> None:
+    if UTILS_OK:
+        _utils.hr_open_folder(path.encode(_ENC))
+    else:
+        import subprocess
+        subprocess.Popen(["xdg-open", path])
 
-    sw = stopwatch.create()
-    t0 = _time.perf_counter_ns()
-    stopwatch.sleep_until_ns(sw, 10_000_000)
-    elapsed = (_time.perf_counter_ns() - t0) / 1e6
-    print(f"stopwatch 10ms sleep: {elapsed:.2f} ms")
-    stopwatch.destroy(sw)
 
-    print("\nAll self-tests passed!")
+def path_exists(path: str) -> bool:
+    if not UTILS_OK:
+        return os.path.exists(path)
+    return bool(_utils.hr_path_exists(path.encode(_ENC)))
+
+
+def filename_from_template(template: str, folder: str) -> str:
+    if not UTILS_OK:
+        from datetime import datetime
+        now = datetime.now()
+        name = template.replace("{date}", now.strftime("%Y%m%d")) \
+                       .replace("{time}", now.strftime("%H%M%S"))
+        return os.path.join(folder, name + ".mp4")
+    buf = ctypes.create_string_buffer(512)
+    _utils.hr_filename_from_template(
+        template.encode(_ENC), folder.encode(_ENC), buf, 512)
+    return buf.value.decode(_ENC)
+
+
+log.info(
+    "homrec_native2 loaded: app=%s prof=%s utils=%s",
+    APP_OK, PROF_OK, UTILS_OK,
+)

@@ -40,9 +40,9 @@ BRIDGE_VERSION  = "1.2.0"
 HOMREC_VERSION = "1.6.2"
 CORE_VERSION   = "1.4.3"
 
-# ────────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------------------------
 #  Вспомогательные утилиты разбора аргументов
-# ────────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------------------------
 
 def _parse_named(raw: str, key: str) -> str | None:
     """Извлечь значение #key="value" или #key=value из строки raw."""
@@ -71,9 +71,9 @@ def _get_base_dir() -> str:
             else os.path.dirname(os.path.abspath(__file__)))
 
 
-# ────────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------------------------
 #  Менеджер созданных окон (хранилище)
-# ────────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------------------------
 
 class WindowRegistry:
     """
@@ -138,7 +138,7 @@ def _resolve_math(s: str) -> str:
 
 
 
-# ─── RuleRegistry ─────────────────────────────────────────────────────────────
+# --- RuleRegistry -------------------------------------------------------------
 
 class RuleRegistry:
     """
@@ -191,7 +191,7 @@ class RuleRegistry:
         return list(self._data.keys())
 
 
-# ─── AERegistry ───────────────────────────────────────────────────────────────
+# --- AERegistry ---------------------------------------------------------------
 
 class AERegistry:
     """
@@ -235,7 +235,7 @@ class AERegistry:
         return list(self._data.keys())
 
 
-# ─── AliasRegistry ────────────────────────────────────────────────────────────
+# --- AliasRegistry ------------------------------------------------------------
 
 class AliasRegistry:
     """
@@ -276,7 +276,7 @@ class AliasRegistry:
         return dict(self._data)
 
 
-# ─── EnvStore ─────────────────────────────────────────────────────────────────
+# --- EnvStore -----------------------------------------------------------------
 
 class EnvStore:
     """Хранит внутренние переменные окружения консоли ($name)."""
@@ -306,7 +306,7 @@ class EnvStore:
         return re.sub(r'\$([A-Za-z_]\w*)', _rep, s)
 
 
-# ────────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------------------------
 
 class HotkeyManager:
     """
@@ -394,9 +394,9 @@ class HotkeyManager:
         return dict(self._bindings)
 
 
-# ────────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------------------------
 #  NativeConsole
-# ────────────────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------------------------
 
 class NativeConsole:
     GITHUB = "https://github.com/homaaio/HomREC"
@@ -497,7 +497,7 @@ class NativeConsole:
             log.warning("hr_console.dll load failed: %s", e)
             return None  # BUG FIX: явный None
 
-    # ── Публичный API ────────────────────────────────────────────────────────────
+    # -- Публичный API ------------------------------------------------------------
 
     def toggle(self):
         # BUG FIX: проверка self._lib перед любым обращением
@@ -517,7 +517,7 @@ class NativeConsole:
         except Exception as e:
             log.error("run_command error '%s': %s", cmd, e)
 
-    # ── Callbacks DLL ────────────────────────────────────────────────────────────
+    # -- Callbacks DLL ------------------------------------------------------------
 
     def _start(self):
         log.info("Console: start_recording")
@@ -581,7 +581,7 @@ class NativeConsole:
         except Exception as e:
             log.warning("Console open_url error: %s", e)
 
-    # ── Расширенный диспетчер команд ─────────────────────────────────────────────
+    # -- Расширенный диспетчер команд ---------------------------------------------
 
     def _dispatch_extended(self, raw: str):
         """
@@ -630,7 +630,7 @@ class NativeConsole:
         if cmd == "!disconnect":
             self._cmd_disconnect(raw); return
 
-        # ── Новые команды ──────────────────────────────────────────────────────
+        # -- Новые команды ------------------------------------------------------
         if cmd == "!ls":
             self._cmd_ls(raw); return
         if cmd == "!status":
@@ -679,7 +679,7 @@ class NativeConsole:
 
 
 
-    # ─── !start --rec ─────────────────────────────────────────────────────────
+    # --- !start --rec ---------------------------------------------------------
 
     def _cmd_start_rec(self, raw: str):
         """!start --rec 1|0"""
@@ -718,7 +718,7 @@ class NativeConsole:
                 if not silent:
                     log.info("!start --rec 0: запись не была активна")
 
-    # ─── !rule ────────────────────────────────────────────────────────────────
+    # --- !rule ----------------------------------------------------------------
 
     def _cmd_rule(self, raw: str):
         """
@@ -756,7 +756,7 @@ class NativeConsole:
 
         log.warning("!rule: используй --check или --get from connect")
 
-    # ─── !edit ────────────────────────────────────────────────────────────────
+    # --- !edit ----------------------------------------------------------------
 
     def _cmd_edit(self, raw: str):
         """
@@ -838,7 +838,7 @@ class NativeConsole:
 
         log.warning("!edit: используй --file / --window / --rule / --settings")
 
-    # ─── !create ──────────────────────────────────────────────────────────────
+    # --- !create --------------------------------------------------------------
 
     def _cmd_create(self, raw: str):
         """
@@ -873,7 +873,7 @@ class NativeConsole:
 
         base = _get_base_dir()
 
-        # ── --rule ────────────────────────────────────────────────────────────
+        # -- --rule ------------------------------------------------------------
         if is_rule:
             # body = всё после первой ';' после #name=...
             m = re.search(r'#name=["\']?[^"\';\s]+["\']?\s*;\s*(.+)', raw, re.DOTALL)
@@ -908,7 +908,7 @@ class NativeConsole:
                     self._run_rule_body(name, body, silent)
             return
 
-        # ── --ae ──────────────────────────────────────────────────────────────
+        # -- --ae --------------------------------------------------------------
         if is_ae:
             type_raw = _parse_named(raw, "type")
             if not type_raw:
@@ -938,7 +938,7 @@ class NativeConsole:
                          ae_type, name, ae_data.get("hex"), ae_data.get("rgb"))
             return
 
-        # ── --window ──────────────────────────────────────────────────────────
+        # -- --window ----------------------------------------------------------
         # Parse window style params
         bg   = _parse_named(raw, "bg")   or "white"
         fg   = _parse_named(raw, "fg")   or "black"
@@ -999,7 +999,7 @@ class NativeConsole:
         if auto_connect and not disconnected:
             self._cmd_connect(f'!connect --window #name="{name}" 1')
 
-    # ─── !ls ──────────────────────────────────────────────────────────────────
+    # --- !ls ------------------------------------------------------------------
 
     def _cmd_ls(self, raw: str):
         """!ls [--windows][--rules][--ae][--hotkeys][--all][-v][--json][--connected][--disconnected][--count]"""
@@ -1062,7 +1062,7 @@ class NativeConsole:
         else:
             for section, items in result.items():
                 names = sorted(items.keys()) if sort_by == "name" else list(items.keys())
-                log.info("── %s (%d) ──", section, len(names))
+                log.info("-- %s (%d) --", section, len(names))
                 for name in names:
                     data = items[name]
                     if verbose:
@@ -1071,7 +1071,7 @@ class NativeConsole:
                         brief = "  ".join(f"{k}={v}" for k, v in data.items())
                         log.info("  %-24s  %s", name, brief)
 
-    # ─── !status ──────────────────────────────────────────────────────────────
+    # --- !status --------------------------------------------------------------
 
     def _cmd_status(self, raw: str):
         """Текущее состояние системы одним блоком."""
@@ -1102,7 +1102,7 @@ class NativeConsole:
             log.info("правила : %d подключённых / %d всего", rules_on, len(self._rule_reg.all_names()))
             log.info("хоткеи  : %d привязок", hk_count)
 
-    # ─── !info ────────────────────────────────────────────────────────────────
+    # --- !info ----------------------------------------------------------------
 
     def _cmd_info(self, raw: str):
         """!info --window|--rule|--ae|--hotkey #name="..." / #key="..."""
@@ -1149,7 +1149,7 @@ class NativeConsole:
 
         log.warning("!info: используй --window / --rule / --ae / --hotkey")
 
-    # ─── !history ─────────────────────────────────────────────────────────────
+    # --- !history -------------------------------------------------------------
 
     def _cmd_history(self, raw: str):
         """!history [#count=N] [--clear] [--search "text"]"""
@@ -1169,7 +1169,7 @@ class NativeConsole:
         for i, line in enumerate(hist, 1):
             log.info("  %3d  %s", i, line)
 
-    # ─── !alias ───────────────────────────────────────────────────────────────
+    # --- !alias ---------------------------------------------------------------
 
     def _cmd_alias(self, raw: str):
         """!alias #name="sr" #cmd="!start --rec 1" | --list | --remove #name="sr" """
@@ -1196,7 +1196,7 @@ class NativeConsole:
         self._alias_reg.add(name, cmd)
         log.info("!alias: '%s' → %s", name, cmd)
 
-    # ─── !repeat ──────────────────────────────────────────────────────────────
+    # --- !repeat --------------------------------------------------------------
 
     def _cmd_repeat(self, raw: str):
         """!repeat #count=N <command>"""
@@ -1210,7 +1210,7 @@ class NativeConsole:
             log.info("!repeat [%d/%d]: %s", i + 1, count, cmd)
             self._dispatch_extended(cmd)
 
-    # ─── !delay ───────────────────────────────────────────────────────────────
+    # --- !delay ---------------------------------------------------------------
 
     def _cmd_delay(self, raw: str):
         """!delay #ms=N <command>"""
@@ -1225,7 +1225,7 @@ class NativeConsole:
         t.daemon = True
         t.start()
 
-    # ─── !batch ───────────────────────────────────────────────────────────────
+    # --- !batch ---------------------------------------------------------------
 
     def _cmd_batch(self, raw: str):
         """!batch cmd1 && cmd2 && ...  [-x / --stop-on-error]"""
@@ -1245,7 +1245,7 @@ class NativeConsole:
                 if stop_on_error:
                     log.warning("!batch: остановка при ошибке (-x)"); return
 
-    # ─── !run ─────────────────────────────────────────────────────────────────
+    # --- !run -----------------------------------------------------------------
 
     def _cmd_run(self, raw: str):
         """!run #file="script.hrc" [--encoding utf8|cp1251] [--ignore-errors] [--echo-each] [-x]"""
@@ -1281,14 +1281,14 @@ class NativeConsole:
                 if stop_on_error and not ignore_errors:
                     log.warning("!run: остановка (-x)"); return
 
-    # ─── !clear ───────────────────────────────────────────────────────────────
+    # --- !clear ---------------------------------------------------------------
 
     def _cmd_clear(self, raw: str):
         """!clear — очистить вывод консоли."""
         # Специальный маркер, который можно перехватить на стороне UI
         log.info("\x00CLEAR_CONSOLE\x00")
 
-    # ─── !echo ────────────────────────────────────────────────────────────────
+    # --- !echo ----------------------------------------------------------------
 
     def _cmd_echo(self, raw: str):
         """!echo [--ok|--warn|--err] <text>"""
@@ -1311,7 +1311,7 @@ class NativeConsole:
         else:
             log.info(body)
 
-    # ─── !clip ────────────────────────────────────────────────────────────────
+    # --- !clip ----------------------------------------------------------------
 
     def _cmd_clip(self, raw: str):
         """!clip --copy "text" | --paste | --clear"""
@@ -1351,7 +1351,7 @@ class NativeConsole:
             return
         log.warning("!clip: используй --copy \"текст\" / --paste / --clear")
 
-    # ─── !env ─────────────────────────────────────────────────────────────────
+    # --- !env -----------------------------------------------------------------
 
     def _cmd_env(self, raw: str):
         """!env --set #name="x" #val="y" | --get #name | --list | --unset #name"""
@@ -1384,7 +1384,7 @@ class NativeConsole:
             return
         log.warning("!env: используй --set / --get / --list / --unset")
 
-    # ─── !timer ───────────────────────────────────────────────────────────────
+    # --- !timer ---------------------------------------------------------------
 
     def _cmd_timer(self, raw: str):
         """!timer #name="x" #ms=N <cmd> | --cancel #name | --list"""
@@ -1425,7 +1425,7 @@ class NativeConsole:
         self._timers[name] = t
         log.info("!timer '%s': через %dms → %s", name, ms, cmd)
 
-    # ─── !watch ───────────────────────────────────────────────────────────────
+    # --- !watch ---------------------------------------------------------------
 
     def _cmd_watch(self, raw: str):
         """!watch #name="x" #ms=N <cmd> [--max-runs #count=N] | --stop #name | --list"""
@@ -1498,7 +1498,7 @@ class NativeConsole:
                  name, ms, f"±{jitter_ms}ms" if jitter_ms else "",
                  cmd, f"  (max {max_runs})" if max_runs else "")
 
-    # ─── Console output helper ────────────────────────────────────────────────
+    # --- Console output helper ------------------------------------------------
 
     def _con_write(self, text: str, tag: int = 0):
         """Вывести строку напрямую в окно DLL-консоли (тег: 0=text 1=ok 2=warn 3=err 4=dim 5=accent)."""
@@ -1515,7 +1515,7 @@ class NativeConsole:
     def _con_warn(self, s: str): self._con_write("  \u26a0  " + s, 2)
     def _con_err (self, s: str): self._con_write("  \u2716  " + s, 3)
 
-    # ─── !ping ────────────────────────────────────────────────────────────────
+    # --- !ping ----------------------------------------------------------------
 
     def _cmd_ping(self, raw: str):
         import time
@@ -1523,12 +1523,12 @@ class NativeConsole:
         elapsed = (time.perf_counter() - t0) * 1000
         self._con_ok(f"pong  ({elapsed:.3f} ms)")
 
-    # ─── !version ─────────────────────────────────────────────────────────────
+    # --- !version -------------------------------------------------------------
 
     def _cmd_version(self, raw: str):
         self._con_write(f"  Console  {CONSOLE_VERSION}  |  Bridge  {BRIDGE_VERSION}  |  Python  {sys.version.split()[0]}", 5)
 
-    # ─── !homrec ──────────────────────────────────────────────────────────────
+    # --- !homrec --------------------------------------------------------------
 
     def _cmd_homrec(self, raw: str):
         """
@@ -1551,7 +1551,7 @@ class NativeConsole:
             return
         self._con_warn("!homrec: unknown option. Try  !homrec --version  or  !homrec --help")
 
-    # ─── !log ─────────────────────────────────────────────────────────────────
+    # --- !log -----------------------------------------------------------------
 
     def _cmd_log(self, raw: str):
         """!log --tail [#count=N] | --search "x" [--invert] | --level info|warn|err | --clear"""
@@ -1602,7 +1602,7 @@ class NativeConsole:
         for line in lines:
             log.info(line)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # --------------------------------------------------------------------------
 
     def _run_rule_body(self, rule_name: str, body: str, silent: bool = False):
         """
@@ -1622,7 +1622,7 @@ class NativeConsole:
                 log.info("  rule '%s' → %s", rule_name, step)
             self._dispatch_extended(step)
 
-    # ─── !start --window ──────────────────────────────────────────────────────
+    # --- !start --window ------------------------------------------------------
 
     def _cmd_start_window(self, raw: str):
         """!start --window #name="x"  — переоткрыть созданное окно."""
@@ -1643,7 +1643,7 @@ class NativeConsole:
         else:
             self._open_tk_window(name)
 
-    # ─── $rm ──────────────────────────────────────────────────────────────────
+    # --- $rm ------------------------------------------------------------------
 
     def _cmd_rm(self, raw: str):
         """
@@ -1753,7 +1753,7 @@ class NativeConsole:
 
         log.warning("$rm: используй --window / --rule / --ae")
 
-    # ─── !connect ─────────────────────────────────────────────────────────────
+    # --- !connect -------------------------------------------------------------
 
     def _cmd_connect(self, raw: str):
         """
@@ -1851,7 +1851,7 @@ class NativeConsole:
 
         log.warning("!connect: используй --window / --rule / --function")
 
-    # ─── !disconnect ──────────────────────────────────────────────────────────
+    # --- !disconnect ----------------------------------------------------------
 
     def _cmd_disconnect(self, raw: str):
         """
@@ -1954,7 +1954,7 @@ class NativeConsole:
         log.warning("!disconnect: используй --window / --rule / --ae / --function  или #name=")
 
 
-    # ─── Вспомогательные методы ───────────────────────────────────────────────
+    # --- Вспомогательные методы -----------------------------------------------
 
     def _root_alive(self) -> bool:
         """Проверить, существует ли ещё root-окно Tkinter."""
