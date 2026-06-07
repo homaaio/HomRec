@@ -9,6 +9,10 @@ hr_terminal.exe - standalone external terminal window for HomRec console.
   Unicode input field, Catppuccin Mocha color scheme matching the DLL console).
   Multiple instances supported simultaneously (up to 8 concurrent connections).
 
+=== Changed ===
+
+All source files was moved to src/ folder
+
 === Fixed ===
 
 Minor bugs has been fixed
