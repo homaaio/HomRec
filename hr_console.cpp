@@ -38,6 +38,12 @@
 #define _UNICODE
 #include <windows.h>
 #include <richedit.h>
+#ifdef _MSC_VER
+#  pragma comment(lib, "gdi32.lib")
+#else
+// MinGW-w64: pass -lgdi32 on the linker command line
+// (this pragma is a no-op for GCC but documents the requirement)
+#endif
 
 #include <string>
 #include <vector>
