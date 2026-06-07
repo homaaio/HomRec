@@ -1,25 +1,3 @@
-/*
- * hr_profile_io.cpp  —  HomRec profile / theme / language I/O engine  (v1.6.2)
- *
- * Реализует бинарный формат файлов .hrc / .hrl / .hrt из homrec.py:
- *   magic (4 bytes) + gzip-compressed JSON body
- *
- * Также содержит:
- *   - Полную структуру HrProfileFull со всеми полями из homrec.py
- *   - Сериализацию / десериализацию в/из JSON
- *   - Сканирование папок Assets/Themes/ и Assets/L/
- *   - Определение типа файла по magic (hrc_detect)
- *
- * Зависимости: zlib (для gzip), доступна на всех платформах.
- *
- * Build (MinGW-w64):
- *   g++ -O2 -std=c++17 -shared -static-libgcc -static-libstdc++ ^
- *       -o hr_profile_io.dll hr_profile_io.cpp -lz
- *
- * Build (GCC Linux):
- *   g++ -O2 -std=c++17 -shared -fPIC -o hr_profile_io.so hr_profile_io.cpp -lz
- */
-
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
@@ -38,27 +16,138 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-/* zlib is required for .hrc / .hrl / .hrt file I/O.
- *   MinGW-w64 : zlib ships with the toolchain — add  -lz  to the linker flags.
- *               build_native.py must include "-lz" in the hr_profile_io link step.
- *   Ubuntu    : sudo apt install zlib1g-dev
- *   MSVC      : install via vcpkg (vcpkg install zlib:x64-windows)
- */
-#ifndef _WIN32
+/* ── zlib / gzip ────────────────────────────────────────────────────────────
+ * hr_profile_io uses gzip to wrap JSON in .hrc/.hrl/.hrt files.
+ *
+ * On Windows, zlib is loaded at runtime from zlib1.dll (ships with Python,
+ * Git for Windows, and most dev tools — it will be present on any machine
+ * that can run homrec.py).  This removes the compile-time dependency on the
+ * zlib headers entirely, so the DLL builds without -I or -lz flags.
+ *
+ * On Linux/macOS the system zlib header and library are used as normal.
+ *
+ * ── HOW TO RESTORE THE STATIC DEPENDENCY (if you prefer) ────────────────────
+ * Delete everything between the dashed lines and replace with:
+ *   #include <zlib.h>
+ * Then add  -lz  to the linker flags in build_native.py and ensure zlib-dev
+ * is installed (MinGW-w64: already bundled; Ubuntu: apt install zlib1g-dev).
+ * ─────────────────────────────────────────────────────────────────────────── */
+#if defined(_WIN32)
+
+/* zlib type aliases — mirrors zlib.h exactly so the rest of the file compiles
+ * without the header.                                                          */
+typedef unsigned char   Bytef;
+typedef unsigned long   uLong;
+typedef unsigned long   uLongf;
+typedef unsigned int    uInt;
+
+typedef struct {
+    const Bytef *next_in;  uInt avail_in;  uLong total_in;
+    Bytef       *next_out; uInt avail_out; uLong total_out;
+    char *msg; void *state;
+    void *zalloc; void *zfree; void *opaque;
+    int data_type; uLong adler; uLong reserved;
+} z_stream;
+
+#define Z_OK              0
+#define Z_STREAM_END      1
+#define Z_STREAM_ERROR   (-2)
+#define Z_DATA_ERROR     (-3)
+#define Z_DEFLATED        8
+#define Z_BEST_COMPRESSION 9
+#define Z_DEFAULT_STRATEGY 0
+#define Z_FINISH           4
+#define Z_SYNC_FLUSH       2
+
+/* Function-pointer types for the zlib1.dll symbols we need */
+typedef uLong (__cdecl *_zfn_compressBound)(uLong);
+typedef int   (__cdecl *_zfn_deflateInit2_)(z_stream*,int,int,int,int,int,
+                                             const char*,int);
+typedef int   (__cdecl *_zfn_deflate)      (z_stream*,int);
+typedef int   (__cdecl *_zfn_deflateEnd)   (z_stream*);
+typedef int   (__cdecl *_zfn_inflateInit2_)(z_stream*,int,const char*,int);
+typedef int   (__cdecl *_zfn_inflate)      (z_stream*,int);
+typedef int   (__cdecl *_zfn_inflateEnd)   (z_stream*);
+
+struct _ZlibRT {
+    HMODULE            h;
+    _zfn_compressBound compressBound;
+    _zfn_deflateInit2_ deflateInit2_;
+    _zfn_deflate       deflate;
+    _zfn_deflateEnd    deflateEnd;
+    _zfn_inflateInit2_ inflateInit2_;
+    _zfn_inflate       inflate;
+    _zfn_inflateEnd    inflateEnd;
+};
+
+static struct _ZlibRT _zrt;
+static int            _zrt_loaded = 0;
+
+static int _zlib_load(void) {
+    if (_zrt_loaded) return _zrt.h != NULL;
+    _zrt_loaded = 1;
+    /* Try the standard zlib1.dll names in the same order Python/Git use */
+    static const char * const names[] = { "zlib1.dll", "zlib.dll", NULL };
+    for (int i = 0; names[i]; i++) {
+        HMODULE h = LoadLibraryA(names[i]);
+        if (!h) continue;
+        _zrt.h             = h;
+        _zrt.compressBound = (_zfn_compressBound) GetProcAddress(h,"compressBound");
+        _zrt.deflateInit2_ = (_zfn_deflateInit2_) GetProcAddress(h,"deflateInit2_");
+        _zrt.deflate       = (_zfn_deflate)       GetProcAddress(h,"deflate");
+        _zrt.deflateEnd    = (_zfn_deflateEnd)    GetProcAddress(h,"deflateEnd");
+        _zrt.inflateInit2_ = (_zfn_inflateInit2_) GetProcAddress(h,"inflateInit2_");
+        _zrt.inflate       = (_zfn_inflate)       GetProcAddress(h,"inflate");
+        _zrt.inflateEnd    = (_zfn_inflateEnd)    GetProcAddress(h,"inflateEnd");
+        if (_zrt.compressBound && _zrt.deflateInit2_ && _zrt.deflate &&
+            _zrt.deflateEnd   && _zrt.inflateInit2_ && _zrt.inflate &&
+            _zrt.inflateEnd) {
+            return 1;   /* success */
+        }
+        FreeLibrary(h);
+        _zrt.h = NULL;
+    }
+    return 0;   /* zlib1.dll not found */
+}
+
+/* Thin wrappers that match the zlib API and delegate to the runtime DLL */
+static uLong _zlib_compressBound(uLong s) {
+    return _zlib_load() ? _zrt.compressBound(s) : s + s/10 + 64;
+}
+static int _zlib_deflateInit2(z_stream *s,int l,int m,int wb,int ml,int st) {
+    if (!_zlib_load()) return Z_STREAM_ERROR;
+    /* deflateInit2_ expects the zlib version string and stream size */
+    return _zrt.deflateInit2_(s,l,m,wb,ml,st,"1.2.11",(int)sizeof(z_stream));
+}
+static int _zlib_deflate(z_stream *s, int f) {
+    return _zlib_load() ? _zrt.deflate(s,f) : Z_STREAM_ERROR;
+}
+static int _zlib_deflateEnd(z_stream *s) {
+    return _zrt.h ? _zrt.deflateEnd(s) : Z_STREAM_ERROR;
+}
+static int _zlib_inflateInit2(z_stream *s, int wb) {
+    if (!_zlib_load()) return Z_STREAM_ERROR;
+    return _zrt.inflateInit2_(s,wb,"1.2.11",(int)sizeof(z_stream));
+}
+static int _zlib_inflate(z_stream *s, int f) {
+    return _zlib_load() ? _zrt.inflate(s,f) : Z_STREAM_ERROR;
+}
+static int _zlib_inflateEnd(z_stream *s) {
+    return _zrt.h ? _zrt.inflateEnd(s) : Z_STREAM_ERROR;
+}
+
+/* Map the zlib macro/function names used in the rest of this file */
+#define compressBound   _zlib_compressBound
+#define deflateInit2    _zlib_deflateInit2
+#define deflate         _zlib_deflate
+#define deflateEnd      _zlib_deflateEnd
+#define inflateInit2    _zlib_inflateInit2
+#define inflate         _zlib_inflate
+#define inflateEnd      _zlib_inflateEnd
+
+#else  /* Linux / macOS — use the system zlib header as normal */
 #  include <zlib.h>
-#else
-/* On MinGW-w64, zlib.h lives alongside the compiler headers.
- * If the build system did not set up the include path, fall back to
- * a relative path that matches the standard MinGW-w64 layout.       */
-#  if defined(__has_include) && __has_include(<zlib.h>)
-#    include <zlib.h>
-#  elif defined(__has_include) && __has_include(<../include/zlib.h>)
-#    include <../include/zlib.h>
-#  else
-#    include <zlib.h>   /* will fail with a clear message if zlib is absent */
-#  endif
-#  pragma comment(lib, "z.lib")   /* MSVC; MinGW uses -lz on cmd line */
-#endif
+#endif /* _WIN32 */
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Magic bytes (mirrors Python _HRC_MAGIC / _HRL_MAGIC / _HRT_MAGIC)         */

@@ -75,7 +75,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.6.2"
+CURRENT_VERSION = "1.6.3"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -111,7 +111,7 @@ def _version_gt(a: str, b: str) -> bool:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.6.2",
+        "app_title": "HomRec v1.6.3",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -204,7 +204,7 @@ LANGUAGES = {
         "show_log": "Show Log",
     },
     "ru": {
-        "app_title": "HomRec v1.6.2",
+        "app_title": "HomRec v1.6.3",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -378,7 +378,7 @@ def optimize_for_performance() -> None:
     except Exception as _e:
         log.warning(f"Native ext not loaded at startup: {_e}")
 
-    log.info("Performance optimizations applied (v1.6.2)")
+    log.info("Performance optimizations applied (v1.6.3)")
 
 class AudioLevelMeter(tk.Canvas):
     """Smooth gradient audio level meter with peak indicator (no segments)."""
@@ -2452,7 +2452,7 @@ class HomRecScreen:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_tray()
-        log.info("HomRec v1.6.2 started, language: %s", self.current_language)
+        log.info("HomRec v1.6.3 started, language: %s", self.current_language)
         # Check for updates 2 seconds after startup (non-blocking)
         self.root.after(2000, self._start_update_check)
         # Show welcome dialog on first launch
@@ -2556,7 +2556,7 @@ class HomRecScreen:
                 pass
 
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.2")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.3")
 
         # Pre-render two frames of the REC badge (for a simple pulse animation)
         self._rec_icon_img = None
@@ -3145,7 +3145,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.6.2", 
+        tk.Label(title_frame, text="v1.6.3", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
