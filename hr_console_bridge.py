@@ -445,6 +445,13 @@ class NativeConsole:
             self._lib.hr_con_set_command_cb.restype = None
             self._lib.hr_con_set_command_cb(self._cb_command)
 
+        # Запустить pipe-сервер для hr_terminal.exe
+        if hasattr(self._lib, 'hr_pipe_server_start'):
+            self._lib.hr_pipe_server_start.argtypes = []
+            self._lib.hr_pipe_server_start.restype  = None
+            self._lib.hr_pipe_server_start()
+            log.info("Pipe server started for external terminals")
+
         # Фильтр для !disconnect --log
         # BUG FIX: проверять self._lib != None перед вызовом
         class LogFilter(logging.Filter):
