@@ -30,8 +30,10 @@
 #  include <windows.h>
 #  include <psapi.h>
 #  include <shlobj.h>
+#  include <wininet.h>   /* HINTERNET, INTERNET_PORT, etc. */
 #  pragma comment(lib, "psapi.lib")
 #  pragma comment(lib, "shell32.lib")
+#  pragma comment(lib, "wininet.lib")
 #  define HR_EXPORT extern "C" __declspec(dllexport)
    typedef HANDLE hr_proc_t;
 #else
@@ -878,19 +880,6 @@ HR_EXPORT int hr_acquire_single_instance(const char *mutex_name) {
 /*  Update check (synchronous, call from a worker thread)                      */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
-/* WinINet function-pointer types — must be at file scope so that HINTERNET
- * (itself a typedef) is fully visible when GCC parses the declarations.
- * Putting them inside the function body triggers "typedef is initialized"
- * errors on GCC/MinGW because the return type contains another typedef.     */
-#ifdef _WIN32
-typedef HINTERNET (WINAPI *pfnWiOpen) (LPCSTR,DWORD,LPCSTR,LPCSTR,DWORD);
-typedef HINTERNET (WINAPI *pfnWiConn) (HINTERNET,LPCSTR,INTERNET_PORT,LPCSTR,LPCSTR,DWORD,DWORD,DWORD_PTR);
-typedef HINTERNET (WINAPI *pfnWiReq)  (HINTERNET,LPCSTR,LPCSTR,LPCSTR,LPCSTR,LPCSTR*,DWORD,DWORD_PTR);
-typedef BOOL      (WINAPI *pfnWiSend) (HINTERNET,LPCSTR,DWORD,LPVOID,DWORD,DWORD,DWORD_PTR);
-typedef BOOL      (WINAPI *pfnWiRead) (HINTERNET,LPVOID,DWORD,LPDWORD);
-typedef BOOL      (WINAPI *pfnWiClose)(HINTERNET);
-#endif
-
 /*
  * hr_fetch_latest_version
  *
@@ -915,14 +904,19 @@ HR_EXPORT int hr_fetch_latest_version(const char *repo,
     HMODULE hWinInet = LoadLibraryA("wininet.dll");
     if (!hWinInet) return 0;
 
-    /* Use file-scope typedefs pfnWi* — GCC rejects typedef declarations inside
-     * a function when the return type is itself a typedef (HINTERNET). */
-    auto _Open  = (pfnWiOpen) GetProcAddress(hWinInet, "InternetOpenA");
-    auto _Conn  = (pfnWiConn) GetProcAddress(hWinInet, "InternetConnectA");
-    auto _Req   = (pfnWiReq)  GetProcAddress(hWinInet, "HttpOpenRequestA");
-    auto _Send  = (pfnWiSend) GetProcAddress(hWinInet, "HttpSendRequestA");
-    auto _Read  = (pfnWiRead) GetProcAddress(hWinInet, "InternetReadFile");
-    auto _Close = (pfnWiClose)GetProcAddress(hWinInet, "InternetCloseHandle");
+    typedef HINTERNET (WINAPI *pfnOpen)(LPCSTR,DWORD,LPCSTR,LPCSTR,DWORD);
+    typedef HINTERNET (WINAPI *pfnConn)(HINTERNET,LPCSTR,INTERNET_PORT,LPCSTR,LPCSTR,DWORD,DWORD,DWORD_PTR);
+    typedef HINTERNET (WINAPI *pfnReq) (HINTERNET,LPCSTR,LPCSTR,LPCSTR,LPCSTR,LPCSTR*,DWORD,DWORD_PTR);
+    typedef BOOL      (WINAPI *pfnSend)(HINTERNET,LPCSTR,DWORD,LPVOID,DWORD,DWORD,DWORD_PTR);
+    typedef BOOL      (WINAPI *pfnRead)(HINTERNET,LPVOID,DWORD,LPDWORD);
+    typedef BOOL      (WINAPI *pfnClose)(HINTERNET);
+
+    auto _Open  = (pfnOpen) GetProcAddress(hWinInet, "InternetOpenA");
+    auto _Conn  = (pfnConn) GetProcAddress(hWinInet, "InternetConnectA");
+    auto _Req   = (pfnReq)  GetProcAddress(hWinInet, "HttpOpenRequestA");
+    auto _Send  = (pfnSend) GetProcAddress(hWinInet, "HttpSendRequestA");
+    auto _Read  = (pfnRead) GetProcAddress(hWinInet, "InternetReadFile");
+    auto _Close = (pfnClose)GetProcAddress(hWinInet, "InternetCloseHandle");
 
     if (!_Open || !_Conn || !_Req || !_Send || !_Read || !_Close) {
         FreeLibrary(hWinInet); return 0;
