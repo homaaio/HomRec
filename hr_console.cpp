@@ -1,37 +1,3 @@
-/*
- * hr_console.cpp  —  HomRec Developer Console  v3.0
- *
- * Pure Win32 / GDI, статически слинкован с libstdc++ и libgcc
- *
- * API:
- *   hr_con_init / hr_con_set_command_cb / hr_con_toggle
- *   hr_con_set_recording(int) / hr_con_log_connected() -> int
- *
- * Команды:
- *   !start   --rec 1|0            старт/стоп записи
- *   !start   --window #name="..."
- *   !rule    --get from connect #name="..."
- *   !rule    --check #name="..."
- *   !edit    --file|--window|--rule|--settings #name="..."
- *   !create  --window #name="..." [#bg=...] [#fg=...] [#size=(WxH)] [-o][-s][-n][-c][-d]
- *   !create  --window --notepad [as .ext] #name="..."
- *   !create  --rule  #name="..."; <step>; <step> [-c][-d]
- *   !create  --ae #type=color{rgb=(r,g,b)|hex=(#RRGGBB)} #name="..."
- *   !connect --window #name="..." 1|0   [-s][-q]
- *   !connect --rule   #name="..."       [-s][-q]
- *   !connect --function <cmd> to|; <key> [#name="..."]  [-s][-q]
- *   !disconnect --window|--rule #name="..."  [-s][-q]
- *   !disconnect --ae #type=... #name="..."
- *   !disconnect --function <cmd> to|; <key>  (или #name="func")
- *   $rm      --window #name="..." [-q]
- *
- * Математика: {int.random(a, b)} в любом аргументе
- *
- * Баг-фиксы (унаследованы из v2):
- *   WMA_EXEC дренирует всю очередь; g_hist_idx в границах;
- *   WM_DESTROY чистит GDI; commit_input обрезает \r;
- *   cmd_date пропускает пустые токены
- */
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #define UNICODE
@@ -55,6 +21,11 @@
 #else
 #  define HR_EXPORT extern "C"
 #endif
+
+// Объявления из hr_console_pipe_server.cpp
+extern "C" void hr_pipe_broadcast(const wchar_t* text, int tag);
+extern "C" void hr_pipe_server_start();
+extern "C" void hr_pipe_server_stop();
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 typedef void (*CB_VOID)();
@@ -129,9 +100,10 @@ static void post_exec(std::function<void()> fn) {
     if (g_hwnd) PostMessageW(g_hwnd, WMA_EXEC, 0, 0);
 }
 
-static void write_line(const wchar_t* text, int tag) {
+void write_line(const wchar_t* text, int tag) {
     { std::lock_guard<std::mutex> lk(g_msg_mx); g_msg_q.push_back({text, tag}); }
     if (g_hwnd) PostMessageW(g_hwnd, WMA_FLUSH, 0, 0);
+    hr_pipe_broadcast(text, tag);   // дублировать вывод во все подключённые терминалы
 }
 
 static void wok  (const wchar_t* s) { write_line((std::wstring(L"  \u2714  ") + s).c_str(), 1); }
@@ -241,7 +213,7 @@ static void forward_to_python(const std::wstring& raw) {
 //  Commands
 // ═════════════════════════════════════════════════════════════════════════════
 
-static bool dispatch(const std::wstring& raw); // forward
+bool dispatch(const std::wstring& raw); // forward
 
 static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
     bool no_web = has(args, L"-w");
@@ -519,7 +491,7 @@ static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
 // ─── Главный диспетчер ────────────────────────────────────────────────────────
 // Возвращает true если команда выполнена успешно, false при ошибке.
 // Используется флагом -return/-ret для вывода 1/0 вместо обычного текста.
-static bool dispatch(const std::wstring& raw) {
+bool dispatch(const std::wstring& raw) {
     auto parts = split(raw);
     if (parts.empty()) return false;
     auto cmd  = tolw(parts[0]);
@@ -739,6 +711,7 @@ static LRESULT CALLBACK wnd_proc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_br_inp)  { DeleteObject(g_br_inp);  g_br_inp  = nullptr; }
         if (g_fmono)   { DeleteObject(g_fmono);   g_fmono   = nullptr; }
         if (g_fbold)   { DeleteObject(g_fbold);   g_fbold   = nullptr; }
+        hr_pipe_server_stop();   // остановить pipe-сервер
         PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hw,msg,wp,lp);
@@ -843,6 +816,9 @@ HR_EXPORT void hr_con_init(
     g_cb_open_log=cb_open_log; g_cb_open_url=cb_open_url;
     if (log_path) wcsncpy_s(g_log_path, log_path, _TRUNCATE);
     if (gh_url)   wcsncpy_s(g_gh_url,   gh_url,   _TRUNCATE);
+
+    // Запустить pipe-сервер для внешних терминалов
+    hr_pipe_server_start();
 }
 
 // НОВОЕ: регистрация колбэка для расширенных команд
