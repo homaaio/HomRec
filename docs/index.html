@@ -2,873 +2,644 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HomRec — Screen recorder for weak PCs</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+<title>HomRec — Screen recorder</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-:root {
-  --base:    #1e1e2e;
-  --mantle:  #181825;
-  --crust:   #11111b;
-  --surface0:#313244;
-  --surface1:#45475a;
-  --surface2:#585b70;
-  --overlay0:#6c7086;
-  --overlay1:#7f849c;
-  --text:    #cdd6f4;
-  --subtext1:#bac2de;
-  --subtext0:#a6adc8;
-  --lavender:#b4befe;
-  --blue:    #89b4fa;
-  --sapphire:#74c7ec;
-  --sky:     #89dceb;
-  --teal:    #94e2d5;
-  --green:   #a6e3a1;
-  --yellow:  #f9e2af;
-  --peach:   #fab387;
-  --red:     #f38ba8;
-  --mauve:   #cba6f7;
-  --pink:    #f5c2e7;
-}
+  :root {
+    --bg: #0a0a0c;
+    --surface: #111116;
+    --border: #1e1e28;
+    --accent: #c8ff4e;
+    --accent2: #4ef0ff;
+    --text: #e8e8f0;
+    --muted: #5a5a72;
+    --danger: #ff4e6a;
+  }
 
-*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
 
-body {
-  background: var(--crust);
-  color: var(--text);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 15px;
-  line-height: 1.75;
-  overflow-x: hidden;
-  -webkit-font-smoothing: antialiased;
-}
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow-x: hidden;
+    position: relative;
+  }
 
-/* scanlines */
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,.04) 3px, rgba(0,0,0,.04) 4px);
-  pointer-events: none;
-  z-index: 9999;
-}
+  /* grid background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(200,255,78,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(200,255,78,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
 
-/* ── NAV ────────────────────────────────────── */
-nav {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 200;
-  height: 56px;
-  background: rgba(17,17,27,.88);
-  backdrop-filter: blur(20px) saturate(180%);
-  border-bottom: 1px solid var(--surface0);
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 48px;
-}
-.nav-logo {
-  font-family: 'Syne', sans-serif;
-  font-weight: 800; font-size: 20px;
-  color: var(--blue); letter-spacing: -.5px;
-  display: flex; align-items: baseline; gap: 10px;
-  text-decoration: none;
-}
-.nav-logo span {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px; font-weight: 400;
-  color: var(--overlay0); letter-spacing: .5px;
-}
-.nav-links { display: flex; gap: 32px; list-style: none; }
-.nav-links a {
-  font-size: 12px; letter-spacing: .5px;
-  color: var(--subtext0); text-decoration: none;
-  transition: color .2s;
-}
-.nav-links a:hover { color: var(--text); }
-.nav-cta {
-  background: var(--blue); color: var(--crust);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px; font-weight: 700; letter-spacing: .5px;
-  padding: 8px 20px; border-radius: 5px;
-  text-decoration: none; transition: opacity .2s;
-}
-.nav-cta:hover { opacity: .85; }
+  /* subtle glow */
+  body::after {
+    content: '';
+    position: fixed;
+    width: 600px;
+    height: 600px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(200,255,78,0.07) 0%, transparent 70%);
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 0;
+  }
 
-/* ── HERO ───────────────────────────────────── */
-#hero {
-  min-height: 100vh;
-  display: flex; flex-direction: column;
-  justify-content: center; align-items: flex-start;
-  padding: 100px 80px 80px;
-  position: relative; overflow: hidden;
-}
-.hero-bg-grid {
-  position: absolute; inset: 0;
-  background-image:
-    linear-gradient(var(--surface0) 1px, transparent 1px),
-    linear-gradient(90deg, var(--surface0) 1px, transparent 1px);
-  background-size: 48px 48px;
-  opacity: .12;
-  mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 0%, transparent 100%);
-}
-.hero-blob {
-  position: absolute;
-  width: 700px; height: 700px;
-  background: radial-gradient(circle, rgba(137,180,250,.09) 0%, transparent 65%);
-  top: -180px; left: -200px;
-  pointer-events: none;
-}
+  .container {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 620px;
+    padding: 2rem 1.8rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
 
-.hero-eyebrow {
-  font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase;
-  color: var(--blue); margin-bottom: 20px;
-  display: flex; align-items: center; gap: 10px;
-}
-.hero-eyebrow::before {
-  content: '';
-  display: block; width: 24px; height: 1px;
-  background: var(--blue);
-}
+  /* ========== CENTERED LOGO SECTION ========== */
+  .logo-main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 18px;
+    width: 100%;
+    animation: fadeDown 0.6s ease both;
+  }
 
-h1.hero-title {
-  font-family: 'Syne', sans-serif;
-  font-size: clamp(64px, 10vw, 120px);
-  font-weight: 800;
-  line-height: .9;
-  letter-spacing: -4px;
-  color: var(--text);
-  margin-bottom: 0;
-}
-h1.hero-title .c { color: var(--blue); }
+  .logo-symbol {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
 
-.hero-tagline {
-  font-family: 'Syne', sans-serif;
-  font-size: clamp(18px, 2.5vw, 26px);
-  font-weight: 400;
-  color: var(--subtext0);
-  margin-top: 24px;
-  margin-bottom: 16px;
-  letter-spacing: -.3px;
-  line-height: 1.5;
-  max-width: 520px;
-}
-.hero-tagline strong { color: var(--text); font-weight: 600; }
+  .logo-icon-svg {
+    display: inline-flex;
+  }
 
-.hero-desc {
-  font-size: 14px;
-  color: var(--overlay1);
-  line-height: 1.85;
-  max-width: 440px;
-  margin-bottom: 48px;
-}
+  .logo-text-central {
+    font-size: 3.3rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: #ffffff;
+    background: linear-gradient(135deg, #ffffff 20%, #e0e0ff 70%);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.1);
+  }
 
-.hero-btns { display: flex; gap: 12px; flex-wrap: wrap; }
-.btn-a {
-  background: var(--blue); color: var(--crust);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 13px; font-weight: 700; letter-spacing: .5px;
-  padding: 14px 32px; border-radius: 5px;
-  text-decoration: none; transition: opacity .2s, transform .15s;
-  display: inline-flex; align-items: center; gap: 8px;
-}
-.btn-a:hover { opacity: .88; transform: translateY(-1px); }
-.btn-b {
-  border: 1px solid var(--surface1); color: var(--subtext1);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 13px; letter-spacing: .5px;
-  padding: 14px 32px; border-radius: 5px;
-  text-decoration: none; transition: border-color .2s, color .2s;
-  display: inline-flex; align-items: center; gap: 8px;
-}
-.btn-b:hover { border-color: var(--blue); color: var(--blue); }
+  .logo-text-central span {
+    color: var(--accent);
+    background: linear-gradient(135deg, var(--accent), #b0ff3a);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+  }
 
-.hero-pills {
-  display: flex; gap: 8px; flex-wrap: wrap;
-  margin-top: 56px; padding-top: 48px;
-  border-top: 1px solid var(--surface0);
-}
-.pill {
-  background: var(--surface0);
-  border: 1px solid var(--surface1);
-  border-radius: 40px;
-  padding: 6px 16px;
-  font-size: 12px; color: var(--subtext0);
-  display: flex; align-items: center; gap: 6px;
-}
-.pill b { color: var(--text); }
+  /* refined badge below logo */
+  .version-badge-center {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 400;
+    color: var(--accent);
+    background: rgba(200,255,78,0.1);
+    border: 1px solid rgba(200,255,78,0.25);
+    padding: 3px 12px;
+    border-radius: 99px;
+    letter-spacing: 0.04em;
+    margin-top: 12px;
+    backdrop-filter: blur(2px);
+  }
 
-/* ── SECTIONS shared ────────────────────────── */
-section { padding: 96px 80px; }
+  .tagline-central {
+    font-size: 0.92rem;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 300;
+    letter-spacing: 0.04em;
+    text-align: center;
+    margin-top: 14px;
+    margin-bottom: 42px;
+    animation: fadeDown 0.6s 0.1s ease both;
+  }
 
-.s-eyebrow {
-  font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
-  color: var(--blue); margin-bottom: 14px;
-  display: flex; align-items: center; gap: 10px;
-}
-.s-eyebrow::before {
-  content: ''; display: block;
-  width: 20px; height: 1px; background: var(--blue);
-}
+  /* card style */
+  .card {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    animation: fadeUp 0.6s 0.25s ease both;
+    position: relative;
+    overflow: hidden;
+    backdrop-filter: blur(2px);
+    box-shadow: 0 20px 35px -12px rgba(0,0,0,0.5);
+  }
 
-.s-title {
-  font-family: 'Syne', sans-serif;
-  font-size: clamp(32px, 4vw, 48px);
-  font-weight: 800;
-  letter-spacing: -1.5px;
-  color: var(--text);
-  margin-bottom: 56px;
-  line-height: 1.1;
-}
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(200,255,78,0.4), transparent);
+  }
 
-/* ── FEATURES ───────────────────────────────── */
-#features { background: var(--mantle); }
+  .card-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
 
-.feat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 1px;
-  border: 1px solid var(--surface0);
-  border-radius: 10px;
-  overflow: hidden;
-  background: var(--surface0);
-}
-.feat-card {
-  background: var(--mantle);
-  padding: 32px 30px;
-  transition: background .2s;
-  cursor: default;
-}
-.feat-card:hover { background: var(--base); }
-.feat-icon { font-size: 22px; margin-bottom: 18px; }
-.feat-name {
-  font-family: 'Syne', sans-serif;
-  font-size: 16px; font-weight: 700;
-  color: var(--text); margin-bottom: 10px;
-  letter-spacing: -.3px;
-}
-.feat-body {
-  font-size: 13px; color: var(--subtext0);
-  line-height: 1.85;
-}
+  /* download primary button */
+  .dl-btn {
+    width: 100%;
+    background: var(--accent);
+    color: #0a0a0c;
+    border: none;
+    border-radius: 14px;
+    padding: 16px 24px;
+    font-family: 'Syne', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    letter-spacing: -0.02em;
+    transition: transform 0.15s, box-shadow 0.15s, background 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
 
-/* ── CHARTS ─────────────────────────────────── */
-#charts { background: var(--crust); }
+  .dl-btn::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(255,255,255,0.15);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
 
-.charts-wrap {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 16px;
-}
-.chart-card {
-  background: var(--mantle);
-  border: 1px solid var(--surface0);
-  border-radius: 10px;
-  padding: 28px 24px;
-}
-.chart-label {
-  font-size: 11px; letter-spacing: 1.2px;
-  text-transform: uppercase;
-  color: var(--overlay0);
-  margin-bottom: 28px;
-}
+  .dl-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(200,255,78,0.3);
+  }
 
-/* bar chart */
-.bars {
-  display: flex; align-items: flex-end;
-  gap: 8px; height: 110px;
-}
-.bar-col {
-  display: flex; flex-direction: column;
-  align-items: center; gap: 8px;
-  flex: 1; height: 100%;
-  justify-content: flex-end;
-}
-.bar-fill {
-  width: 100%; border-radius: 4px 4px 0 0;
-  transition: opacity .2s;
-  position: relative;
-}
-.bar-fill:hover { opacity: .75; }
-.bar-fill::after {
-  content: attr(data-val);
-  position: absolute; bottom: calc(100% + 4px);
-  left: 50%; transform: translateX(-50%);
-  font-size: 10px; color: var(--subtext0);
-  white-space: nowrap;
-}
-.bar-lbl { font-size: 10px; color: var(--overlay0); }
+  .dl-btn:hover::after {
+    opacity: 1;
+  }
+  .dl-btn:active {
+    transform: translateY(1px);
+  }
 
-/* cmp rows */
-.cmp-list { display: flex; flex-direction: column; gap: 18px; }
-.cmp-head { display: flex; justify-content: space-between; margin-bottom: 7px; }
-.cmp-name { font-size: 13px; color: var(--subtext1); }
-.cmp-val  { font-size: 12px; color: var(--overlay1); }
-.cmp-track {
-  height: 5px; background: var(--surface0);
-  border-radius: 3px; overflow: hidden;
-}
-.cmp-bar {
-  height: 100%; border-radius: 3px;
-  width: 0; transition: width 1.2s cubic-bezier(.4,0,.2,1);
-}
+  .dl-btn svg {
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    transition: transform 0.2s;
+  }
 
-/* donut */
-.donut-center {
-  display: flex; flex-direction: column;
-  align-items: center; gap: 20px;
-}
-.donut-legend {
-  display: grid; grid-template-columns: 1fr 1fr;
-  gap: 8px 20px; width: 100%;
-}
-.donut-row {
-  display: flex; align-items: center;
-  gap: 7px; font-size: 12px; color: var(--subtext0);
-}
-.donut-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .dl-btn:hover svg {
+    transform: translateY(2px);
+  }
 
-/* ── RELEASES ───────────────────────────────── */
-#releases { background: var(--mantle); }
+  /* format chooser */
+  .format-chooser {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    overflow: hidden;
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-8px);
+    transition: max-height 0.4s cubic-bezier(0.2, 0.9, 0.4, 1.1), opacity 0.3s, transform 0.3s;
+  }
 
-.release-list { display: flex; flex-direction: column; gap: 10px; }
-.rel {
-  background: var(--base);
-  border: 1px solid var(--surface0);
-  border-radius: 8px;
-  padding: 28px 30px;
-  display: grid;
-  grid-template-columns: 120px 1fr 160px;
-  gap: 28px;
-  align-items: start;
-  transition: border-color .2s, background .2s;
-}
-.rel:hover { border-color: var(--surface1); background: var(--mantle); }
+  .format-chooser.open {
+    max-height: 220px;
+    opacity: 1;
+    transform: translateY(0);
+  }
 
-.rel-meta {}
-.rel-ver {
-  font-family: 'Syne', sans-serif;
-  font-size: 22px; font-weight: 800;
-  color: var(--blue); letter-spacing: -.5px;
-  margin-bottom: 6px;
-}
-.badge {
-  display: inline-block;
-  font-size: 9px; letter-spacing: 1.2px;
-  text-transform: uppercase;
-  padding: 3px 8px; border-radius: 4px;
-  font-weight: 500;
-}
-.badge-latest { background: rgba(166,227,161,.12); color: var(--green); border: 1px solid rgba(166,227,161,.2); }
-.badge-stable { background: rgba(137,180,250,.1);  color: var(--blue);  border: 1px solid rgba(137,180,250,.2); }
-.badge-legacy { background: rgba(88,91,112,.3);    color: var(--overlay1); border: 1px solid var(--surface0); }
-.rel-date { font-size: 12px; color: var(--overlay0); margin-top: 8px; }
+  .format-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 400;
+    color: var(--muted);
+    text-align: center;
+    letter-spacing: 0.04em;
+    grid-column: 1/-1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
 
-.rel-body {}
-.rel-name {
-  font-family: 'Syne', sans-serif;
-  font-size: 17px; font-weight: 700;
-  color: var(--text); margin-bottom: 14px;
-  letter-spacing: -.3px;
-}
-.rel-log { list-style: none; display: flex; flex-direction: column; gap: 5px; }
-.rel-log li {
-  font-size: 13px; color: var(--subtext0);
-  line-height: 1.6;
-  padding-left: 20px; position: relative;
-}
-.rel-log li::before {
-  position: absolute; left: 0;
-  content: '+'; color: var(--green);
-}
-.rel-log li.fix::before { content: '✓'; color: var(--yellow); }
-.rel-log li.brk::before { content: '!'; color: var(--red); }
+  .format-label::before,
+  .format-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
 
-.rel-actions { display: flex; flex-direction: column; gap: 8px; }
-.btn-rel {
-  background: var(--surface0); color: var(--subtext1);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px; font-weight: 500; letter-spacing: .3px;
-  padding: 10px 18px; border-radius: 5px;
-  text-decoration: none; text-align: center;
-  transition: background .2s;
-  display: block;
-}
-.btn-rel:hover { background: var(--surface1); }
-.btn-rel.hi { background: var(--blue); color: var(--crust); font-weight: 700; }
-.btn-rel.hi:hover { opacity: .85; }
+  .fmt-btn {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    text-decoration: none;
+    transition: background 0.2s, border-color 0.2s, transform 0.12s;
+  }
 
-/* ── INSTALL ────────────────────────────────── */
-#install { background: var(--crust); }
+  .fmt-btn:hover {
+    background: rgba(200,255,78,0.08);
+    border-color: rgba(200,255,78,0.4);
+    transform: translateY(-1px);
+    color: var(--accent);
+  }
 
-.install-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-.install-card {
-  background: var(--mantle);
-  border: 1px solid var(--surface0);
-  border-radius: 10px;
-  padding: 32px;
-}
-.install-card-title {
-  font-family: 'Syne', sans-serif;
-  font-size: 18px; font-weight: 700;
-  color: var(--text); margin-bottom: 6px;
-  letter-spacing: -.3px;
-}
-.install-card-sub {
-  font-size: 13px; color: var(--overlay1);
-  margin-bottom: 24px; line-height: 1.7;
-}
-.steps { display: flex; flex-direction: column; gap: 12px; }
-.step {
-  display: flex; gap: 16px; align-items: flex-start;
-}
-.step-num {
-  width: 24px; height: 24px; border-radius: 50%;
-  background: var(--surface0); border: 1px solid var(--surface1);
-  font-size: 11px; color: var(--subtext0);
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0; margin-top: 2px;
-}
-.step-text { font-size: 13px; color: var(--subtext0); line-height: 1.7; }
-.step-text code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  background: var(--surface0);
-  color: var(--blue);
-  padding: 1px 7px; border-radius: 3px;
-}
+  .fmt-btn:active {
+    transform: translateY(0);
+  }
 
-pre.code-block {
-  background: var(--base);
-  border: 1px solid var(--surface0);
-  border-radius: 7px;
-  padding: 20px 22px;
-  margin-top: 20px;
-  overflow-x: auto;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 13px; line-height: 1.8;
-  color: var(--subtext1);
-}
-pre.code-block .cm { color: var(--overlay0); }
-pre.code-block .kw { color: var(--blue); }
-pre.code-block .st { color: var(--green); }
+  .fmt-icon {
+    font-size: 1.1rem;
+    filter: drop-shadow(0 1px 1px rgba(0,0,0,0.3));
+  }
 
-.hotkeys-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 10px;
-  margin-top: 20px;
-}
-.hk {
-  background: var(--surface0);
-  border-radius: 6px; padding: 14px 16px;
-  display: flex; flex-direction: column; gap: 5px;
-}
-.hk-key {
-  font-size: 13px; font-weight: 700;
-  color: var(--yellow);
-  letter-spacing: .3px;
-}
-.hk-action { font-size: 12px; color: var(--subtext0); }
+  .divider {
+    height: 1px;
+    background: var(--border);
+    width: 100%;
+  }
 
-/* ── FOOTER ─────────────────────────────────── */
-footer {
-  background: var(--mantle);
-  border-top: 1px solid var(--surface0);
-  padding: 48px 80px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap; gap: 20px;
-}
-.footer-brand {
-  font-family: 'Syne', sans-serif;
-  font-weight: 800; font-size: 22px;
-  color: var(--blue); letter-spacing: -.5px;
-}
-.footer-brand small {
-  display: block;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px; font-weight: 400;
-  color: var(--overlay0); letter-spacing: 0;
-  margin-top: 4px;
-}
-.footer-links { display: flex; gap: 28px; }
-.footer-links a {
-  font-size: 13px; color: var(--subtext0);
-  text-decoration: none; transition: color .2s;
-}
-.footer-links a:hover { color: var(--text); }
-.footer-copy { font-size: 12px; color: var(--overlay0); }
+  /* progress section */
+  .progress-section {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
 
-/* ── ANIM ───────────────────────────────────── */
-.reveal {
-  opacity: 0; transform: translateY(20px);
-  transition: opacity .6s ease, transform .6s ease;
-}
-.reveal.in { opacity: 1; transform: none; }
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
 
-@media (max-width: 900px) {
-  nav { padding: 0 24px; }
-  .nav-links { display: none; }
-  section, #hero { padding: 72px 28px; }
-  h1.hero-title { letter-spacing: -2px; }
-  .charts-wrap { grid-template-columns: 1fr; }
-  .install-grid { grid-template-columns: 1fr; }
-  .rel { grid-template-columns: 1fr; }
-  footer { flex-direction: column; padding: 40px 28px; }
-}
+  .next-ver {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .next-ver .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent2);
+    box-shadow: 0 0 8px var(--accent2);
+    animation: pulse 1.8s ease infinite;
+  }
+
+  .progress-pct {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+
+  .progress-pct span {
+    color: var(--accent2);
+    font-weight: 600;
+  }
+
+  .progress-bar-wrap {
+    width: 100%;
+    height: 6px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, var(--accent2), #c084fc);
+    width: 0%;
+    transition: width 1.2s cubic-bezier(0.25, 0.8, 0.5, 1);
+    position: relative;
+  }
+
+  .progress-fill::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent2);
+    box-shadow: 0 0 8px var(--accent2);
+    animation: glow-dot 1.8s ease infinite;
+  }
+
+  .milestones {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+  }
+
+  .milestone {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 400;
+    color: var(--muted);
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    letter-spacing: 0.02em;
+    transition: color 0.3s, border-color 0.3s, background 0.2s;
+  }
+
+  .milestone.done {
+    color: var(--accent);
+    border-color: rgba(200,255,78,0.35);
+    background: rgba(200,255,78,0.07);
+  }
+
+  .footer {
+    margin-top: 30px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--muted);
+    text-align: center;
+    letter-spacing: 0.04em;
+    animation: fadeUp 0.6s 0.45s ease both;
+  }
+
+  .footer a {
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 1px solid var(--border);
+    transition: color 0.2s;
+  }
+
+  .footer a:hover {
+    color: var(--text);
+  }
+
+  /* Keyframes */
+  @keyframes fadeDown {
+    from { opacity: 0; transform: translateY(-18px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(18px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.5; transform: scale(0.95); }
+  }
+
+  @keyframes glow-dot {
+    0%, 100% { box-shadow: 0 0 6px var(--accent2); }
+    50%       { box-shadow: 0 0 14px var(--accent2), 0 0 22px rgba(78,240,255,0.4); }
+  }
+
+  /* Responsive fine-tuning */
+  @media (max-width: 500px) {
+    .container {
+      padding: 1.2rem;
+    }
+    .logo-text-central {
+      font-size: 2.5rem;
+    }
+    .card {
+      padding: 24px;
+    }
+    .fmt-btn {
+      font-size: 0.75rem;
+      padding: 10px 12px;
+    }
+    .milestone {
+      font-size: 0.6rem;
+    }
+  }
 </style>
 </head>
 <body>
 
-<nav>
-  <a class="nav-logo" href="index.html">HomRec <span>v1.6.1</span></a>
-  <ul class="nav-links">
-    <li><a href="#features">Features</a></li>
-    <li><a href="#charts">Stats</a></li>
-    <li><a href="#releases">Releases</a></li>
-    <li><a href="#install">Install</a></li>
-    <li><a href="docs.html">Docs</a></li>
-  </ul>
-  <a class="nav-cta" href="https://github.com/homaaio/HomRec/releases/download/1.6.0/v1.6.0.zip" target="_blank">↓ Download</a>
-</nav>
+<div class="container">
 
-<!-- ── HERO ── -->
-<section id="hero">
-  <div class="hero-bg-grid"></div>
-  <div class="hero-blob"></div>
-
-  <div class="hero-eyebrow">Open source · Windows · Python 3.8+</div>
-
-  <h1 class="hero-title">Hom<span class="c">Rec</span></h1>
-
-  <p class="hero-tagline">
-    Screen recorder built for <strong>weak PCs.</strong><br>
-    No lags. No bloat. No GPU.
-  </p>
-
-  <p class="hero-desc">
-    If you've ever tried recording with OBS on an old laptop and everything lagged —
-    HomRec is made for you. Written from the ground up to use minimum CPU and RAM.
-    Just open, record, done.
-  </p>
-
-  <div class="hero-btns">
-    <a class="btn-a" href="https://github.com/homaaio/HomRec/releases/download/1.6.0/v1.6.0.zip" target="_blank">
-      ↓ Download .zip
-    </a>
-    <a class="btn-b" href="docs.html">
-      Docs →
-    </a>
-    <a class="btn-b" href="https://github.com/homaaio/homrec" target="_blank">
-      GitHub
-    </a>
-  </div>
-
-  <div class="hero-pills">
-    <div class="pill">CPU <b>~15%</b> at 1080p30</div>
-    <div class="pill">RAM <b>&lt;80 MB</b></div>
-    <div class="pill">GPU <b>not required</b></div>
-    <div class="pill">FFmpeg <b>bundled</b></div>
-    <div class="pill">F9 <b>start/stop</b></div>
-  </div>
-</section>
-
-<!-- ── FEATURES ── -->
-<section id="features">
-  <div class="s-eyebrow">Capabilities</div>
-  <div class="s-title">Everything you need.<br>Nothing you don't.</div>
-  <div class="feat-grid reveal">
-    <div class="feat-card">
-      <div class="feat-icon">🎞️</div>
-      <div class="feat-name">Screen Recording</div>
-      <div class="feat-body">Full desktop or specific window. Capture exactly what you need, nothing more.</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon">🎙️</div>
-      <div class="feat-name">Audio Capture</div>
-      <div class="feat-body">Microphone and desktop audio via native WASAPI loopback. No extra audio packages.</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon">🖥️</div>
-      <div class="feat-name">Multi-monitor</div>
-      <div class="feat-body">Pick which monitor to record from a clean dropdown list.</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon">📊</div>
-      <div class="feat-name">PC Analytics</div>
-      <div class="feat-body">CPU, RAM, and disk usage in one combined panel so you can watch your machine while recording.</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon">⌨️</div>
-      <div class="feat-name">Dev Console</div>
-      <div class="feat-body">Full-featured command console (Ctrl+Shift+T) with rules, timers, hotkeys, and scripting.</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon">🌍</div>
-      <div class="feat-name">Localization</div>
-      <div class="feat-body">English and Russian UI included. Extend with your own .hrl language files.</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon">🔔</div>
-      <div class="feat-name">System Tray</div>
-      <div class="feat-body">Minimise to tray and control everything from the tray menu without opening the window.</div>
-    </div>
-    <div class="feat-card">
-      <div class="feat-icon">🎨</div>
-      <div class="feat-name">Catppuccin Theme</div>
-      <div class="feat-body">Dark UI inspired by Catppuccin Macchiato. Clean and easy on the eyes during long sessions.</div>
-    </div>
-  </div>
-</section>
-
-<!-- ── CHARTS ── -->
-<section id="charts">
-  <div class="s-eyebrow">Performance</div>
-  <div class="s-title">Light by design.</div>
-  <div class="charts-wrap reveal">
-
-    <div class="chart-card">
-      <div class="chart-label">CPU usage — 1080p 30fps</div>
-      <div class="bars">
-        <div class="bar-col">
-          <div class="bar-fill" style="height:82%; background:var(--red); opacity:.65;" data-val="~60%"></div>
-          <div class="bar-lbl">OBS</div>
-        </div>
-        <div class="bar-col">
-          <div class="bar-fill" style="height:65%; background:var(--peach); opacity:.7;" data-val="~48%"></div>
-          <div class="bar-lbl">Bandicam</div>
-        </div>
-        <div class="bar-col">
-          <div class="bar-fill" style="height:50%; background:var(--yellow); opacity:.7;" data-val="~35%"></div>
-          <div class="bar-lbl">Fraps</div>
-        </div>
-        <div class="bar-col">
-          <div class="bar-fill" style="height:20%; background:var(--blue);" data-val="~15%"></div>
-          <div class="bar-lbl">HomRec</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="chart-card">
-      <div class="chart-label">RAM footprint (MB)</div>
-      <div class="cmp-list">
-        <div>
-          <div class="cmp-head"><span class="cmp-name">OBS</span><span class="cmp-val">~350 MB</span></div>
-          <div class="cmp-track"><div class="cmp-bar" data-w="100" style="background:var(--red);opacity:.65;"></div></div>
-        </div>
-        <div>
-          <div class="cmp-head"><span class="cmp-name">Bandicam</span><span class="cmp-val">~180 MB</span></div>
-          <div class="cmp-track"><div class="cmp-bar" data-w="51" style="background:var(--peach);opacity:.75;"></div></div>
-        </div>
-        <div>
-          <div class="cmp-head"><span class="cmp-name">Fraps</span><span class="cmp-val">~130 MB</span></div>
-          <div class="cmp-track"><div class="cmp-bar" data-w="37" style="background:var(--yellow);opacity:.75;"></div></div>
-        </div>
-        <div>
-          <div class="cmp-head"><span class="cmp-name">HomRec</span><span class="cmp-val">&lt;80 MB</span></div>
-          <div class="cmp-track"><div class="cmp-bar" data-w="23" style="background:var(--blue);"></div></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="chart-card">
-      <div class="chart-label">Dependency breakdown</div>
-      <div class="donut-center">
-        <svg viewBox="0 0 130 130" width="130" height="130">
-          <circle cx="65" cy="65" r="44" fill="none" stroke="var(--surface0)" stroke-width="20"/>
-          <!-- circumference ≈ 276.5 -->
-          <circle cx="65" cy="65" r="44" fill="none" stroke="var(--blue)"   stroke-width="20" stroke-dasharray="83 193.5" stroke-dashoffset="0"      transform="rotate(-90 65 65)"/>
-          <circle cx="65" cy="65" r="44" fill="none" stroke="var(--mauve)"  stroke-width="20" stroke-dasharray="55 221.5" stroke-dashoffset="-83"     transform="rotate(-90 65 65)"/>
-          <circle cx="65" cy="65" r="44" fill="none" stroke="var(--green)"  stroke-width="20" stroke-dasharray="41 235.5" stroke-dashoffset="-138"    transform="rotate(-90 65 65)"/>
-          <circle cx="65" cy="65" r="44" fill="none" stroke="var(--yellow)" stroke-width="20" stroke-dasharray="55 221.5" stroke-dashoffset="-179"    transform="rotate(-90 65 65)"/>
-          <circle cx="65" cy="65" r="44" fill="none" stroke="var(--peach)"  stroke-width="20" stroke-dasharray="22 254.5" stroke-dashoffset="-234"    transform="rotate(-90 65 65)"/>
-          <circle cx="65" cy="65" r="44" fill="none" stroke="var(--teal)"   stroke-width="20" stroke-dasharray="20 256.5" stroke-dashoffset="-256"    transform="rotate(-90 65 65)"/>
-          <text x="65" y="69" text-anchor="middle" fill="var(--subtext0)" font-size="11" font-family="JetBrains Mono">6 pkgs</text>
+  <div class="logo-main">
+    <div class="logo-symbol">
+      <div class="logo-icon-svg">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="4" fill="#c8ff4e" stroke="#c8ff4e" stroke-width="1.2"/>
+          <circle cx="12" cy="12" r="8" stroke="#e8e8f0" stroke-width="1.5" fill="none" opacity="0.8"/>
+          <path d="M12 4 A8 8 0 0 1 20 12" stroke="#4ef0ff" stroke-width="2" stroke-linecap="round" fill="none"/>
         </svg>
-        <div class="donut-legend">
-          <div class="donut-row"><div class="donut-dot" style="background:var(--blue)"></div>opencv</div>
-          <div class="donut-row"><div class="donut-dot" style="background:var(--mauve)"></div>Pillow</div>
-          <div class="donut-row"><div class="donut-dot" style="background:var(--green)"></div>mss</div>
-          <div class="donut-row"><div class="donut-dot" style="background:var(--yellow)"></div>numpy</div>
-          <div class="donut-row"><div class="donut-dot" style="background:var(--peach)"></div>psutil</div>
-          <div class="donut-row"><div class="donut-dot" style="background:var(--teal)"></div>pystray</div>
+      </div>
+      <div class="logo-text-central">Hom<span>Rec</span></div>
+    </div>
+    <div class="version-badge-center">v1.6.3 — stable</div>
+    <div class="tagline-central">// Pure Performance. Total Freedom</div>
+  </div>
+
+  <!-- download card -->
+  <div class="card">
+    <div class="card-label">download assets</div>
+
+    <button class="dl-btn" id="dlBtn" onclick="toggleFormats()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v13M6 11l6 6 6-6"/>
+        <path d="M3 21h18"/>
+      </svg>
+      Download HomRec v1.6.3
+    </button>
+
+    <div class="format-chooser" id="formatChooser">
+      <div class="format-label">archive format</div>
+      <a class="fmt-btn" href="https://github.com/homaaio/HomRec/releases/download/1.6.3/v1.6.3.zip" download>
+        <span class="fmt-icon">📦</span> .zip (Win/macOS)
+      </a>
+      <a class="fmt-btn" href="https://github.com/homaaio/HomRec/releases/download/1.6.3/v1.6.3.7z" download>
+        <span class="fmt-icon">🗜️</span> .7z (lightweight)
+      </a>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Progress + milestones -->
+    <div class="progress-section">
+      <div class="progress-header">
+        <div class="next-ver">
+          <span class="dot"></span>
+          roadmap · v1.7.0
+        </div>
+        <div class="progress-pct">
+          completion <span id="pctNum">0</span>%
         </div>
       </div>
-    </div>
 
-  </div>
-</section>
-
-<!-- ── RELEASES ── -->
-<section id="releases">
-  <div class="s-eyebrow">Changelog</div>
-  <div class="s-title">Releases</div>
-  <div class="release-list reveal">
-
-    <div class="rel">
-      <div class="rel-meta">
-        <div class="rel-ver">1.6.0</div>
-        <div class="badge badge-latest">latest</div>
-        <div class="rel-date">2025</div>
+      <div class="progress-bar-wrap">
+        <div class="progress-fill" id="progressFill"></div>
       </div>
-      <div class="rel-body">
-        <div class="rel-name">Developer Console v3.0</div>
-        <ul class="rel-log">
-          <li>Full developer console with 18 command categories (Ctrl+Shift+T)</li>
-          <li>Rules engine — define and chain automation scripts with steps</li>
-          <li>Timer and watcher system for scheduled and recurring actions</li>
-          <li>AE object system for advanced event hooks</li>
-          <li>Batch command execution with <code>&&</code> chaining and error handling</li>
-          <li>Script runner — execute <code>.hrc</code> files line by line</li>
-          <li class="fix">WASAPI loopback stability improved</li>
-          <li class="fix">System tray memory leak fixed</li>
-        </ul>
-      </div>
-      <div class="rel-actions">
-        <a class="btn-rel hi" href="https://github.com/homaaio/homrec/releases" target="_blank">↓ Download .zip</a>
-        <a class="btn-rel" href="https://github.com/homaaio/homrec" target="_blank">Source code</a>
-        <a class="btn-rel" href="docs.html">Docs</a>
+
+      <div class="milestones" id="milestones">
+        <span class="milestone done">core refactor</span>
+        <span class="milestone done">export presets</span>
+        <span class="milestone done">audio engine v2</span>
+        <span class="milestone">plugin api</span>
+        <span class="milestone">new UI</span>
+        <span class="milestone">release build</span>
       </div>
     </div>
-
-    <div class="rel">
-      <div class="rel-meta">
-        <div class="rel-ver">1.5.x</div>
-        <div class="badge badge-stable">stable</div>
-        <div class="rel-date">2024</div>
-      </div>
-      <div class="rel-body">
-        <div class="rel-name">System Tray & Analytics</div>
-        <ul class="rel-log">
-          <li>System tray support via pystray</li>
-          <li>PC Analytics panel — CPU, RAM, disk</li>
-          <li>Always-on-top toggle</li>
-          <li>Live FPS, duration, frame count in status bar</li>
-          <li class="fix">Multi-monitor detection improved</li>
-          <li class="fix">Audio desync on long recordings fixed</li>
-        </ul>
-      </div>
-      <div class="rel-actions">
-        <a class="btn-rel" href="https://github.com/homaaio/homrec/releases" target="_blank">↓ Download</a>
-      </div>
-    </div>
-
-    <div class="rel">
-      <div class="rel-meta">
-        <div class="rel-ver">1.4.x</div>
-        <div class="badge badge-legacy">legacy</div>
-        <div class="rel-date">2024</div>
-      </div>
-      <div class="rel-body">
-        <div class="rel-name">Localization & Hotkeys</div>
-        <ul class="rel-log">
-          <li>English and Russian UI with .hrl language files</li>
-          <li>F9 / F10 / F11 global hotkeys</li>
-          <li>Custom output folder selection</li>
-          <li>Auto update check on launch</li>
-        </ul>
-      </div>
-      <div class="rel-actions">
-        <a class="btn-rel" href="https://github.com/homaaio/homrec/releases" target="_blank">↓ Download</a>
-      </div>
-    </div>
-
-  </div>
-</section>
-
-<!-- ── INSTALL ── -->
-<section id="install">
-  <div class="s-eyebrow">Setup</div>
-  <div class="s-title">Get running in<br>two minutes.</div>
-
-  <div class="install-grid reveal">
-
-    <div class="install-card">
-      <div class="install-card-title">Option A — .exe (recommended)</div>
-      <div class="install-card-sub">No Python or FFmpeg setup required. Everything is bundled in the archive.</div>
-      <div class="steps">
-        <div class="step">
-          <div class="step-num">1</div>
-          <div class="step-text">Go to <a href="https://github.com/homaaio/homrec/releases" style="color:var(--blue)">Releases</a> and download the latest <code>.zip</code></div>
-        </div>
-        <div class="step">
-          <div class="step-num">2</div>
-          <div class="step-text">Unzip anywhere — no installer needed</div>
-        </div>
-        <div class="step">
-          <div class="step-num">3</div>
-          <div class="step-text">Launch <code>!hr.exe</code></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="install-card">
-      <div class="install-card-title">Option B — from source</div>
-      <div class="install-card-sub">Requires Python 3.8+ and FFmpeg on PATH or in the project folder.</div>
-<pre class="code-block"><span class="cm"># clone</span>
-<span class="kw">git</span> clone https://github.com/homaaio/homrec.git
-<span class="kw">cd</span> homrec
-
-<span class="cm"># install deps</span>
-<span class="kw">pip</span> install -r requirements.txt
-
-<span class="cm"># run</span>
-<span class="kw">python</span> homrec.py</pre>
-    </div>
-
   </div>
 
-  <div style="margin-top:32px" class="install-card reveal" style="max-width:100%">
-    <div class="install-card-title">Keyboard shortcuts</div>
-    <div class="install-card-sub">Global hotkeys — work even when the window is not focused.</div>
-    <div class="hotkeys-grid">
-      <div class="hk"><div class="hk-key">F9</div><div class="hk-action">Start / Stop recording</div></div>
-      <div class="hk"><div class="hk-key">F10</div><div class="hk-action">Pause / Resume recording</div></div>
-      <div class="hk"><div class="hk-key">F11</div><div class="hk-action">Toggle fullscreen</div></div>
-      <div class="hk"><div class="hk-key">Ctrl+Shift+T</div><div class="hk-action">Open developer console</div></div>
-    </div>
+  <div class="footer">
+    open source · <a href="https://github.com/homaaio/HomRec" target="_blank" rel="noopener noreferrer">github.com/homaaio/HomRec</a>  ·  GPL-3.0
   </div>
-</section>
-
-<!-- ── FOOTER ── -->
-<footer>
-  <div class="footer-brand">
-    HomRec
-    <small>Screen recorder for weak PCs · v1.6.0</small>
-  </div>
-  <div class="footer-links">
-    <a href="https://github.com/homaaio/homrec" target="_blank">GitHub</a>
-    <a href="https://t.me/homaexe" target="_blank">Telegram</a>
-    <a href="https://x.com/homrec_dev" target="_blank">X / Twitter</a>
-    <a href="docs.html">Docs</a>
-    <a href="#releases">Releases</a>
-  </div>
-  <div class="footer-copy">Made with ❤️ by homaaio</div>
-</footer>
+</div>
 
 <script>
-  // reveal on scroll
-  const obs = new IntersectionObserver(es => {
-    es.forEach(e => { if (e.isIntersecting) e.target.classList.add('in'); });
-  }, { threshold: 0.08 });
-  document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+  // -------------------------------------------------------------------------
+  const TARGET_PCT = 52; 
+  // -------------------------------------------------------------------------
 
-  // animate cmp bars
-  const barObs = new IntersectionObserver(es => {
-    es.forEach(e => {
-      if (e.isIntersecting) {
-        e.target.querySelectorAll('.cmp-bar').forEach(b => {
-          const w = b.dataset.w;
-          requestAnimationFrame(() => { b.style.width = w + '%'; });
-        });
+  // Animate progress bar on load
+  window.addEventListener('load', () => {
+    // slight delay to let the CSS animations breathe
+    setTimeout(() => {
+      const fillEl = document.getElementById('progressFill');
+      if (fillEl) fillEl.style.width = TARGET_PCT + '%';
+      animateCounter(0, TARGET_PCT, 1400);
+    }, 500);
+  });
+
+  // counter animation easing
+  function animateCounter(from, to, duration) {
+    const el = document.getElementById('pctNum');
+    if (!el) return;
+    const startTime = performance.now();
+    function updateCounter(now) {
+      const elapsed = now - startTime;
+      let t = Math.min(elapsed / duration, 1);
+      // easeOutCubic for smooth finish
+      const easeOut = 1 - Math.pow(1 - t, 3);
+      const currentVal = Math.floor(from + (to - from) * easeOut);
+      el.textContent = currentVal;
+      if (t < 1) {
+        requestAnimationFrame(updateCounter);
+      } else {
+        el.textContent = to;
       }
+    }
+    requestAnimationFrame(updateCounter);
+  }
+
+  // toggle format dropdown with arrow & dynamic background
+  let open = false;
+  function toggleFormats() {
+    open = !open;
+    const chooser = document.getElementById('formatChooser');
+    const btn = document.getElementById('dlBtn');
+    if (chooser) {
+      chooser.classList.toggle('open', open);
+    }
+    if (btn) {
+      btn.style.background = open ? '#b8ef3e' : 'var(--accent)';
+      // subtle style while open
+      if (open) {
+        btn.style.boxShadow = '0 4px 16px rgba(200,255,78,0.35)';
+      } else {
+        btn.style.boxShadow = '';
+      }
+    }
+  }
+
+  // close formats if clicking outside card area
+  document.addEventListener('click', (e) => {
+    if (open && !e.target.closest('.card')) {
+      open = false;
+      const chooser = document.getElementById('formatChooser');
+      const btn = document.getElementById('dlBtn');
+      if (chooser) chooser.classList.remove('open');
+      if (btn) {
+        btn.style.background = 'var(--accent)';
+        btn.style.boxShadow = '';
+      }
+    }
+  });
+
+  // Optional: manually block event propagation for the button toggle to avoid conflict
+  const dlButton = document.getElementById('dlBtn');
+  if (dlButton) {
+    dlButton.addEventListener('click', (e) => {
+      e.stopPropagation();   // avoid immediate closing by document listener
     });
-  }, { threshold: 0.3 });
-  document.querySelectorAll('.chart-card').forEach(c => barObs.observe(c));
+  }
+
+  // small extra hover effect on format links to mimic download confirm
+  const fmtLinks = document.querySelectorAll('.fmt-btn');
+  fmtLinks.forEach(link => {
+    link.addEventListener('click', (e) => {
+      // just a tiny feedback, don't prevent download
+      console.log(`Initiating download: ${link.href}`);
+    });
+  });
 </script>
 </body>
 </html>
