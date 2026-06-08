@@ -1,4 +1,4 @@
-# HomRec Developer Console v1.2.0 — Command Reference
+# HomRec Developer Console v1.2.2 — Command Reference
 
 > **Open console:** `Ctrl+Shift+T` · **Close:** `Esc` or × button  
 > **Quick help inside the console:** `!help`
