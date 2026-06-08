@@ -38,7 +38,7 @@
 
 /* ── версии ────────────────────────────────────────────────────────────────── */
 #define TERMINAL_VERSION  L"1.0"
-#define CONSOLE_VERSION   L"3.0"
+#define CONSOLE_VERSION   L"1.2.2"
 
 /* ── Named Pipe ─────────────────────────────────────────────────────────────  */
 #define PIPE_NAME         L"\\\\.\\pipe\\HomRecConsole"
