@@ -1,13 +1,3 @@
-"""
-hr_console_bridge.py  —  Python shim для hr_console.dll
-Версия 3.0
-Исправлены баги:
-  - LogFilter не защищал от crash при раннем вызове до инициализации DLL
-  - _quit() мог зависнуть если root уже уничтожен
-  - _load() не инициализировал _lib=None при раннем выходе
-  - toggle() обращался к self._lib до проверки на None
-  - GC мог удалить колбэки раньше времени (исправлено через аннотации типов)
-"""
 from __future__ import annotations
 
 import ctypes
@@ -33,11 +23,11 @@ CB_VOID    = ctypes.CFUNCTYPE(None)
 CB_URL     = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)
 CB_COMMAND = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)   # новый: произвольная команда из DLL
 
-CONSOLE_VERSION = "1.2.0"
-BRIDGE_VERSION  = "1.2.0"
+CONSOLE_VERSION = "1.2.2"
+BRIDGE_VERSION  = "1.2.2"
 
 # HomRec application version constants
-HOMREC_VERSION = "1.6.2"
+HOMREC_VERSION = "1.6.4"
 CORE_VERSION   = "1.4.3"
 
 # --------------------------------------------------------------------------------
@@ -601,6 +591,9 @@ class NativeConsole:
         raw = re.sub(r'\s+-ret(?:urn)?\b', '', raw).strip()
         raw = raw.strip()
 
+        # Нормализация: @all → --all
+        raw = raw.replace("@all", "--all")
+
         # Подстановка переменных окружения ($name)
         raw = self._env.resolve(raw)
 
@@ -618,6 +611,8 @@ class NativeConsole:
 
         self._record_history(raw)
 
+        if cmd == "!rename":
+            self._cmd_rename(raw); return
         if cmd == "$rm":
             self._cmd_rm(raw); return
         if cmd == "!edit":
@@ -627,6 +622,8 @@ class NativeConsole:
         if cmd == "!start":
             if "--rec" in raw:
                 self._cmd_start_rec(raw)
+            elif "--terminal" in raw:
+                self._cmd_start_terminal(raw)
             else:
                 self._cmd_start_window(raw)
             return
@@ -1629,6 +1626,27 @@ class NativeConsole:
                 log.info("  rule '%s' → %s", rule_name, step)
             self._dispatch_extended(step)
 
+    # --- !start --terminal as @terminal ------------------------------------
+
+    def _cmd_start_terminal(self, raw: str):
+        """!start --terminal as @terminal  — запустить hr_terminal.exe."""
+        tokens = raw.split()
+        silent = "-s" in tokens or "--silent" in tokens
+        if "as" not in tokens or "@terminal" not in tokens:
+            log.warning("!start --terminal: синтаксис: !start --terminal as @terminal")
+            return
+        base = _get_base_dir()
+        exe  = os.path.join(base, "hr_terminal.exe")
+        if not os.path.exists(exe):
+            log.warning("!start --terminal: hr_terminal.exe не найден в %s", base)
+            return
+        try:
+            subprocess.Popen([exe], cwd=base)
+            if not silent:
+                log.info("!start --terminal: hr_terminal.exe запущен")
+        except Exception as e:
+            log.error("!start --terminal: ошибка запуска: %s", e)
+
     # --- !start --window ------------------------------------------------------
 
     def _cmd_start_window(self, raw: str):
@@ -1649,6 +1667,128 @@ class NativeConsole:
                 log.warning("!start: нет пути к файлу для '%s'", name)
         else:
             self._open_tk_window(name)
+
+    # --- !rename --------------------------------------------------------------
+
+    def _cmd_rename(self, raw: str):
+        """
+        !rename --window  #name="old_name" to #name="new_name"
+        !rename --rule    #name="old_name" to #name="new_name"
+        !rename --ae      #name="old_name" to #name="new_name"
+        !rename --hotkey  #name="old_name" to #name="new_name"
+        !rename --window  @all #prefix="pfx_"          (добавить префикс ко всем)
+        !rename --window  @all #suffix="_v2"           (добавить суффикс ко всем)
+        !rename --window  @all #replace="old" to="new" (замена подстроки во всех именах)
+        """
+        import re
+        tokens = raw.split()
+        silent = "-s" in tokens or "--silent" in tokens
+
+        use_all = "--all" in raw  # @all уже нормализован в --all DLL-стороной
+
+        def _do_rename(registry, reg_type: str, old: str, new_name: str) -> bool:
+            entry = registry.get(old)
+            if entry is None:
+                self._con_warn(f"!rename {reg_type}: '{old}' не найдено")
+                return False
+            registry.add(new_name, **({} if reg_type == "ae" else {}))
+            # Переносим данные: удаляем старое, создаём новое
+            if reg_type == "window":
+                data = dict(entry)
+                registry.remove(old)
+                registry.add(new_name, data.get("kind", "window"), data)
+            elif reg_type == "rule":
+                body = entry.get("body", "")
+                conn = entry.get("connected", True)
+                registry.remove(old)
+                registry.add(new_name, body, conn)
+            elif reg_type == "ae":
+                ae_type = entry.get("type", "color")
+                data = {k: v for k, v in entry.items() if k != "type"}
+                registry.remove(old)
+                registry.add(new_name, ae_type, data)
+            return True
+
+        # Определить тип объекта
+        reg = None
+        reg_type = ""
+        if "--window" in raw:
+            reg, reg_type = self._win_reg, "window"
+        elif "--rule" in raw:
+            reg, reg_type = self._rule_reg, "rule"
+        elif "--ae" in raw:
+            reg, reg_type = self._ae_reg, "ae"
+        elif "--hotkey" in raw:
+            # Хоткеи переименовываются через alias
+            if use_all:
+                self._con_warn("!rename --hotkey @all: не поддерживается"); return
+            old = _parse_named(raw, "name")
+            m2  = re.search(r'\bto\b\s+#name=["\']?([^"\';\s]+)["\']?', raw)
+            new_name = m2.group(1) if m2 else None
+            if not old or not new_name:
+                self._con_warn('!rename --hotkey: нужен #name="old" to #name="new"'); return
+            # Переименовать alias hotkey
+            unbound = self._hotkeys.unbind_by_alias(old)
+            if unbound:
+                # rebind с новым alias
+                bindings = self._hotkeys.all_bindings()
+                if unbound in bindings:
+                    cmd_val = bindings[unbound]
+                    cmd_str = cmd_val.get("cmd", "") if isinstance(cmd_val, dict) else str(cmd_val)
+                    self._hotkeys.bind(unbound, cmd_str, alias=new_name)
+                    if not silent:
+                        self._con_ok(f"!rename --hotkey '{old}' → '{new_name}'")
+            else:
+                self._con_warn(f"!rename --hotkey '{old}': не найдено")
+            return
+        else:
+            self._con_warn("!rename: используй --window / --rule / --ae / --hotkey"); return
+
+        # @all — пакетное переименование
+        if use_all:
+            prefix  = _parse_named(raw, "prefix")  or ""
+            suffix  = _parse_named(raw, "suffix")  or ""
+            replace_from = _parse_named(raw, "replace") or None
+            replace_to_m = re.search(r'\bto=["\']?([^"\';\s]+)["\']?', raw)
+            replace_to   = replace_to_m.group(1) if replace_to_m else ""
+
+            names = list(reg.all_names())
+            count = 0
+            for old in names:
+                new_name = old
+                if prefix:   new_name = prefix + new_name
+                if suffix:   new_name = new_name + suffix
+                if replace_from is not None:
+                    new_name = new_name.replace(replace_from, replace_to)
+                if new_name == old:
+                    continue
+                if _do_rename(reg, reg_type, old, new_name):
+                    count += 1
+                    if not silent:
+                        self._con_info(f"  '{old}' → '{new_name}'")
+            if not silent:
+                self._con_ok(f"!rename @all ({reg_type}): переименовано {count} из {len(names)}")
+            return
+
+        # Одиночное переименование: #name="old" to #name="new"
+        old = _parse_named(raw, "name")
+        m2  = re.search(r'\bto\b\s+#name=["\']?([^"\';\s]+)["\']?', raw)
+        if not m2:
+            # попробовать формат: #name="old" to #name="new"
+            m2 = re.search(r'#name=["\']?[^"\';\s]+["\']?\s+to\s+#name=["\']?([^"\';\s]+)["\']?', raw)
+        new_name = m2.group(1) if m2 else None
+
+        if not old or not new_name:
+            self._con_warn('!rename: синтаксис: !rename --window #name="old" to #name="new"')
+            return
+        if old == new_name:
+            self._con_warn(f"!rename: имена совпадают ('{old}')"); return
+        if reg.exists(new_name):
+            self._con_warn(f"!rename: '{new_name}' уже существует"); return
+
+        if _do_rename(reg, reg_type, old, new_name):
+            if not silent:
+                self._con_ok(f"!rename --{reg_type} '{old}' → '{new_name}'")
 
     # --- $rm ------------------------------------------------------------------
 
