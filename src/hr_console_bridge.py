@@ -57,8 +57,20 @@ def _parse_flags(raw: str) -> set[str]:
 
 
 def _get_base_dir() -> str:
-    return (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
-            else os.path.dirname(os.path.abspath(__file__)))
+    """Return the project root directory.
+
+    When frozen (PyInstaller .exe): the folder containing the .exe.
+    When running as .py from src/: the parent of src/ — i.e. the project root
+    where create/, assets/, hr_terminal.exe, etc. all live.
+    Falls back to the script's own directory if the src/ layout isn't detected.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    _src = os.path.dirname(os.path.abspath(__file__))
+    _parent = os.path.dirname(_src)
+    if os.path.isdir(os.path.join(_parent, "src")) or os.path.basename(_src).lower() == "src":
+        return _parent
+    return _src  # flat layout fallback
 
 
 # --------------------------------------------------------------------------------
@@ -413,7 +425,7 @@ class NativeConsole:
         if not self._lib:
             return
 
-        log_path = os.path.join(base, "homrec.log")
+        log_path = os.path.join(base, "homrec.log")  # base is already root dir
 
         # Держим ссылки чтобы GC не удалил (BUG FIX: хранить как атрибуты экземпляра)
         self._cb_start    = CB_VOID(self._start)
