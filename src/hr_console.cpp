@@ -3,6 +3,7 @@
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include <shellapi.h>
 #include <richedit.h>
 
 #include <string>
@@ -244,6 +245,7 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
             {L"  !create --ae #type=color{rgb=(r,g,b)} #name=\"...\"",
                                                             L"Create AE color object (rgb or hex)"},
             {L"  !start  --window #name=\"...\"",           L"Open a previously created window"},
+            {L"  !start  --terminal as @terminal",         L"Launch hr_terminal.exe (external terminal)"},
             {L"  !connect    --window #name=\"...\" 1   [-s][-q]", L"Enable window"},
             {L"  !connect    --rule   #name=\"...\"     [-s][-q]", L"Connect a rule"},
             {L"  !connect    --function <cmd> to|; <key> [#name=\"...\"]  [-s][-q]",
@@ -254,8 +256,13 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
             {L"  !disconnect --function <cmd> to|; <key>  (or #name=\"func\")",
                                                             L"Unbind hotkey"},
             {L"  $rm     --window #name=\"...\" [-q]",      L"Delete window from homrec.create"},
+            {L"  $rm     --window @all [-q]",              L"Delete ALL objects of that type"},
             {L"  {int.random(a, b)}",                       L"Random int in [a,b] — usable anywhere"},
+            {L"  @all",                                      L"Universal selector: applies to every object (works with !rename, $rm, !connect, !disconnect)"},
             {L"  --- New in v3.0 ---",                        L""},
+            {L"  !rename --window|--rule|--ae|--hotkey #name=\"old\" to #name=\"new\"",
+                                                             L"Rename object in registry"},
+            {L"  !rename --window @all <transform>\",",      L"Batch-rename all objects of type"},
             {L"  !ls [--windows|--rules|--ae|--hotkeys]",     L"List registry objects"},
             {L"  !status",                                     L"System state snapshot"},
             {L"  !info --window|--rule|--ae|--hotkey #name=", L"Detailed object card"},
@@ -424,8 +431,37 @@ static void cmd_start(const std::vector<std::wstring>& args, bool silent,
         cmd_start_rec(args, silent);
         return;
     }
+    // !start --terminal as @terminal  → запустить hr_terminal.exe
+    if (has(args, L"--terminal")) {
+        // Проверить наличие "as" и "@terminal"
+        bool has_as       = has(args, L"as");
+        bool has_at_term  = has(args, L"@terminal");
+        if (!has_as || !has_at_term) {
+            werr(L"Usage: !start --terminal as @terminal"); return;
+        }
+        if (!silent) winfo(L"Launching hr_terminal.exe...");
+        // Запустить hr_terminal.exe рядом с DLL
+        wchar_t dir[MAX_PATH] = {};
+        GetModuleFileNameW(GetModuleHandleW(nullptr), dir, MAX_PATH);
+        wchar_t* last = wcsrchr(dir, L'\\');
+        if (last) *(last + 1) = L'\0';
+        std::wstring exe = std::wstring(dir) + L"hr_terminal.exe";
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask  = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"open";
+        sei.lpFile = exe.c_str();
+        sei.nShow  = SW_SHOW;
+        if (ShellExecuteExW(&sei)) {
+            if (sei.hProcess) CloseHandle(sei.hProcess);
+            if (!silent) wok(L"hr_terminal.exe launched");
+        } else {
+            werr((L"Failed to launch: " + exe).c_str());
+        }
+        return;
+    }
     if (!has(args, L"--window")) {
-        werr(L"Usage: !start --window #name=\"...\" | !start --rec 1|0"); return;
+        werr(L"Usage: !start --window #name=\"...\" | !start --rec 1|0 | !start --terminal as @terminal"); return;
     }
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
@@ -488,11 +524,30 @@ static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
     forward_to_python(raw);
 }
 
+// ─── !rename ──────────────────────────────────────────────────────────────────
+static void cmd_rename(const std::vector<std::wstring>& args, bool silent,
+                       const std::wstring& raw) {
+    bool is_window = has(args, L"--window");
+    bool is_rule   = has(args, L"--rule");
+    bool is_ae     = has(args, L"--ae");
+    bool is_hotkey = has(args, L"--hotkey");
+    if (!is_window && !is_rule && !is_ae && !is_hotkey) {
+        werr(L"Usage: !rename --window|--rule|--ae|--hotkey #name=\"old\" to #name=\"new\"");
+        return;
+    }
+    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
+    forward_to_python(raw);
+}
+
 // ─── Главный диспетчер ────────────────────────────────────────────────────────
 // Возвращает true если команда выполнена успешно, false при ошибке.
 // Используется флагом -return/-ret для вывода 1/0 вместо обычного текста.
 bool dispatch(const std::wstring& raw) {
-    auto parts = split(raw);
+    // Нормализация: @all → --all (работает в любой команде)
+    std::wstring raw_norm = raw;
+    { auto pos = raw_norm.find(L"@all"); while (pos != std::wstring::npos) { raw_norm.replace(pos,4,L"--all"); pos = raw_norm.find(L"@all",pos+5); } }
+
+    auto parts = split(raw_norm);
     if (parts.empty()) return false;
     auto cmd  = tolw(parts[0]);
     std::vector<std::wstring> args(parts.begin()+1, parts.end());
@@ -503,8 +558,8 @@ bool dispatch(const std::wstring& raw) {
     bool silent = ret_mode || has(args,L"-s") || has(args,L"--silent");
     auto clean  = strip_flags(args, {L"-s",L"--silent",L"-return",L"-ret"});
 
-    // Убрать -return/-ret из raw-строки перед пересылкой в Python
-    std::wstring raw_clean = raw;
+    // Убрать -return/-ret из raw_norm-строки перед пересылкой в Python
+    std::wstring raw_clean = raw_norm;
     for (auto flag : {std::wstring(L" -return"), std::wstring(L" -ret")}) {
         auto pos = raw_clean.find(flag);
         while (pos != std::wstring::npos) {
@@ -558,10 +613,21 @@ bool dispatch(const std::wstring& raw) {
     else if (cmd==L"!connect")    cmd_connect(clean,silent,raw_clean);
     else if (cmd==L"!disconnect") cmd_disconnect(clean,silent,raw_clean);
     else if (cmd==L"$rm") {
-        bool rm_ok = has(clean,L"--window") || has(clean,L"--rule") ||
-                     has(clean,L"--ae") || has(clean,L"--all");
+        // @all → --all
+        std::wstring raw_rm = raw_clean;
+        { auto pos = raw_rm.find(L"@all"); while (pos != std::wstring::npos) { raw_rm.replace(pos,4,L"--all"); pos = raw_rm.find(L"@all",pos+5); } }
+        std::vector<std::wstring> clean_rm;
+        for (auto& t : clean) { std::wstring x=t; if(x==L"@all") x=L"--all"; clean_rm.push_back(x); }
+        bool rm_ok = has(clean_rm,L"--window") || has(clean_rm,L"--rule") ||
+                     has(clean_rm,L"--ae") || has(clean_rm,L"--all");
         if (!rm_ok) ok = false;
-        else cmd_rm(clean,silent,raw_clean);
+        else cmd_rm(clean_rm,silent,raw_rm);
+    }
+    else if (cmd==L"!rename") {
+        bool rn_ok = has(clean,L"--window") || has(clean,L"--rule") ||
+                     has(clean,L"--ae") || has(clean,L"--hotkey");
+        if (!rn_ok) ok = false;
+        else cmd_rename(clean,silent,raw_clean);
     }
     // ── Новые команды (v3.0): перенаправляются в Python ──────────────────────
     else if (cmd==L"!ls"      || cmd==L"!status"  || cmd==L"!info"   ||
@@ -752,7 +818,7 @@ static DWORD CALLBACK con_thread(LPVOID) {
     g_hwnd = hw;
 
     g_hdr = CreateWindowExW(0,L"STATIC",
-        L"  \u2328  HomRec Console v3.0   \u2014   Ctrl+Shift+T  |  !help",
+        L"  \u2328  HomRec Console v1.2.2   \u2014   Ctrl+Shift+T  |  !help",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
         0,0,0,0,hw,nullptr,hi,nullptr);
     SendMessageW(g_hdr,WM_SETFONT,(WPARAM)g_fbold,TRUE);
@@ -784,7 +850,7 @@ static DWORD CALLBACK con_thread(LPVOID) {
 
     layout(hw);
 
-    write_line(L"HomRec Developer Console v3.0", 0);
+    write_line(L"HomRec Developer Console v1.2.2", 0);
     winfo(L"type !help to see all commands  |  Esc or \u00d7 to close");
     write_line(L"", 4);
 
