@@ -1086,8 +1086,8 @@ LANG_REQUIRED_KEYS = [
 THEME_REQUIRED_KEYS = ["bg","surface","accent","text","text_secondary",
                         "success","warning","error"]
 
-ASSETS_DIR   = "Assets"
 _SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__)) if not getattr(__import__('sys'), 'frozen', False) else os.path.dirname(__import__('sys').executable)
+ASSETS_DIR   = os.path.join(_SCRIPT_DIR, "Assets")
 SETTINGS_PATH = os.path.join(_SCRIPT_DIR, "homrec_settings.json")
 THEMES_DIR   = os.path.join(ASSETS_DIR, "Themes")
 LANGS_DIR    = os.path.join(ASSETS_DIR, "L")
@@ -2365,7 +2365,7 @@ class HomRecScreen:
         self.stop_ffmpeg_reader = False
         
         self.scale_factor = 0.75
-        self.output_folder = "recordings"
+        self.output_folder = os.path.join(_SCRIPT_DIR, "recordings")
         self.quality = 70
         self.target_fps = 15
         self.recording_mode = "balanced"
@@ -3012,7 +3012,7 @@ class HomRecScreen:
                 self._first_launch = False
                 with open(SETTINGS_PATH, "r") as f:
                     settings = json.load(f)
-                    self.output_folder = settings.get("output_folder", "recordings")
+                    self.output_folder = settings.get("output_folder", os.path.join(_SCRIPT_DIR, "recordings"))
                     self.scale_factor = settings.get("scale_factor", 0.75)
                     self.target_fps = settings.get("target_fps", 15)
                     # Клампим quality: старые настройки могли сохранить 95-100%
@@ -4621,10 +4621,7 @@ class HomRecScreen:
         if not HAS_TRAY:
             return
         try:
-            if getattr(sys, 'frozen', False):
-                base_dir = os.path.dirname(sys.executable)
-            else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
+            base_dir = _SCRIPT_DIR
             icons_dir = os.path.join(base_dir, "icons")
 
             # Prefer tray.ico, fall back to main.ico, then generate
