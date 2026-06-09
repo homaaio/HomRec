@@ -23,8 +23,8 @@ CB_VOID    = ctypes.CFUNCTYPE(None)
 CB_URL     = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)
 CB_COMMAND = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)   # новый: произвольная команда из DLL
 
-CONSOLE_VERSION = "1.2.2"
-BRIDGE_VERSION  = "1.2.2"
+CONSOLE_VERSION = "1.2.3"
+BRIDGE_VERSION  = "1.2.3"
 
 # HomRec application version constants
 HOMREC_VERSION = "1.6.4"
