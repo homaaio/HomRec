@@ -36,15 +36,15 @@
 #include <wchar.h>
 #include <time.h>
 
-/* ── версии ────────────────────────────────────────────────────────────────── */
+/* -- версии ------------------------------------------------------------------ */
 #define TERMINAL_VERSION  L"1.0"
 #define CONSOLE_VERSION   L"1.2.2"
 
-/* ── Named Pipe ─────────────────────────────────────────────────────────────  */
+/* -- Named Pipe -------------------------------------------------------------  */
 #define PIPE_NAME         L"\\\\.\\pipe\\HomRecConsole"
 #define PIPE_BUF          4096
 
-/* ── Palette (Catppuccin Mocha — идентично hr_console.cpp) ──────────────── */
+/* -- Palette (Catppuccin Mocha — идентично hr_console.cpp) ---------------- */
 #define C_BG      0x002E1E1E
 #define C_SURFACE 0x00443231
 #define C_INPUTBG 0x00201811
@@ -59,19 +59,19 @@ static const COLORREF TAG_COL[6] = {
     C_TEXT, C_GREEN, C_YELLOW, C_RED, C_DIM, C_ACCENT
 };
 
-/* ── Layout constants ───────────────────────────────────────────────────────  */
+/* -- Layout constants -------------------------------------------------------  */
 #define HDR_H    32
 #define STS_H    22
 #define INP_H    36
 #define PAD       8
 #define PROMPT_W 28
 
-/* ── Window message IDs ─────────────────────────────────────────────────────  */
+/* -- Window message IDs -----------------------------------------------------  */
 #define WMA_WRITELINE  (WM_APP + 1)
 #define WMA_CONNECTED  (WM_APP + 2)
 #define WMA_LOST_CONN  (WM_APP + 3)
 
-/* ── Globals ─────────────────────────────────────────────────────────────── */
+/* -- Globals --------------------------------------------------------------- */
 static HWND  g_hwnd    = NULL;
 static HWND  g_hdr     = NULL;
 static HWND  g_out     = NULL;

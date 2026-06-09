@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-/* ── zlib / gzip ────────────────────────────────────────────────────────────
+/* -- zlib / gzip ------------------------------------------------------------
  * hr_profile_io uses gzip to wrap JSON in .hrc/.hrl/.hrt files.
  *
  * On Windows, zlib is loaded at runtime from zlib1.dll (ships with Python,
@@ -26,12 +26,12 @@
  *
  * On Linux/macOS the system zlib header and library are used as normal.
  *
- * ── HOW TO RESTORE THE STATIC DEPENDENCY (if you prefer) ────────────────────
+ * -- HOW TO RESTORE THE STATIC DEPENDENCY (if you prefer) --------------------
  * Delete everything between the dashed lines and replace with:
  *   #include <zlib.h>
  * Then add  -lz  to the linker flags in build_native.py and ensure zlib-dev
  * is installed (MinGW-w64: already bundled; Ubuntu: apt install zlib1g-dev).
- * ─────────────────────────────────────────────────────────────────────────── */
+ * --------------------------------------------------------------------------- */
 #if defined(_WIN32)
 
 /* zlib type aliases — mirrors zlib.h exactly so the rest of the file compiles
@@ -149,17 +149,17 @@ static int _zlib_inflateEnd(z_stream *s) {
 #  include <zlib.h>
 #endif /* _WIN32 */
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Magic bytes (mirrors Python _HRC_MAGIC / _HRL_MAGIC / _HRT_MAGIC)         */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 static const uint8_t MAGIC_HRC[4] = {'H','R','C',0x01};
 static const uint8_t MAGIC_HRL[4] = {'H','R','L',0x01};
 static const uint8_t MAGIC_HRT[4] = {'H','R','T',0x01};
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Internal helpers                                                            */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 static std::string _str(const char *s) { return s ? std::string(s) : ""; }
 
@@ -233,9 +233,9 @@ static int _jget_bool(const char *json, const char *key, int def) {
     return def;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  gzip helpers (wraps zlib)                                                   */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 static std::vector<uint8_t> _gz_compress(const uint8_t *data, size_t sz) {
     /* Estimate: worst case ~1% overhead + 18 byte gzip header */
@@ -283,9 +283,9 @@ static std::vector<uint8_t> _gz_decompress(const uint8_t *data, size_t sz) {
     return out;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Low-level binary file I/O                                                   */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_hrc_write
@@ -379,9 +379,9 @@ HR_EXPORT int hr_hrc_detect(const char *path) {
     return -1;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Full settings struct — mirrors ALL fields in HomRecScreen.__init__          */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 struct HrProfileFull {
     /* Paths */
@@ -492,9 +492,9 @@ static void _profile_defaults(HrProfileFull *p) {
     p->schema_version = 1;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  JSON ↔ HrProfileFull                                                        */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 static void _profile_from_json(HrProfileFull *p, const char *json) {
     char tmp[512];
@@ -638,9 +638,9 @@ static std::string _profile_to_json(const HrProfileFull *p) {
     return std::string(buf);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Public profile API                                                          */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 HR_EXPORT void *hr_profile_create(void) {
     HrProfileFull *p = new(std::nothrow) HrProfileFull();
@@ -801,9 +801,9 @@ HR_EXPORT void hr_profile_set_double(void *h, const char *field, double val) {
     if (strcmp(field, "ui_scale")     == 0) { p->ui_scale     = val; return; }
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Directory scanning (Themes / Languages)                                     */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_scan_dir_ext
@@ -863,9 +863,9 @@ HR_EXPORT int hr_scan_dir_ext(const char *dir_path, const char *ext,
     return count;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Theme JSON extraction helper                                                */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_theme_get_color
@@ -881,9 +881,9 @@ HR_EXPORT int hr_theme_get_color(const char *json_body, const char *key,
     return _jget_str(json_body, key, out_color, out_len);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Language file helpers                                                       */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_lang_get_value
