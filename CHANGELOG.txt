@@ -1,5 +1,21 @@
 welcome to changelog :D
 
+[Version 1.6.4] - 2026-06-09
+
+=== Added ===
+
+!start --terminal as @terminal command — launches hr_terminal.exe as an
+  external terminal window directly from the console. The command is handled
+  natively in hr_console.cpp (ShellExecuteExW next to the DLL) and mirrored
+  in hr_console_bridge.py (subprocess.Popen next to the script).
+  Appears in !help output under the !start group.
+
+=== Fixed ===
+
+Version bumped to 1.6.4
+Console version bumped to 1.2.2
+Minor bugs has been fixed (Tray bugs, icons bugs etc.)
+
 [Version 1.6.3] - 2026-06-07
 
 === Added ===
@@ -8,10 +24,6 @@ hr_terminal.exe - standalone external terminal window for HomRec console.
   Runs as a separate process with its own Win32 window (Rich Edit output,
   Unicode input field, Catppuccin Mocha color scheme matching the DLL console).
   Multiple instances supported simultaneously (up to 8 concurrent connections).
-
-=== Changed ===
-
-All source files was moved to src/ folder
 
 === Fixed ===
 
