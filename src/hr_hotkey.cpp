@@ -29,15 +29,15 @@
 #include <thread>
 #include <mutex>
 
-/* ── Hotkey IDs ──────────────────────────────────────────────────────────── */
+/* -- Hotkey IDs ------------------------------------------------------------ */
 static constexpr int HK_START_STOP  = 1;   /* F9  */
 static constexpr int HK_PAUSE       = 2;   /* F10 */
 static constexpr int HK_FULLSCREEN  = 3;   /* F11 */
 
-/* ── Callback types ──────────────────────────────────────────────────────── */
+/* -- Callback types -------------------------------------------------------- */
 typedef void (*HR_HK_CB)();  /* no-arg callback for each hotkey action */
 
-/* ── Context ─────────────────────────────────────────────────────────────── */
+/* -- Context --------------------------------------------------------------- */
 struct HotkeyCtx {
     HR_HK_CB cb_start_stop{nullptr};
     HR_HK_CB cb_pause{nullptr};
@@ -53,7 +53,7 @@ struct HotkeyCtx {
 #endif
 };
 
-/* ── Win32 hidden-window message pump ────────────────────────────────────── */
+/* -- Win32 hidden-window message pump -------------------------------------- */
 
 #ifdef _WIN32
 static constexpr wchar_t k_wndclass[] = L"HomRecHotkeyWnd_161";
@@ -114,7 +114,7 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
 }
 #endif
 
-/* ── Public API ───────────────────────────────────────────────────────────── */
+/* -- Public API ------------------------------------------------------------- */
 
 HR_EXPORT void *hr_hk_create() {
     return new(std::nothrow) HotkeyCtx{};
