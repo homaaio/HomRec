@@ -85,8 +85,6 @@ except ImportError:
     _native_core = _FakeCore()
 
 
-# -- Импортируем ВСЁ остальное из оригинального homrec.py ---------------------
-# (языки, темы, диалоги, аудиомикшер и т.д. — без изменений)
 try:
     from homrec import (
         LANGUAGES, LANG_SCHEMA_VERSION, THEME_SCHEMA_VERSION,
