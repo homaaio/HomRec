@@ -44,6 +44,166 @@ PROF_OK  = _prof  is not None
 UTILS_OK = _utils is not None
 
 # ---------------------------------------------------------------------------
+# Compatibility flags expected by homrec.py
+# ---------------------------------------------------------------------------
+
+# True if at least one native library loaded successfully
+NATIVE_OK   = APP_OK or PROF_OK or UTILS_OK
+
+# GPU / encoder helpers live in hr_app_logic
+ENCODER_OK  = APP_OK
+
+# hr_audio.dll is a separate library not yet bound in this file
+AUDIO_OK    = False
+
+# hr_tools functionality is covered by hr_app_logic bindings above
+TOOLS_OK    = APP_OK
+
+# Ring-buffer DLL is not present in this build
+RINGBUF_OK  = False
+
+
+# ---------------------------------------------------------------------------
+# tools_engine facade
+# Wraps the GPU-probe, codec-args, merge and dshow functions from hr_app_logic.
+# homrec.py uses:  tools_engine.probe_gpu(ffpath)
+#                  tools_engine.build_codec_args(codec, quality, fps, cpu_count)
+#                  tools_engine.merge_av(ffpath, video, audio)
+#                  tools_engine.get_dshow_devices(ffpath)
+# ---------------------------------------------------------------------------
+
+class _ToolsEngine:
+    """Python facade over hr_app_logic C++ functions used by homrec.py."""
+
+    def probe_gpu(self, ffmpeg_path: str) -> str | None:
+        return probe_gpu_encoder(ffmpeg_path)
+
+    def build_codec_args(self, codec: str, quality: int,
+                         fps: int, cpu_count: int) -> list[str]:
+        return build_codec_args(codec, quality, fps, cpu_count)
+
+    def merge_av(self, ffmpeg_path: str,
+                 video_path: str, audio_path: str) -> bool:
+        return merge_audio_video(ffmpeg_path, video_path, audio_path)
+
+    def get_dshow_devices(self, ffmpeg_path: str) -> list[str]:
+        """List DirectShow audio input devices via ffmpeg -list_devices."""
+        import subprocess, platform as _plat, re
+        if _plat.system() != "Windows":
+            return []
+        try:
+            r = subprocess.run(
+                [ffmpeg_path, "-list_devices", "true",
+                 "-f", "dshow", "-i", "dummy"],
+                capture_output=True, timeout=8,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            text = (r.stdout + r.stderr).decode("utf-8", errors="replace")
+            devices: list[str] = []
+            in_audio = False
+            for line in text.splitlines():
+                if "audio" in line.lower():
+                    in_audio = True
+                if in_audio:
+                    m = re.search(r'"([^"]+)"', line)
+                    if m:
+                        devices.append(m.group(1))
+            return devices
+        except Exception:
+            return []
+
+
+tools_engine = _ToolsEngine() if TOOLS_OK else None
+
+
+# ---------------------------------------------------------------------------
+# audio_engine facade
+# hr_audio.dll is not yet loaded; methods are no-ops / return safe defaults.
+# homrec.py guards every call with:  if _AOK and _ae is not None:
+# ---------------------------------------------------------------------------
+
+class _AudioEngine:
+    """Stub audio engine returned when hr_audio.dll is absent."""
+
+    def start(self, mic_vol: float = 1.0, sys_vol: float = 1.0,
+              mic_mute: bool = False, sys_mute: bool = False) -> int:
+        return 0  # 0 = no streams started
+
+    def stop(self) -> None:
+        pass
+
+    def get_levels(self) -> tuple[int, int]:
+        return 0, 0
+
+    def set_volumes(self, mic_vol: float, sys_vol: float,
+                    mic_mute: bool, sys_mute: bool) -> None:
+        pass
+
+    def read_mic(self) -> bytes:
+        return b""
+
+    def read_sys(self) -> bytes:
+        return b""
+
+
+# AUDIO_OK is False, so homrec.py will not actually call these methods,
+# but the name must be importable to avoid ImportError.
+audio_engine = _AudioEngine()
+
+
+# ---------------------------------------------------------------------------
+# core facade
+# Used by the capture thread:  from homrec_native import core as _native_core
+# homrec.py checks _have_native before calling, so a stub is sufficient.
+# ---------------------------------------------------------------------------
+
+class _NativeCore:
+    """
+    Pure-Python / NumPy fallback for the C++ capture accelerator.
+
+    homrec.py uses two methods from this object:
+      bgrx_to_rgb_np(bgra_bytes, w, h)  → numpy uint8 array (h, w, 3) RGB
+      resize_bilinear_np(rgb_np, sw, sh, dw, dh) → bytes  (dw*dh*3)
+
+    When hr_app_logic.dll is present these are backed by C++; here we
+    provide equivalent NumPy implementations so the capture loop works
+    correctly without the DLL.
+    """
+
+    @staticmethod
+    def bgrx_to_rgb_np(bgra_bytes: bytes, w: int, h: int):
+        """Convert raw BGRX bytes → numpy RGB array (h, w, 3)."""
+        import numpy as np
+        arr = np.frombuffer(bgra_bytes, dtype=np.uint8).reshape(h, w, 4)
+        # BGRX → RGB: swap channels and drop alpha/X
+        return arr[:, :, ::-1][:, :, 1:]  # [..., B G R X] → [..., R G B]
+
+    @staticmethod
+    def resize_bilinear_np(rgb_np, sw: int, sh: int, dw: int, dh: int) -> bytes:
+        """Resize an (h, w, 3) numpy array to (dh, dw) and return raw bytes."""
+        import numpy as np
+        # Use cv2 if available (fast), fall back to pure numpy via PIL
+        try:
+            import cv2
+            resized = cv2.resize(rgb_np, (dw, dh), interpolation=cv2.INTER_LINEAR)
+            return resized.tobytes()
+        except Exception:
+            pass
+        try:
+            from PIL import Image
+            img = Image.fromarray(rgb_np, "RGB")
+            img = img.resize((dw, dh), Image.Resampling.BILINEAR)
+            return img.tobytes()
+        except Exception:
+            # Last resort: nearest-neighbour via numpy
+            y_idx = (np.arange(dh) * sh // dh).astype(np.int32)
+            x_idx = (np.arange(dw) * sw // dw).astype(np.int32)
+            return rgb_np[np.ix_(y_idx, x_idx)].tobytes()
+
+
+core = _NativeCore()
+
+# ---------------------------------------------------------------------------
 # hr_app_logic bindings
 # ---------------------------------------------------------------------------
 

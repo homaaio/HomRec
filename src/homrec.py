@@ -80,7 +80,7 @@ except ImportError:
     HAS_TRAY = False
 
 # ==================== VERSION & UPDATE CHECK ====================
-CURRENT_VERSION = "1.6.3"
+CURRENT_VERSION = "1.6.4"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -116,7 +116,7 @@ def _version_gt(a: str, b: str) -> bool:
 # ==================== LANGUAGE FILES ====================
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.6.3",
+        "app_title": "HomRec v1.6.4",
         "live_preview": "PREVIEW",
         "ready": "Ready",
         "recording": "Recording",
@@ -209,7 +209,7 @@ LANGUAGES = {
         "show_log": "Show Log",
     },
     "ru": {
-        "app_title": "HomRec v1.6.3",
+        "app_title": "HomRec v1.6.4",
         "live_preview": "ПРЕДПРОСМОТР",
         "ready": "Готов",
         "recording": "Запись",
@@ -306,14 +306,6 @@ LANGUAGES = {
 # ==================== HELPER FUNCTIONS ====================
 
 def find_ffmpeg() -> str | None:
-    """Find FFmpeg in system or in program directory.
-
-    When running as a PyInstaller .exe:
-      - __file__ points to the temp _MEIXXXXXX unpack folder, NOT the .exe folder
-      - os.getcwd() is wherever the user launched from, NOT the .exe folder
-      - sys.executable is always the actual .exe path, so its directory IS the
-        folder the user placed ffmpeg.exe next to the app.
-    """
     # 1. Folder containing the running .exe (or .py script)
     if getattr(sys, 'frozen', False):
         # PyInstaller sets sys.frozen=True and sys.executable = path to .exe
@@ -383,7 +375,7 @@ def optimize_for_performance() -> None:
     except Exception as _e:
         log.warning(f"Native ext not loaded at startup: {_e}")
 
-    log.info("Performance optimizations applied (v1.6.3)")
+    log.info("Performance optimizations applied (v1.6.4)")
 
 class AudioLevelMeter(tk.Canvas):
     """Smooth gradient audio level meter with peak indicator (no segments)."""
@@ -2471,7 +2463,7 @@ class HomRecScreen:
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_tray()
-        log.info("HomRec v1.6.3 started, language: %s", self.current_language)
+        log.info("HomRec v1.6.4 started, language: %s", self.current_language)
         # Check for updates 2 seconds after startup (non-blocking)
         self.root.after(2000, self._start_update_check)
         # Show welcome dialog on first launch
@@ -2575,7 +2567,7 @@ class HomRecScreen:
                 pass
 
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.3")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.4")
 
         # Pre-render two frames of the REC badge (for a simple pulse animation)
         self._rec_icon_img = None
@@ -3164,7 +3156,7 @@ class HomRecScreen:
                 font=("Segoe UI", 22, "bold"), 
                 bg=self.colors["surface"], 
                 fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.6.3", 
+        tk.Label(title_frame, text="v1.6.4", 
                 font=("Segoe UI", 11), 
                 bg=self.colors["surface"], 
                 fg=self.colors["text_secondary"]).pack()
