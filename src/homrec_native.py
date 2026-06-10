@@ -15,16 +15,29 @@ log = logging.getLogger("homrec.native2")
 # ---------------------------------------------------------------------------
 
 def _lib_path(name: str) -> str:
-    base = Path(sys.executable).parent if getattr(sys, "frozen", False) \
-           else Path(__file__).parent
-    for ext in (".dll", ".so", ".dylib"):
-        p = base / (name + ext)
-        if p.exists():
-            return str(p)
+    def _search_dirs():
+        if not getattr(sys, "frozen", False):
+            yield Path(__file__).parent
+        else:
+            exe_dir = Path(sys.executable).parent
+            yield exe_dir
+            yield exe_dir / "src"   # DLLs may live in src/ subdir next to .exe
+
+    for base in _search_dirs():
+        for ext in (".dll", ".so", ".dylib"):
+            p = base / (name + ext)
+            if p.exists():
+                # Register the DLL directory so Windows finds dependent DLLs
+                if hasattr(os, "add_dll_directory"):
+                    try:
+                        os.add_dll_directory(str(base))
+                    except Exception:
+                        pass
+                return str(p)
     found = ctypes.util.find_library(name)
     if found:
         return found
-    raise FileNotFoundError(f"Native library '{name}' not found near {base}")
+    raise FileNotFoundError(f"Native library '{name}' not found")
 
 
 def _load(name: str) -> Optional[ctypes.CDLL]:
