@@ -17,27 +17,27 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 ---
 
-## ✨ Features
+## Features
 
 | Feature | Details |
 |---|---|
-| 🎞️ **Screen recording** | Full desktop or specific window |
-| 🎙️ **Audio capture** | Microphone + Desktop audio (via WASAPI loopback) |
-| 🖥️ **Multi-monitor** | Select which monitor to record |
-| 📊 **PC Analytics** | CPU, RAM and disk in one combined window |
-| ⌨️ **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
-| 🌍 **Languages** | English and Russian UI (You can add more with .hrl files!) |
-| 🎨 **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
-| 📁 **Custom output folder** | Choose where recordings are saved |
-| 📈 **Recording stats** | Live FPS, duration, frame count in status bar |
-| 🔼 **Always on top** | Keep the window above everything else |
-| 🔔 **System tray** | Minimise to tray, control recording from tray menu |
-| 🔄 **Auto update check** | Notifies you when a new version is out |
-| ❓ **Help menu** | Check for updates and report issues directly from the app |
+| **Screen recording** | Full desktop or specific window |
+| **Audio capture** | Microphone + Desktop audio (via WASAPI loopback) |
+| **Multi-monitor** | Select which monitor to record |
+| **PC Analytics** | CPU, RAM and disk in one combined window |
+| **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
+| **Languages** | English and Russian UI (You can add more with .hrl files!) |
+| **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
+| **Custom output folder** | Choose where recordings are saved |
+| **Recording stats** | Live FPS, duration, frame count in status bar |
+| **Always on top** | Keep the window above everything else |
+| **System tray** | Minimise to tray, control recording from tray menu |
+| **Auto update check** | Notifies you when a new version is out |
+| **Help menu** | Check for updates and report issues directly from the app |
 
 ---
 
-## 🚀 Installation
+## Installation
 
 ### Option A — .exe (recommended)
 
@@ -79,7 +79,7 @@ python homrec.py
 
 ---
 
-## ⌨️ Keyboard shortcuts
+## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
@@ -89,7 +89,7 @@ python homrec.py
 
 ---
 
-## 📦 Dependencies
+## Dependencies
 
 ```
 opencv-python
@@ -109,7 +109,7 @@ pip install -r requirements.txt
 
 ---
 
-## 📣 Stay updated
+## Stay updated
 
 ### **[t.me/homaexe](https://t.me/homaexe)** / **[x.com/homrec_dev](https://x.com/homrec_dev)**
 
