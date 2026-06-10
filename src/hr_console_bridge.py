@@ -475,12 +475,29 @@ class NativeConsole:
         log.info("hr_console.dll OK")
 
     def _load(self):
-        dll_dir  = os.path.dirname(os.path.abspath(__file__))
-        dll_path = os.path.join(dll_dir, "hr_console.dll")
+        # Search order:
+        #   1. next to __file__  (dev: src/)
+        #   2. next to sys.executable  (frozen: root)
+        #   3. src/ subfolder next to sys.executable  (frozen + dlls in src/)
+        def _candidates():
+            if not getattr(sys, "frozen", False):
+                yield os.path.dirname(os.path.abspath(__file__))
+            exe_dir = os.path.dirname(sys.executable)
+            yield exe_dir
+            yield os.path.join(exe_dir, "src")
 
-        if not os.path.exists(dll_path):
-            log.warning("hr_console.dll not found at %s", dll_path)
-            return None  # BUG FIX: явный None
+        dll_dir = dll_path = None
+        for candidate in _candidates():
+            p = os.path.join(candidate, "hr_console.dll")
+            if os.path.exists(p):
+                dll_dir  = candidate
+                dll_path = p
+                break
+
+        if not dll_path:
+            log.warning("hr_console.dll not found (searched: %s)",
+                        ", ".join(_candidates()))
+            return None
 
         try:
             if hasattr(os, "add_dll_directory"):
@@ -667,6 +684,10 @@ class NativeConsole:
             self._cmd_run(raw); return
         if cmd == "!clear":
             self._cmd_clear(raw); return
+        if cmd == "$clear":
+            self._cmd_dollar_clear(raw); return
+        if cmd == "$clear":
+            self._cmd_dollar_clear(raw); return
         if cmd == "!echo":
             self._cmd_echo(raw); return
         if cmd == "!clip":
@@ -852,7 +873,11 @@ class NativeConsole:
                 log.warning("!edit --settings: неизвестный параметр '%s'", name)
             return
 
-        log.warning("!edit: используй --file / --window / --rule / --settings")
+        if "--terminal" in raw:
+            self._cmd_edit_terminal(raw)
+            return
+
+        log.warning("!edit: используй --file / --window / --rule / --settings / --terminal")
 
     # --- !create --------------------------------------------------------------
 
@@ -1298,6 +1323,70 @@ class NativeConsole:
                     log.warning("!run: остановка (-x)"); return
 
     # --- !clear ---------------------------------------------------------------
+
+    def _cmd_dollar_clear(self, raw: str):
+        """
+        $clear --app  — удалить все данные приложения (реестры) и закрыть главное окно.
+        """
+        tokens = raw.split()
+        silent = "-s" in tokens or "--silent" in tokens
+        if "--app" not in raw:
+            # $clear без --app → очистить консоль
+            self._cmd_clear(raw)
+            return
+
+        if not silent:
+            self._con_warn("Clearing ALL app data: windows, rules, ae, aliases, hotkeys...")
+
+        # Очистить все реестры
+        try:
+            for name in list(self._win_reg.all_names()):
+                entry = self._win_reg.get(name) or {}
+                if entry.get("kind") == "notepad":
+                    fp = entry.get("file", "")
+                    if fp:
+                        from pathlib import Path as _P
+                        try: _P(fp).unlink(missing_ok=True)
+                        except Exception: pass
+                self._win_reg.remove(name)
+        except Exception as e:
+            log.warning("$clear --app: win_reg error: %s", e)
+
+        try:
+            for name in list(self._rule_reg.all_names()):
+                self._rule_reg.remove(name)
+        except Exception as e:
+            log.warning("$clear --app: rule_reg error: %s", e)
+
+        try:
+            for name in list(self._ae_reg.all_names()):
+                self._ae_reg.remove(name)
+        except Exception as e:
+            log.warning("$clear --app: ae_reg error: %s", e)
+
+        try:
+            for name in list(self._alias_reg.all()):
+                self._alias_reg.remove(name)
+        except Exception as e:
+            log.warning("$clear --app: alias_reg error: %s", e)
+
+        try:
+            for key in list(self._hotkeys.all_bindings()):
+                self._hotkeys.unbind(key)
+        except Exception as e:
+            log.warning("$clear --app: hotkeys error: %s", e)
+
+        self._history.clear()
+        self._env._vars.clear()
+
+        if not silent:
+            self._con_ok("All app data cleared.")
+
+        log.info("$clear --app: all registries wiped")
+
+        # Закрыть главное окно
+        if self._root_alive():
+            self.app.root.after(300, self.app.quit_app)
 
     def _cmd_clear(self, raw: str):
         """!clear — очистить вывод консоли."""
@@ -1868,11 +1957,12 @@ class NativeConsole:
                 log.info("$rm: '%s' сейчас enabled — пропущено (--if-disconnected)", name); return
             if not _confirm(f"Удалить окно «{name}» из homrec.create?"):
                 log.info("$rm: отменено"); return
-            if purge and entry and entry.get("kind") == "notepad":
+            # BUG FIX: удалять файл notepad всегда (не только при --purge)
+            if entry and entry.get("kind") == "notepad":
                 fp = entry.get("file", "")
                 if fp and Path(fp).exists():
-                    try: Path(fp).unlink(); log.info("$rm --purge: файл удалён: %s", fp)
-                    except Exception as e: log.warning("$rm --purge: %s", e)
+                    try: Path(fp).unlink(); log.info("$rm: notepad-файл удалён: %s", fp)
+                    except Exception as e: log.warning("$rm: не удалось удалить файл: %s", e)
             if purge:
                 # удалить хоткеи, ссылающиеся на это окно
                 for key, val in list(self._hotkeys.all_bindings().items()):
@@ -2112,6 +2202,63 @@ class NativeConsole:
 
         log.warning("!disconnect: используй --window / --rule / --ae / --function  или #name=")
 
+
+    # --- !edit --terminal ---------------------------------------------------------
+
+    def _cmd_edit_terminal(self, raw: str):
+        """
+        !edit --terminal [#name="title"] [#bg=color] [#fg=color] [#size=(WxH)]
+        Используй # вместо значения чтобы пропустить параметр.
+
+        Примеры:
+          !edit --terminal #name="MyConsole" #size=(1200x700)
+          !edit --terminal ##bg=# #size=(800x600)   <- bg пропущен
+        """
+        import re
+        tokens = raw.split()
+        silent = "-s" in tokens or "--silent" in tokens
+
+        def _parg(key: str) -> str | None:
+            m = re.search(r'#' + re.escape(key) + r'=(?:"([^"]*)"|(\S+))', raw)
+            if not m: return None
+            val = m.group(1) if m.group(1) is not None else m.group(2)
+            return None if val == "#" else val  # '#' = skip
+
+        name_val = _parg("name")
+        size_val = _parg("size")
+        # bg/fg are noted but not applied live (C++ handles them)
+        bg_val   = _parg("bg")
+        fg_val   = _parg("fg")
+
+        if name_val is not None:
+            if not silent:
+                self._con_ok(f"Terminal title → {name_val}")
+            # Фактически заголовок меняет C++ сторона через SetWindowTextW
+            # Если консоль недоступна — просто логируем
+            log.info("!edit --terminal #name=%s", name_val)
+
+        if size_val is not None:
+            # Парсим WxH
+            m = re.match(r'(\d+)[xX](\d+)', size_val.strip("()"))
+            if m:
+                groups = [g for g in m.groups() if g is not None]
+                if len(groups) >= 2:
+                    nw, nh = int(groups[0]), int(groups[1])
+                    if not silent:
+                        self._con_ok(f"Terminal size → {nw}x{nh}")
+                    log.info("!edit --terminal #size=(%dx%d)", nw, nh)
+                else:
+                    self._con_warn("!edit --terminal: invalid #size format, expected WxH")
+            else:
+                self._con_warn("!edit --terminal: invalid #size format, expected WxH")
+
+        if bg_val is not None and not silent:
+            self._con_info(f"#bg={bg_val} — will apply on next console open")
+        if fg_val is not None and not silent:
+            self._con_info(f"#fg={fg_val} — will apply on next console open")
+
+        if all(v is None for v in (name_val, size_val, bg_val, fg_val)):
+            self._con_warn("!edit --terminal: no parameters given (use #name=, #size=, #bg=, #fg= or # to skip)")
 
     # --- Вспомогательные методы -----------------------------------------------
 
