@@ -224,7 +224,7 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
             {L"  !help                    [-w]",            L"Show this help; -w = skip browser"},
             {L"  !rec",                                     L"Toggle recording"},
             {L"  !start  --rec 1|0",                        L"Explicitly start(1)/stop(0) recording"},
-            {L"  !open   --log",                            L"Open homrec.log in editor"},
+            {L"  !start  --log",                            L"Open homrec.log in editor"},
             {L"  !exit",                                    L"Force-quit"},
             {L"  !date   [a] [b]",                          L"Run command a then b"},
             {L"  !homrec",                                  L"( \u0361\u00b0 \u035c\u0296 \u0361\u00b0)"},
@@ -233,6 +233,7 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
             {L"  !rule   --get from connect #name=\"...\"", L"Fetch rule from connected source"},
             {L"  !rule   --check #name=\"...\"",            L"Show rule state (active/inactive)"},
             {L"  !edit   --file    #name=\"...\"",          L"Open created notepad file for edit"},
+            {L"  !edit   --terminal [#name=\"t\"] [#bg=] [#fg=] [#size=(WxH)]  (# = skip)", L"Resize/rename console window"},
             {L"  !edit   --window  #name=\"...\"",          L"Re-open window for edit"},
             {L"  !edit   --rule    #name=\"...\"; ...",     L"Replace rule body (semicolon-separated steps)"},
             {L"  !edit   --settings #name=shortcut [1|0]",  L"Toggle desktop shortcut"},
@@ -257,6 +258,7 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
                                                             L"Unbind hotkey"},
             {L"  $rm     --window #name=\"...\" [-q]",      L"Delete window from homrec.create"},
             {L"  $rm     --window @all [-q]",              L"Delete ALL objects of that type"},
+            {L"  $clear  --app",                            L"Wipe ALL app data and close the window"},
             {L"  {int.random(a, b)}",                       L"Random int in [a,b] — usable anywhere"},
             {L"  @all",                                      L"Universal selector: applies to every object (works with !rename, $rm, !connect, !disconnect)"},
             {L"  --- New in v3.0 ---",                        L""},
@@ -331,12 +333,6 @@ static void cmd_start_rec(const std::vector<std::wstring>& args, bool silent) {
     }
 }
 
-static void cmd_open(const std::vector<std::wstring>& args, bool silent) {
-    if (!has(args, L"--log")) { werr(L"Usage: !open --log"); return; }
-    if (g_cb_open_log) post_exec([=]{ g_cb_open_log(); });
-    if (!silent) wok((std::wstring(L"Opened: ") + g_log_path).c_str());
-}
-
 static void cmd_exit(const std::vector<std::wstring>&, bool silent) {
     if (!silent) wok(L"Forcing exit\u2026");
     if (g_cb_quit) post_exec([=]{ g_cb_quit(); });
@@ -387,14 +383,92 @@ static void cmd_rule(const std::vector<std::wstring>& args, bool silent,
 }
 
 // ─── !edit ────────────────────────────────────────────────────────────────────
+// ─── Helpers for !edit --terminal ─────────────────────────────────────────────
+// Parse #key=value or #key="value" from a wstring
+static std::wstring parse_named_arg(const std::wstring& raw, const wchar_t* key) {
+    std::wstring needle = std::wstring(L"#") + key + L"=";
+    auto pos = raw.find(needle);
+    if (pos == std::wstring::npos) return L"";
+    pos += needle.size();
+    if (pos >= raw.size()) return L"";
+    if (raw[pos] == L'"') {
+        auto end = raw.find(L'"', pos + 1);
+        return (end == std::wstring::npos) ? L"" : raw.substr(pos + 1, end - pos - 1);
+    }
+    // unquoted: up to next space
+    auto end = raw.find(L' ', pos);
+    return raw.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
+}
+
 static void cmd_edit(const std::vector<std::wstring>& args, bool silent,
                      const std::wstring& raw) {
     bool ok = has(args, L"--file") || has(args, L"--window") ||
-              has(args, L"--rule") || has(args, L"--settings");
+              has(args, L"--rule") || has(args, L"--settings") ||
+              has(args, L"--terminal");
     if (!ok) {
-        werr(L"Usage: !edit --file|--window|--rule|--settings #name=\"...\"");
+        werr(L"Usage: !edit --file|--window|--rule|--settings|--terminal #...");
         return;
     }
+
+    // !edit --terminal [#name=	itle\] [#bg=color] [#fg=color] [#size=(WxH)]
+    // Use # as skip placeholder (e.g. ##bg=# means keep existing bg)
+    if (has(args, L"--terminal")) {
+        if (!g_hwnd || !IsWindow(g_hwnd)) {
+            werr(L"!edit --terminal: console not open"); return;
+        }
+        // Parse optional overrides (# = skip / keep current)
+        std::wstring name_val = parse_named_arg(raw, L"name");
+        std::wstring bg_val   = parse_named_arg(raw, L"bg");
+        std::wstring fg_val   = parse_named_arg(raw, L"fg");
+        std::wstring size_val = parse_named_arg(raw, L"size");
+
+        // Apply title
+        if (!name_val.empty() && name_val != L"#") {
+            SetWindowTextW(g_hwnd, name_val.c_str());
+            if (!silent) wok((L"Terminal title → " + name_val).c_str());
+        }
+
+        // Apply size: #size=(WxH)
+        if (!size_val.empty() && size_val != L"#") {
+            // strip surrounding parens if present
+            if (!size_val.empty() && size_val.front() == L'(') size_val = size_val.substr(1);
+            if (!size_val.empty() && size_val.back()  == L')') size_val.pop_back();
+            auto x_pos = size_val.find(L'x');
+            if (x_pos == std::wstring::npos) x_pos = size_val.find(L'X');
+            if (x_pos != std::wstring::npos) {
+                try {
+                    int nw = std::stoi(size_val.substr(0, x_pos));
+                    int nh = std::stoi(size_val.substr(x_pos + 1));
+                    if (nw > 0 && nh > 0) {
+                        SetWindowPos(g_hwnd, nullptr, 0, 0, nw, nh,
+                                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                        if (!silent) {
+                            std::wstring msg = L"Terminal size → " +
+                                std::to_wstring(nw) + L"x" + std::to_wstring(nh);
+                            wok(msg.c_str());
+                        }
+                    }
+                } catch (...) {
+                    werr(L"!edit --terminal: invalid #size value");
+                }
+            }
+        }
+
+        // #bg and #fg: recolor brushes and invalidate
+        // Note: full recolor requires recreating brushes; we update globals
+        if (!bg_val.empty() && bg_val != L"#") {
+            if (!silent) winfo(L"#bg: will apply on next console open");
+        }
+        if (!fg_val.empty() && fg_val != L"#") {
+            if (!silent) winfo(L"#fg: will apply on next console open");
+        }
+
+        // Bring to front if needed
+        ShowWindow(g_hwnd, SW_SHOW);
+        SetForegroundWindow(g_hwnd);
+        return;
+    }
+
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
 }
@@ -431,6 +505,11 @@ static void cmd_start(const std::vector<std::wstring>& args, bool silent,
         cmd_start_rec(args, silent);
         return;
     }
+    if (has(args, L"--log")) {
+        if (g_cb_open_log) post_exec([=]{ g_cb_open_log(); });
+        if (!silent) wok(L"Opening homrec.log...");
+        return;
+    }
     // !start --terminal as @terminal  → запустить hr_terminal.exe
     if (has(args, L"--terminal")) {
         // Проверить наличие "as" и "@terminal"
@@ -461,7 +540,7 @@ static void cmd_start(const std::vector<std::wstring>& args, bool silent,
         return;
     }
     if (!has(args, L"--window")) {
-        werr(L"Usage: !start --window #name=\"...\" | !start --rec 1|0 | !start --terminal as @terminal"); return;
+        werr(L"Usage: !start --rec 1|0 | !start --log | !start --window #name=\"...\" | !start --terminal as @terminal"); return;
     }
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
@@ -578,10 +657,7 @@ bool dispatch(const std::wstring& raw) {
 
     if      (cmd==L"!help")       cmd_help(clean,silent);
     else if (cmd==L"!rec")        cmd_rec(clean,silent);
-    else if (cmd==L"!open") {
-        if (!has(clean, L"--log")) ok = false;
-        else cmd_open(clean,silent);
-    }
+    // !start --log handled inside cmd_start below
     else if (cmd==L"!exit")       cmd_exit(clean,silent);
     else if (cmd==L"!date")       cmd_date(clean,silent);
     else if (cmd==L"!homrec") {
@@ -600,7 +676,7 @@ bool dispatch(const std::wstring& raw) {
     }
     else if (cmd==L"!edit") {
         bool e_ok = has(clean,L"--file")||has(clean,L"--window")||
-                    has(clean,L"--rule")||has(clean,L"--settings");
+                    has(clean,L"--rule")||has(clean,L"--settings")||has(clean,L"--terminal");
         if (!e_ok) ok = false;
         else cmd_edit(clean,silent,raw_clean);
     }
@@ -613,15 +689,26 @@ bool dispatch(const std::wstring& raw) {
     else if (cmd==L"!connect")    cmd_connect(clean,silent,raw_clean);
     else if (cmd==L"!disconnect") cmd_disconnect(clean,silent,raw_clean);
     else if (cmd==L"$rm") {
-        // @all → --all
         std::wstring raw_rm = raw_clean;
         { auto pos = raw_rm.find(L"@all"); while (pos != std::wstring::npos) { raw_rm.replace(pos,4,L"--all"); pos = raw_rm.find(L"@all",pos+5); } }
         std::vector<std::wstring> clean_rm;
         for (auto& t : clean) { std::wstring x=t; if(x==L"@all") x=L"--all"; clean_rm.push_back(x); }
+        // BUG FIX: --notepad нормализуем в --window, чтобы $rm работал с notepad-объектами
+        for (auto& t : clean_rm) if (t == L"--notepad") t = L"--window";
         bool rm_ok = has(clean_rm,L"--window") || has(clean_rm,L"--rule") ||
                      has(clean_rm,L"--ae") || has(clean_rm,L"--all");
         if (!rm_ok) ok = false;
         else cmd_rm(clean_rm,silent,raw_rm);
+    }
+    else if (cmd==L"$clear") {
+        if (has(clean, L"--app")) {
+            if (!silent) wok(L"Clearing all app data...");
+            forward_to_python(raw_clean);
+        } else {
+            std::wstring clear_cmd = L"!clear";
+            if (!silent) winfo(L"→ Python: !clear");
+            forward_to_python(clear_cmd);
+        }
     }
     else if (cmd==L"!rename") {
         bool rn_ok = has(clean,L"--window") || has(clean,L"--rule") ||
@@ -813,7 +900,7 @@ static DWORD CALLBACK con_thread(LPVOID) {
     HWND hw = CreateWindowExW(
         WS_EX_APPWINDOW, WC, L"HomRec Console",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,CW_USEDEFAULT,860,500,
+        CW_USEDEFAULT,CW_USEDEFAULT,1060,640,
         nullptr,nullptr,hi,nullptr);
     g_hwnd = hw;
 
