@@ -21,25 +21,25 @@ log = logging.getLogger("homrec.console")
 
 CB_VOID    = ctypes.CFUNCTYPE(None)
 CB_URL     = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)
-CB_COMMAND = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)   # новый: произвольная команда из DLL
+CB_COMMAND = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)
 
 CONSOLE_VERSION = "1.2.3"
 BRIDGE_VERSION  = "1.2.3"
 
 # HomRec application version constants
-HOMREC_VERSION = "1.6.4"
-CORE_VERSION   = "1.4.3"
+HOMREC_VERSION = "1.6.5"
+CORE_VERSION   = "1.6.0"
 
 # --------------------------------------------------------------------------------
-#  Вспомогательные утилиты разбора аргументов
+#  Argument parsing utilities
 # --------------------------------------------------------------------------------
 
 def _parse_named(raw: str, key: str) -> str | None:
-    """Извлечь значение #key="value" или #key=value из строки raw."""
+    """Extract the value of #key="value" or #key=value from raw string."""
     import re
     m = re.search(r'#' + re.escape(key) + r'=["\']?([^"\'#\s]+)["\']?', raw)
     if not m:
-        # попробовать с кавычками
+        # try with quotes
         m = re.search(r'#' + re.escape(key) + r'="([^"]*)"', raw)
     if not m:
         m = re.search(r'#' + re.escape(key) + r"='([^']*)'", raw)
@@ -48,7 +48,7 @@ def _parse_named(raw: str, key: str) -> str | None:
 
 
 def _parse_flags(raw: str) -> set[str]:
-    """Собрать все -флаги из строки (токены начинающиеся с -), кроме -return/-ret."""
+    """Collect all -flags from string (tokens starting with -), except -return/-ret."""
     import re
     flags = set(re.findall(r'(?<!\S)-[a-zA-Z]+', raw))
     flags.discard('-return')
@@ -57,13 +57,6 @@ def _parse_flags(raw: str) -> set[str]:
 
 
 def _get_base_dir() -> str:
-    """Return the project root directory.
-
-    When frozen (PyInstaller .exe): the folder containing the .exe.
-    When running as .py from src/: the parent of src/ — i.e. the project root
-    where create/, assets/, hr_terminal.exe, etc. all live.
-    Falls back to the script's own directory if the src/ layout isn't detected.
-    """
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     _src = os.path.dirname(os.path.abspath(__file__))
@@ -74,14 +67,10 @@ def _get_base_dir() -> str:
 
 
 # --------------------------------------------------------------------------------
-#  Менеджер созданных окон (хранилище)
+#  Created window manager (registry)
 # --------------------------------------------------------------------------------
 
 class WindowRegistry:
-    """
-    Хранит список «виртуальных» окон созданных через !create --window.
-    Данные сохраняются в <base>/create/windows.json
-    """
     def __init__(self, base_dir: str):
         self._path = Path(base_dir) / "create" / "windows.json"
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,7 +116,7 @@ import random as _random
 
 
 def _resolve_math(s: str) -> str:
-    """Заменяет {int.random(a, b)} на случайное целое."""
+    """Replaces {int.random(a, b)} with a random integer."""
     import re
     def _rep(m):
         try:
@@ -143,12 +132,6 @@ def _resolve_math(s: str) -> str:
 # --- RuleRegistry -------------------------------------------------------------
 
 class RuleRegistry:
-    """
-    Хранит правила из !create --rule.
-    Файл: <base>/create/rules.json
-    Формат записи: {"body": str, "connected": bool}
-    Тело правила — строки, разделённые ; (каждая — команда консоли).
-    """
     def __init__(self, base_dir: str):
         self._path = Path(base_dir) / "create" / "rules.json"
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,8 +180,8 @@ class RuleRegistry:
 
 class AERegistry:
     """
-    Хранит "Anything Else" объекты (цвета, и т.д.).
-    Файл: <base>/create/ae.json
+    Stores "Anything Else" objects (colors, etc.).
+    File: <base>/create/ae.json
     """
     def __init__(self, base_dir: str):
         self._path = Path(base_dir) / "create" / "ae.json"
@@ -237,12 +220,54 @@ class AERegistry:
         return list(self._data.keys())
 
 
+# --- TerminalFuncRegistry -----------------------------------------------------
+
+class TerminalFuncRegistry:
+    """
+    Stores functions bound to @terminal via !connect --func @terminal <alias> <cmd>.
+    These are short aliases that hr_terminal.exe resolves locally when typed.
+    Persisted to <base>/create/terminal_funcs.json
+    """
+    def __init__(self, base_dir: str):
+        self._path = Path(base_dir) / "create" / "terminal_funcs.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._data: dict[str, str] = {}  # alias -> full command
+        self._load()
+
+    def _load(self):
+        try:
+            if self._path.exists():
+                self._data = json.loads(self._path.read_text("utf-8"))
+        except Exception as e:
+            log.warning("TerminalFuncRegistry._load: %s", e)
+
+    def _save(self):
+        self._path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), "utf-8")
+
+    def bind(self, alias: str, cmd: str):
+        self._data[alias] = cmd
+        self._save()
+
+    def unbind(self, alias: str) -> bool:
+        if alias in self._data:
+            del self._data[alias]
+            self._save()
+            return True
+        return False
+
+    def resolve(self, alias: str) -> str | None:
+        return self._data.get(alias)
+
+    def all(self) -> dict[str, str]:
+        return dict(self._data)
+
+
 # --- AliasRegistry ------------------------------------------------------------
 
 class AliasRegistry:
     """
-    Хранит псевдонимы команд, созданные через !alias.
-    Файл: <base>/create/aliases.json
+    Stores command aliases created via !alias.
+    File: <base>/create/aliases.json
     """
     def __init__(self, base_dir: str):
         self._path = Path(base_dir) / "create" / "aliases.json"
@@ -281,7 +306,7 @@ class AliasRegistry:
 # --- EnvStore -----------------------------------------------------------------
 
 class EnvStore:
-    """Хранит внутренние переменные окружения консоли ($name)."""
+    """Stores internal console environment variables ($name)."""
     def __init__(self):
         self._vars: dict[str, str] = {}
 
@@ -301,7 +326,7 @@ class EnvStore:
         return dict(self._vars)
 
     def resolve(self, s: str) -> str:
-        """Заменяет $name на значение переменной в строке."""
+        """Replaces $name with the variable value in the string."""
         import re
         def _rep(m):
             return self._vars.get(m.group(1), m.group(0))
@@ -312,9 +337,9 @@ class EnvStore:
 
 class HotkeyManager:
     """
-    Регистрирует глобальные горячие клавиши через keyboard (если доступен)
-    или через Tkinter bind как fallback.
-    Хранит привязки в <base>/create/hotkeys.json
+    Registers global hotkeys via keyboard (if available)
+    or via Tkinter bind as fallback.
+    Stores bindings in <base>/create/hotkeys.json
     """
     def __init__(self, base_dir: str, console: "NativeConsole"):
         self._path = Path(base_dir) / "create" / "hotkeys.json"
@@ -323,7 +348,7 @@ class HotkeyManager:
         self._bindings: dict[str, str] = {}  # key → command
         self._load()
 
-        # Попытка использовать библиотеку keyboard
+        # Try to use keyboard library
         try:
             import keyboard as _kb
             self._kb = _kb
@@ -331,7 +356,7 @@ class HotkeyManager:
             self._kb = None
             log.warning("'keyboard' package not found; hotkeys fallback to Tkinter bind")
 
-        # Восстановить сохранённые привязки
+        # Restore saved bindings
         for key, val in list(self._bindings.items()):
             cmd = val.get("cmd") if isinstance(val, dict) else val
             self._register_os(key, cmd)
@@ -357,7 +382,7 @@ class HotkeyManager:
             except Exception as e:
                 log.warning("Hotkey registration failed for '%s': %s", key, e)
         else:
-            # Tkinter bind (работает только когда фокус на главном окне)
+            # Tkinter bind (only works when focus is on main window)
             app = self._console.app
             try:
                 tk_key = "<" + key.replace("+", "-") + ">"
@@ -405,7 +430,7 @@ class NativeConsole:
 
     def __init__(self, app: "HomRecScreen") -> None:
         self.app = app
-        self._lib = None  # BUG FIX: инициализировать до _load()
+        self._lib = None  # BUG FIX: initialize before _load()
 
         base = _get_base_dir()
         self._win_reg  = WindowRegistry(base)
@@ -415,9 +440,9 @@ class NativeConsole:
         self._env      = EnvStore()
         self._hotkeys  = HotkeyManager(base, self)
 
-        # История команд консоли (для !history)
+        # Console command history (for !history)
         self._history: list[str] = []
-        # Таймеры и watcher-ы
+        # Timers and watchers
         self._timers: dict[str, threading.Timer] = {}
         self._watchers: dict[str, dict] = {}   # name → {thread, stop_event, ms, cmd, runs, max_runs}
 
@@ -427,13 +452,13 @@ class NativeConsole:
 
         log_path = os.path.join(base, "homrec.log")  # base is already root dir
 
-        # Держим ссылки чтобы GC не удалил (BUG FIX: хранить как атрибуты экземпляра)
+        # Keep references so GC does not delete them (BUG FIX: store as instance attributes)
         self._cb_start    = CB_VOID(self._start)
         self._cb_stop     = CB_VOID(self._stop)
         self._cb_quit     = CB_VOID(self._quit)
         self._cb_open_log = CB_VOID(self._open_log)
         self._cb_open_url = CB_URL(self._open_url)
-        self._cb_command  = CB_COMMAND(self._on_command)  # новый колбэк для расширенных команд
+        self._cb_command  = CB_COMMAND(self._on_command)  # new callback for extended commands
 
         self._lib.hr_con_init(
             self._cb_start, self._cb_stop, self._cb_quit,
@@ -441,32 +466,36 @@ class NativeConsole:
             log_path, self.GITHUB,
         )
 
-        # Регистрируем расширенный колбэк команд (если DLL поддерживает)
+        # Register extended command callback (if DLL supports it)
         if hasattr(self._lib, 'hr_con_set_command_cb'):
             self._lib.hr_con_set_command_cb.argtypes = [CB_COMMAND]
             self._lib.hr_con_set_command_cb.restype = None
             self._lib.hr_con_set_command_cb(self._cb_command)
 
-        # Запустить pipe-сервер для hr_terminal.exe
+        # Start pipe server for hr_terminal.exe
+        # Bug fix: terminal.exe used to hang because the pipe had no keepalive.
+        # We now start a daemon thread that sends a NUL heartbeat every 2 seconds
+        # so terminal's ReadFile never blocks indefinitely.
         if hasattr(self._lib, 'hr_pipe_server_start'):
             self._lib.hr_pipe_server_start.argtypes = []
             self._lib.hr_pipe_server_start.restype  = None
             self._lib.hr_pipe_server_start()
             log.info("Pipe server started for external terminals")
+            self._start_pipe_keepalive()
 
-        # Фильтр для !disconnect --log
-        # BUG FIX: проверять self._lib != None перед вызовом
+        # Filter for !disconnect --log
+        # BUG FIX: check self._lib != None before calling
         class LogFilter(logging.Filter):
             def __init__(self, lib):
                 super().__init__()
                 self._lib = lib
 
             def filter(self, r):
-                # BUG FIX: защита от случая когда _lib ещё None
+                # BUG FIX: guard against case when _lib is still None
                 try:
                     return bool(self._lib and self._lib.hr_con_log_connected())
                 except Exception:
-                    return True  # при ошибке — не блокировать лог
+                    return True  # on error — do not block log
 
         for h in logging.getLogger().handlers:
             if isinstance(h, logging.FileHandler):
@@ -521,12 +550,12 @@ class NativeConsole:
             return lib
         except Exception as e:
             log.warning("hr_console.dll load failed: %s", e)
-            return None  # BUG FIX: явный None
+            return None  # BUG FIX: explicit None
 
-    # -- Публичный API ------------------------------------------------------------
+    # -- Public API -------------------------------------------------------------------
 
     def toggle(self):
-        # BUG FIX: проверка self._lib перед любым обращением
+        # BUG FIX: check self._lib before any access
         if not self._lib:
             return
         is_rec = 1 if getattr(self.app, "recording", False) else 0
@@ -534,7 +563,7 @@ class NativeConsole:
         self._lib.hr_con_toggle()
 
     def run_command(self, cmd: str):
-        """Выполнить расширенную команду (вызывается из горячих клавиш или DLL)."""
+        """Execute an extended command (called from hotkeys or DLL)."""
         cmd = cmd.strip()
         if not cmd:
             return
@@ -547,7 +576,7 @@ class NativeConsole:
 
     def _start(self):
         log.info("Console: start_recording")
-        # BUG FIX: проверять что root существует
+        # BUG FIX: check that root exists
         if self._root_alive():
             self.app.root.after(0, self.app.start_recording)
         if self._lib:
@@ -576,17 +605,51 @@ class NativeConsole:
                 pass
         except Exception as e:
             log.warning("Console quit error: %s", e)
-        # BUG FIX: проверять что root жив до after()
+        # BUG FIX: check that root is alive before after()
         if self._root_alive():
             self.app.root.after(150, lambda: (self._safe_destroy(), sys.exit(0)))
         else:
             sys.exit(0)
 
     def _on_command(self, cmd: str):
-        """Колбэк для расширенных команд от DLL (новый)."""
+        """Callback for extended commands from DLL (new)."""
         log.info("Console command: %s", cmd)
         if self._root_alive():
             self.app.root.after(0, lambda: self.run_command(cmd))
+
+    def _push_terminal_funcs(self) -> None:
+        """Send the full terminal func table to hr_terminal.exe via pipe as JSON packet."""
+        try:
+            if self._lib and hasattr(self._lib, 'hr_pipe_send'):
+                import json as _json
+                payload = _json.dumps({
+                    "__type__": "terminal_funcs",
+                    "funcs": self._term_funcs.all()
+                })
+                data = payload.encode("utf-8") + b"\n"
+                self._lib.hr_pipe_send.argtypes = [ctypes.c_char_p]
+                self._lib.hr_pipe_send.restype = None
+                self._lib.hr_pipe_send(data)
+        except Exception as e:
+            log.debug("_push_terminal_funcs: %s", e)
+
+    def _start_pipe_keepalive(self) -> None:
+        """Start a daemon thread that sends periodic heartbeat pings through the DLL pipe.
+        Prevents terminal.exe ReadFile from blocking forever (Bug fix v1.7.0).
+        """
+        import threading, time
+        def _beat():
+            while True:
+                try:
+                    if self._lib and hasattr(self._lib, 'hr_pipe_send'):
+                        self._lib.hr_pipe_send.argtypes = [ctypes.c_char_p]
+                        self._lib.hr_pipe_send.restype  = None
+                        self._lib.hr_pipe_send(b"\x00")  # NUL keepalive byte
+                except Exception:
+                    pass
+                time.sleep(2.0)
+        t = threading.Thread(target=_beat, daemon=True, name="pipe-keepalive")
+        t.start()
 
     def _open_log(self):
         base = _get_base_dir()
@@ -607,31 +670,44 @@ class NativeConsole:
         except Exception as e:
             log.warning("Console open_url error: %s", e)
 
-    # -- Расширенный диспетчер команд ---------------------------------------------
+    # -- Extended command dispatcher --------------------------------------------------
 
-    def _dispatch_extended(self, raw: str):
+    def _dispatch_extended(self, raw: str, _ret_requested: bool = False):
         """
-        Роутер расширенных команд.
-        Вызывается из NativeConsole.on_command() когда команда пришла из DLL.
-        Флаги -return/-ret уже удалены из raw на стороне C++ DLL до пересылки.
+        Extended command router.
+        Called from NativeConsole.on_command() when command arrives from DLL.
+        -ret / -return flag: if present, logs (1) on success or (0) on failure after execution.
         """
         import re
-        # Дополнительная защита: стрипаем -return/-ret если они вдруг остались
+        # Detect -ret flag before stripping
+        ret_flag = bool(re.search(r'\s+-ret(?:urn)?\b', raw)) or _ret_requested
         raw = re.sub(r'\s+-ret(?:urn)?\b', '', raw).strip()
         raw = raw.strip()
+        if ret_flag:
+            # Wrap dispatch in try/except to determine success
+            try:
+                self._dispatch_extended_inner(raw)
+                log.info("-ret: (1)  [command executed successfully]")
+            except Exception as e:
+                log.warning("-ret: (0)  [command failed: %s]", e)
+            return
+        self._dispatch_extended_inner(raw)
 
-        # Нормализация: @all → --all
+    def _dispatch_extended_inner(self, raw: str):
+        """Inner dispatch — called by _dispatch_extended after -ret is handled."""
+
+        # Normalize: @all → --all
         raw = raw.replace("@all", "--all")
 
-        # Подстановка переменных окружения ($name)
+        # Substitute environment variables ($name)
         raw = self._env.resolve(raw)
 
-        # Подстановка математики
+        # Substitute math expressions
         raw = _resolve_math(raw)
 
         cmd = raw.split()[0] if raw.split() else ""
 
-        # Проверить псевдоним
+        # Check alias
         alias_cmd = self._alias_reg.get(cmd)
         if alias_cmd:
             self._record_history(raw)
@@ -663,7 +739,7 @@ class NativeConsole:
         if cmd == "!disconnect":
             self._cmd_disconnect(raw); return
 
-        # -- Новые команды ------------------------------------------------------
+        # -- New commands -------------------------------------------------------
         if cmd == "!ls":
             self._cmd_ls(raw); return
         if cmd == "!status":
@@ -700,6 +776,10 @@ class NativeConsole:
             self._cmd_watch(raw); return
         if cmd == "!ping":
             self._cmd_ping(raw); return
+        if cmd == "!check.er":
+            self._cmd_check_er(raw); return
+        if cmd == "!func.list":
+            self._cmd_func_list(raw); return
         if cmd == "!version":
             self._cmd_version(raw); return
         if cmd == "!homrec":
@@ -707,7 +787,7 @@ class NativeConsole:
         if cmd == "!log":
             self._cmd_log(raw); return
 
-        log.warning("_dispatch_extended: неизвестная команда '%s'", cmd)
+        log.warning("_dispatch_extended: unknown command '%s'", cmd)
 
     def _record_history(self, raw: str):
         self._history.append(raw)
@@ -729,7 +809,7 @@ class NativeConsole:
                 except ValueError:
                     pass
         if val is None:
-            log.warning("!start --rec: укажи 1 (старт) или 0 (стоп)")
+            log.warning("!start --rec: specify 1 (start) or 0 (stop)")
             return
         silent = "-s" in tokens or "--silent" in tokens
         if val == 1:
@@ -739,10 +819,10 @@ class NativeConsole:
                 if self._lib:
                     self._lib.hr_con_set_recording(1)
                 if not silent:
-                    log.info("!start --rec 1: запись начата")
+                    log.info("!start --rec 1: recording started")
             else:
                 if not silent:
-                    log.info("!start --rec 1: уже идёт запись")
+                    log.info("!start --rec 1: already recording")
         else:
             if getattr(self.app, "recording", False):
                 if self._root_alive():
@@ -750,57 +830,57 @@ class NativeConsole:
                 if self._lib:
                     self._lib.hr_con_set_recording(0)
                 if not silent:
-                    log.info("!start --rec 0: запись остановлена")
+                    log.info("!start --rec 0: recording stopped")
             else:
                 if not silent:
-                    log.info("!start --rec 0: запись не была активна")
+                    log.info("!start --rec 0: recording was not active")
 
     # --- !rule ----------------------------------------------------------------
 
     def _cmd_rule(self, raw: str):
         """
         !rule --check #name="example"
-            → показывает: активно/не активно + тело
+            → shows: active/inactive + body
         !rule --get from connect #name="example"
-            → читает правило из реестра (источник — !connect --rule)
+            → reads rule from registry (source — !connect --rule)
         """
         tokens = raw.split()
         silent = "-s" in tokens
         name = _parse_named(raw, "name")
         if not name:
-            log.warning("!rule: не указан #name")
+            log.warning("!rule: #name not specified")
             return
 
         if "--check" in raw:
             entry = self._rule_reg.get(name)
             if entry is None:
-                log.warning("!rule --check '%s': не найдено", name)
+                log.warning("!rule --check '%s': not found", name)
                 return
-            status = "✔ активно" if entry.get("connected", True) else "✘ отключено"
-            body   = entry.get("body", "(пусто)")
+            status = "✔ active" if entry.get("connected", True) else "✘ disabled"
+            body   = entry.get("body", "(empty)")
             log.info("!rule --check '%s':  %s", name, status)
-            log.info("  тело: %s", body)
+            log.info("  body: %s", body)
             return
 
         if "--get" in raw and "from" in raw and "connect" in raw:
             entry = self._rule_reg.get(name)
             if entry is None:
-                log.warning("!rule --get '%s': не найдено в реестре", name)
+                log.warning("!rule --get '%s': not found in registry", name)
                 return
             log.info("!rule --get '%s': connected=%s  body=%s",
                      name, entry.get("connected"), entry.get("body", ""))
             return
 
-        log.warning("!rule: используй --check или --get from connect")
+        log.warning("!rule: use --check or --get from connect")
 
     # --- !edit ----------------------------------------------------------------
 
     def _cmd_edit(self, raw: str):
         """
-        !edit --file    #name="x"           → открыть файл notepad на редактирование
-        !edit --window  #name="x"           → переоткрыть окно
-        !edit --rule    #name="x"; <step>; <step>  → заменить тело правила
-        !edit --settings #name=shortcut 1|0 → ярлык на рабочем столе
+        !edit --file    #name="x"           → open file in notepad for editing
+        !edit --window  #name="x"           → reopen window
+        !edit --rule    #name="x"; <step>; <step>  → replace rule body
+        !edit --settings #name=shortcut 1|0 → desktop shortcut
         """
         import re
         tokens = raw.split()
@@ -809,75 +889,75 @@ class NativeConsole:
         if "--file" in raw:
             name = _parse_named(raw, "name")
             if not name:
-                log.warning("!edit --file: не указан #name"); return
+                log.warning("!edit --file: #name not specified"); return
             entry = self._win_reg.get(name)
             if not entry:
-                log.warning("!edit --file '%s': не найдено в реестре", name); return
+                log.warning("!edit --file '%s': not found in registry", name); return
             if entry.get("kind") != "notepad":
-                log.warning("!edit --file '%s': это не notepad (kind=%s)", name, entry.get("kind")); return
+                log.warning("!edit --file '%s': not a notepad entry (kind=%s)", name, entry.get("kind")); return
             fp = entry.get("file", "")
             if not fp:
-                log.warning("!edit --file '%s': путь к файлу не сохранён", name); return
+                log.warning("!edit --file '%s': file path not saved", name); return
             self._open_notepad_file(fp)
             if not silent:
-                log.info("!edit --file '%s': открыт %s", name, fp)
+                log.info("!edit --file '%s': opened %s", name, fp)
             return
 
         if "--window" in raw:
             name = _parse_named(raw, "name")
             if not name:
-                log.warning("!edit --window: не указан #name"); return
+                log.warning("!edit --window: #name not specified"); return
             self._cmd_start_window(f'!start --window #name="{name}"')
             if not silent:
-                log.info("!edit --window '%s': открыто", name)
+                log.info("!edit --window '%s': opened", name)
             return
 
         if "--rule" in raw:
             # !edit --rule #name="x"; step1; step2; step3
             m = re.search(r'#name=["\']?([^"\';\s]+)["\']?\s*;\s*(.+)', raw, re.DOTALL)
             if not m:
-                # Показать текущее тело, если нет новых шагов
+                # Show current body if no new steps provided
                 name = _parse_named(raw, "name")
                 if name:
                     entry = self._rule_reg.get(name)
                     if entry:
-                        log.info("!edit --rule '%s' (текущее тело):\n  %s",
-                                 name, entry.get("body", "(пусто)"))
+                        log.info("!edit --rule '%s' (current body):\n  %s",
+                                 name, entry.get("body", "(empty)"))
                     else:
-                        log.warning("!edit --rule '%s': не найдено", name)
+                        log.warning("!edit --rule '%s': not found", name)
                 else:
-                    log.warning("!edit --rule: синтаксис: !edit --rule #name=\"x\"; шаг1; шаг2")
+                    log.warning("!edit --rule: syntax: !edit --rule #name=\"x\"; step1; step2")
                 return
             name     = _resolve_math(m.group(1).strip())
             new_body = m.group(2).strip()
             if not self._rule_reg.exists(name):
-                log.warning("!edit --rule '%s': не найдено. Сначала !create --rule", name); return
+                log.warning("!edit --rule '%s': not found. Use !create --rule first", name); return
             entry = self._rule_reg.get(name)
             self._rule_reg.add(name, new_body, entry.get("connected", True))
             if not silent:
-                log.info("!edit --rule '%s': тело обновлено → %s", name, new_body)
+                log.info("!edit --rule '%s': body updated → %s", name, new_body)
             return
 
         if "--settings" in raw:
             name = _parse_named(raw, "name")
             if not name:
-                log.warning("!edit --settings: не указан #name"); return
+                log.warning("!edit --settings: #name not specified"); return
             toks = raw.split()
             vals = [t for t in toks if t in ("0","1","true","false","on","off","yes","no")]
             enable = vals[-1] in ("1","true","on","yes") if vals else True
             if name == "shortcut":
                 self._toggle_desktop_shortcut(enable)
                 if not silent:
-                    log.info("!edit --settings shortcut → %s", "вкл" if enable else "выкл")
+                    log.info("!edit --settings shortcut → %s", "on" if enable else "off")
             else:
-                log.warning("!edit --settings: неизвестный параметр '%s'", name)
+                log.warning("!edit --settings: unknown parameter '%s'", name)
             return
 
         if "--terminal" in raw:
             self._cmd_edit_terminal(raw)
             return
 
-        log.warning("!edit: используй --file / --window / --rule / --settings / --terminal")
+        log.warning("!edit: use --file / --window / --rule / --settings / --terminal")
 
     # --- !create --------------------------------------------------------------
 
@@ -888,10 +968,10 @@ class NativeConsole:
                          [-o] [-s] [-n] [-c] [-d]
 
         !create --rule #name="x"; step1; step2; step3  [-c] [-d]
-            Шаги — команды консоли через ';'.
-            При -c: немедленно выполняется (connect).
-            При -d: сохраняется как disconnected.
-            Пример: !create --rule #name="auto"; !start --rec 1 then; $rm #name="notepad2"
+            Steps — console commands separated by ';'.
+            With -c: executes immediately (connect).
+            With -d: saved as disconnected.
+            Example: !create --rule #name="auto"; !start --rec 1 then; $rm #name="notepad2"
 
         !create --ae #type=color{rgb=(255,0,0)} #name="red"
         !create --ae #type=color{hex=(#FF0000)}  #name="red"
@@ -910,18 +990,18 @@ class NativeConsole:
 
         name = _parse_named(raw, "name")
         if not name:
-            log.warning("!create: не указан #name"); return
+            log.warning("!create: #name not specified"); return
 
         base = _get_base_dir()
 
         # -- --rule ------------------------------------------------------------
         if is_rule:
-            # body = всё после первой ';' после #name=...
+            # body = everything after first ';' following #name=...
             m = re.search(r'#name=["\']?[^"\';\s]+["\']?\s*;\s*(.+)', raw, re.DOTALL)
             body = m.group(1).strip() if m else ""
             connected = not disconnected
 
-            # Новые флаги для правил
+            # New flags for rules
             once    = "--once"  in raw
             delay_s = _parse_named(raw, "ms") if "--delay" in raw else None
             on_fail = _parse_named(raw, "cmd") if "--on-fail" in raw else None
@@ -932,17 +1012,17 @@ class NativeConsole:
             if loop_s:  extra_rule["loop"] = int(loop_s)
 
             self._rule_reg.add(name, body, connected)
-            # Сохранить дополнительные мета-данные
+            # Save additional metadata
             if extra_rule:
                 entry = self._rule_reg.get(name) or {}
                 entry.update(extra_rule)
                 self._rule_reg.add(name, body, connected)
 
             if not silent:
-                log.info("!create --rule '%s': сохранено  connected=%s  body: %s%s",
-                         name, connected, body or "(пусто)",
+                log.info("!create --rule '%s': saved  connected=%s  body: %s%s",
+                         name, connected, body or "(empty)",
                          f"  once={once}" if once else "")
-            # -c: выполнить шаги прямо сейчас
+            # -c: execute steps right now
             if auto_connect and body:
                 loop_n = int(loop_s) if loop_s else 1
                 for _ in range(loop_n if loop_n > 0 else 1):
@@ -953,7 +1033,7 @@ class NativeConsole:
         if is_ae:
             type_raw = _parse_named(raw, "type")
             if not type_raw:
-                log.warning("!create --ae: не указан #type"); return
+                log.warning("!create --ae: #type not specified"); return
             ae_type = type_raw.split("{")[0].lower()
             ae_data: dict = {"connected": not disconnected}
 
@@ -969,9 +1049,9 @@ class NativeConsole:
                     ae_data["hex"] = "#" + hx
                     ae_data["rgb"] = [int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)]
                 else:
-                    log.warning("!create --ae color: нужен rgb=(...) или hex=(...)"); return
+                    log.warning("!create --ae color: rgb=(...) or hex=(...) required"); return
             else:
-                log.warning("!create --ae: неизвестный #type='%s'", ae_type); return
+                log.warning("!create --ae: unknown #type='%s'", ae_type); return
 
             self._ae_reg.add(name, ae_type, ae_data)
             if not silent:
@@ -986,7 +1066,7 @@ class NativeConsole:
         size_m = re.search(r'#size=\((\d+)x(\d+)\)', raw)
         w, h = (int(size_m.group(1)), int(size_m.group(2))) if size_m else (500, 400)
 
-        # Новые флаги для окон (v3.0)
+        # New window flags (v3.0)
         topmost    = "-t" in flags or "--topmost"    in raw
         borderless = "-b" in flags or "--borderless" in raw
         resizable  = "-r" in flags or "--resizable"  in raw
@@ -1115,7 +1195,7 @@ class NativeConsole:
     # --- !status --------------------------------------------------------------
 
     def _cmd_status(self, raw: str):
-        """Текущее состояние системы одним блоком."""
+        """Current system state in one block."""
         tokens = raw.split()
         as_json = "--json" in tokens
         rec      = getattr(self.app, "recording", False)
@@ -1137,13 +1217,198 @@ class NativeConsole:
         if as_json:
             log.info(_json.dumps(data, ensure_ascii=False))
         else:
-            log.info("запись  : %s", "вкл" if rec else "выкл")
-            log.info("лог     : %s", "подключён" if log_conn else "нет")
-            log.info("окна    : %d активных / %d всего", wins_on, len(self._win_reg.all_names()))
-            log.info("правила : %d подключённых / %d всего", rules_on, len(self._rule_reg.all_names()))
-            log.info("хоткеи  : %d привязок", hk_count)
+            log.info("recording : %s", "on" if rec else "off")
+            log.info("log      : %s", "connected" if log_conn else "none")
+            log.info("windows  : %d active / %d total", wins_on, len(self._win_reg.all_names()))
+            log.info("rules    : %d connected / %d total", rules_on, len(self._rule_reg.all_names()))
+            log.info("hotkeys  : %d bindings", hk_count)
 
     # --- !info ----------------------------------------------------------------
+
+    def _cmd_func_list(self, raw: str):
+        """!func.list — list all functions bound to @terminal."""
+        funcs = self._term_funcs.all()
+        if not funcs:
+            log.info("No functions bound to @terminal. Use: !connect --func @terminal <alias> <cmd>")
+            return
+        log.info("Terminal functions (%d):", len(funcs))
+        for alias, cmd in funcs.items():
+            log.info("  %-18s → %s", alias, cmd)
+
+    # ------------------------------------------------------------------ !check.er
+    # ------------------------------------------------------------------ !check.er
+
+    def _cmd_check_er(self, raw: str):
+        """!check.er — interactive text-mode integrity/diagnostic scanner.
+        Opens a text console menu (no GUI) in a daemon thread so the main thread stays responsive.
+        Menu options:
+          1 - Scan a specific video file for corruption
+          2 - Scan all video files in output folder
+          3 - Run HomRec self-diagnostics (FFmpeg, DLL, audio, overlays)
+          q - Quit
+        """
+        import threading
+        def _run_checker():
+            import sys, os, subprocess as sp, re
+            ffmpeg = getattr(self.app, 'ffmpeg_path', 'ffmpeg') or 'ffmpeg'
+            out_dir = getattr(self.app, 'output_folder', '') or os.path.expanduser('~')
+
+            def _con(msg, tag="info"):
+                """Emit a log line visible in the HomRec console."""
+                getattr(log, tag if tag in ("info","warning","error") else "info")(msg)
+
+            def _probe_video(path: str) -> list[str]:
+                """Run ffprobe on a file and return list of issues found."""
+                issues = []
+                if not os.path.exists(path):
+                    issues.append(f"File not found: {path}"); return issues
+                size = os.path.getsize(path)
+                if size == 0:
+                    issues.append("File is empty (0 bytes)"); return issues
+                if size < 8192:
+                    issues.append(f"File suspiciously small: {size} bytes")
+                try:
+                    r = sp.run(
+                        [ffmpeg, '-v','error','-i', path,
+                         '-f','null','-'],
+                        capture_output=True, text=True, timeout=60,
+                        creationflags=0x08000000 if sys.platform=='win32' else 0
+                    )
+                    err = r.stderr or ""
+                    # Parse FFmpeg error lines
+                    for line in err.splitlines():
+                        line = line.strip()
+                        if not line: continue
+                        low = line.lower()
+                        if any(k in low for k in ('corrupt','invalid','error','missing','truncated','broken','bad')):
+                            issues.append(line[:160])
+                    if r.returncode not in (0, 1):
+                        issues.append(f"FFmpeg exit code {r.returncode}")
+                except sp.TimeoutExpired:
+                    issues.append("Probe timed out (>60s) — file may be very large or corrupt")
+                except FileNotFoundError:
+                    issues.append(f"ffmpeg not found at: {ffmpeg}")
+                except Exception as e:
+                    issues.append(f"Probe error: {e}")
+                return issues
+
+            def _report(path, issues):
+                name = os.path.basename(path)
+                if issues:
+                    _con(f"[ISSUES] {name}:", "warning")
+                    for iss in issues[:20]:
+                        _con(f"  ! {iss}", "warning")
+                    if len(issues) > 20:
+                        _con(f"  ... and {len(issues)-20} more issues", "warning")
+                else:
+                    _con(f"[OK] {name} — no errors detected")
+
+            def _self_diag():
+                _con("--- HomRec Self-Diagnostics ---")
+                # 1. FFmpeg
+                if os.path.exists(ffmpeg):
+                    try:
+                        r = sp.run([ffmpeg,'-version'], capture_output=True, text=True, timeout=5,
+                                   creationflags=0x08000000 if sys.platform=='win32' else 0)
+                        ver_line = r.stdout.splitlines()[0] if r.stdout else "?"
+                        _con(f"  FFmpeg: {ver_line}")
+                    except Exception as e:
+                        _con(f"  FFmpeg: ERROR — {e}", "warning")
+                else:
+                    _con(f"  FFmpeg: NOT FOUND at '{ffmpeg}'", "error")
+                # 2. ddagrab
+                ddagrab_ok = getattr(self.app, 'use_ddagrab', None)
+                if ddagrab_ok is None:
+                    _con("  ddagrab (game capture): not probed yet — start a recording to check")
+                else:
+                    _con(f"  ddagrab (game capture): {'supported ✓' if ddagrab_ok else 'not available — using GDI fallback'}")
+                # 3. DLL
+                dll_ok = self._lib is not None
+                _con(f"  hr_console.dll: {'loaded ✓' if dll_ok else 'NOT LOADED'}", "info" if dll_ok else "error")
+                # 4. Audio
+                try:
+                    devices = self.app.get_dshow_audio_devices()
+                    _con(f"  Audio devices: {len(devices)} found — {', '.join(devices[:3])}" + ("…" if len(devices)>3 else ""))
+                except Exception as e:
+                    _con(f"  Audio devices: error reading — {e}", "warning")
+                # 5. Overlays
+                ovs = getattr(self.app, 'overlays', [])
+                enabled_ovs = [o for o in ovs if o.get('enabled', True)]
+                _con(f"  Overlays: {len(ovs)} defined, {len(enabled_ovs)} enabled")
+                # 6. Output folder
+                if os.path.isdir(out_dir):
+                    videos = [f for f in os.listdir(out_dir) if f.lower().endswith(('.mp4','.mkv'))]
+                    _con(f"  Output folder: {out_dir}  ({len(videos)} video files)")
+                else:
+                    _con(f"  Output folder: NOT FOUND — {out_dir}", "warning")
+                _con("--- Diagnostics complete ---")
+
+            # ---- Interactive menu ----
+            _con("╔══════════════════════════════════════╗")
+            _con("║   !check.er — HomRec Integrity Tool  ║")
+            _con("╠══════════════════════════════════════╣")
+            _con("║  1 - Scan a specific video file       ║")
+            _con("║  2 - Scan all videos in output folder ║")
+            _con("║  3 - Run HomRec self-diagnostics      ║")
+            _con("║  q - Quit                             ║")
+            _con("╚══════════════════════════════════════╝")
+
+            # Parse inline arg if provided: !check.er 1 or !check.er 3
+            inline = raw.strip().split()[1] if len(raw.strip().split()) > 1 else None
+            choice = inline or "menu"
+
+            if choice == "1":
+                # List recent videos and ask
+                videos = sorted(
+                    [os.path.join(out_dir,f) for f in (os.listdir(out_dir) if os.path.isdir(out_dir) else [])
+                     if f.lower().endswith(('.mp4','.mkv'))],
+                    key=os.path.getmtime, reverse=True
+                )[:20]
+                if not videos:
+                    _con("No video files found in output folder.", "warning")
+                    return
+                _con("Recent videos:")
+                for i, v in enumerate(videos, 1):
+                    sz = os.path.getsize(v) / 1048576
+                    _con(f"  {i:2}. {os.path.basename(v)}  ({sz:.1f} MB)")
+                _con("To scan a specific file, type:  !check.er scan #file="<path>"")
+                _con(f"Scanning the most recent file: {os.path.basename(videos[0])}")
+                issues = _probe_video(videos[0])
+                _report(videos[0], issues)
+            elif choice == "2":
+                if not os.path.isdir(out_dir):
+                    _con(f"Output folder not found: {out_dir}", "error"); return
+                videos = [os.path.join(out_dir,f) for f in os.listdir(out_dir) if f.lower().endswith(('.mp4','.mkv'))]
+                if not videos:
+                    _con("No video files found.", "warning"); return
+                _con(f"Scanning {len(videos)} video files in: {out_dir}")
+                bad = 0
+                for v in videos:
+                    issues = _probe_video(v)
+                    _report(v, issues)
+                    if issues: bad += 1
+                _con(f"--- Scan complete: {len(videos)} files, {bad} with issues ---")
+            elif choice == "3":
+                _self_diag()
+            elif inline and inline.startswith("#file="):
+                path = re.sub(r'^#file=["\']?', '', inline).rstrip('"\'')
+                _con(f"Scanning: {path}")
+                _report(path, _probe_video(path))
+            elif choice == "scan":
+                # !check.er scan #file="..."
+                m = re.search(r'#file=["\']?([^"\' ]+)["\']?', raw)
+                if m:
+                    path = m.group(1).strip()
+                    _con(f"Scanning: {path}")
+                    _report(path, _probe_video(path))
+                else:
+                    _con('Usage: !check.er scan #file="path/to/video.mp4"', "warning")
+            else:
+                _con("Type  !check.er 1  to scan a video,  !check.er 2  to scan all,  !check.er 3  for diagnostics.")
+
+        threading.Thread(target=_run_checker, daemon=True, name="check.er").start()
+
+    # ------------------------------------------------------------------ /!check.er
 
     def _cmd_info(self, raw: str):
         """!info --window|--rule|--ae|--hotkey #name="..." / #key="..."""
@@ -1160,35 +1425,35 @@ class NativeConsole:
 
         if "--window" in raw:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!info --window: не указан #name"); return
+            if not name: log.warning("!info --window: #name not specified"); return
             e = self._win_reg.get(name)
-            if e is None: log.warning("!info --window '%s': не найдено", name); return
+            if e is None: log.warning("!info --window '%s': not found", name); return
             _show({"name": name, **e}); return
 
         if "--rule" in raw:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!info --rule: не указан #name"); return
+            if not name: log.warning("!info --rule: #name not specified"); return
             e = self._rule_reg.get(name)
-            if e is None: log.warning("!info --rule '%s': не найдено", name); return
+            if e is None: log.warning("!info --rule '%s': not found", name); return
             steps = [s.strip() for s in e.get("body","").split(";") if s.strip()]
             _show({"name": name, "connected": e.get("connected", True),
                    "steps": len(steps), "body": e.get("body","")}); return
 
         if "--ae" in raw:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!info --ae: не указан #name"); return
+            if not name: log.warning("!info --ae: #name not specified"); return
             e = self._ae_reg.get(name)
-            if e is None: log.warning("!info --ae '%s': не найдено", name); return
+            if e is None: log.warning("!info --ae '%s': not found", name); return
             _show({"name": name, **e}); return
 
         if "--hotkey" in raw:
             key = _parse_named(raw, "key")
-            if not key: log.warning("!info --hotkey: не указан #key"); return
+            if not key: log.warning("!info --hotkey: #key not specified"); return
             b = self._hotkeys.all_bindings().get(key)
-            if b is None: log.warning("!info --hotkey '%s': не найдено", key); return
+            if b is None: log.warning("!info --hotkey '%s': not found", key); return
             _show({"key": key, **(b if isinstance(b, dict) else {"cmd": b})}); return
 
-        log.warning("!info: используй --window / --rule / --ae / --hotkey")
+        log.warning("!info: use --window / --rule / --ae / --hotkey")
 
     # --- !history -------------------------------------------------------------
 
@@ -1197,7 +1462,7 @@ class NativeConsole:
         tokens = raw.split()
         if "--clear" in tokens:
             self._history.clear()
-            log.info("история очищена"); return
+            log.info("history cleared"); return
 
         search  = _parse_named(raw, "search")
         count_s = _parse_named(raw, "count")
@@ -1218,22 +1483,22 @@ class NativeConsole:
         if "--list" in tokens:
             aliases = self._alias_reg.all()
             if not aliases:
-                log.info("псевдонимов нет"); return
+                log.info("no aliases"); return
             for n, c in aliases.items():
                 log.info("  %-16s → %s", n, c)
             return
         if "--remove" in tokens:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!alias --remove: не указан #name"); return
+            if not name: log.warning("!alias --remove: #name not specified"); return
             if self._alias_reg.remove(name):
-                log.info("!alias: удалён '%s'", name)
+                log.info("!alias: removed '%s'", name)
             else:
-                log.warning("!alias --remove: '%s' не найден", name)
+                log.warning("!alias --remove: '%s' not found", name)
             return
         name = _parse_named(raw, "name")
         cmd  = _parse_named(raw, "cmd")
         if not name or not cmd:
-            log.warning("!alias: нужен #name=... и #cmd=..."); return
+            log.warning("!alias: #name=... and #cmd=... required"); return
         self._alias_reg.add(name, cmd)
         log.info("!alias: '%s' → %s", name, cmd)
 
@@ -1244,7 +1509,7 @@ class NativeConsole:
         import re
         m = re.match(r'!repeat\s+#count=(\d+)\s+(.+)', raw, re.IGNORECASE)
         if not m:
-            log.warning("!repeat: синтаксис: !repeat #count=N <команда>"); return
+            log.warning("!repeat: syntax: !repeat #count=N <command>"); return
         count = int(m.group(1))
         cmd   = m.group(2).strip()
         for i in range(count):
@@ -1258,10 +1523,10 @@ class NativeConsole:
         import re
         m = re.match(r'!delay\s+#ms=(\d+)\s+(.+)', raw, re.IGNORECASE)
         if not m:
-            log.warning("!delay: синтаксис: !delay #ms=N <команда>"); return
+            log.warning("!delay: syntax: !delay #ms=N <command>"); return
         ms  = int(m.group(1))
         cmd = m.group(2).strip()
-        log.info("!delay: через %dms → %s", ms, cmd)
+        log.info("!delay: after %dms → %s", ms, cmd)
         t = threading.Timer(ms / 1000.0, lambda: self._dispatch_extended(cmd))
         t.daemon = True
         t.start()
@@ -1276,15 +1541,15 @@ class NativeConsole:
         body = re.sub(r'\s+(-x|--stop-on-error)\b', '', body)
         parts = [p.strip() for p in body.split("&&") if p.strip()]
         if not parts:
-            log.warning("!batch: нет команд"); return
+            log.warning("!batch: no commands"); return
         for part in parts:
             log.info("!batch → %s", part)
             try:
                 self._dispatch_extended(part)
             except Exception as e:
-                log.error("!batch ошибка: %s", e)
+                log.error("!batch error: %s", e)
                 if stop_on_error:
-                    log.warning("!batch: остановка при ошибке (-x)"); return
+                    log.warning("!batch: stopped on error (-x)"); return
 
     # --- !run -----------------------------------------------------------------
 
@@ -1292,7 +1557,7 @@ class NativeConsole:
         """!run #file="script.hrc" [--encoding utf8|cp1251] [--ignore-errors] [--echo-each] [-x]"""
         file_path = _parse_named(raw, "file")
         if not file_path:
-            log.warning("!run: не указан #file"); return
+            log.warning("!run: #file not specified"); return
         encoding      = _parse_named(raw, "encoding") or "utf-8"
         ignore_errors = "--ignore-errors" in raw
         echo_each     = "--echo-each"     in raw
@@ -1302,12 +1567,12 @@ class NativeConsole:
         if not p.is_absolute():
             p = Path(_get_base_dir()) / p
         if not p.exists():
-            log.warning("!run: файл не найден: %s", p); return
+            log.warning("!run: file not found: %s", p); return
 
         try:
             text = p.read_text(encoding=encoding)
         except Exception as e:
-            log.error("!run: ошибка чтения файла: %s", e); return
+            log.error("!run: file read error: %s", e); return
 
         lines = [l.strip() for l in text.splitlines()]
         for i, line in enumerate(lines, 1):
@@ -1318,27 +1583,27 @@ class NativeConsole:
             try:
                 self._dispatch_extended(line)
             except Exception as e:
-                log.error("!run [%d] ошибка '%s': %s", i, line, e)
+                log.error("!run [%d] error '%s': %s", i, line, e)
                 if stop_on_error and not ignore_errors:
-                    log.warning("!run: остановка (-x)"); return
+                    log.warning("!run: stopped (-x)"); return
 
     # --- !clear ---------------------------------------------------------------
 
     def _cmd_dollar_clear(self, raw: str):
         """
-        $clear --app  — удалить все данные приложения (реестры) и закрыть главное окно.
+        $clear --app  — delete all application data (registries) and close main window.
         """
         tokens = raw.split()
         silent = "-s" in tokens or "--silent" in tokens
         if "--app" not in raw:
-            # $clear без --app → очистить консоль
+            # $clear without --app → clear console
             self._cmd_clear(raw)
             return
 
         if not silent:
             self._con_warn("Clearing ALL app data: windows, rules, ae, aliases, hotkeys...")
 
-        # Очистить все реестры
+        # Clear all registries
         try:
             for name in list(self._win_reg.all_names()):
                 entry = self._win_reg.get(name) or {}
@@ -1384,13 +1649,13 @@ class NativeConsole:
 
         log.info("$clear --app: all registries wiped")
 
-        # Закрыть главное окно
+        # Close main window
         if self._root_alive():
             self.app.root.after(300, self.app.quit_app)
 
     def _cmd_clear(self, raw: str):
-        """!clear — очистить вывод консоли."""
-        # Специальный маркер, который можно перехватить на стороне UI
+        """!clear — clear console output."""
+        # Special marker that can be intercepted on the UI side
         log.info("\x00CLEAR_CONSOLE\x00")
 
     # --- !echo ----------------------------------------------------------------
@@ -1426,7 +1691,7 @@ class NativeConsole:
                 import tkinter as tk
                 r = tk.Tk(); r.withdraw()
                 r.clipboard_clear(); r.update(); r.destroy()
-                log.info("!clip: буфер очищен")
+                log.info("!clip: clipboard cleared")
             except Exception as e:
                 log.warning("!clip --clear: %s", e)
             return
@@ -1450,11 +1715,11 @@ class NativeConsole:
                 import tkinter as tk
                 r = tk.Tk(); r.withdraw()
                 r.clipboard_clear(); r.clipboard_append(text); r.update(); r.destroy()
-                log.info("!clip: скопировано: %s", text)
+                log.info("!clip: copied: %s", text)
             except Exception as e:
                 log.warning("!clip --copy: %s", e)
             return
-        log.warning("!clip: используй --copy \"текст\" / --paste / --clear")
+        log.warning("!clip: use --copy \"text\" / --paste / --clear")
 
     # --- !env -----------------------------------------------------------------
 
@@ -1463,31 +1728,31 @@ class NativeConsole:
         tokens = raw.split()
         if "--list" in tokens:
             vs = self._env.all()
-            if not vs: log.info("переменных нет"); return
+            if not vs: log.info("no variables"); return
             for k, v in vs.items():
                 log.info("  $%-20s = %s", k, v)
             return
         if "--unset" in tokens:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!env --unset: не указан #name"); return
-            if self._env.unset(name): log.info("!env: $%s удалена", name)
-            else: log.warning("!env: $%s не найдена", name)
+            if not name: log.warning("!env --unset: #name not specified"); return
+            if self._env.unset(name): log.info("!env: $%s removed", name)
+            else: log.warning("!env: $%s not found", name)
             return
         if "--get" in tokens:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!env --get: не указан #name"); return
+            if not name: log.warning("!env --get: #name not specified"); return
             val = self._env.get(name)
-            if val is None: log.warning("!env: $%s не установлена", name)
+            if val is None: log.warning("!env: $%s not set", name)
             else: log.info("$%s = %s", name, val)
             return
         if "--set" in tokens:
             name = _parse_named(raw, "name")
             val  = _parse_named(raw, "val")
-            if not name: log.warning("!env --set: не указан #name"); return
+            if not name: log.warning("!env --set: #name not specified"); return
             self._env.set(name, val or "")
             log.info("!env: $%s = %s", name, val)
             return
-        log.warning("!env: используй --set / --get / --list / --unset")
+        log.warning("!env: use --set / --get / --list / --unset")
 
     # --- !timer ---------------------------------------------------------------
 
@@ -1496,27 +1761,27 @@ class NativeConsole:
         tokens = raw.split()
         if "--list" in tokens:
             if not self._timers:
-                log.info("активных таймеров нет"); return
+                log.info("no active timers"); return
             for n in list(self._timers.keys()):
-                log.info("  %-20s (активен)", n)
+                log.info("  %-20s (active)", n)
             return
         if "--cancel" in tokens:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!timer --cancel: не указан #name"); return
+            if not name: log.warning("!timer --cancel: #name not specified"); return
             t = self._timers.pop(name, None)
-            if t: t.cancel(); log.info("!timer '%s': отменён", name)
-            else: log.warning("!timer '%s': не найден", name)
+            if t: t.cancel(); log.info("!timer '%s': cancelled", name)
+            else: log.warning("!timer '%s': not found", name)
             return
 
         name  = _parse_named(raw, "name")
         ms_s  = _parse_named(raw, "ms")
         if not name or not ms_s:
-            log.warning("!timer: нужен #name и #ms"); return
+            log.warning("!timer: #name and #ms required"); return
         import re
-        # Команда — всё после последнего именованного параметра
+        # Command — everything after last named parameter
         cmd_m = re.search(r'#ms=\d+\s+(.+)', raw)
         if not cmd_m:
-            log.warning("!timer: не найдена команда после #ms=N"); return
+            log.warning("!timer: command not found after #ms=N"); return
         cmd = cmd_m.group(1).strip()
         ms  = int(ms_s)
 
@@ -1528,7 +1793,7 @@ class NativeConsole:
         t = threading.Timer(ms / 1000.0, _fire)
         t.daemon = True; t.start()
         self._timers[name] = t
-        log.info("!timer '%s': через %dms → %s", name, ms, cmd)
+        log.info("!timer '%s': after %dms → %s", name, ms, cmd)
 
     # --- !watch ---------------------------------------------------------------
 
@@ -1537,30 +1802,30 @@ class NativeConsole:
         tokens = raw.split()
         if "--list" in tokens:
             if not self._watchers:
-                log.info("активных watch нет"); return
+                log.info("no active watchers"); return
             for n, w in self._watchers.items():
                 log.info("  %-20s  ms=%d  cmd=%s  runs=%d", n, w["ms"], w["cmd"], w["runs"])
             return
         if "--stop" in tokens:
             name = _parse_named(raw, "name")
-            if not name: log.warning("!watch --stop: не указан #name"); return
+            if not name: log.warning("!watch --stop: #name not specified"); return
             w = self._watchers.pop(name, None)
-            if w: w["stop_event"].set(); log.info("!watch '%s': остановлен", name)
-            else: log.warning("!watch '%s': не найден", name)
+            if w: w["stop_event"].set(); log.info("!watch '%s': stopped", name)
+            else: log.warning("!watch '%s': not found", name)
             return
 
         name  = _parse_named(raw, "name")
         ms_s  = _parse_named(raw, "ms")
         if not name or not ms_s:
-            log.warning("!watch: нужен #name и #ms"); return
+            log.warning("!watch: #name and #ms required"); return
 
         import re
-        # Команда — всё между #ms=N и первым флагом --
+        # Command — everything between #ms=N and first -- flag
         cmd_m = re.search(r'#ms=\d+\s+(.*?)(?:\s+--|$)', raw)
         if not cmd_m:
             cmd_m = re.search(r'#ms=\d+\s+(.+)', raw)
         if not cmd_m:
-            log.warning("!watch: не найдена команда после #ms=N"); return
+            log.warning("!watch: command not found after #ms=N"); return
         cmd = cmd_m.group(1).strip()
         ms  = int(ms_s)
 
@@ -1591,22 +1856,22 @@ class NativeConsole:
                 try:
                     self._dispatch_extended(c)
                 except Exception as e:
-                    log.error("!watch '%s' ошибка: %s", n, e)
+                    log.error("!watch '%s' error: %s", n, e)
                 if max_runs and i["runs"] >= max_runs:
-                    log.info("!watch '%s': max-runs=%d достигнут, остановлен", n, max_runs)
+                    log.info("!watch '%s': max-runs=%d reached, stopped", n, max_runs)
                     self._watchers.pop(n, None)
                     break
 
         t = threading.Thread(target=_loop, daemon=True)
         t.start()
-        log.info("!watch '%s': каждые %dms%s → %s%s",
+        log.info("!watch '%s': every %dms%s → %s%s",
                  name, ms, f"±{jitter_ms}ms" if jitter_ms else "",
                  cmd, f"  (max {max_runs})" if max_runs else "")
 
     # --- Console output helper ------------------------------------------------
 
     def _con_write(self, text: str, tag: int = 0):
-        """Вывести строку напрямую в окно DLL-консоли (тег: 0=text 1=ok 2=warn 3=err 4=dim 5=accent)."""
+        """Print a line directly to the DLL console window (tag: 0=text 1=ok 2=warn 3=err 4=dim 5=accent)."""
         if self._lib:
             try:
                 self._lib.hr_con_write(text, tag)
@@ -1667,17 +1932,17 @@ class NativeConsole:
         if "--clear" in tokens:
             try:
                 log_path.write_text("", "utf-8")
-                log.info("!log: homrec.log очищен")
+                log.info("!log: homrec.log cleared")
             except Exception as e:
                 log.warning("!log --clear: %s", e)
             return
 
         if not log_path.exists():
-            log.warning("!log: homrec.log не найден"); return
+            log.warning("!log: homrec.log not found"); return
         try:
             lines = log_path.read_text("utf-8", errors="replace").splitlines()
         except Exception as e:
-            log.warning("!log: ошибка чтения: %s", e); return
+            log.warning("!log: read error: %s", e); return
 
         if "--search" in tokens:
             import re
@@ -1711,15 +1976,15 @@ class NativeConsole:
 
     def _run_rule_body(self, rule_name: str, body: str, silent: bool = False):
         """
-        Выполняет шаги тела правила.
-        Шаги разделены ';'.  Ключевые слова:
-          then  — просто разделитель (игнорируется)
+        Executes the rule body steps.
+        Steps separated by ';'.  Keywords:
+          then  — just a separator (ignored)
           !start --rec 1 then   → [!start --rec 1]
         """
         import re
         steps = [s.strip() for s in body.split(";") if s.strip()]
         for step in steps:
-            # Убрать trailing 'then'
+            # Remove trailing 'then'
             step = re.sub(r'\s+then\s*$', '', step, flags=re.IGNORECASE).strip()
             if not step:
                 continue
@@ -1730,42 +1995,42 @@ class NativeConsole:
     # --- !start --terminal as @terminal ------------------------------------
 
     def _cmd_start_terminal(self, raw: str):
-        """!start --terminal as @terminal  — запустить hr_terminal.exe."""
+        """!start --terminal as @terminal  — launch hr_terminal.exe."""
         tokens = raw.split()
         silent = "-s" in tokens or "--silent" in tokens
         if "as" not in tokens or "@terminal" not in tokens:
-            log.warning("!start --terminal: синтаксис: !start --terminal as @terminal")
+            log.warning("!start --terminal: syntax: !start --terminal as @terminal")
             return
         base = _get_base_dir()
         exe  = os.path.join(base, "hr_terminal.exe")
         if not os.path.exists(exe):
-            log.warning("!start --terminal: hr_terminal.exe не найден в %s", base)
+            log.warning("!start --terminal: hr_terminal.exe not found in %s", base)
             return
         try:
-            subprocess.Popen([exe], cwd=base)
+            _popen_no_window([exe], cwd=base)
             if not silent:
-                log.info("!start --terminal: hr_terminal.exe запущен")
+                log.info("!start --terminal: hr_terminal.exe started")
         except Exception as e:
-            log.error("!start --terminal: ошибка запуска: %s", e)
+            log.error("!start --terminal: launch error: %s", e)
 
     # --- !start --window ------------------------------------------------------
 
     def _cmd_start_window(self, raw: str):
-        """!start --window #name="x"  — переоткрыть созданное окно."""
+        """!start --window #name="x"  — reopen a created window."""
         if "--window" not in raw:
-            log.warning("!start: используй --window или --rec"); return
+            log.warning("!start: use --window or --rec"); return
         name = _parse_named(raw, "name")
         if not name:
-            log.warning("!start --window: не указан #name"); return
+            log.warning("!start --window: #name not specified"); return
         entry = self._win_reg.get(name)
         if entry is None:
-            log.warning("!start --window '%s': не найдено в реестре", name); return
+            log.warning("!start --window '%s': not found in registry", name); return
         if entry.get("kind") == "notepad":
             fp = entry.get("file", "")
             if fp:
                 self._open_notepad_file(fp)
             else:
-                log.warning("!start: нет пути к файлу для '%s'", name)
+                log.warning("!start: no file path for '%s'", name)
         else:
             self._open_tk_window(name)
 
@@ -1777,23 +2042,23 @@ class NativeConsole:
         !rename --rule    #name="old_name" to #name="new_name"
         !rename --ae      #name="old_name" to #name="new_name"
         !rename --hotkey  #name="old_name" to #name="new_name"
-        !rename --window  @all #prefix="pfx_"          (добавить префикс ко всем)
-        !rename --window  @all #suffix="_v2"           (добавить суффикс ко всем)
-        !rename --window  @all #replace="old" to="new" (замена подстроки во всех именах)
+        !rename --window  @all #prefix="pfx_"          (add prefix to all)
+        !rename --window  @all #suffix="_v2"           (add suffix to all)
+        !rename --window  @all #replace="old" to="new" (replace substring in all names)
         """
         import re
         tokens = raw.split()
         silent = "-s" in tokens or "--silent" in tokens
 
-        use_all = "--all" in raw  # @all уже нормализован в --all DLL-стороной
+        use_all = "--all" in raw  # @all already normalized to --all on the DLL side
 
         def _do_rename(registry, reg_type: str, old: str, new_name: str) -> bool:
             entry = registry.get(old)
             if entry is None:
-                self._con_warn(f"!rename {reg_type}: '{old}' не найдено")
+                self._con_warn(f"!rename {reg_type}: '{old}' not found")
                 return False
             registry.add(new_name, **({} if reg_type == "ae" else {}))
-            # Переносим данные: удаляем старое, создаём новое
+            # Move data: delete old, create new
             if reg_type == "window":
                 data = dict(entry)
                 registry.remove(old)
@@ -1810,7 +2075,7 @@ class NativeConsole:
                 registry.add(new_name, ae_type, data)
             return True
 
-        # Определить тип объекта
+        # Determine object type
         reg = None
         reg_type = ""
         if "--window" in raw:
@@ -1820,18 +2085,18 @@ class NativeConsole:
         elif "--ae" in raw:
             reg, reg_type = self._ae_reg, "ae"
         elif "--hotkey" in raw:
-            # Хоткеи переименовываются через alias
+            # Hotkeys are renamed via alias
             if use_all:
-                self._con_warn("!rename --hotkey @all: не поддерживается"); return
+                self._con_warn("!rename --hotkey @all: not supported"); return
             old = _parse_named(raw, "name")
             m2  = re.search(r'\bto\b\s+#name=["\']?([^"\';\s]+)["\']?', raw)
             new_name = m2.group(1) if m2 else None
             if not old or not new_name:
-                self._con_warn('!rename --hotkey: нужен #name="old" to #name="new"'); return
-            # Переименовать alias hotkey
+                self._con_warn('!rename --hotkey: #name="old" to #name="new" required'); return
+            # Rename alias hotkey
             unbound = self._hotkeys.unbind_by_alias(old)
             if unbound:
-                # rebind с новым alias
+                # rebind with new alias
                 bindings = self._hotkeys.all_bindings()
                 if unbound in bindings:
                     cmd_val = bindings[unbound]
@@ -1840,12 +2105,12 @@ class NativeConsole:
                     if not silent:
                         self._con_ok(f"!rename --hotkey '{old}' → '{new_name}'")
             else:
-                self._con_warn(f"!rename --hotkey '{old}': не найдено")
+                self._con_warn(f"!rename --hotkey '{old}': not found")
             return
         else:
-            self._con_warn("!rename: используй --window / --rule / --ae / --hotkey"); return
+            self._con_warn("!rename: use --window / --rule / --ae / --hotkey"); return
 
-        # @all — пакетное переименование
+        # @all — batch rename
         if use_all:
             prefix  = _parse_named(raw, "prefix")  or ""
             suffix  = _parse_named(raw, "suffix")  or ""
@@ -1868,24 +2133,24 @@ class NativeConsole:
                     if not silent:
                         self._con_info(f"  '{old}' → '{new_name}'")
             if not silent:
-                self._con_ok(f"!rename @all ({reg_type}): переименовано {count} из {len(names)}")
+                self._con_ok(f"!rename @all ({reg_type}): renamed {count} of {len(names)}")
             return
 
-        # Одиночное переименование: #name="old" to #name="new"
+        # Single rename: #name="old" to #name="new"
         old = _parse_named(raw, "name")
         m2  = re.search(r'\bto\b\s+#name=["\']?([^"\';\s]+)["\']?', raw)
         if not m2:
-            # попробовать формат: #name="old" to #name="new"
+            # try format: #name="old" to #name="new"
             m2 = re.search(r'#name=["\']?[^"\';\s]+["\']?\s+to\s+#name=["\']?([^"\';\s]+)["\']?', raw)
         new_name = m2.group(1) if m2 else None
 
         if not old or not new_name:
-            self._con_warn('!rename: синтаксис: !rename --window #name="old" to #name="new"')
+            self._con_warn('!rename: syntax: !rename --window #name="old" to #name="new"')
             return
         if old == new_name:
-            self._con_warn(f"!rename: имена совпадают ('{old}')"); return
+            self._con_warn(f"!rename: names are identical ('{old}')"); return
         if reg.exists(new_name):
-            self._con_warn(f"!rename: '{new_name}' уже существует"); return
+            self._con_warn(f"!rename: '{new_name}' already exists"); return
 
         if _do_rename(reg, reg_type, old, new_name):
             if not silent:
@@ -1910,97 +2175,97 @@ class NativeConsole:
             if quiet: return True
             if self._root_alive():
                 import tkinter.messagebox as mb
-                return mb.askyesno("Удаление", msg)
+                return mb.askyesno("Delete", msg)
             return True
 
-        # --all: удалить всё из реестра
+        # --all: remove everything from registry
         if "--all" in raw:
             if "--window" in raw:
                 names = self._win_reg.all_names()
-                if not _confirm(f"Удалить все {len(names)} окон из реестра?"):
-                    log.info("$rm --all --window: отменено"); return
+                if not _confirm(f"Delete all {len(names)} windows from registry?"):
+                    log.info("$rm --all --window: cancelled"); return
                 for n in names:
                     if if_dis:
                         e = self._win_reg.get(n) or {}
                         if e.get("enabled", True): continue
                     self._win_reg.remove(n)
-                log.info("$rm --all --window: удалено %d записей", len(names))
+                log.info("$rm --all --window: removed %d entries", len(names))
             elif "--rule" in raw:
                 names = self._rule_reg.all_names()
-                if not _confirm(f"Удалить все {len(names)} правил?"):
-                    log.info("$rm --all --rule: отменено"); return
+                if not _confirm(f"Delete all {len(names)} rules?"):
+                    log.info("$rm --all --rule: cancelled"); return
                 for n in names:
                     if if_dis:
                         e = self._rule_reg.get(n) or {}
                         if e.get("connected", True): continue
                     self._rule_reg.remove(n)
-                log.info("$rm --all --rule: удалено %d записей", len(names))
+                log.info("$rm --all --rule: removed %d entries", len(names))
             elif "--ae" in raw:
                 names = self._ae_reg.all_names()
-                if not _confirm(f"Удалить все {len(names)} ae-объектов?"):
-                    log.info("$rm --all --ae: отменено"); return
+                if not _confirm(f"Delete all {len(names)} ae-objects?"):
+                    log.info("$rm --all --ae: cancelled"); return
                 for n in names:
                     self._ae_reg.remove(n)
-                log.info("$rm --all --ae: удалено %d записей", len(names))
+                log.info("$rm --all --ae: removed %d entries", len(names))
             else:
-                log.warning("$rm --all: укажи --window / --rule / --ae")
+                log.warning("$rm --all: specify --window / --rule / --ae")
             return
 
         if not name:
-            log.warning('$rm: не указан #name  (пример: $rm --window #name="x")'); return
+            log.warning('$rm: #name not specified  (example: $rm --window #name="x")'); return
 
         if "--window" in raw:
             if not self._win_reg.exists(name):
-                log.warning("$rm: '%s' не найдено в реестре", name); return
+                log.warning("$rm: '%s' not found in registry", name); return
             entry = self._win_reg.get(name)
             if if_dis and entry and entry.get("enabled", True):
-                log.info("$rm: '%s' сейчас enabled — пропущено (--if-disconnected)", name); return
-            if not _confirm(f"Удалить окно «{name}» из homrec.create?"):
-                log.info("$rm: отменено"); return
-            # BUG FIX: удалять файл notepad всегда (не только при --purge)
+                log.info("$rm: '%s' is currently enabled — skipped (--if-disconnected)", name); return
+            if not _confirm(f"Delete window '{name}' from homrec.create?"):
+                log.info("$rm: cancelled"); return
+            # BUG FIX: always delete notepad file (not only with --purge)
             if entry and entry.get("kind") == "notepad":
                 fp = entry.get("file", "")
                 if fp and Path(fp).exists():
-                    try: Path(fp).unlink(); log.info("$rm: notepad-файл удалён: %s", fp)
-                    except Exception as e: log.warning("$rm: не удалось удалить файл: %s", e)
+                    try: Path(fp).unlink(); log.info("$rm: notepad file deleted: %s", fp)
+                    except Exception as e: log.warning("$rm: failed to delete file: %s", e)
             if purge:
-                # удалить хоткеи, ссылающиеся на это окно
+                # remove hotkeys referencing this window
                 for key, val in list(self._hotkeys.all_bindings().items()):
                     cmd_val = val.get("cmd","") if isinstance(val, dict) else str(val)
                     if name in cmd_val:
                         self._hotkeys.unbind(key)
-                        log.info("$rm --purge: хоткей '%s' удалён", key)
+                        log.info("$rm --purge: hotkey '%s' removed", key)
             self._win_reg.remove(name)
-            log.info("$rm --window: '%s' удалено", name)
+            log.info("$rm --window: '%s' removed", name)
             return
 
         if "--rule" in raw:
             if not self._rule_reg.exists(name):
-                log.warning("$rm --rule: '%s' не найдено", name); return
+                log.warning("$rm --rule: '%s' not found", name); return
             entry = self._rule_reg.get(name)
             if if_dis and entry and entry.get("connected", True):
-                log.info("$rm --rule: '%s' сейчас connected — пропущено", name); return
-            if not _confirm(f"Удалить правило «{name}»?"):
-                log.info("$rm: отменено"); return
+                log.info("$rm --rule: '%s' is currently connected — skipped", name); return
+            if not _confirm(f"Delete rule '{name}'?"):
+                log.info("$rm: cancelled"); return
             if purge:
                 for key, val in list(self._hotkeys.all_bindings().items()):
                     cmd_val = val.get("cmd","") if isinstance(val, dict) else str(val)
                     if name in cmd_val:
                         self._hotkeys.unbind(key)
             self._rule_reg.remove(name)
-            log.info("$rm --rule: '%s' удалено", name)
+            log.info("$rm --rule: '%s' removed", name)
             return
 
         if "--ae" in raw:
             if not self._ae_reg.exists(name):
-                log.warning("$rm --ae: '%s' не найдено", name); return
-            if not _confirm(f"Удалить ae-объект «{name}»?"):
-                log.info("$rm: отменено"); return
+                log.warning("$rm --ae: '%s' not found", name); return
+            if not _confirm(f"Delete ae-object '{name}'?"):
+                log.info("$rm: cancelled"); return
             self._ae_reg.remove(name)
-            log.info("$rm --ae: '%s' удалено", name)
+            log.info("$rm --ae: '%s' removed", name)
             return
 
-        log.warning("$rm: используй --window / --rule / --ae")
+        log.warning("$rm: use --window / --rule / --ae")
 
     # --- !connect -------------------------------------------------------------
 
@@ -2018,46 +2283,46 @@ class NativeConsole:
         force   = "-f" in tokens or "--force" in tokens
 
         if "--window" in raw:
-            # --all: connect все окна
+            # --all: connect all windows
             if all_obj:
                 for name in self._win_reg.all_names():
                     self._cmd_connect(f'!connect --window #name="{name}" 1 -s')
-                if not silent: log.info("!connect --window --all: все окна подключены")
+                if not silent: log.info("!connect --window --all: all windows connected")
                 return
             name = _parse_named(raw, "name")
             if not name:
-                log.warning("!connect --window: не указан #name"); return
+                log.warning("!connect --window: #name not specified"); return
             val = None
             for t in tokens:
                 if t in ("0", "1"): val = int(t)
             entry = self._win_reg.get(name)
             if entry is None:
-                log.warning("!connect --window '%s': не найдено", name); return
+                log.warning("!connect --window '%s': not found", name); return
             if toggle:
                 val = 0 if entry.get("enabled", True) else 1
             enabled = (val != 0) if val is not None else True
             if not force and entry.get("enabled") == enabled:
-                if not silent: log.info("!connect --window '%s': уже в состоянии %s", name, enabled)
+                if not silent: log.info("!connect --window '%s': already in state %s", name, enabled)
                 return
             entry["enabled"] = enabled
             self._win_reg.add(name, entry.get("kind", "window"), entry)
             if enabled:
                 self._cmd_start_window(f'!start --window #name="{name}"')
             if not silent:
-                log.info("!connect --window '%s' → %s", name, "включено" if enabled else "отключено")
+                log.info("!connect --window '%s' → %s", name, "enabled" if enabled else "disabled")
             return
 
         if "--rule" in raw:
             if all_obj:
                 for name in self._rule_reg.all_names():
                     self._cmd_connect(f'!connect --rule #name="{name}" -s')
-                if not silent: log.info("!connect --rule --all: все правила подключены")
+                if not silent: log.info("!connect --rule --all: all rules connected")
                 return
             name = _parse_named(raw, "name")
             if not name:
-                log.warning("!connect --rule: не указан #name"); return
+                log.warning("!connect --rule: #name not specified"); return
             if not self._rule_reg.exists(name):
-                log.warning("!connect --rule '%s': не найдено", name); return
+                log.warning("!connect --rule '%s': not found", name); return
             entry = self._rule_reg.get(name)
             if toggle:
                 new_state = not entry.get("connected", True)
@@ -2070,7 +2335,7 @@ class NativeConsole:
                     if body: self._run_rule_body(name, body, silent)
                 return
             if not force and entry and entry.get("connected", False):
-                if not silent: log.info("!connect --rule '%s': уже подключено", name)
+                if not silent: log.info("!connect --rule '%s': already connected", name)
                 return
             self._rule_reg.set_connected(name, True)
             entry = self._rule_reg.get(name)
@@ -2086,7 +2351,7 @@ class NativeConsole:
                 raw, re.IGNORECASE
             )
             if not m:
-                log.warning('!connect --function: синтаксис: !connect --function <cmd> to|; <key> [#name="func"]')
+                log.warning('!connect --function: syntax: !connect --function <cmd> to|; <key> [#name="func"]')
                 return
             cmd_part  = m.group(1).strip()
             key_part  = m.group(2).strip()
@@ -2098,7 +2363,24 @@ class NativeConsole:
                          f"  (name={func_name})" if func_name else "")
             return
 
-        log.warning("!connect: используй --window / --rule / --function")
+        if "--func" in raw and "@terminal" in raw:
+            # Syntax: !connect --func @terminal <alias> <cmd...>
+            # Example: !connect --func @terminal status !status --verbose
+            import re
+            m = re.search(r'--func\s+@terminal\s+(\S+)\s+(.+)', raw, re.IGNORECASE)
+            if not m:
+                log.warning('!connect --func @terminal: syntax: !connect --func @terminal <alias> <command>')
+                return
+            alias = m.group(1).strip()
+            cmd_str = m.group(2).strip()
+            self._term_funcs.bind(alias, cmd_str)
+            # Push updated func table to terminal via pipe
+            self._push_terminal_funcs()
+            if not silent:
+                log.info("!connect --func @terminal '%s' → %s", alias, cmd_str)
+            return
+
+        log.warning("!connect: use --window / --rule / --function / --func @terminal")
 
     # --- !disconnect ----------------------------------------------------------
 
@@ -2108,7 +2390,7 @@ class NativeConsole:
         !disconnect --rule    #name="x"      [-s][-q][--all][--toggle]
         !disconnect --ae      #type=... #name="x"
         !disconnect --function <cmd> to|; <key>
-        !disconnect           #name="func"   (по имени, заданному в !connect --function)
+        !disconnect           #name="func"   (by name set in !connect --function)
         """
         import re
         tokens = raw.split()
@@ -2121,14 +2403,14 @@ class NativeConsole:
             if all_obj:
                 for name in self._win_reg.all_names():
                     self._cmd_disconnect(f'!disconnect --window #name="{name}" -s')
-                if not silent: log.info("!disconnect --window --all: все окна отключены")
+                if not silent: log.info("!disconnect --window --all: all windows disconnected")
                 return
             name = _parse_named(raw, "name")
             if not name:
-                log.warning("!disconnect --window: не указан #name"); return
+                log.warning("!disconnect --window: #name not specified"); return
             entry = self._win_reg.get(name)
             if entry is None:
-                log.warning("!disconnect --window '%s': не найдено", name); return
+                log.warning("!disconnect --window '%s': not found", name); return
             if toggle:
                 new_state = not entry.get("enabled", True)
                 entry["enabled"] = new_state
@@ -2136,7 +2418,7 @@ class NativeConsole:
                 if not silent: log.info("!disconnect --window '%s' toggle → %s", name, new_state)
                 return
             if not force and not entry.get("enabled", True):
-                if not silent: log.info("!disconnect --window '%s': уже disabled", name)
+                if not silent: log.info("!disconnect --window '%s': already disabled", name)
                 return
             entry["enabled"] = False
             self._win_reg.add(name, entry.get("kind", "window"), entry)
@@ -2147,21 +2429,21 @@ class NativeConsole:
             if all_obj:
                 for name in self._rule_reg.all_names():
                     self._rule_reg.set_connected(name, False)
-                if not silent: log.info("!disconnect --rule --all: все правила отключены")
+                if not silent: log.info("!disconnect --rule --all: all rules disconnected")
                 return
             name = _parse_named(raw, "name")
             if not name:
-                log.warning("!disconnect --rule: не указан #name"); return
+                log.warning("!disconnect --rule: #name not specified"); return
             if toggle:
                 entry = self._rule_reg.get(name)
                 if entry is None:
-                    log.warning("!disconnect --rule '%s': не найдено", name); return
+                    log.warning("!disconnect --rule '%s': not found", name); return
                 new_state = not entry.get("connected", True)
                 self._rule_reg.set_connected(name, new_state)
                 if not silent: log.info("!disconnect --rule '%s' toggle → %s", name, new_state)
                 return
             if not self._rule_reg.set_connected(name, False):
-                log.warning("!disconnect --rule '%s': не найдено", name)
+                log.warning("!disconnect --rule '%s': not found", name)
             elif not silent:
                 log.info("!disconnect --rule '%s' → disconnected", name)
             return
@@ -2170,37 +2452,51 @@ class NativeConsole:
             ae_type = _parse_named(raw, "type")
             name    = _parse_named(raw, "name")
             if not name:
-                log.warning("!disconnect --ae: не указан #name"); return
+                log.warning("!disconnect --ae: #name not specified"); return
             if self._ae_reg.remove(name):
                 if not silent:
-                    log.info("!disconnect --ae [%s] '%s' → удалено", ae_type, name)
+                    log.info("!disconnect --ae [%s] '%s' → removed", ae_type, name)
             else:
-                log.warning("!disconnect --ae '%s': не найдено", name)
+                log.warning("!disconnect --ae '%s': not found", name)
             return
 
         if "--function" in raw:
             m = re.search(r'--function\s+(.+?)\s+(?:to|;)\s+(\S+)', raw, re.IGNORECASE)
             if not m:
-                log.warning("!disconnect --function: синтаксис: --function <cmd> to|; <key>")
+                log.warning("!disconnect --function: syntax: --function <cmd> to|; <key>")
                 return
             key_part = m.group(2).strip()
             self._hotkeys.unbind(key_part)
             if not silent:
-                log.info("!disconnect --function '%s' → отвязано", key_part)
+                log.info("!disconnect --function '%s' → unbound", key_part)
             return
 
-        # Отключить по имени (#name="func"), заданному при !connect --function
+        # Disconnect by name (#name="func") set in !connect --function
         name = _parse_named(raw, "name")
         if name:
             unbound = self._hotkeys.unbind_by_alias(name)
             if unbound:
                 if not silent:
-                    log.info("!disconnect #name='%s' → отвязано (%s)", name, unbound)
+                    log.info("!disconnect #name='%s' → unbound (%s)", name, unbound)
             else:
-                log.warning("!disconnect #name='%s': не найдено", name)
+                log.warning("!disconnect #name='%s': not found", name)
             return
 
-        log.warning("!disconnect: используй --window / --rule / --ae / --function  или #name=")
+        if "--func" in raw and "@terminal" in raw:
+            import re
+            m = re.search(r'--func\s+@terminal\s+(\S+)', raw, re.IGNORECASE)
+            if not m:
+                log.warning('!disconnect --func @terminal: syntax: !disconnect --func @terminal <alias>')
+                return
+            alias = m.group(1).strip()
+            if self._term_funcs.unbind(alias):
+                self._push_terminal_funcs()
+                if not silent: log.info("!disconnect --func @terminal '%s': unbound", alias)
+            else:
+                log.warning("!disconnect --func @terminal '%s': not found", alias)
+            return
+
+        log.warning("!disconnect: use --window / --rule / --ae / --function / --func @terminal  or #name=")
 
 
     # --- !edit --terminal ---------------------------------------------------------
@@ -2208,11 +2504,11 @@ class NativeConsole:
     def _cmd_edit_terminal(self, raw: str):
         """
         !edit --terminal [#name="title"] [#bg=color] [#fg=color] [#size=(WxH)]
-        Используй # вместо значения чтобы пропустить параметр.
+        Use # instead of a value to skip a parameter.
 
-        Примеры:
+        Examples:
           !edit --terminal #name="MyConsole" #size=(1200x700)
-          !edit --terminal ##bg=# #size=(800x600)   <- bg пропущен
+          !edit --terminal ##bg=# #size=(800x600)   <- bg skipped
         """
         import re
         tokens = raw.split()
@@ -2233,12 +2529,12 @@ class NativeConsole:
         if name_val is not None:
             if not silent:
                 self._con_ok(f"Terminal title → {name_val}")
-            # Фактически заголовок меняет C++ сторона через SetWindowTextW
-            # Если консоль недоступна — просто логируем
+            # Title is actually changed by C++ side via SetWindowTextW
+            # If console is unavailable — just log
             log.info("!edit --terminal #name=%s", name_val)
 
         if size_val is not None:
-            # Парсим WxH
+            # Parse WxH
             m = re.match(r'(\d+)[xX](\d+)', size_val.strip("()"))
             if m:
                 groups = [g for g in m.groups() if g is not None]
@@ -2260,10 +2556,10 @@ class NativeConsole:
         if all(v is None for v in (name_val, size_val, bg_val, fg_val)):
             self._con_warn("!edit --terminal: no parameters given (use #name=, #size=, #bg=, #fg= or # to skip)")
 
-    # --- Вспомогательные методы -----------------------------------------------
+    # --- Helper methods -------------------------------------------------------
 
     def _root_alive(self) -> bool:
-        """Проверить, существует ли ещё root-окно Tkinter."""
+        """Check whether the Tkinter root window still exists."""
         try:
             return bool(self.app.root.winfo_exists())
         except Exception:
@@ -2276,9 +2572,9 @@ class NativeConsole:
             pass
 
     def _open_tk_window(self, name: str):
-        """Открыть Tkinter-окно с заданным именем и стилем из реестра."""
+        """Open a Tkinter window with the given name and style from registry."""
         if not self._root_alive():
-            log.warning("_open_tk_window: root недоступен")
+            log.warning("_open_tk_window: root unavailable")
             return
 
         entry = self._win_reg.get(name) or {}
@@ -2295,12 +2591,12 @@ class NativeConsole:
             top.configure(bg=bg_color)
             tk.Label(top, text=name, bg=bg_color, fg=fg_color,
                      font=("Segoe UI", 14)).pack(pady=20)
-            log.info("Tkinter-окно открыто: %s", name)
+            log.info("Tkinter window opened: %s", name)
 
         self.app.root.after(0, _create)
 
     def _open_notepad_file(self, path: str):
-        """Открыть файл в системном редакторе."""
+        """Open a file in the system editor."""
         try:
             if platform.system() == "Windows":
                 os.startfile(path)
@@ -2308,14 +2604,14 @@ class NativeConsole:
                 subprocess.Popen(["open", "-a", "TextEdit", path])
             else:
                 subprocess.Popen(["xdg-open", path])
-            log.info("Открыт файл: %s", path)
+            log.info("File opened: %s", path)
         except Exception as e:
             log.warning("_open_notepad_file error: %s", e)
 
     def _toggle_desktop_shortcut(self, enable: bool):
-        """Создать или удалить ярлык на рабочем столе (Windows)."""
+        """Create or delete a desktop shortcut (Windows)."""
         if platform.system() != "Windows":
-            log.warning("Ярлык поддерживается только на Windows")
+            log.warning("Shortcuts are only supported on Windows")
             return
 
         desktop  = Path(os.path.expanduser("~")) / "Desktop"
@@ -2331,14 +2627,14 @@ class NativeConsole:
                     f"$s.WorkingDirectory='{os.path.dirname(target)}';"
                     f"$s.Save()"
                 )
-                subprocess.run(["powershell", "-Command", ps], capture_output=True)
-                log.info("Ярлык создан: %s", lnk_path)
+                _run_no_window(["powershell", "-Command", ps], capture_output=True)
+                log.info("Shortcut created: %s", lnk_path)
             except Exception as e:
-                log.error("Ошибка создания ярлыка: %s", e)
+                log.error("Failed to create shortcut: %s", e)
         else:
             try:
                 if lnk_path.exists():
                     lnk_path.unlink()
-                    log.info("Ярлык удалён: %s", lnk_path)
+                    log.info("Shortcut deleted: %s", lnk_path)
             except Exception as e:
-                log.error("Ошибка удаления ярлыка: %s", e)
+                log.error("Failed to delete shortcut: %s", e)
