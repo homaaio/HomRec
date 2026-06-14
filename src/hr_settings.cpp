@@ -47,7 +47,7 @@
 #include <algorithm>
 #include <cctype>
 
-/* ── Tiny JSON helpers (no external dependencies) ─────────────────────────── */
+/* -- Tiny JSON helpers (no external dependencies) --------------------------- */
 
 static std::string _escape_json(const std::string &s) {
     std::string out;
@@ -110,7 +110,7 @@ static bool _json_get_bool(const char *json, const char *key, bool def) {
     return def;
 }
 
-/* ── Settings struct ──────────────────────────────────────────────────────── */
+/* -- Settings struct -------------------------------------------------------- */
 
 struct HrSettings {
     char  output_folder[512];
@@ -161,7 +161,7 @@ static void _defaults(HrSettings *s) {
     s->dxgi = 0;
 }
 
-/* ── Public API ───────────────────────────────────────────────────────────── */
+/* -- Public API ------------------------------------------------------------- */
 
 HR_EXPORT void *hr_settings_create() {
     HrSettings *s = new(std::nothrow) HrSettings{};
@@ -278,7 +278,7 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
     return (written == strlen(buf)) ? 1 : 0;
 }
 
-/* ── Field accessors ──────────────────────────────────────────────────────── */
+/* -- Field accessors -------------------------------------------------------- */
 
 HR_EXPORT const char *hr_settings_get_output_folder(const void *h) {
     return h ? static_cast<const HrSettings *>(h)->output_folder : "";
