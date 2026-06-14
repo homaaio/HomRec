@@ -1128,7 +1128,6 @@ class OverlayManagerWindow:
         if not self._overlays:
             tk.Label(self._list_inner, text="No overlays yet. Click + Add Overlay to start.",
                      bg=self.c["surface"], fg=self.c["text_secondary"],
-                     bg=self.c["surface"], fg=self.c["text_secondary"],
                      font=("Segoe UI", 9, "italic"), justify="center").pack(padx=12, pady=20)
             return
         for i, ov in enumerate(self._overlays):
