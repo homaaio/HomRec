@@ -3,7 +3,6 @@
 No lags. No bloat. No GPU required.
 
 [![Version](https://img.shields.io/badge/version-1.6.4-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
-[![Python](https://img.shields.io/badge/python-3.11+-yellow?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows)](https://github.com/homaaio/homrec/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-@homaexe-2aabee?style=flat-square&logo=telegram)](https://t.me/homaexe)
 
