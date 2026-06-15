@@ -1178,131 +1178,165 @@ class OverlayManagerWindow:
         self._editor_widgets = {}
 
     def _build_editor(self, idx: int) -> None:
+        """Show only fields relevant to the overlay type — no clutter."""
         self._clear_editor()
-        ov = self._overlays[idx]
-        c = self.c
-        ef = self._editor_frame
-        w = self._editor_widgets
+        ov   = self._overlays[idx]
+        c    = self.c
+        ef   = self._editor_frame
+        w    = self._editor_widgets
+        kind = ov.get("kind", "text")
 
-        tk.Label(ef, text="Edit Overlay", bg=c["bg"], fg=c["accent"],
-                 font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=4,
-                 sticky="w", padx=8, pady=(4,10))
+        kind_icon = {"text": "📝", "webcam": "📷", "image": "🖼"}.get(kind, "?")
+        tk.Label(ef, text=f"{kind_icon}  Edit {kind.capitalize()} Overlay",
+                 bg=c["bg"], fg=c["accent"],
+                 font=("Segoe UI", 11, "bold")).grid(
+                 row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 10))
 
-        def lbl(r, col, text):
+        row = [1]
+        def _lbl(text):
             tk.Label(ef, text=text, bg=c["bg"], fg=c["text"],
-                     font=("Segoe UI", 9), anchor="w", width=12).grid(
-                     row=r, column=col, sticky="w", padx=(8,4), pady=3)
+                     font=("Segoe UI", 9), anchor="w", width=13).grid(
+                     row=row[0], column=0, sticky="w", padx=(8,4), pady=4)
+        def _next():
+            row[0] += 1
 
-        # Row 1: Kind
-        lbl(1, 0, "Type:")
-        kind_var = tk.StringVar(value=ov.get("kind","text"))
-        kf = tk.Frame(ef, bg=c["bg"]); kf.grid(row=1, column=1, columnspan=3, sticky="w", pady=3)
+        # Type selector
+        _lbl("Type:")
+        kind_var = tk.StringVar(value=kind)
+        kf = tk.Frame(ef, bg=c["bg"])
+        kf.grid(row=row[0], column=1, columnspan=3, sticky="w", pady=4)
         for kv, kl in [("text","📝 Text"),("webcam","📷 Webcam"),("image","🖼 Image")]:
             tk.Radiobutton(kf, text=kl, variable=kind_var, value=kv,
                            bg=c["bg"], fg=c["text"], selectcolor=c["surface"],
-                           activebackground=c["bg"],
-                           font=("Segoe UI", 9)).pack(side="left", padx=6)
+                           activebackground=c["bg"], font=("Segoe UI", 9),
+                           command=lambda: (self._apply_editor(idx), self._build_editor(idx))
+                           ).pack(side="left", padx=6)
         w["kind"] = kind_var
+        _next()
 
-        # Row 2: Enabled toggle
-        lbl(2, 0, "Enabled:")
+        # Enabled
+        _lbl("Enabled:")
         en_var = tk.BooleanVar(value=ov.get("enabled", True))
         tk.Checkbutton(ef, variable=en_var, bg=c["bg"], fg=c["text"],
                        selectcolor=c["surface"], activebackground=c["bg"]).grid(
-                       row=2, column=1, sticky="w", pady=3)
+                       row=row[0], column=1, sticky="w", pady=4)
         w["enabled"] = en_var
+        _next()
 
-        # Row 3: Text content
-        lbl(3, 0, "Text:")
-        text_var = tk.StringVar(value=ov.get("text",""))
-        tk.Entry(ef, textvariable=text_var, bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 10), relief="flat", width=30).grid(
-                 row=3, column=1, columnspan=3, sticky="ew", padx=4, pady=3)
-        w["text"] = text_var
+        # Set defaults for all keys so _apply_editor never KeyErrors
+        w["text"]      = tk.StringVar(value=ov.get("text", ""))
+        w["font_size"] = tk.IntVar(value=ov.get("font_size", 28))
+        w["color"]     = tk.StringVar(value=ov.get("color", "#ffffff"))
+        w["path"]      = tk.StringVar(value=ov.get("path", ""))
+        w["cam_index"] = tk.IntVar(value=ov.get("cam_index", 0))
 
-        # Row 4: Font size
-        lbl(4, 0, "Font size:")
-        fs_var = tk.IntVar(value=ov.get("font_size", 24))
-        tk.Scale(ef, variable=fs_var, from_=8, to=96, orient="horizontal",
-                 length=200, bg=c["bg"], fg=c["text"],
-                 troughcolor=c["surface"], highlightthickness=0,
-                 showvalue=True).grid(row=4, column=1, columnspan=2, sticky="ew", pady=3)
-        w["font_size"] = fs_var
+        if kind == "text":
+            _lbl("Text:")
+            tk.Entry(ef, textvariable=w["text"], bg=c["surface"], fg=c["text"],
+                     font=("Segoe UI", 10), relief="flat", width=28).grid(
+                     row=row[0], column=1, columnspan=3, sticky="ew", padx=4, pady=4)
+            _next()
 
-        # Row 5: Color
-        lbl(5, 0, "Color:")
-        col_var = tk.StringVar(value=ov.get("color","#ffffff"))
-        col_preview = tk.Label(ef, bg=col_var.get(), width=4, relief="flat", cursor="hand2")
-        col_preview.grid(row=5, column=1, padx=4, pady=3)
-        def pick():
-            from tkinter import colorchooser as cc
-            r = cc.askcolor(color=col_var.get(), parent=self.win)
-            if r[1]:
-                col_var.set(r[1]); col_preview.config(bg=r[1])
-        col_preview.bind("<Button-1>", lambda e: pick())
-        tk.Label(ef, textvariable=col_var, bg=c["bg"], fg=c["text_secondary"],
-                 font=("Consolas",9), cursor="hand2").grid(row=5, column=2, sticky="w", pady=3)
-        w["color"] = col_var
+            _lbl("Font size:")
+            tk.Scale(ef, variable=w["font_size"], from_=8, to=120,
+                     orient="horizontal", length=220, bg=c["bg"], fg=c["text"],
+                     troughcolor=c["surface"], highlightthickness=0,
+                     showvalue=True).grid(row=row[0], column=1, columnspan=3,
+                     sticky="ew", pady=4)
+            _next()
 
-        # Row 6: Image path
-        lbl(6, 0, "Image path:")
-        path_var = tk.StringVar(value=ov.get("path",""))
-        pf = tk.Frame(ef, bg=c["bg"]); pf.grid(row=6, column=1, columnspan=3, sticky="ew", pady=3)
-        tk.Entry(pf, textvariable=path_var, bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 9), relief="flat", width=22).pack(side="left")
-        tk.Button(pf, text="…", command=lambda: path_var.set(
-            filedialog.askopenfilename(filetypes=[("Images","*.png *.jpg *.jpeg *.bmp"),("All","*.*")]) or path_var.get()),
-                  bg=c["surface"], fg=c["text"], relief="flat", font=("Segoe UI",9), padx=5).pack(side="left", padx=4)
-        w["path"] = path_var
+            _lbl("Color:")
+            col_row = tk.Frame(ef, bg=c["bg"])
+            col_row.grid(row=row[0], column=1, columnspan=3, sticky="w", pady=4)
+            col_prev = tk.Label(col_row, bg=w["color"].get(), width=4,
+                                relief="flat", cursor="hand2")
+            col_prev.pack(side="left")
+            def _pick_color():
+                from tkinter import colorchooser as cc
+                res = cc.askcolor(color=w["color"].get(), parent=self.win)
+                if res[1]:
+                    w["color"].set(res[1]); col_prev.config(bg=res[1])
+            col_prev.bind("<Button-1>", lambda e: _pick_color())
+            tk.Label(col_row, textvariable=w["color"], bg=c["bg"],
+                     fg=c["text_secondary"], font=("Consolas", 9)).pack(side="left", padx=8)
+            _next()
 
-        # Row 7: Webcam index
-        lbl(7, 0, "Camera index:")
-        cam_var = tk.IntVar(value=ov.get("cam_index",0))
-        tk.Spinbox(ef, textvariable=cam_var, from_=0, to=9, width=5,
-                   bg=c["surface"], fg=c["text"], relief="flat").grid(
-                   row=7, column=1, sticky="w", pady=3)
-        w["cam_index"] = cam_var
+        elif kind == "image":
+            _lbl("Image file:")
+            pf = tk.Frame(ef, bg=c["bg"])
+            pf.grid(row=row[0], column=1, columnspan=3, sticky="ew", pady=4)
+            tk.Entry(pf, textvariable=w["path"], bg=c["surface"], fg=c["text"],
+                     font=("Segoe UI", 9), relief="flat", width=20).pack(side="left")
+            tk.Button(pf, text="Browse…",
+                      command=lambda: w["path"].set(
+                          filedialog.askopenfilename(
+                              filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif"),
+                                         ("All", "*.*")]) or w["path"].get()),
+                      bg=c["surface"], fg=c["accent"],
+                      font=("Segoe UI", 9), relief="flat", padx=8).pack(side="left", padx=6)
+            _next()
 
-        # Row 8: Opacity
-        lbl(8, 0, "Opacity:")
-        op_var = tk.DoubleVar(value=ov.get("opacity",1.0))
+        elif kind == "webcam":
+            _lbl("Camera index:")
+            cam_row = tk.Frame(ef, bg=c["bg"])
+            cam_row.grid(row=row[0], column=1, sticky="w", pady=4)
+            tk.Spinbox(cam_row, textvariable=w["cam_index"],
+                       from_=0, to=9, width=4,
+                       bg=c["surface"], fg=c["text"], relief="flat").pack(side="left")
+            tk.Label(cam_row, text="  (0 = default camera)",
+                     bg=c["bg"], fg=c["text_secondary"],
+                     font=("Segoe UI", 8)).pack(side="left")
+            _next()
+
+        # Opacity (always shown)
+        tk.Frame(ef, bg=c["surface"], height=1).grid(
+            row=row[0], column=0, columnspan=4, sticky="ew", padx=8, pady=(8,4))
+        _next()
+        _lbl("Opacity:")
+        op_var = tk.DoubleVar(value=ov.get("opacity", 1.0))
         tk.Scale(ef, variable=op_var, from_=0.0, to=1.0, resolution=0.05,
-                 orient="horizontal", length=200, bg=c["bg"], fg=c["text"],
+                 orient="horizontal", length=220, bg=c["bg"], fg=c["text"],
                  troughcolor=c["surface"], highlightthickness=0,
-                 showvalue=True).grid(row=8, column=1, columnspan=2, sticky="ew", pady=3)
+                 showvalue=True).grid(row=row[0], column=1, columnspan=3,
+                 sticky="ew", pady=4)
         w["opacity"] = op_var
+        _next()
 
-        # Separator
-        tk.Frame(ef, bg=c["surface"], height=1).grid(row=9, column=0, columnspan=4, sticky="ew", padx=8, pady=6)
-        tk.Label(ef, text="Position & Size  (fraction of screen, 0.0–1.0)",
-                 bg=c["bg"], fg=c["text_secondary"], font=("Segoe UI", 8, "italic")).grid(
-                 row=9, column=0, columnspan=4, sticky="w", padx=8)
-
-        for row_offset, (var_key, label, def_val, lo, hi) in enumerate([
-            ("x", "X pos:", ov.get("x",0.05), 0.0, 0.95),
-            ("y", "Y pos:", ov.get("y",0.05), 0.0, 0.95),
-            ("w", "Width:",  ov.get("w",0.25), 0.02, 1.0),
-            ("h", "Height:", ov.get("h",0.08), 0.02, 1.0),
-        ]):
-            r = 10 + row_offset
-            lbl(r, 0, label)
+        # Position & Size
+        tk.Label(ef, text="Position & Size  (0.0–1.0, fraction of screen)",
+                 bg=c["bg"], fg=c["text_secondary"],
+                 font=("Segoe UI", 8, "italic")).grid(
+                 row=row[0], column=0, columnspan=4, sticky="w", padx=8, pady=(8,2))
+        _next()
+        for var_key, label, def_val, lo, hi in [
+            ("x", "X:", ov.get("x",0.05), 0.0, 0.95),
+            ("y", "Y:", ov.get("y",0.05), 0.0, 0.95),
+            ("w", "W:", ov.get("w",0.25), 0.02, 1.0),
+            ("h", "H:", ov.get("h",0.12), 0.02, 1.0),
+        ]:
+            _lbl(label)
             var = tk.DoubleVar(value=def_val)
             tk.Scale(ef, variable=var, from_=lo, to=hi, resolution=0.01,
                      orient="horizontal", length=240, bg=c["bg"], fg=c["text"],
                      troughcolor=c["surface"], highlightthickness=0,
-                     showvalue=True).grid(row=r, column=1, columnspan=3, sticky="ew", pady=2)
+                     showvalue=True).grid(row=row[0], column=1, columnspan=3,
+                     sticky="ew", pady=2)
             w[var_key] = var
+            _next()
 
-        # Apply button
-        tk.Button(ef, text="✔ Apply changes to this overlay", command=lambda: self._apply_editor(idx),
-                  bg=c["success"], fg=c["bg"], font=("Segoe UI", 9, "bold"),
-                  relief="flat", padx=10, pady=5).grid(
-                  row=14, column=0, columnspan=4, pady=(12,4), padx=8, sticky="ew")
+        tk.Button(ef, text="✔  Apply", command=lambda: self._apply_editor(idx),
+                  bg=c["success"], fg=c["bg"],
+                  font=("Segoe UI", 10, "bold"), relief="flat",
+                  padx=10, pady=6).grid(
+                  row=row[0], column=0, columnspan=4,
+                  pady=(14,4), padx=8, sticky="ew")
 
         ef.columnconfigure(1, weight=1)
 
     def _apply_editor(self, idx: int) -> None:
         w = self._editor_widgets
+        if not w:
+            return
         ov = self._overlays[idx]
         ov["kind"]      = w["kind"].get()
         ov["enabled"]   = w["enabled"].get()
@@ -1317,7 +1351,7 @@ class OverlayManagerWindow:
         ov["w"] = round(w["w"].get(), 3)
         ov["h"] = round(w["h"].get(), 3)
         self._refresh_list()
-        self._set_status("Changes applied.")
+        self._set_status("Applied.")
 
     def _open_preview(self) -> None:
         # Sync current editor first
@@ -1346,36 +1380,45 @@ class OverlayManagerWindow:
 
 class OverlayPreviewDialog:
     """OBS-style overlay positioning preview.
-    Shows a live screenshot of the target monitor with draggable overlay handles.
-    Changes are committed back to the caller via callback when OK is clicked.
+    Screenshot is letterboxed preserving aspect ratio.
+    Overlays drawn with a filled semi-transparent tinted rect so they are always visible.
     """
-    _HANDLE = 10  # resize handle px
+    _HANDLE = 12  # resize handle size px
 
     def __init__(self, parent, app, overlays: list[dict], callback) -> None:
         self.app = app
         self.callback = callback
         self._overlays = [dict(o) for o in overlays]
-        self._sel = None       # selected overlay index
-        self._drag_mode = None # "move" or "resize"
+        self._sel = None
+        self._drag_mode = None
         self._drag_origin = (0, 0)
         self._drag_ov_origin = (0, 0, 0, 0)
+        # cached render state
+        self._render_ox = self._render_oy = 0
+        self._render_bw = self._render_bh = 1
 
         c = app.colors
         self.dlg = tk.Toplevel(parent)
         self.dlg.title("Overlay Preview — drag to position")
-        self.dlg.geometry("900x560")
+        # Pick window size matching 16:9 + header/footer
+        self.dlg.geometry("1024x620")
         self.dlg.configure(bg=c["bg"])
         self.dlg.grab_set()
         self.dlg.resizable(True, True)
+        self._c = c
 
         top = tk.Frame(self.dlg, bg=c["bg"])
         top.pack(fill="x", padx=10, pady=(8, 4))
-        tk.Label(top, text="Drag overlays to reposition. Drag bottom-right corner to resize.",
+        tk.Label(top, text="Click an overlay to select it. Drag to move. Drag bottom-right corner to resize.",
                  bg=c["bg"], fg=c["text_secondary"], font=("Segoe UI", 9)).pack(side="left")
+        self._sel_lbl = tk.Label(top, text="", bg=c["bg"],
+                                  fg=c["accent"], font=("Segoe UI", 9, "bold"))
+        self._sel_lbl.pack(side="right", padx=8)
 
-        canvas_frame = tk.Frame(self.dlg, bg=c["surface"], bd=1, relief="flat")
+        canvas_frame = tk.Frame(self.dlg, bg="#000000", bd=0)
         canvas_frame.pack(fill="both", expand=True, padx=10, pady=(0, 4))
-        self.canvas = tk.Canvas(canvas_frame, bg="#1e1e2e", highlightthickness=0, cursor="crosshair")
+        self.canvas = tk.Canvas(canvas_frame, bg="#111111",
+                                highlightthickness=0, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
 
         bot = tk.Frame(self.dlg, bg=c["bg"])
@@ -1388,104 +1431,148 @@ class OverlayPreviewDialog:
                   relief="flat", padx=12, pady=6).pack(side="right")
 
         self.canvas.bind("<Configure>", lambda e: self._render())
-        self.canvas.bind("<ButtonPress-1>",   self._on_press)
-        self.canvas.bind("<B1-Motion>",        self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>",  self._on_release)
-        self._bg_img = None
-        self.dlg.after(80, self._grab_bg)
+        self.canvas.bind("<ButtonPress-1>",  self._on_press)
+        self.canvas.bind("<B1-Motion>",       self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self._bg_source = None
+        self._bg_tk = None
+        self.dlg.after(120, self._grab_bg)
 
+    # ── Screenshot ────────────────────────────────────────────────────────────
     def _grab_bg(self) -> None:
-        """Grab current screen content as background."""
+        """Grab a screenshot of the selected monitor, store as PIL Image."""
         try:
             import mss as _mss
             with _mss.mss() as sct:
                 mon_id = getattr(self.app, "monitor_id", 1)
                 monitors = sct.monitors
-                mon = monitors[min(mon_id, len(monitors)-1)]
+                mon = monitors[min(mon_id, len(monitors) - 1)]
                 shot = sct.grab(mon)
-                img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-                self._bg_source = img
+                self._bg_source = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                self._bg_orig_w, self._bg_orig_h = shot.size
         except Exception:
             self._bg_source = None
-        self._render()
+            self._bg_orig_w = 1920
+            self._bg_orig_h = 1080
+        self.dlg.after(0, self._render)
 
+    # ── Render ────────────────────────────────────────────────────────────────
     def _render(self) -> None:
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
-        if cw < 2 or ch < 2:
+        if cw < 4 or ch < 4:
             return
         self.canvas.delete("all")
-        # Draw background
-        if getattr(self, "_bg_source", None):
-            bg = self._bg_source.copy()
-            bg.thumbnail((cw, ch), Image.BILINEAR)
-            # letterbox
-            bw, bh = bg.size
-            ox = (cw - bw) // 2
-            oy = (ch - bh) // 2
-            self._bg_tk = ImageTk.PhotoImage(bg)
-            self.canvas.create_image(ox, oy, anchor="nw", image=self._bg_tk)
-            self._render_ox = ox; self._render_oy = oy
-            self._render_bw = bw; self._render_bh = bh
-        else:
-            # dark placeholder
-            self.canvas.create_rectangle(0, 0, cw, ch, fill="#1e1e2e", outline="")
-            self.canvas.create_text(cw//2, ch//2, text="(screen preview)",
-                                     fill="#6c7086", font=("Segoe UI", 11))
-            self._render_ox = 0; self._render_oy = 0
-            self._render_bw = cw; self._render_bh = ch
 
-        # Draw overlays
+        # --- Background: letterbox preserving source aspect ratio ---
+        src_w = getattr(self, "_bg_orig_w", 1920)
+        src_h = getattr(self, "_bg_orig_h", 1080)
+        scale = min(cw / src_w, ch / src_h)
+        bw = int(src_w * scale)
+        bh = int(src_h * scale)
+        ox = (cw - bw) // 2
+        oy = (ch - bh) // 2
+
+        # Draw black bars
+        self.canvas.create_rectangle(0, 0, cw, ch, fill="#000000", outline="")
+
+        if self._bg_source is not None:
+            resized = self._bg_source.resize((bw, bh), Image.BILINEAR)
+            self._bg_tk = ImageTk.PhotoImage(resized)
+            self.canvas.create_image(ox, oy, anchor="nw", image=self._bg_tk)
+        else:
+            # Placeholder grid
+            self.canvas.create_rectangle(ox, oy, ox+bw, oy+bh, fill="#1e1e2e", outline="#313244")
+            self.canvas.create_text(ox + bw//2, oy + bh//2,
+                                     text="Screen preview (mss not installed)",
+                                     fill="#6c7086", font=("Segoe UI", 11), justify="center")
+
+        # Store render coords for hit-test and drag
+        self._render_ox = ox
+        self._render_oy = oy
+        self._render_bw = bw
+        self._render_bh = bh
+
+        # --- Draw each overlay as a visible tinted box ---
+        KIND_COLOR = {"text": "#cba6f7", "webcam": "#89dceb", "image": "#a6e3a1"}
         for i, ov in enumerate(self._overlays):
             if not ov.get("enabled", True):
                 continue
             x1, y1, x2, y2 = self._ov_canvas_rect(ov)
             selected = (i == self._sel)
-            border = "#a6e3a1" if selected else "#89b4fa"
-            alpha_tag = f"ov_{i}"
-            # fill with semi-transparent effect (draw rectangles)
-            self.canvas.create_rectangle(x1, y1, x2, y2,
-                outline=border, width=2 if selected else 1,
-                fill="", dash=(4,2) if not selected else None,
-                tags=(alpha_tag,))
-            # label inside
             kind = ov.get("kind", "text")
-            icon = {"text": "📝", "webcam": "📷", "image": "🖼"}.get(kind, "?")
-            short = ""
-            if kind == "text":
-                short = ov.get("text","")[:18]
-            elif kind == "image":
-                short = os.path.basename(ov.get("path",""))[:14]
-            elif kind == "webcam":
-                short = f"cam#{ov.get('cam_index',0)}"
-            op_str = f"{int(ov.get('opacity',1.0)*100)}%"
-            label = f"{icon} {short}  [{op_str}]"
-            self.canvas.create_text((x1+x2)//2, (y1+y2)//2, text=label,
-                fill="#cdd6f4", font=("Segoe UI", 9),
-                tags=(alpha_tag,))
-            # resize handle
-            self.canvas.create_rectangle(x2-self._HANDLE, y2-self._HANDLE, x2, y2,
-                fill=border, outline="", tags=(alpha_tag,))
+            base_col = KIND_COLOR.get(kind, "#cdd6f4")
+            border_w = 2 if selected else 1
 
-    def _ov_canvas_rect(self, ov: dict) -> tuple[int, int, int, int]:
-        bw = self._render_bw; bh = self._render_bh
-        ox = self._render_ox; oy = self._render_oy
+            # Filled semi-opaque box — drawn with a stipple so it doesn't hide bg
+            self.canvas.create_rectangle(
+                x1, y1, x2, y2,
+                fill=base_col, outline=base_col,
+                stipple="gray25", width=0
+            )
+            # Solid border
+            self.canvas.create_rectangle(
+                x1, y1, x2, y2,
+                fill="", outline=base_col,
+                width=border_w,
+                dash=(6, 3) if not selected else None
+            )
+
+            # Label
+            icon = {"text": "T", "webcam": "CAM", "image": "IMG"}.get(kind, "?")
+            if kind == "text":
+                name = ov.get("text", "")[:20]
+            elif kind == "image":
+                name = os.path.basename(ov.get("path", ""))[:18]
+            else:
+                name = f"Cam#{ov.get('cam_index', 0)}"
+            op_str = f"{int(ov.get('opacity', 1.0) * 100)}%"
+            label = f"[{icon}] {name}  {op_str}"
+
+            # Shadow
+            self.canvas.create_text(
+                (x1 + x2) // 2 + 1, (y1 + y2) // 2 + 1,
+                text=label, fill="#000000", font=("Segoe UI", 9, "bold")
+            )
+            self.canvas.create_text(
+                (x1 + x2) // 2, (y1 + y2) // 2,
+                text=label, fill="#ffffff", font=("Segoe UI", 9, "bold")
+            )
+
+            # Resize handle (bottom-right corner)
+            h = self._HANDLE
+            self.canvas.create_rectangle(
+                x2 - h, y2 - h, x2, y2,
+                fill=base_col, outline="#ffffff", width=1
+            )
+            # Selection ring
+            if selected:
+                self.canvas.create_rectangle(
+                    x1 - 2, y1 - 2, x2 + 2, y2 + 2,
+                    fill="", outline="#ffffff", width=1, dash=(3, 3)
+                )
+
+    # ── Geometry helpers ──────────────────────────────────────────────────────
+    def _ov_canvas_rect(self, ov: dict) -> tuple:
+        bw = max(self._render_bw, 1)
+        bh = max(self._render_bh, 1)
+        ox = self._render_ox
+        oy = self._render_oy
         x1 = int(ox + ov.get("x", 0.05) * bw)
         y1 = int(oy + ov.get("y", 0.05) * bh)
-        x2 = int(x1 + ov.get("w", 0.2) * bw)
-        y2 = int(y1 + ov.get("h", 0.1) * bh)
+        x2 = int(x1 + max(0.02, ov.get("w", 0.2)) * bw)
+        y2 = int(y1 + max(0.02, ov.get("h", 0.1)) * bh)
         return x1, y1, x2, y2
 
-    def _hit_test(self, mx: int, my: int) -> tuple[int | None, str]:
-        """Return (overlay_index, mode) where mode is 'resize' or 'move' or (None,'')."""
+    # ── Interaction ───────────────────────────────────────────────────────────
+    def _hit_test(self, mx: int, my: int) -> tuple:
+        h = self._HANDLE
         for i, ov in enumerate(self._overlays):
             if not ov.get("enabled", True):
                 continue
             x1, y1, x2, y2 = self._ov_canvas_rect(ov)
-            # resize handle
-            if x2-self._HANDLE <= mx <= x2 and y2-self._HANDLE <= my <= y2:
+            if x2 - h <= mx <= x2 and y2 - h <= my <= y2:
                 return i, "resize"
-            # body
             if x1 <= mx <= x2 and y1 <= my <= y2:
                 return i, "move"
         return None, ""
@@ -1497,8 +1584,15 @@ class OverlayPreviewDialog:
         self._drag_origin = (event.x, event.y)
         if idx is not None:
             ov = self._overlays[idx]
-            self._drag_ov_origin = (ov.get("x",0.05), ov.get("y",0.05),
-                                     ov.get("w",0.2), ov.get("h",0.1))
+            self._drag_ov_origin = (
+                ov.get("x", 0.05), ov.get("y", 0.05),
+                ov.get("w", 0.2),  ov.get("h", 0.1)
+            )
+            kind = ov.get("kind", "text")
+            name = ov.get("text","") if kind=="text" else                    os.path.basename(ov.get("path","")) if kind=="image" else                    f"Cam#{ov.get('cam_index',0)}"
+            self._sel_lbl.config(text=f"Selected: [{kind}] {name[:24]}")
+        else:
+            self._sel_lbl.config(text="")
         self._render()
 
     def _on_drag(self, event) -> None:
@@ -1506,15 +1600,16 @@ class OverlayPreviewDialog:
             return
         dx = event.x - self._drag_origin[0]
         dy = event.y - self._drag_origin[1]
-        bw = self._render_bw or 1; bh = self._render_bh or 1
+        bw = max(self._render_bw, 1)
+        bh = max(self._render_bh, 1)
         ox0, oy0, ow0, oh0 = self._drag_ov_origin
         ov = self._overlays[self._sel]
         if self._drag_mode == "move":
-            ov["x"] = max(0.0, min(0.95, ox0 + dx / bw))
-            ov["y"] = max(0.0, min(0.95, oy0 + dy / bh))
+            ov["x"] = round(max(0.0, min(0.95, ox0 + dx / bw)), 3)
+            ov["y"] = round(max(0.0, min(0.95, oy0 + dy / bh)), 3)
         elif self._drag_mode == "resize":
-            ov["w"] = max(0.02, min(1.0, ow0 + dx / bw))
-            ov["h"] = max(0.02, min(1.0, oh0 + dy / bh))
+            ov["w"] = round(max(0.02, min(1.0, ow0 + dx / bw)), 3)
+            ov["h"] = round(max(0.02, min(1.0, oh0 + dy / bh)), 3)
         self._render()
 
     def _on_release(self, event) -> None:

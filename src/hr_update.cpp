@@ -33,20 +33,20 @@
 #include <sstream>
 #include <algorithm>
 
-/* ── Version ─────────────────────────────────────────────────────────────── */
+/* -- Version --------------------------------------------------------------- */
 
 static constexpr char  k_current[]   = "1.6.1";
 static constexpr wchar_t k_repo[]    = L"homaaio/HomREC";
 static constexpr wchar_t k_api_host[]= L"api.github.com";
 static constexpr wchar_t k_api_path[]= L"/repos/homaaio/HomREC/releases/latest";
 
-/* ── Callback type ───────────────────────────────────────────────────────── */
+/* -- Callback type --------------------------------------------------------- */
 
 /* Called on a background thread when a newer version is found.
  * arg: null-terminated wchar_t string, e.g. L"1.6.2"            */
 typedef void (*HR_UPDATE_CB)(const wchar_t *latest_tag);
 
-/* ── Version comparison ──────────────────────────────────────────────────── */
+/* -- Version comparison ---------------------------------------------------- */
 
 static bool _version_gt(const std::string &a, const std::string &b) {
     auto parse = [](const std::string &s) -> std::vector<int> {
@@ -70,7 +70,7 @@ static bool _version_gt(const std::string &a, const std::string &b) {
     return false;
 }
 
-/* ── Extract "tag_name" from minimal GitHub JSON ─────────────────────────── */
+/* -- Extract "tag_name" from minimal GitHub JSON --------------------------- */
 
 static std::string _extract_tag(const std::string &json) {
     const char *key = "\"tag_name\"";
@@ -88,7 +88,7 @@ static std::string _extract_tag(const std::string &json) {
     return tag;
 }
 
-/* ── HTTP fetch (WinHTTP) ────────────────────────────────────────────────── */
+/* -- HTTP fetch (WinHTTP) -------------------------------------------------- */
 
 #ifdef _WIN32
 static std::string _fetch_release_json() {
@@ -144,7 +144,7 @@ static std::string _fetch_release_json() {
 static std::string _fetch_release_json() { return {}; }
 #endif
 
-/* ── Background thread entry ─────────────────────────────────────────────── */
+/* -- Background thread entry ----------------------------------------------- */
 
 struct _CheckCtx {
     HR_UPDATE_CB cb;
@@ -164,7 +164,7 @@ static void _check_thread(HR_UPDATE_CB cb) {
     } catch (...) {}
 }
 
-/* ── Public API ───────────────────────────────────────────────────────────── */
+/* -- Public API ------------------------------------------------------------- */
 
 /*
  * hr_update_check_async
