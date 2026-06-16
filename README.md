@@ -3,8 +3,8 @@
 No lags. No bloat. No GPU required.
 
 [![Version](https://img.shields.io/badge/version-1.6.4-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
-
-[![Telegram](https://img.shields.io/badge/Telegram-@homaexe-2aabee?style=flat-square&logo=telegram)](https://t.me/homaexe)
+[![Discord](https://img.shields.io/badge/Discord-0047ab?style=flat-square&logo=discord)](https://discord.gg/Gv4t6Xhy7E)
+[![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
 
 ---
 
