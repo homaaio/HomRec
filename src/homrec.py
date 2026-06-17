@@ -1656,8 +1656,10 @@ class AdvancedSettingsDialog:
         self._row(vt, "Preset", ttk.Combobox(vt, textvariable=self._prev, values=["ultrafast","superfast","veryfast","faster","fast","medium","slow"], width=12, state="readonly"))
         self._crfv = tk.IntVar(value=getattr(a, "enc_crf", 18))
         self._row(vt, "CRF (quality)", tk.Scale(vt, variable=self._crfv, from_=0, to=51, orient="horizontal", length=180, bg=c["bg"], fg=c["text"], highlightthickness=0, troughcolor=c["surface"]))
-        self._pixv = tk.StringVar(value=getattr(a, "pix_fmt", "yuv420p"))
-        self._row(vt, "Pixel format", ttk.Combobox(vt, textvariable=self._pixv, values=["yuv420p","yuv444p","rgb24"], width=12, state="readonly"))
+        self._pixv = tk.StringVar(value="yuv420p")
+        self._row(vt, "Pixel format", ttk.Combobox(vt, textvariable=self._pixv, values=["yuv420p"], width=12, state="disabled"))
+        tk.Label(vt, text="Locked to yuv420p for player compatibility (yuv444p/rgb24 broke playback)",
+                 bg=c["bg"], fg=c.get("text_secondary", "#888"), font=("Segoe UI", 8)).pack(anchor="w", padx=4)
 
         at = tk.Frame(notebook, bg=c["bg"]); notebook.add(at, text="Audio")
         self._srv = tk.StringVar(value=str(getattr(a, "audio_sample_rate", 44100)))
@@ -2565,10 +2567,8 @@ class HomRecScreen:
         help_menu.add_command(label=self.lang["check_updates"], command=self._manual_update_check)
         help_menu.add_separator()
         help_menu.add_command(label=self.lang["report_issue"], command=self._open_issues)
-        help_menu.add_separator()
-        help_menu.add_command(label="⚙ Core Manager…", command=self._open_core_manager)
 
-        # Core Manager also in Settings menu
+        # Core Manager lives only in Settings menu
         settings_menu.add_separator()
         settings_menu.add_command(label="⚙ Core Manager…", command=self._open_core_manager)
 
@@ -3173,6 +3173,17 @@ class HomRecScreen:
 
         threading.Thread(target=_probe, daemon=True).start()
 
+    def _safe_pix_fmt(self) -> str:
+        """
+        Force a pixel format that every common player/codec combo can actually
+        decode. 'yuv444p' and 'rgb24' (previously offered in Advanced Settings)
+        are NOT supported by the baseline/main H.264 profile that most
+        hardware encoders (NVENC/QSV/AMF) and most players (incl. many VLC
+        builds) expect, and caused "unsupported codec / cannot decode" errors
+        on playback. yuv420p is the only format guaranteed to work everywhere.
+        """
+        return 'yuv420p'
+
     def _build_codec_args(self) -> list:
         codec = getattr(self, 'video_codec', 'libx264')
         hw    = getattr(self, 'hw_accel', 'auto')
@@ -3194,12 +3205,13 @@ class HomRecScreen:
         is_nvenc = 'nvenc' in codec; is_qsv = 'qsv' in codec; is_amf = 'amf' in codec
         is_265 = codec == 'libx265' or 'hevc' in codec
         args = ['-c:v', codec]
-        if is_nvenc:   args += ['-preset','p1','-tune','ull','-rc','constqp','-qp',str(qp),'-g',str(gop)]
-        elif is_qsv:   args += ['-preset','veryfast','-look_ahead','0','-low_power','1','-qp',str(qp),'-g',str(gop)]
-        elif is_amf:   args += ['-quality','speed','-rc','cqp','-qp_i',str(qp),'-qp_p',str(qp),'-g',str(gop)]
+        if is_nvenc:   args += ['-preset','p1','-tune','ull','-rc','constqp','-qp',str(qp),'-g',str(gop),'-profile:v','main']
+        elif is_qsv:   args += ['-preset','veryfast','-look_ahead','0','-low_power','1','-qp',str(qp),'-g',str(gop),'-profile:v','main']
+        elif is_amf:   args += ['-quality','speed','-rc','cqp','-qp_i',str(qp),'-qp_p',str(qp),'-g',str(gop),'-profile:v','main']
         else:
             thr = 1 if cpu_count <= 4 else max(1, cpu_count // 4)
             args += ['-preset','ultrafast','-tune','zerolatency','-crf',str(qp),'-g',str(gop),'-threads',str(thr)]
+            if not is_265: args += ['-profile:v','main','-level','4.1']
             if is_265: args += ['-x265-params','log-level=error']
         return args
 
@@ -3482,11 +3494,19 @@ class HomRecScreen:
 
     def _build_overlay_vf(self) -> str:
         """Build FFmpeg -vf string for enabled text overlays.
+
+        IMPORTANT: this filter is appended AFTER the scale= filter in the
+        chain (see start_recording), so coordinates must be computed against
+        the final OUTPUT resolution (record_width/record_height), not the
+        original capture resolution. Using original_width/height here caused
+        overlays to land in the wrong position (or off-frame) whenever
+        recording quality/scale was below 100%.
+
         Image and webcam overlays are composited at post-process time.
         """
         filters = []
-        w = self.original_width or 1920
-        h = self.original_height or 1080
+        w = self.record_width or self.original_width or 1920
+        h = self.record_height or self.original_height or 1080
         for ov in getattr(self, 'overlays', []):
             if not ov.get('enabled', True):
                 continue
@@ -3509,6 +3529,130 @@ class HomRecScreen:
             )
         return ','.join(filters)
 
+    def _build_filter_graph(self, base_label_in: str = "0:v") -> tuple[list, str, str | None]:
+        """
+        Build the full filter graph for scale + all overlay kinds (text,
+        image, webcam) as a single -filter_complex, plus any extra -i input
+        args needed for image/webcam sources.
+
+        Previously image and webcam overlays were configured in the UI but
+        never actually composited — the docstring claimed "post-process"
+        handling that didn't exist anywhere in the code, so those overlays
+        silently did nothing. They are now real inputs added to the FFmpeg
+        graph at capture time, since that's the only way to keep them
+        frame-accurate and in sync with a live screen capture (a true
+        post-process pass would need to re-encode the whole file and still
+        couldn't capture a *live* webcam after the fact).
+
+        Returns: (extra_input_args, filter_complex_string, output_pad_label)
+                 output_pad_label is None if no filters are needed at all
+                 (caller should fall back to a plain passthrough).
+        """
+        extra_inputs: list = []
+        graph_parts: list = []
+        next_input_idx = 1  # 0 is the screen capture
+
+        needs_scale = (self.record_width != self.original_width or
+                       self.record_height != self.original_height)
+        cur_label = base_label_in
+        if needs_scale:
+            graph_parts.append(f"[{cur_label}]scale={self.record_width}:{self.record_height}:flags=fast_bilinear[scaled]")
+            cur_label = "scaled"
+
+        # Text overlays — drawtext chained directly (cheap, no extra input)
+        text_vf = self._build_overlay_vf()
+        if text_vf:
+            graph_parts.append(f"[{cur_label}]{text_vf}[txt]")
+            cur_label = "txt"
+
+        w = self.record_width or 1920
+        h = self.record_height or 1080
+
+        for ov in getattr(self, 'overlays', []):
+            if not ov.get('enabled', True):
+                continue
+            kind = ov.get('kind')
+
+            if kind == 'image':
+                path = ov.get('path', '')
+                if not path or not os.path.exists(path):
+                    continue
+                ow = max(2, int(ov.get('w', 0.25) * w))
+                oh = max(2, int(ov.get('h', 0.08) * h))
+                ox = int(ov.get('x', 0.05) * w)
+                oy = int(ov.get('y', 0.05) * h)
+                opacity = ov.get('opacity', 1.0)
+
+                extra_inputs += ['-i', path]
+                in_label = f"{next_input_idx}:v"
+                scaled_label = f"img{next_input_idx}"
+                if opacity < 1.0:
+                    graph_parts.append(
+                        f"[{in_label}]scale={ow}:{oh},format=rgba,"
+                        f"colorchannelmixer=aa={opacity:.2f}[{scaled_label}]"
+                    )
+                else:
+                    graph_parts.append(f"[{in_label}]scale={ow}:{oh}[{scaled_label}]")
+
+                out_label = f"ov{next_input_idx}"
+                graph_parts.append(
+                    f"[{cur_label}][{scaled_label}]overlay={ox}:{oy}[{out_label}]"
+                )
+                cur_label = out_label
+                next_input_idx += 1
+
+            elif kind == 'webcam':
+                cam_idx = ov.get('cam_index', 0)
+                ow = max(2, int(ov.get('w', 0.25) * w))
+                oh = max(2, int(ov.get('h', 0.25) * h))
+                ox = int(ov.get('x', 0.05) * w)
+                oy = int(ov.get('y', 0.05) * h)
+
+                if platform.system() == 'Windows':
+                    cam_args = ['-f', 'dshow', '-video_size', f'{ow}x{oh}',
+                                '-i', f'video={self._dshow_cam_name(cam_idx)}']
+                else:
+                    cam_args = ['-f', 'v4l2', '-video_size', f'{ow}x{oh}',
+                                '-i', f'/dev/video{cam_idx}']
+                extra_inputs += cam_args
+                in_label = f"{next_input_idx}:v"
+                scaled_label = f"cam{next_input_idx}"
+                graph_parts.append(f"[{in_label}]scale={ow}:{oh}[{scaled_label}]")
+
+                out_label = f"ov{next_input_idx}"
+                graph_parts.append(
+                    f"[{cur_label}][{scaled_label}]overlay={ox}:{oy}[{out_label}]"
+                )
+                cur_label = out_label
+                next_input_idx += 1
+
+        if not graph_parts:
+            return [], "", None
+
+        filter_complex = ';'.join(graph_parts)
+        return extra_inputs, filter_complex, cur_label
+
+    def _dshow_cam_name(self, cam_index: int) -> str:
+        """Resolve a DirectShow camera device name by index (Windows)."""
+        try:
+            cached = getattr(self, '_dshow_cam_names_cache', None)
+            if cached is None:
+                result = subprocess.run(
+                    [self.ffmpeg_path, '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
+                    capture_output=True, text=True, timeout=8,
+                    creationflags=subprocess.CREATE_NO_WINDOW)
+                names = []
+                for line in result.stderr.splitlines():
+                    if '(video)' in line and '"' in line:
+                        names.append(line.split('"')[1])
+                self._dshow_cam_names_cache = names
+                cached = names
+            if cached and 0 <= cam_index < len(cached):
+                return cached[cam_index]
+        except Exception as e:
+            log.debug(f"dshow cam name probe failed: {e}")
+        return "Integrated Webcam"
+
     def toggle_recording(self) -> None:
         if not self.recording: self.start_recording()
         else: self.stop_recording()
@@ -3527,23 +3671,25 @@ class HomRecScreen:
                 self.ffmpeg_reader_thread.join(timeout=2)
 
             fps = self.target_fps
-            needs_scale = (self.record_width != self.original_width or self.record_height != self.original_height)
-            vf_args = ['-vf', f'scale={self.record_width}:{self.record_height}:flags=fast_bilinear'] if needs_scale else []
             codec_args = self._build_codec_args()
             draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
 
             gdi_flags = ['-thread_queue_size','128','-probesize','32','-fflags','nobuffer','-rtbufsize','16M']
+            fmt = getattr(self, 'video_format', 'mp4')
             out_flags = ['-vsync','0','-flush_packets','1','-max_muxing_queue_size','1024']
+            if fmt == 'mp4':
+                out_flags += ['-movflags', '+faststart']
+            safe_pix_fmt = self._safe_pix_fmt()
 
-            # Build overlay vf filters for text overlays (image/webcam overlays handled post-process)
-            overlay_vf = self._build_overlay_vf()
-            if overlay_vf:
-                if vf_args:
-                    # merge scale + overlay into single -vf
-                    existing_vf = vf_args[1]
-                    vf_args = ['-vf', existing_vf + ',' + overlay_vf]
-                else:
-                    vf_args = ['-vf', overlay_vf]
+            # Build the full filter graph (scale + text/image/webcam overlays).
+            # This replaces all per-branch -vf handling below — every capture
+            # mode now routes through the same -filter_complex so overlays
+            # behave identically (and correctly) regardless of capture method.
+            extra_inputs, filter_complex, out_pad = self._build_filter_graph()
+            if out_pad:
+                graph_args = ['-filter_complex', filter_complex, '-map', f'[{out_pad}]']
+            else:
+                graph_args = []
 
             # Bug fix: GDI capture produces a single frozen frame with fullscreen D3D/Vulkan games.
             # Use ddagrab (Desktop Duplication API / DXGI) when available — works with game overlays
@@ -3558,11 +3704,11 @@ class HomRecScreen:
                 dda_flags = ['-thread_queue_size','128','-fflags','nobuffer']
                 mon_idx = max(0, getattr(self, 'monitor_id', 1) - 1)
                 dda_input = ['-f','lavfi','-i',f'ddagrab=output_idx={mon_idx}:framerate={fps}:draw_mouse={draw_mouse}']
-                cmd = [self.ffmpeg_path, '-y', *dda_flags, *dda_input, *vf_args, *codec_args, '-pix_fmt',getattr(self,'pix_fmt','yuv420p'), *out_flags, '-an', self.filename]
+                cmd = [self.ffmpeg_path, '-y', *dda_flags, *dda_input, *extra_inputs, *graph_args, *codec_args, '-pix_fmt',safe_pix_fmt, *out_flags, '-an', self.filename]
             elif self.capture_mode == "window" and self.capture_window_title:
-                cmd = [self.ffmpeg_path, '-y', *gdi_flags, '-f','gdigrab', '-framerate',str(fps), '-draw_mouse',draw_mouse, '-i',f'title={self.capture_window_title}', *vf_args, *codec_args, '-pix_fmt',getattr(self,'pix_fmt','yuv420p'), *out_flags, '-an', self.filename]
+                cmd = [self.ffmpeg_path, '-y', *gdi_flags, '-f','gdigrab', '-framerate',str(fps), '-draw_mouse',draw_mouse, '-i',f'title={self.capture_window_title}', *extra_inputs, *graph_args, *codec_args, '-pix_fmt',safe_pix_fmt, *out_flags, '-an', self.filename]
             else:
-                cmd = [self.ffmpeg_path, '-y', *gdi_flags, '-f','gdigrab', '-framerate',str(fps), '-draw_mouse',draw_mouse, '-offset_x',str(self.monitor_left), '-offset_y',str(self.monitor_top), '-video_size',f'{self.original_width}x{self.original_height}', '-i','desktop', *vf_args, *codec_args, '-pix_fmt',getattr(self,'pix_fmt','yuv420p'), *out_flags, '-an', self.filename]
+                cmd = [self.ffmpeg_path, '-y', *gdi_flags, '-f','gdigrab', '-framerate',str(fps), '-draw_mouse',draw_mouse, '-offset_x',str(self.monitor_left), '-offset_y',str(self.monitor_top), '-video_size',f'{self.original_width}x{self.original_height}', '-i','desktop', *extra_inputs, *graph_args, *codec_args, '-pix_fmt',safe_pix_fmt, *out_flags, '-an', self.filename]
 
             log.debug(f"FFmpeg cmd: {' '.join(cmd)}")
             self.ffmpeg_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=="Windows" else 0)
