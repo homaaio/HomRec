@@ -3908,4 +3908,14 @@ if __name__ == "__main__":
             sys.exit(0)
     root = tk.Tk()
     app = HomRecScreen(root)
+
+    # ── HomRec Plugin Engine ──────────────────────────────────────────────────
+    try:
+        from hr_plugin_engine import init_plugin_engine
+        app.plugin_engine = init_plugin_engine(app)
+    except Exception as _pe:
+        import logging as _lg
+        _lg.getLogger("homrec").warning(f"Plugin engine failed to load: {_pe}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     root.mainloop()
