@@ -144,6 +144,8 @@ class PluginEngine:
             os.path.dirname(os.path.abspath(__file__)), PLUGINS_DIR
         )
         os.makedirs(self._plugins_dir, exist_ok=True)
+        self._plugins_menu_ref: tk.Menu | None = None
+        self._plugins_menubar_ref: tk.Menu | None = None
         self._patch_app()
         log.info(f"PluginEngine init, plugins dir: {self._plugins_dir}")
 
@@ -178,6 +180,11 @@ class PluginEngine:
         # recreate_widgets — rebuild plugin menu items
         _orig_recreate = app.recreate_widgets
         def _recreate_patched():
+            # The menubar is destroyed and rebuilt from scratch inside
+            # create_menu() during recreate_widgets(), so our previous
+            # menu reference is now invalid — drop it before re-adding.
+            engine._plugins_menu_ref = None
+            engine._plugins_menubar_ref = None
             _orig_recreate()
             engine._rebuild_plugin_menu()
         app.recreate_widgets = _recreate_patched
@@ -302,20 +309,52 @@ class PluginEngine:
     # ── menu ──────────────────────────────────────────────
 
     def _rebuild_plugin_menu(self) -> None:
-        """Добавить меню Plugins в menubar."""
+        """Добавить меню Plugins в menubar.
+
+        Uses a tracked reference (self._plugins_menu_ref /
+        self._plugins_menubar_ref) instead of searching for the cascade by
+        its label string. The previous implementation used
+        menubar.index("Plugins") wrapped in try/except — on some Tk/Tcl
+        builds, .index() lookups against labels containing emoji can raise
+        or silently fail to match, which let the except swallow the error
+        and skip deletion, leaving the old "🧩 Plugins" cascade in place
+        while a second one got added right after it (the reported
+        duplicate-tab bug). Tracking the actual menu widget sidesteps that
+        entirely — we delete it directly if it still exists, no string
+        matching involved.
+        """
         try:
             menubar = self.app.root.nametowidget(self.app.root["menu"])
             c = self.app.colors
 
-            # Remove old Plugins menu if exists
-            try:
-                idx = menubar.index("Plugins")
-                menubar.delete(idx)
-            except Exception:
-                pass
+            # If we previously added a Plugins cascade to THIS SAME menubar,
+            # remove it directly via the tracked reference before re-adding.
+            if self._plugins_menubar_ref is menubar and self._plugins_menu_ref is not None:
+                try:
+                    self._plugins_menu_ref.destroy()
+                except Exception:
+                    pass
+                # Also try to drop the cascade entry itself by scanning
+                # menu entries for one whose submenu is our tracked widget
+                # (more reliable than label string matching).
+                try:
+                    last = menubar.index("end")
+                    if last is not None:
+                        for i in range(last, -1, -1):
+                            try:
+                                if menubar.type(i) == "cascade":
+                                    sub_name = menubar.entrycget(i, "menu")
+                                    if sub_name == str(self._plugins_menu_ref):
+                                        menubar.delete(i)
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
 
             plugin_menu = tk.Menu(menubar, tearoff=0, bg=c["surface"], fg=c["fg"])
             menubar.add_cascade(label="🧩 Plugins", menu=plugin_menu)
+            self._plugins_menu_ref = plugin_menu
+            self._plugins_menubar_ref = menubar
 
             plugin_menu.add_command(label="📂 Install Plugin…", command=self._open_install_dialog)
             plugin_menu.add_command(label="🗂 Manage Plugins…", command=self._open_manager)
