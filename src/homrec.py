@@ -206,6 +206,23 @@ def optimize_for_performance() -> None:
 
 
 def rms_to_level_percent(raw_rms: float, floor_db: float = -55.0) -> int:
+    """Convert a raw 16-bit PCM RMS value (0..32767) into a 0..100 meter level
+    using a logarithmic (dBFS) scale instead of a linear divide.
+
+    A linear mapping like `rms / 150` badly compresses normal speech into the
+    bottom ~15-20% of the meter while a slightly raised voice already pegs it
+    at 100%, which reads as "the meter barely reacts, then slams to max" -
+    exactly the perceptual mismatch a VU meter must avoid. Human hearing (and
+    every real audio meter) is logarithmic, so we convert RMS to dBFS first:
+
+        dBFS = 20 * log10(rms / 32767)   (negative; 0 dBFS = full-scale)
+
+    then map [floor_db, 0] dB onto [0, 100]%. floor_db=-55 means: anything
+    55 dB or more below full scale (typical quiet-room noise floor) reads as
+    ~0%, and the full dynamic range up to clipping is spread evenly across
+    the meter, so normal conversational speech now sits in a useful mid-range
+    instead of near the bottom.
+    """
     if raw_rms <= 0:
         return 0
     import math as _math
@@ -703,6 +720,14 @@ class AudioPanel:
 
 
 class OverlaysDockPanel:
+    """Compact dockable panel shown next to the Audio Mixer.
+
+    Lets the user quickly add an overlay (+), see the current overlay list,
+    drag an overlay's position straight on the Preview screen (reuses the
+    existing OverlayPreviewDialog), and per-overlay open a "⋮" menu with
+    "More" (opens the full OverlayManagerWindow settings for that overlay)
+    and "Remove" (deletes it, with no further dialog needed).
+    """
     def __init__(self, parent, app) -> None:
         self.app = app
         c = app.colors
@@ -738,7 +763,7 @@ class OverlaysDockPanel:
         self._menu_widgets: dict = {}
         self.refresh()
 
-    # list rendering   
+    # -- list rendering ---------------------------------------------------
     def refresh(self) -> None:
         c = self.app.colors
         for w in self._list_inner.winfo_children():
@@ -767,7 +792,7 @@ class OverlaysDockPanel:
                                   cursor="hand2", command=lambda idx=i: self._open_item_menu(idx))
             dots_btn.pack(side="right", padx=2)
 
-     # + Add   
+    # -- + Add ------------------------------------------------------------
     def _quick_add(self) -> None:
         new_ov = {"kind": "text", "text": "New Text", "font_size": 28, "color": "#ffffff",
                    "opacity": 1.0, "x": 0.05, "y": 0.05, "w": 0.25, "h": 0.08,
@@ -779,7 +804,7 @@ class OverlaysDockPanel:
         self.app._refresh_overlay_badge()
         self.refresh()
 
-     # ⋮ per-item menu: More / Remove  
+    # -- ⋮ per-item menu: More / Remove ----------------------------------
     def _open_item_menu(self, idx: int) -> None:
         c = self.app.colors
         menu = tk.Menu(self.frame, tearoff=0, bg=c["surface"], fg=c["text"],
@@ -1206,7 +1231,7 @@ class OverlayManagerWindow:
         win.resizable(True, True)
         self.win = win
 
-         # Header   
+        # -- Header ------------------------------------------------------------
         hdr = tk.Frame(win, bg=self.c["surface"], pady=0)
         hdr.pack(fill="x")
         tk.Label(hdr, text="🎭  Overlay Manager", bg=self.c["surface"],
@@ -1218,7 +1243,7 @@ class OverlayManagerWindow:
                   bg=self.c["success"], fg=self.c["bg"],
                   font=("Segoe UI", 9, "bold"), relief="flat", padx=12, pady=6).pack(side="right", padx=(0,4), pady=8)
 
-         # Body: list left, editor right  --
+        # -- Body: list left, editor right ------------------------------------
         body = tk.Frame(win, bg=self.c["bg"])
         body.pack(fill="both", expand=True, padx=12, pady=(8, 0))
 
@@ -1243,7 +1268,7 @@ class OverlayManagerWindow:
         self._editor_frame = tk.Frame(body, bg=self.c["bg"])
         self._editor_frame.pack(side="left", fill="both", expand=True)
 
-         # Footer   
+        # -- Footer ------------------------------------------------------------
         ftr = tk.Frame(win, bg=self.c["bg"])
         ftr.pack(fill="x", padx=12, pady=8)
         tk.Button(ftr, text="Save & Apply", command=self._save_apply,
@@ -1261,7 +1286,7 @@ class OverlayManagerWindow:
         self._refresh_list()
         win.protocol("WM_DELETE_WINDOW", win.destroy)
 
-     # List   ------
+    # -- List ------------------------------------------------------------------
     def _refresh_list(self) -> None:
         for w in self._list_inner.winfo_children():
             w.destroy()
@@ -1311,7 +1336,7 @@ class OverlayManagerWindow:
         self._refresh_list()
         self._build_editor(self._sel_idx)
 
-     # Editor   ----
+    # -- Editor ----------------------------------------------------------------
     def _clear_editor(self) -> None:
         for w in self._editor_frame.winfo_children():
             w.destroy()
@@ -1577,7 +1602,7 @@ class OverlayPreviewDialog:
         self._bg_tk = None
         self.dlg.after(120, self._grab_bg)
 
-     # Screenshot   
+    # -- Screenshot ------------------------------------------------------------
     def _grab_bg(self) -> None:
         """Grab a screenshot of the selected monitor, store as PIL Image."""
         try:
@@ -1595,7 +1620,7 @@ class OverlayPreviewDialog:
             self._bg_orig_h = 1080
         self.dlg.after(0, self._render)
 
-     # Render   ----
+    # -- Render ----------------------------------------------------------------
     def _render(self) -> None:
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
@@ -1603,7 +1628,7 @@ class OverlayPreviewDialog:
             return
         self.canvas.delete("all")
 
-         #- Background: letterbox preserving source aspect ratio ---
+        # --- Background: letterbox preserving source aspect ratio ---
         src_w = getattr(self, "_bg_orig_w", 1920)
         src_h = getattr(self, "_bg_orig_h", 1080)
         scale = min(cw / src_w, ch / src_h)
@@ -1632,7 +1657,7 @@ class OverlayPreviewDialog:
         self._render_bw = bw
         self._render_bh = bh
 
-         #- Draw each overlay as a visible tinted box ---
+        # --- Draw each overlay as a visible tinted box ---
         KIND_COLOR = {"text": "#cba6f7", "webcam": "#89dceb", "image": "#a6e3a1"}
         for i, ov in enumerate(self._overlays):
             if not ov.get("enabled", True):
@@ -1691,7 +1716,7 @@ class OverlayPreviewDialog:
                     fill="", outline="#ffffff", width=1, dash=(3, 3)
                 )
 
-     # Geometry helpers   --
+    # -- Geometry helpers ------------------------------------------------------
     def _ov_canvas_rect(self, ov: dict) -> tuple:
         bw = max(self._render_bw, 1)
         bh = max(self._render_bh, 1)
@@ -1703,7 +1728,7 @@ class OverlayPreviewDialog:
         y2 = int(y1 + max(0.02, ov.get("h", 0.1)) * bh)
         return x1, y1, x2, y2
 
-     # Interaction   -------
+    # -- Interaction -----------------------------------------------------------
     def _hit_test(self, mx: int, my: int) -> tuple:
         h = self._HANDLE
         for i, ov in enumerate(self._overlays):
@@ -1875,7 +1900,7 @@ class AdvancedSettingsDialog:
             row = nt.grid_size()[1]
             tk.Checkbutton(nt, text=text, variable=var, bg=c["bg"], fg=c["text"], selectcolor=c["surface"], font=("Segoe UI", 10)).grid(row=row, column=0, columnspan=2, sticky="w", padx=20, pady=4)
 
-         # Overlays tab --
+        # -- Overlays tab --
         ot = tk.Frame(notebook, bg=c["bg"]); notebook.add(ot, text="Overlays")
         self._build_overlays_tab(ot)
 
@@ -1888,7 +1913,7 @@ class AdvancedSettingsDialog:
         tk.Button(bot, text="Cancel", command=self.dialog.destroy, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="right", padx=(6, 0))
         tk.Button(bot, text="Save", command=self._save, bg=c["success"], fg=c["bg"], font=("Segoe UI", 9, "bold"), relief="flat", padx=16, pady=6).pack(side="right")
 
-    #   ------ overlays
+    # ------------------------------------------------------------------ overlays
     def _build_overlays_tab(self, parent: tk.Frame) -> None:
         c = self.app.colors
         self._overlays: list[dict] = [dict(o) for o in getattr(self.app, "overlays", [])]
@@ -2094,7 +2119,7 @@ class AdvancedSettingsDialog:
         self._overlays = overlays
         self._refresh_overlay_list()
 
-    #   ------ /overlays
+    # ------------------------------------------------------------------ /overlays
 
     def _row(self, parent, label: str, widget) -> None:
         row = parent.grid_size()[1]
@@ -2585,8 +2610,19 @@ class HomRecScreen:
 
     def update_preview_size(self) -> None:
         try:
-            pw = max(600, min(self.root.winfo_width() - 320, 1280))
-            ph = max(350, min(self.root.winfo_height() - 240, 720))
+            max_w = max(600, min(self.root.winfo_width() - 320, 1280))
+            max_h = max(350, min(self.root.winfo_height() - 240, 720))
+            src_w = getattr(self, 'original_width', 0) or 1
+            src_h = getattr(self, 'original_height', 0) or 1
+            src_ratio = src_w / src_h
+            # Fit the real source aspect ratio inside the (max_w, max_h) box
+            # instead of stretching to fill it exactly - fixes the preview
+            # looking squashed/stretched whenever the window shape doesn't
+            # match the monitor's actual aspect ratio.
+            if max_w / max_h > src_ratio:
+                ph = max_h; pw = max(1, int(round(ph * src_ratio)))
+            else:
+                pw = max_w; ph = max(1, int(round(pw / src_ratio)))
             self.preview_width = pw; self.preview_height = ph
         except: pass
 
@@ -2863,6 +2899,9 @@ class HomRecScreen:
                 self.pause_btn.config(text=self.lang["resume"], bg=self.colors["success"])
 
     def _toggle_panel_visibility(self, attr_name: str, var: tk.BooleanVar) -> None:
+        """Used by View -> Show checkbuttons (Audio Mixer / Overlays) and by the
+        Overlays panel's own ✕ close button to show/hide a dock panel and
+        rebuild the layout to match."""
         setattr(self, attr_name, var.get())
         self.save_settings(silent=True)
         self.recreate_widgets()
@@ -2978,6 +3017,10 @@ class HomRecScreen:
             messagebox.showinfo(self.lang["info"], self.lang["settings_saved"])
 
     def save_settings_debounced(self, delay_ms: int = 400) -> None:
+        """Coalesce rapid-fire saves (e.g. dragging a volume/FPS slider fires
+        its command callback dozens of times per second) into a single
+        silent save shortly after the user stops moving the control, instead
+        of writing the full settings JSON to disk on every tick of the drag."""
         existing = getattr(self, '_pending_save_after_id', None)
         if existing is not None:
             try: self.root.after_cancel(existing)
@@ -3021,29 +3064,6 @@ class HomRecScreen:
                                    state="disabled", relief="flat", height=1, cursor="hand2")
         self.pause_btn.pack(fill="x", pady=(4, 0))
         self.stop_btn = tk.Button(btn_frame)
-
-        # Overlays quick-access button (toolbar, next to REC)
-        tk.Frame(btn_frame, bg=self.colors["surface"], height=1).pack(fill="x", pady=(10, 4))
-        overlay_row = tk.Frame(btn_frame, bg=self.colors["surface"])
-        overlay_row.pack(fill="x")
-        self.overlay_btn = tk.Button(
-            overlay_row, text="🎭 Overlays",
-            command=self._open_overlays_panel,
-            bg=self.colors.get("surface_light", "#45475a"),
-            fg=self.colors["accent"],
-            font=("Segoe UI", 9, "bold"),
-            relief="flat", cursor="hand2", pady=4
-        )
-        self.overlay_btn.pack(fill="x")
-        # Show active overlay count badge
-        self._overlay_badge = tk.Label(
-            overlay_row, text="",
-            bg=self.colors.get("surface_light", "#45475a"),
-            fg=self.colors["warning"],
-            font=("Segoe UI", 8)
-        )
-        self._overlay_badge.pack()
-        self._refresh_overlay_badge()
 
         status_frame = tk.Frame(left_panel, bg=self.colors["surface"])
         status_frame.pack(pady=15, padx=15, fill="x")
@@ -3537,6 +3557,102 @@ class HomRecScreen:
             frames.append(img)
         return frames
 
+    def _composite_overlays_on_preview(self, img: "Image.Image", pw: int, ph: int) -> "Image.Image":
+        """Draw enabled overlays onto a preview thumbnail so the live Preview
+        pane actually shows what the recording will look like.
+
+        Mirrors the normalized x/y/w/h(/font_size/color/opacity) fields used
+        by _build_overlay_vf (text) and _build_filter_graph (image/webcam)
+        for the real FFmpeg recording, just scaled to the small preview size
+        instead of the full record resolution - so overlay positions in the
+        live preview match where they land in the actual output.
+        """
+        overlays = getattr(self, 'overlays', [])
+        if not overlays:
+            return img
+        try:
+            img = img.convert("RGBA")
+            for ov in overlays:
+                if not ov.get('enabled', True):
+                    continue
+                kind = ov.get('kind', 'text')
+                if kind == 'text':
+                    text = ov.get('text', '')
+                    if not text:
+                        continue
+                    x = int(ov.get('x', 0.05) * pw)
+                    y = int(ov.get('y', 0.05) * ph)
+                    # font_size is specified against the full record resolution;
+                    # scale it down proportionally to the preview's size so text
+                    # isn't comically oversized in the small thumbnail.
+                    rw = getattr(self, 'record_width', 0) or getattr(self, 'original_width', 0) or pw
+                    fs_full = int(ov.get('font_size', 24))
+                    fs = max(6, int(fs_full * (pw / max(1, rw))))
+                    col = ov.get('color', '#ffffff')
+                    opacity = ov.get('opacity', 1.0)
+                    try:
+                        alpha = max(0, min(255, int(opacity * 255)))
+                        r = int(col[1:3], 16); g = int(col[3:5], 16); b = int(col[5:7], 16)
+                    except Exception:
+                        r, g, b, alpha = 255, 255, 255, 255
+                    from PIL import ImageFont
+                    font = getattr(self, '_preview_overlay_font_cache', {}).get(fs)
+                    if font is None:
+                        try: font = ImageFont.truetype("segoeui.ttf", fs)
+                        except Exception:
+                            try: font = ImageFont.truetype("arial.ttf", fs)
+                            except Exception: font = ImageFont.load_default()
+                        cache = getattr(self, '_preview_overlay_font_cache', {})
+                        cache[fs] = font
+                        self._preview_overlay_font_cache = cache
+                    d = ImageDraw.Draw(img)
+                    d.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, alpha))  # cheap drop shadow
+                    d.text((x, y), text, font=font, fill=(r, g, b, alpha))
+                elif kind == 'image':
+                    path = ov.get('path', '')
+                    if not path or not os.path.exists(path):
+                        continue
+                    ow = max(1, int(ov.get('w', 0.25) * pw))
+                    oh = max(1, int(ov.get('h', 0.08) * ph))
+                    ox = int(ov.get('x', 0.05) * pw)
+                    oy = int(ov.get('y', 0.05) * ph)
+                    opacity = ov.get('opacity', 1.0)
+                    cache = getattr(self, '_preview_overlay_img_cache', {})
+                    cache_key = (path, ow, oh)
+                    thumb = cache.get(cache_key)
+                    if thumb is None:
+                        try:
+                            src = Image.open(path).convert("RGBA")
+                            src = src.resize((ow, oh), Image.Resampling.BILINEAR)
+                            if len(cache) > 16:  # simple cap so this can't grow unbounded
+                                cache.clear()
+                            cache[cache_key] = src
+                            self._preview_overlay_img_cache = cache
+                            thumb = src
+                        except Exception:
+                            continue
+                    if opacity < 1.0:
+                        a = thumb.split()[-1].point(lambda p: int(p * opacity))
+                        thumb = thumb.copy(); thumb.putalpha(a)
+                    img.paste(thumb, (ox, oy), thumb)
+                elif kind == 'webcam':
+                    ow = max(1, int(ov.get('w', 0.25) * pw))
+                    oh = max(1, int(ov.get('h', 0.25) * ph))
+                    ox = int(ov.get('x', 0.05) * pw)
+                    oy = int(ov.get('y', 0.05) * ph)
+                    # Opening a real camera device just to render a thumbnail
+                    # isn't worth the cost/latency; show a clearly-labeled
+                    # placeholder box in the correct position/size instead so
+                    # at least placement is visible in the live preview.
+                    d = ImageDraw.Draw(img)
+                    d.rectangle([ox, oy, ox + ow, oy + oh], outline=(137, 180, 250, 255), width=2,
+                                fill=(30, 30, 46, 160))
+                    d.text((ox + 4, oy + 4), f"📷 Cam {ov.get('cam_index', 0)}", fill=(205, 214, 244, 255))
+            return img.convert("RGB")
+        except Exception as e:
+            log.debug(f"overlay preview composite error: {e}")
+            return img.convert("RGB") if img.mode != "RGB" else img
+
     def _capture_loop(self) -> None:
         import mss as _mss
         sct = _mss.mss()
@@ -3572,6 +3688,7 @@ class HomRecScreen:
                             rec_img.thumbnail((pw, ph), Image.Resampling.BILINEAR)
                         try: self._preview_queue.get_nowait()
                         except: pass
+                        rec_img = self._composite_overlays_on_preview(rec_img, pw, ph)
                         self._preview_queue.put_nowait(rec_img)
                     except Exception: pass
                     # Was 2.0s (one frame every 2 seconds -> visibly choppy/frame-by-frame
@@ -3591,6 +3708,7 @@ class HomRecScreen:
 
                 try: self._preview_queue.get_nowait()
                 except queue.Empty: pass
+                img = self._composite_overlays_on_preview(img, pw, ph)
                 self._preview_queue.put_nowait(img)
 
                 _now = time.time()
@@ -3686,7 +3804,17 @@ class HomRecScreen:
         OverlayManagerWindow(self.root, self)
 
     def _build_overlay_vf(self) -> str:
+        """Build FFmpeg -vf string for enabled text overlays.
 
+        IMPORTANT: this filter is appended AFTER the scale= filter in the
+        chain (see start_recording), so coordinates must be computed against
+        the final OUTPUT resolution (record_width/record_height), not the
+        original capture resolution. Using original_width/height here caused
+        overlays to land in the wrong position (or off-frame) whenever
+        recording quality/scale was below 100%.
+
+        Image and webcam overlays are composited at post-process time.
+        """
         filters = []
         w = self.record_width or self.original_width or 1920
         h = self.record_height or self.original_height or 1080
@@ -4225,13 +4353,13 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = HomRecScreen(root)
 
-     # HomRec Plugin Engine  
+    # -- HomRec Plugin Engine --------------------------------------------------
     try:
         from hr_plugin_engine import init_plugin_engine
         app.plugin_engine = init_plugin_engine(app)
     except Exception as _pe:
         import logging as _lg
         _lg.getLogger("homrec").warning(f"Plugin engine failed to load: {_pe}")
-    #   -----
+    # -------------------------------------------------------------------------
 
     root.mainloop()
