@@ -1,28 +1,3 @@
-"""
-hr_plugin_engine.py — HomRec Plugin Engine v1.0
-================================================
-Формат плагинов: .hrp (HomRecPlugin) или .jar/.zip
-Структура внутри архива:
-    plugin.json        — манифест
-    main.py            — точка входа (класс Plugin)
-    assets/            — необязательные ресурсы
-
-plugin.json пример:
-{
-    "id":          "com.example.myplugin",
-    "name":        "My Plugin",
-    "version":     "1.0.0",
-    "author":      "You",
-    "description": "Does cool stuff",
-    "min_homrec":  "1.7.0",
-    "entry":       "main.py"
-}
-
-В main.py обязателен класс Plugin(HomRecPluginBase):
-    def on_load(self)    — вызывается при загрузке
-    def on_unload(self)  — вызывается при выгрузке
-"""
-
 from __future__ import annotations
 import os
 import sys
@@ -50,22 +25,6 @@ PLUGIN_EXTENSIONS = {".hrp", ".jar", ".zip"}
 # ─────────────────────────────────────────────────────────────
 
 class HomRecPluginBase:
-    """
-    Базовый класс плагина. Плагин получает ПОЛНЫЙ доступ к app (HomRecScreen).
-
-    Доступные хуки (можно переопределять):
-        on_load()           — плагин загружен
-        on_unload()         — плагин выгружен
-        on_recording_start()— запись началась
-        on_recording_stop() — запись остановилась
-        on_stream_start()   — стрим начался   (если Streaming плагин активен)
-        on_stream_stop()    — стрим остановился
-        on_theme_change(colors: dict)  — смена темы
-        on_frame(frame)     — каждый кадр превью (numpy array BGR)
-        on_menu_build(menubar) — добавить пункты в меню
-        on_settings_build(frame) — добавить в окно настроек
-    """
-
     # Заполняется движком
     app: "HomRecScreen" = None
     meta: dict = {}
@@ -604,10 +563,6 @@ class PluginManagerWindow:
             self._refresh_list()
             self.engine._rebuild_plugin_menu()
 
-
-# ─────────────────────────────────────────────────────────────
-#  Integration helper — вызывается из homrec.py
-# ─────────────────────────────────────────────────────────────
 
 def init_plugin_engine(app: "HomRecScreen") -> PluginEngine:
     """Создать движок и загрузить все плагины. Вызывать из HomRecScreen.__init__."""
