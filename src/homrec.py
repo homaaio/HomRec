@@ -205,12 +205,34 @@ def optimize_for_performance() -> None:
         log.warning(f"Native ext not loaded at startup: {_e}")
 
 
+def rms_to_level_percent(raw_rms: float, floor_db: float = -55.0) -> int:
+    """Convert a raw 16-bit PCM RMS value (0..32767) into a 0..100 meter level
+    using a logarithmic (dBFS) scale instead of a linear divide.
+
+    A linear mapping like `rms / 150` badly compresses normal speech into the
+    bottom ~15-20% of the meter while a slightly raised voice already pegs it
+    at 100%, which reads as "the meter barely reacts, then slams to max" -
+    exactly the perceptual mismatch a VU meter must avoid. Human hearing (and
+    every real audio meter) is logarithmic, so we convert RMS to dBFS first:
+
+        dBFS = 20 * log10(rms / 32767)   (negative; 0 dBFS = full-scale)
+
+    then map [floor_db, 0] dB onto [0, 100]%. floor_db=-55 means: anything
+    55 dB or more below full scale (typical quiet-room noise floor) reads as
+    ~0%, and the full dynamic range up to clipping is spread evenly across
+    the meter, so normal conversational speech now sits in a useful mid-range
+    instead of near the bottom.
+    """
+    if raw_rms <= 0:
+        return 0
+    import math as _math
+    db = 20.0 * _math.log10(min(raw_rms, 32767) / 32767.0)
+    db = max(floor_db, min(0.0, db))
+    pct = (db - floor_db) / (0.0 - floor_db) * 100.0
+    return max(0, min(100, int(round(pct))))
+
+
 class AudioLevelMeter(tk.Canvas):
-    """
-    Smooth audio level meter with configurable dynamics.
-    dynamics: 0 = static (no smoothing), 1-10 = smoothing strength (default 5).
-    enabled: if False, meter is hidden/flat (no CPU used).
-    """
     def __init__(self, parent, width: int = 180, height: int = 20, dynamics: int = 5, **kwargs) -> None:
         super().__init__(parent, width=width, height=height, highlightthickness=0, **kwargs)
         self.meter_width = width
@@ -431,8 +453,16 @@ class WelcomeDialog:
 class AudioPanel:
     def __init__(self, parent, app) -> None:
         self.app = app
-        self.frame = tk.LabelFrame(parent, text=app.lang["audio_mixer"],
-                                   bg=app.colors["surface"], fg=app.colors["accent"],
+        c = app.colors
+        title_bar = tk.Frame(parent, bg=c["surface"])
+        self._title_lbl = tk.Label(title_bar, text=app.lang["audio_mixer"], bg=c["surface"], fg=c["accent"],
+                 font=("Segoe UI", 11, "bold"))
+        self._title_lbl.pack(side="left")
+        tk.Button(title_bar, text="✕", command=self._close_panel,
+                  bg=c["surface"], fg=c["text_secondary"], font=("Segoe UI", 9),
+                  relief="flat", width=3, cursor="hand2").pack(side="right")
+        self.frame = tk.LabelFrame(parent, labelwidget=title_bar,
+                                   bg=c["surface"], fg=c["accent"],
                                    font=("Segoe UI", 11, "bold"), padx=10, pady=10)
         self.frame.pack(fill='both', expand=True, padx=5, pady=5)
         self.audio_enabled = tk.BooleanVar(value=True)
@@ -561,11 +591,11 @@ class AudioPanel:
 
     def on_mic_volume_change(self, value: str) -> None:
         self.mic_volume_label.config(text=f"{int(float(value))}%")
-        self.app.save_settings(silent=True)
+        self.app.save_settings_debounced()
 
     def on_sys_volume_change(self, value: str) -> None:
         self.sys_volume_label.config(text=f"{int(float(value))}%")
-        self.app.save_settings(silent=True)
+        self.app.save_settings_debounced()
 
     def toggle_mic_mute(self) -> None:
         self.mic_mute.set(not self.mic_mute.get())
@@ -661,7 +691,8 @@ class AudioPanel:
                     _t.sleep(0.05); continue
                 try:
                     data = stream.read(1024, exception_on_overflow=False)
-                    self._mic_level_pending = min(100, int(_audioop_mod.rms(data, 2) / 150))
+                    raw_rms = _audioop_mod.rms(data, 2)
+                    self._mic_level_pending = rms_to_level_percent(raw_rms)
                 except Exception:
                     _t.sleep(0.05)
         except Exception as e:
@@ -675,12 +706,146 @@ class AudioPanel:
             except Exception: pass
 
     def update_language(self) -> None:
-        self.frame.config(text=self.app.lang["audio_mixer"])
+        self._title_lbl.config(text=self.app.lang["audio_mixer"])
         ffmpeg_ok = self.app.check_ffmpeg()
         self.ffmpeg_label.config(text=self.app.lang["ffmpeg_found" if ffmpeg_ok else "ffmpeg_not_found"])
         self.audio_check.config(text=self.app.lang["enable_audio"])
         self.mic_mute_btn.config(text=self.app.lang["unmute" if self.mic_mute.get() else "mute"])
         self.sys_mute_btn.config(text=self.app.lang["unmute" if self.sys_mute.get() else "mute"])
+
+    def _close_panel(self) -> None:
+        self.app.show_audio_panel = False
+        self.app.save_settings(silent=True)
+        self.app.recreate_widgets()
+
+
+class OverlaysDockPanel:
+    """Compact dockable panel shown next to the Audio Mixer.
+
+    Lets the user quickly add an overlay (+), see the current overlay list,
+    drag an overlay's position straight on the Preview screen (reuses the
+    existing OverlayPreviewDialog), and per-overlay open a "⋮" menu with
+    "More" (opens the full OverlayManagerWindow settings for that overlay)
+    and "Remove" (deletes it, with no further dialog needed).
+    """
+    def __init__(self, parent, app) -> None:
+        self.app = app
+        c = app.colors
+        self.frame = tk.LabelFrame(parent, text="🎭 Overlays",
+                                    bg=c["surface"], fg=c["accent"],
+                                    font=("Segoe UI", 11, "bold"), padx=8, pady=8)
+        self.frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        header = tk.Frame(self.frame, bg=c["surface"])
+        header.pack(fill="x", pady=(0, 6))
+        tk.Button(header, text="＋", command=self._quick_add,
+                  bg=c["success"], fg=c["bg"], font=("Segoe UI", 9, "bold"),
+                  relief="flat", width=3, cursor="hand2").pack(side="left")
+        tk.Button(header, text="👁 Position on Preview", command=self._open_drag_preview,
+                  bg=c.get("surface_light", "#45475a"), fg=c["accent"],
+                  font=("Segoe UI", 8), relief="flat", padx=8, cursor="hand2").pack(side="left", padx=(6, 0))
+        tk.Button(header, text="✕", command=self._close_panel,
+                  bg=c["surface"], fg=c["text_secondary"], font=("Segoe UI", 9),
+                  relief="flat", width=3, cursor="hand2").pack(side="right")
+
+        list_outer = tk.Frame(self.frame, bg=c["surface"])
+        list_outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(list_outer, bg=c["surface"], highlightthickness=0)
+        scroll = ttk.Scrollbar(list_outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._list_inner = tk.Frame(canvas, bg=c["surface"])
+        canvas.create_window((0, 0), window=self._list_inner, anchor="nw")
+        self._list_inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        self._canvas = canvas
+
+        self._menu_widgets: dict = {}
+        self.refresh()
+
+    # -- list rendering ---------------------------------------------------
+    def refresh(self) -> None:
+        c = self.app.colors
+        for w in self._list_inner.winfo_children():
+            w.destroy()
+        overlays = getattr(self.app, "overlays", [])
+        if not overlays:
+            tk.Label(self._list_inner, text="No overlays yet.\nClick ＋ to add one.",
+                     bg=c["surface"], fg=c["text_secondary"], font=("Segoe UI", 8, "italic"),
+                     justify="center").pack(padx=8, pady=12)
+            return
+        for i, ov in enumerate(overlays):
+            row = tk.Frame(self._list_inner, bg=c.get("surface_light", "#45475a") if i % 2 else c["surface"])
+            row.pack(fill="x", padx=2, pady=1)
+            icon = {"text": "📝", "webcam": "📷", "image": "🖼"}.get(ov.get("kind", "text"), "?")
+            if ov.get("kind") == "text":
+                name = ov.get("text", "")[:14] or "(empty text)"
+            elif ov.get("kind") == "image":
+                name = os.path.basename(ov.get("path", ""))[:14] or "(no file)"
+            else:
+                name = f"Cam#{ov.get('cam_index', 0)}"
+            dot = "●" if ov.get("enabled", True) else "○"
+            tk.Label(row, text=f"{dot} {icon} {name}", bg=row["bg"], fg=c["text"],
+                     font=("Segoe UI", 9), anchor="w").pack(side="left", fill="x", expand=True, padx=6, pady=4)
+            dots_btn = tk.Button(row, text="⋮", bg=row["bg"], fg=c["text_secondary"],
+                                  font=("Segoe UI", 10, "bold"), relief="flat", width=2,
+                                  cursor="hand2", command=lambda idx=i: self._open_item_menu(idx))
+            dots_btn.pack(side="right", padx=2)
+
+    # -- + Add ------------------------------------------------------------
+    def _quick_add(self) -> None:
+        new_ov = {"kind": "text", "text": "New Text", "font_size": 28, "color": "#ffffff",
+                   "opacity": 1.0, "x": 0.05, "y": 0.05, "w": 0.25, "h": 0.08,
+                   "path": "", "cam_index": 0, "enabled": True}
+        overlays = getattr(self.app, "overlays", [])
+        overlays.append(new_ov)
+        self.app.overlays = overlays
+        self.app.save_settings(silent=True)
+        self.app._refresh_overlay_badge()
+        self.refresh()
+
+    # -- ⋮ per-item menu: More / Remove ----------------------------------
+    def _open_item_menu(self, idx: int) -> None:
+        c = self.app.colors
+        menu = tk.Menu(self.frame, tearoff=0, bg=c["surface"], fg=c["text"],
+                        activebackground=c["accent"], activeforeground=c["bg"])
+        menu.add_command(label="More…", command=lambda: self._open_more(idx))
+        menu.add_command(label="Remove", command=lambda: self._remove(idx))
+        try:
+            x = self.frame.winfo_pointerx(); y = self.frame.winfo_pointery()
+            menu.tk_popup(x, y)
+        finally:
+            try: menu.grab_release()
+            except Exception: pass
+
+    def _open_more(self, idx: int) -> None:
+        """Open the full overlay settings window, pre-selected to this overlay."""
+        win = OverlayManagerWindow(self.app.root, self.app)
+        if 0 <= idx < len(win._overlays):
+            win._select(idx)
+
+    def _remove(self, idx: int) -> None:
+        overlays = getattr(self.app, "overlays", [])
+        if 0 <= idx < len(overlays):
+            del overlays[idx]
+            self.app.overlays = overlays
+            self.app.save_settings(silent=True)
+            self.app._refresh_overlay_badge()
+            self.refresh()
+
+    def _open_drag_preview(self) -> None:
+        OverlayPreviewDialog(self.app.root, self.app, getattr(self.app, "overlays", []),
+                              self._on_drag_preview_saved)
+
+    def _on_drag_preview_saved(self, overlays: list) -> None:
+        self.app.overlays = overlays
+        self.app.save_settings(silent=True)
+        self.refresh()
+
+    def _close_panel(self) -> None:
+        self.app.show_overlays_panel = False
+        self.app.save_settings(silent=True)
+        self.app.recreate_widgets()
 
 
 LANG_SCHEMA_VERSION = 1
@@ -1051,7 +1216,7 @@ class ThemeEditorDialog:
 
 
 class OverlayManagerWindow:
-    """Standalone Overlay Manager window — accessible from the toolbar.
+    """Standalone Overlay Manager window - accessible from the toolbar.
     Combines the overlay list, editor, and OBS-style preview in one place.
     """
     def __init__(self, parent, app) -> None:
@@ -1066,7 +1231,7 @@ class OverlayManagerWindow:
         win.resizable(True, True)
         self.win = win
 
-        # ── Header ────────────────────────────────────────────────────────────
+        # -- Header ------------------------------------------------------------
         hdr = tk.Frame(win, bg=self.c["surface"], pady=0)
         hdr.pack(fill="x")
         tk.Label(hdr, text="🎭  Overlay Manager", bg=self.c["surface"],
@@ -1078,7 +1243,7 @@ class OverlayManagerWindow:
                   bg=self.c["success"], fg=self.c["bg"],
                   font=("Segoe UI", 9, "bold"), relief="flat", padx=12, pady=6).pack(side="right", padx=(0,4), pady=8)
 
-        # ── Body: list left, editor right ────────────────────────────────────
+        # -- Body: list left, editor right ------------------------------------
         body = tk.Frame(win, bg=self.c["bg"])
         body.pack(fill="both", expand=True, padx=12, pady=(8, 0))
 
@@ -1103,7 +1268,7 @@ class OverlayManagerWindow:
         self._editor_frame = tk.Frame(body, bg=self.c["bg"])
         self._editor_frame.pack(side="left", fill="both", expand=True)
 
-        # ── Footer ────────────────────────────────────────────────────────────
+        # -- Footer ------------------------------------------------------------
         ftr = tk.Frame(win, bg=self.c["bg"])
         ftr.pack(fill="x", padx=12, pady=8)
         tk.Button(ftr, text="Save & Apply", command=self._save_apply,
@@ -1121,7 +1286,7 @@ class OverlayManagerWindow:
         self._refresh_list()
         win.protocol("WM_DELETE_WINDOW", win.destroy)
 
-    # ── List ──────────────────────────────────────────────────────────────────
+    # -- List ------------------------------------------------------------------
     def _refresh_list(self) -> None:
         for w in self._list_inner.winfo_children():
             w.destroy()
@@ -1171,14 +1336,14 @@ class OverlayManagerWindow:
         self._refresh_list()
         self._build_editor(self._sel_idx)
 
-    # ── Editor ────────────────────────────────────────────────────────────────
+    # -- Editor ----------------------------------------------------------------
     def _clear_editor(self) -> None:
         for w in self._editor_frame.winfo_children():
             w.destroy()
         self._editor_widgets = {}
 
     def _build_editor(self, idx: int) -> None:
-        """Show only fields relevant to the overlay type — no clutter."""
+        """Show only fields relevant to the overlay type - no clutter."""
         self._clear_editor()
         ov   = self._overlays[idx]
         c    = self.c
@@ -1371,6 +1536,9 @@ class OverlayManagerWindow:
         self.app.overlays = self._overlays
         self.app.save_settings(silent=True)
         self.app._refresh_overlay_badge()
+        if getattr(self.app, 'overlays_panel', None):
+            try: self.app.overlays_panel.refresh()
+            except Exception: pass
         self._set_status("Saved & applied.")
         self.win.after(800, self.win.destroy)
 
@@ -1379,10 +1547,6 @@ class OverlayManagerWindow:
         self.win.after(3000, lambda: self._status_lbl.config(text=""))
 
 class OverlayPreviewDialog:
-    """OBS-style overlay positioning preview.
-    Screenshot is letterboxed preserving aspect ratio.
-    Overlays drawn with a filled semi-transparent tinted rect so they are always visible.
-    """
     _HANDLE = 12  # resize handle size px
 
     def __init__(self, parent, app, overlays: list[dict], callback) -> None:
@@ -1438,7 +1602,7 @@ class OverlayPreviewDialog:
         self._bg_tk = None
         self.dlg.after(120, self._grab_bg)
 
-    # ── Screenshot ────────────────────────────────────────────────────────────
+    # -- Screenshot ------------------------------------------------------------
     def _grab_bg(self) -> None:
         """Grab a screenshot of the selected monitor, store as PIL Image."""
         try:
@@ -1456,7 +1620,7 @@ class OverlayPreviewDialog:
             self._bg_orig_h = 1080
         self.dlg.after(0, self._render)
 
-    # ── Render ────────────────────────────────────────────────────────────────
+    # -- Render ----------------------------------------------------------------
     def _render(self) -> None:
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
@@ -1552,7 +1716,7 @@ class OverlayPreviewDialog:
                     fill="", outline="#ffffff", width=1, dash=(3, 3)
                 )
 
-    # ── Geometry helpers ──────────────────────────────────────────────────────
+    # -- Geometry helpers ------------------------------------------------------
     def _ov_canvas_rect(self, ov: dict) -> tuple:
         bw = max(self._render_bw, 1)
         bh = max(self._render_bh, 1)
@@ -1564,7 +1728,7 @@ class OverlayPreviewDialog:
         y2 = int(y1 + max(0.02, ov.get("h", 0.1)) * bh)
         return x1, y1, x2, y2
 
-    # ── Interaction ───────────────────────────────────────────────────────────
+    # -- Interaction -----------------------------------------------------------
     def _hit_test(self, mx: int, my: int) -> tuple:
         h = self._HANDLE
         for i, ov in enumerate(self._overlays):
@@ -1813,7 +1977,6 @@ class AdvancedSettingsDialog:
         self._refresh_overlay_list()
 
     def _overlay_edit(self, idx) -> None:
-        """Open overlay editor dialog; idx=None means new overlay."""
         c = self.app.colors
         existing = self._overlays[idx] if idx is not None else None
         dlg = tk.Toplevel(self.dialog)
@@ -2318,6 +2481,9 @@ class HomRecScreen:
         self.video_format = "mp4"       # "mp4" or "mkv"
         self.separate_audio_mp3 = False  # save audio as separate .mp3
         self.overlays: list[dict] = []   # overlay definitions
+        self.overlays_panel = None       # set once the OverlaysDockPanel is built
+        self.show_audio_panel = True     # Audio Mixer panel visible (View -> Show)
+        self.show_overlays_panel = True  # Overlays dock panel visible (View -> Show)
         self.always_on_top = tk.BooleanVar(value=False)
         self.minimize_to_tray = tk.BooleanVar(value=True)
         self.language_var = tk.StringVar(value="en")
@@ -2526,6 +2692,16 @@ class HomRecScreen:
         view_menu.add_checkbutton(label=self.lang["always_on_top"], variable=self.always_on_top, command=self.toggle_always_on_top)
         view_menu.add_command(label=self.lang["fullscreen"], command=self.toggle_fullscreen)
         view_menu.add_separator()
+
+        self._show_audio_var = tk.BooleanVar(value=getattr(self, 'show_audio_panel', True))
+        self._show_overlays_var = tk.BooleanVar(value=getattr(self, 'show_overlays_panel', True))
+        show_menu = tk.Menu(view_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
+        view_menu.add_cascade(label="Show", menu=show_menu)
+        show_menu.add_checkbutton(label="Audio Mixer", variable=self._show_audio_var,
+                                   command=lambda: self._toggle_panel_visibility('show_audio_panel', self._show_audio_var))
+        show_menu.add_checkbutton(label="Overlays", variable=self._show_overlays_var,
+                                   command=lambda: self._toggle_panel_visibility('show_overlays_panel', self._show_overlays_var))
+        view_menu.add_separator()
         if HAS_PSUTIL:
             view_menu.add_command(label=self.lang["pc_analytics"], command=self.show_analytics)
             view_menu.add_separator()
@@ -2711,6 +2887,14 @@ class HomRecScreen:
             if was_paused:
                 self.pause_btn.config(text=self.lang["resume"], bg=self.colors["success"])
 
+    def _toggle_panel_visibility(self, attr_name: str, var: tk.BooleanVar) -> None:
+        """Used by View -> Show checkbuttons (Audio Mixer / Overlays) and by the
+        Overlays panel's own ✕ close button to show/hide a dock panel and
+        rebuild the layout to match."""
+        setattr(self, attr_name, var.get())
+        self.save_settings(silent=True)
+        self.recreate_widgets()
+
     def set_mode(self, mode: str) -> None:
         self.recording_mode = mode; self.update_mode_settings()
         self.save_settings(silent=True)
@@ -2765,6 +2949,8 @@ class HomRecScreen:
                 self.video_format = s.get("video_format", "mp4")
                 self.separate_audio_mp3 = s.get("separate_audio_mp3", False)
                 self.overlays = s.get("overlays", [])
+                self.show_audio_panel = s.get("show_audio_panel", True)
+                self.show_overlays_panel = s.get("show_overlays_panel", True)
                 self._saved_mic_volume = s.get("mic_volume", 80)
                 self._saved_sys_volume = s.get("sys_volume", 100)
                 self._saved_mic_mute = s.get("mic_mute", False)
@@ -2806,6 +2992,8 @@ class HomRecScreen:
             "video_format": getattr(self, 'video_format', 'mp4'),
             "separate_audio_mp3": getattr(self, 'separate_audio_mp3', False),
             "overlays": getattr(self, 'overlays', []),
+            "show_audio_panel": getattr(self, 'show_audio_panel', True),
+            "show_overlays_panel": getattr(self, 'show_overlays_panel', True),
             "mic_volume": int(self.audio_panel.mic_volume.get()) if hasattr(self, 'audio_panel') else 80,
             "sys_volume": int(self.audio_panel.sys_volume.get()) if hasattr(self, 'audio_panel') else 100,
             "mic_mute": bool(self.audio_panel.mic_mute.get()) if hasattr(self, 'audio_panel') else False,
@@ -2816,6 +3004,18 @@ class HomRecScreen:
             json.dump(settings, f, indent=2)
         if not silent:
             messagebox.showinfo(self.lang["info"], self.lang["settings_saved"])
+
+    def save_settings_debounced(self, delay_ms: int = 400) -> None:
+        """Coalesce rapid-fire saves (e.g. dragging a volume/FPS slider fires
+        its command callback dozens of times per second) into a single
+        silent save shortly after the user stops moving the control, instead
+        of writing the full settings JSON to disk on every tick of the drag."""
+        existing = getattr(self, '_pending_save_after_id', None)
+        if existing is not None:
+            try: self.root.after_cancel(existing)
+            except Exception: pass
+        self._pending_save_after_id = self.root.after(
+            delay_ms, lambda: (self.save_settings(silent=True), setattr(self, '_pending_save_after_id', None)))
 
     def update_monitor_info(self) -> None:
         if self.monitor_id < len(self.sct.monitors):
@@ -2912,7 +3112,7 @@ class HomRecScreen:
 
         def _fps_slide(v):
             val = int(float(v)); self.target_fps = val
-            self._inline_fps_val.config(text=str(val)); self.save_settings(silent=True)
+            self._inline_fps_val.config(text=str(val)); self.save_settings_debounced()
 
         self._inline_fps_slider = tk.Scale(fps_ctrl_frame, from_=1, to=60, orient="horizontal", length=160, showvalue=False,
                                             bg=self.colors["surface"], fg=self.colors["text"], highlightthickness=0,
@@ -2937,9 +3137,37 @@ class HomRecScreen:
         self.preview_label = tk.Label(preview_frame, bg=self.colors["preview_bg"])
         self.preview_label.pack(fill="both", expand=True)
 
-        bottom_panel = tk.Frame(right_panel, bg=self.colors["bg"], height=300)
-        bottom_panel.pack(fill="x"); bottom_panel.pack_propagate(False)
-        self.audio_panel = AudioPanel(bottom_panel, self)
+        show_audio = getattr(self, 'show_audio_panel', True)
+        show_overlays = getattr(self, 'show_overlays_panel', True)
+
+        if show_audio or show_overlays:
+            bottom_panel = tk.Frame(right_panel, bg=self.colors["bg"], height=300)
+            bottom_panel.pack(fill="x"); bottom_panel.pack_propagate(False)
+
+            if show_audio and show_overlays:
+                # Both visible: a draggable/resizable split so the user can
+                # resize either panel by dragging the sash between them.
+                paned = ttk.PanedWindow(bottom_panel, orient="horizontal")
+                paned.pack(fill="both", expand=True)
+                audio_host = tk.Frame(paned, bg=self.colors["bg"])
+                overlays_host = tk.Frame(paned, bg=self.colors["bg"])
+                paned.add(audio_host, weight=3)
+                paned.add(overlays_host, weight=1)
+                self.audio_panel = AudioPanel(audio_host, self)
+                self.overlays_panel = OverlaysDockPanel(overlays_host, self)
+            elif show_audio:
+                self.audio_panel = AudioPanel(bottom_panel, self)
+                self.overlays_panel = None
+            else:
+                hidden_audio_host = tk.Frame(right_panel, bg=self.colors["bg"])
+                self.audio_panel = AudioPanel(hidden_audio_host, self)
+                self.overlays_panel = OverlaysDockPanel(bottom_panel, self)
+        else:
+            # Both hidden: still create an off-screen AudioPanel so the rest
+            # of the app (volume/mute lookups, settings save) keeps working.
+            hidden_host = tk.Frame(right_panel, bg=self.colors["bg"])
+            self.audio_panel = AudioPanel(hidden_host, self)
+            self.overlays_panel = None
 
         if hasattr(self, '_saved_mic_volume'):
             self.audio_panel.mic_volume.set(self._saved_mic_volume)
@@ -3174,14 +3402,7 @@ class HomRecScreen:
         threading.Thread(target=_probe, daemon=True).start()
 
     def _safe_pix_fmt(self) -> str:
-        """
-        Force a pixel format that every common player/codec combo can actually
-        decode. 'yuv444p' and 'rgb24' (previously offered in Advanced Settings)
-        are NOT supported by the baseline/main H.264 profile that most
-        hardware encoders (NVENC/QSV/AMF) and most players (incl. many VLC
-        builds) expect, and caused "unsupported codec / cannot decode" errors
-        on playback. yuv420p is the only format guaranteed to work everywhere.
-        """
+
         return 'yuv420p'
 
     def _build_codec_args(self) -> list:
@@ -3385,7 +3606,11 @@ class HomRecScreen:
                         except: pass
                         self._preview_queue.put_nowait(rec_img)
                     except Exception: pass
-                    time.sleep(2.0); continue
+                    # Was 2.0s (one frame every 2 seconds -> visibly choppy/frame-by-frame
+                    # preview while recording). 0.15s (~6-7 fps) is still cheap on CPU -
+                    # it's a small downsized thumbnail, not the recording frame itself -
+                    # but smooth enough that moving windows don't look like a slideshow.
+                    time.sleep(0.15); continue
 
                 screenshot = sct.grab(monitor); sw, sh = screenshot.size
                 if _have_native and _native_core:
@@ -3423,7 +3648,7 @@ class HomRecScreen:
                 self.preview_label.image = photo
         except queue.Empty: pass
         except Exception: pass
-        self.root.after(2100 if getattr(self, 'recording', False) else 80, self.update_preview)
+        self.root.after(150 if getattr(self, 'recording', False) else 80, self.update_preview)
 
     def _show_preview_placeholder(self) -> None:
         try:
@@ -3534,19 +3759,6 @@ class HomRecScreen:
         Build the full filter graph for scale + all overlay kinds (text,
         image, webcam) as a single -filter_complex, plus any extra -i input
         args needed for image/webcam sources.
-
-        Previously image and webcam overlays were configured in the UI but
-        never actually composited — the docstring claimed "post-process"
-        handling that didn't exist anywhere in the code, so those overlays
-        silently did nothing. They are now real inputs added to the FFmpeg
-        graph at capture time, since that's the only way to keep them
-        frame-accurate and in sync with a live screen capture (a true
-        post-process pass would need to re-encode the whole file and still
-        couldn't capture a *live* webcam after the fact).
-
-        Returns: (extra_input_args, filter_complex_string, output_pad_label)
-                 output_pad_label is None if no filters are needed at all
-                 (caller should fall back to a plain passthrough).
         """
         extra_inputs: list = []
         graph_parts: list = []
@@ -4055,13 +4267,13 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = HomRecScreen(root)
 
-    # ── HomRec Plugin Engine ──────────────────────────────────────────────────
+    # -- HomRec Plugin Engine --------------------------------------------------
     try:
         from hr_plugin_engine import init_plugin_engine
         app.plugin_engine = init_plugin_engine(app)
     except Exception as _pe:
         import logging as _lg
         _lg.getLogger("homrec").warning(f"Plugin engine failed to load: {_pe}")
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
 
     root.mainloop()
