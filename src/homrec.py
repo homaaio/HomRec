@@ -206,23 +206,6 @@ def optimize_for_performance() -> None:
 
 
 def rms_to_level_percent(raw_rms: float, floor_db: float = -55.0) -> int:
-    """Convert a raw 16-bit PCM RMS value (0..32767) into a 0..100 meter level
-    using a logarithmic (dBFS) scale instead of a linear divide.
-
-    A linear mapping like `rms / 150` badly compresses normal speech into the
-    bottom ~15-20% of the meter while a slightly raised voice already pegs it
-    at 100%, which reads as "the meter barely reacts, then slams to max" -
-    exactly the perceptual mismatch a VU meter must avoid. Human hearing (and
-    every real audio meter) is logarithmic, so we convert RMS to dBFS first:
-
-        dBFS = 20 * log10(rms / 32767)   (negative; 0 dBFS = full-scale)
-
-    then map [floor_db, 0] dB onto [0, 100]%. floor_db=-55 means: anything
-    55 dB or more below full scale (typical quiet-room noise floor) reads as
-    ~0%, and the full dynamic range up to clipping is spread evenly across
-    the meter, so normal conversational speech now sits in a useful mid-range
-    instead of near the bottom.
-    """
     if raw_rms <= 0:
         return 0
     import math as _math
@@ -285,15 +268,11 @@ class AudioLevelMeter(tk.Canvas):
         self._raw_level = max(0, min(100, level))
 
         if self.dynamics == 0:
-            # Static mode: no smoothing, direct value
             self.level = float(self._raw_level)
         else:
-            # Exponential smoothing: alpha = dynamics/10
-            # Higher dynamics = faster response (more "instant")
             alpha = self.dynamics / 10.0
             self.level = alpha * self._raw_level + (1.0 - alpha) * self.level
 
-        # Peak hold with configurable decay speed (faster decay at lower dynamics)
         decay_speed = max(1, 4 - self.dynamics // 3)  # 1..4 levels per tick
         if self.level > self._peak:
             self._peak = self.level
@@ -333,7 +312,7 @@ class CustomMessageBox:
 
         check_frame = tk.Frame(dialog, bg=c["bg"])
         check_frame.pack(pady=8)
-        dont_show_text = "Don't show again" if app.current_language == "en" else "Don't show again"
+        dont_show_text = "Don't show again"
         tk.Checkbutton(check_frame, text=dont_show_text, variable=dont_show_var,
                        bg=app.colors["bg"], fg=app.colors["fg"], selectcolor=app.colors["surface"],
                        font=("Segoe UI", 9)).pack()
@@ -548,7 +527,6 @@ class AudioPanel:
                                       bg=c["surface"], fg='#a6e3a1' if ffmpeg_ok else '#f38ba8', font=("Segoe UI", 8))
         self.ffmpeg_label.pack(side='right')
 
-        # Dynamics row: enable/disable meter + speed slider
         dyn_row = tk.Frame(self.frame, bg=c["surface"])
         dyn_row.pack(fill='x', pady=(2, 0))
         self._meter_enabled_var = tk.BooleanVar(value=True)
@@ -720,14 +698,6 @@ class AudioPanel:
 
 
 class OverlaysDockPanel:
-    """Compact dockable panel shown next to the Audio Mixer.
-
-    Lets the user quickly add an overlay (+), see the current overlay list,
-    drag an overlay's position straight on the Preview screen (reuses the
-    existing OverlayPreviewDialog), and per-overlay open a "⋮" menu with
-    "More" (opens the full OverlayManagerWindow settings for that overlay)
-    and "Remove" (deletes it, with no further dialog needed).
-    """
     def __init__(self, parent, app) -> None:
         self.app = app
         c = app.colors
@@ -763,7 +733,6 @@ class OverlaysDockPanel:
         self._menu_widgets: dict = {}
         self.refresh()
 
-    # -- list rendering ---------------------------------------------------
     def refresh(self) -> None:
         c = self.app.colors
         for w in self._list_inner.winfo_children():
@@ -792,7 +761,6 @@ class OverlaysDockPanel:
                                   cursor="hand2", command=lambda idx=i: self._open_item_menu(idx))
             dots_btn.pack(side="right", padx=2)
 
-    # -- + Add ------------------------------------------------------------
     def _quick_add(self) -> None:
         new_ov = {"kind": "text", "text": "New Text", "font_size": 28, "color": "#ffffff",
                    "opacity": 1.0, "x": 0.05, "y": 0.05, "w": 0.25, "h": 0.08,
@@ -804,7 +772,6 @@ class OverlaysDockPanel:
         self.app._refresh_overlay_badge()
         self.refresh()
 
-    # -- ⋮ per-item menu: More / Remove ----------------------------------
     def _open_item_menu(self, idx: int) -> None:
         c = self.app.colors
         menu = tk.Menu(self.frame, tearoff=0, bg=c["surface"], fg=c["text"],
@@ -819,7 +786,6 @@ class OverlaysDockPanel:
             except Exception: pass
 
     def _open_more(self, idx: int) -> None:
-        """Open the full overlay settings window, pre-selected to this overlay."""
         win = OverlayManagerWindow(self.app.root, self.app)
         if 0 <= idx < len(win._overlays):
             win._select(idx)
@@ -1216,9 +1182,6 @@ class ThemeEditorDialog:
 
 
 class OverlayManagerWindow:
-    """Standalone Overlay Manager window - accessible from the toolbar.
-    Combines the overlay list, editor, and OBS-style preview in one place.
-    """
     def __init__(self, parent, app) -> None:
         self.app = app
         self.c = app.colors
@@ -1231,7 +1194,6 @@ class OverlayManagerWindow:
         win.resizable(True, True)
         self.win = win
 
-        # -- Header ------------------------------------------------------------
         hdr = tk.Frame(win, bg=self.c["surface"], pady=0)
         hdr.pack(fill="x")
         tk.Label(hdr, text="🎭  Overlay Manager", bg=self.c["surface"],
@@ -1243,11 +1205,9 @@ class OverlayManagerWindow:
                   bg=self.c["success"], fg=self.c["bg"],
                   font=("Segoe UI", 9, "bold"), relief="flat", padx=12, pady=6).pack(side="right", padx=(0,4), pady=8)
 
-        # -- Body: list left, editor right ------------------------------------
         body = tk.Frame(win, bg=self.c["bg"])
         body.pack(fill="both", expand=True, padx=12, pady=(8, 0))
 
-        # Left: list
         list_frame = tk.Frame(body, bg=self.c["surface"], width=280)
         list_frame.pack(side="left", fill="y", padx=(0, 8))
         list_frame.pack_propagate(False)
@@ -1264,11 +1224,9 @@ class OverlayManagerWindow:
         self._list_inner.bind("<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        # Right: editor
         self._editor_frame = tk.Frame(body, bg=self.c["bg"])
         self._editor_frame.pack(side="left", fill="both", expand=True)
 
-        # -- Footer ------------------------------------------------------------
         ftr = tk.Frame(win, bg=self.c["bg"])
         ftr.pack(fill="x", padx=12, pady=8)
         tk.Button(ftr, text="Save & Apply", command=self._save_apply,
@@ -1286,7 +1244,7 @@ class OverlayManagerWindow:
         self._refresh_list()
         win.protocol("WM_DELETE_WINDOW", win.destroy)
 
-    # -- List ------------------------------------------------------------------
+    # ── List ──────────────────────────────────────────────────────────────────
     def _refresh_list(self) -> None:
         for w in self._list_inner.winfo_children():
             w.destroy()
@@ -1336,7 +1294,7 @@ class OverlayManagerWindow:
         self._refresh_list()
         self._build_editor(self._sel_idx)
 
-    # -- Editor ----------------------------------------------------------------
+    # ── Editor ────────────────────────────────────────────────────────────────
     def _clear_editor(self) -> None:
         for w in self._editor_frame.winfo_children():
             w.destroy()
@@ -1602,7 +1560,7 @@ class OverlayPreviewDialog:
         self._bg_tk = None
         self.dlg.after(120, self._grab_bg)
 
-    # -- Screenshot ------------------------------------------------------------
+    # ── Screenshot ────────────────────────────────────────────────────────────
     def _grab_bg(self) -> None:
         """Grab a screenshot of the selected monitor, store as PIL Image."""
         try:
@@ -1620,7 +1578,7 @@ class OverlayPreviewDialog:
             self._bg_orig_h = 1080
         self.dlg.after(0, self._render)
 
-    # -- Render ----------------------------------------------------------------
+    # ── Render ────────────────────────────────────────────────────────────────
     def _render(self) -> None:
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
@@ -1716,7 +1674,7 @@ class OverlayPreviewDialog:
                     fill="", outline="#ffffff", width=1, dash=(3, 3)
                 )
 
-    # -- Geometry helpers ------------------------------------------------------
+    # ── Geometry helpers ──────────────────────────────────────────────────────
     def _ov_canvas_rect(self, ov: dict) -> tuple:
         bw = max(self._render_bw, 1)
         bh = max(self._render_bh, 1)
@@ -1728,7 +1686,7 @@ class OverlayPreviewDialog:
         y2 = int(y1 + max(0.02, ov.get("h", 0.1)) * bh)
         return x1, y1, x2, y2
 
-    # -- Interaction -----------------------------------------------------------
+    # ── Interaction ───────────────────────────────────────────────────────────
     def _hit_test(self, mx: int, my: int) -> tuple:
         h = self._HANDLE
         for i, ov in enumerate(self._overlays):
@@ -1900,7 +1858,6 @@ class AdvancedSettingsDialog:
             row = nt.grid_size()[1]
             tk.Checkbutton(nt, text=text, variable=var, bg=c["bg"], fg=c["text"], selectcolor=c["surface"], font=("Segoe UI", 10)).grid(row=row, column=0, columnspan=2, sticky="w", padx=20, pady=4)
 
-        # -- Overlays tab --
         ot = tk.Frame(notebook, bg=c["bg"]); notebook.add(ot, text="Overlays")
         self._build_overlays_tab(ot)
 
@@ -1913,7 +1870,6 @@ class AdvancedSettingsDialog:
         tk.Button(bot, text="Cancel", command=self.dialog.destroy, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="right", padx=(6, 0))
         tk.Button(bot, text="Save", command=self._save, bg=c["success"], fg=c["bg"], font=("Segoe UI", 9, "bold"), relief="flat", padx=16, pady=6).pack(side="right")
 
-    # ------------------------------------------------------------------ overlays
     def _build_overlays_tab(self, parent: tk.Frame) -> None:
         c = self.app.colors
         self._overlays: list[dict] = [dict(o) for o in getattr(self.app, "overlays", [])]
@@ -1929,7 +1885,6 @@ class AdvancedSettingsDialog:
                   bg=c["surface"], fg=c["accent"], font=("Segoe UI", 9),
                   relief="flat", padx=10, pady=4).pack(side="right", padx=(0, 6))
 
-        # list frame
         list_outer = tk.Frame(parent, bg=c["surface"], relief="flat", bd=1)
         list_outer.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         self._ov_canvas = tk.Canvas(list_outer, bg=c["bg"], highlightthickness=0)
@@ -2112,14 +2067,12 @@ class AdvancedSettingsDialog:
                   relief="flat", padx=12, pady=6).pack(side="right")
 
     def _overlay_preview(self) -> None:
-        """Open the live overlay preview / drag positioning window."""
         OverlayPreviewDialog(self.dialog, self.app, self._overlays, self._on_overlays_updated)
 
     def _on_overlays_updated(self, overlays: list) -> None:
         self._overlays = overlays
         self._refresh_overlay_list()
 
-    # ------------------------------------------------------------------ /overlays
 
     def _row(self, parent, label: str, widget) -> None:
         row = parent.grid_size()[1]
@@ -2192,7 +2145,6 @@ class AdvancedSettingsDialog:
         data = self._collect(); a = self.app
         for k, v in data.items():
             if k != "hrc_version": setattr(a, k, v)
-        # explicit sync of separate audio flag
         a.separate_audio_mp3 = data.get("separate_audio_mp3", False)
         if hasattr(a, '_apply_hotkeys'): a._apply_hotkeys()
         if hasattr(a, 'apply_theme'):
@@ -2313,7 +2265,7 @@ class SettingsDialog:
         lang_tab = ttk.Frame(notebook); notebook.add(lang_tab, text=a.lang["language"])
         lang_inner = tk.Frame(lang_tab, bg=c["bg"])
         lang_inner.pack(fill="both", expand=True, padx=15, pady=15)
-        tk.Label(lang_inner, text="Select language:" if a.current_language == "en" else "Select language:", bg=c["bg"], fg=c["text"], font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=10)
+        tk.Label(lang_inner, text="Select language:", bg=c["bg"], fg=c["text"], font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=10)
         self.lang_var = tk.StringVar(value=a.current_language)
         tk.Radiobutton(lang_inner, text="English", variable=self.lang_var, value="en", bg=c["bg"], fg=c["text"], selectcolor=c["surface"], font=("Segoe UI", 10)).pack(anchor="w", pady=2)
         tk.Radiobutton(lang_inner, text="Русский", variable=self.lang_var, value="ru", bg=c["bg"], fg=c["text"], selectcolor=c["surface"], font=("Segoe UI", 10)).pack(anchor="w", pady=2)
@@ -2594,7 +2546,7 @@ class HomRecScreen:
                 self.root.iconphoto(True, ImageTk.PhotoImage(icon_image))
             except: pass
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.6.5")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.7.0")
         self._rec_icon_img = None
         self._rec_frames = self._make_rec_frames()
         self._rec_frame_idx = 0
@@ -2615,10 +2567,6 @@ class HomRecScreen:
             src_w = getattr(self, 'original_width', 0) or 1
             src_h = getattr(self, 'original_height', 0) or 1
             src_ratio = src_w / src_h
-            # Fit the real source aspect ratio inside the (max_w, max_h) box
-            # instead of stretching to fill it exactly - fixes the preview
-            # looking squashed/stretched whenever the window shape doesn't
-            # match the monitor's actual aspect ratio.
             if max_w / max_h > src_ratio:
                 ph = max_h; pw = max(1, int(round(ph * src_ratio)))
             else:
@@ -2755,17 +2703,13 @@ class HomRecScreen:
         help_menu.add_separator()
         help_menu.add_command(label=self.lang["report_issue"], command=self._open_issues)
 
-        # Core Manager lives only in Settings menu
         settings_menu.add_separator()
         settings_menu.add_command(label="⚙ Core Manager…", command=self._open_core_manager)
 
     def _open_core_manager(self) -> None:
-        """Open the Core Manager window."""
         if CoreManagerWindow is None:
-            from tkinter import messagebox
             messagebox.showinfo("Core Manager",
                 "hr_core_manager.py not found. Place it in the same folder as homrec.py.")
-            return
             return
         CoreManagerWindow(self.root, self)
 
@@ -2899,9 +2843,6 @@ class HomRecScreen:
                 self.pause_btn.config(text=self.lang["resume"], bg=self.colors["success"])
 
     def _toggle_panel_visibility(self, attr_name: str, var: tk.BooleanVar) -> None:
-        """Used by View -> Show checkbuttons (Audio Mixer / Overlays) and by the
-        Overlays panel's own ✕ close button to show/hide a dock panel and
-        rebuild the layout to match."""
         setattr(self, attr_name, var.get())
         self.save_settings(silent=True)
         self.recreate_widgets()
@@ -3017,10 +2958,6 @@ class HomRecScreen:
             messagebox.showinfo(self.lang["info"], self.lang["settings_saved"])
 
     def save_settings_debounced(self, delay_ms: int = 400) -> None:
-        """Coalesce rapid-fire saves (e.g. dragging a volume/FPS slider fires
-        its command callback dozens of times per second) into a single
-        silent save shortly after the user stops moving the control, instead
-        of writing the full settings JSON to disk on every tick of the drag."""
         existing = getattr(self, '_pending_save_after_id', None)
         if existing is not None:
             try: self.root.after_cancel(existing)
@@ -3133,8 +3070,6 @@ class HomRecScreen:
             bottom_panel.pack(fill="x"); bottom_panel.pack_propagate(False)
 
             if show_audio and show_overlays:
-                # Both visible: a draggable/resizable split so the user can
-                # resize either panel by dragging the sash between them.
                 paned = ttk.PanedWindow(bottom_panel, orient="horizontal")
                 paned.pack(fill="both", expand=True)
                 audio_host = tk.Frame(paned, bg=self.colors["bg"])
@@ -3151,8 +3086,6 @@ class HomRecScreen:
                 self.audio_panel = AudioPanel(hidden_audio_host, self)
                 self.overlays_panel = OverlaysDockPanel(bottom_panel, self)
         else:
-            # Both hidden: still create an off-screen AudioPanel so the rest
-            # of the app (volume/mute lookups, settings save) keeps working.
             hidden_host = tk.Frame(right_panel, bg=self.colors["bg"])
             self.audio_panel = AudioPanel(hidden_host, self)
             self.overlays_panel = None
@@ -3390,7 +3323,6 @@ class HomRecScreen:
         threading.Thread(target=_probe, daemon=True).start()
 
     def _safe_pix_fmt(self) -> str:
-
         return 'yuv420p'
 
     def _build_codec_args(self) -> list:
@@ -3558,15 +3490,6 @@ class HomRecScreen:
         return frames
 
     def _composite_overlays_on_preview(self, img: "Image.Image", pw: int, ph: int) -> "Image.Image":
-        """Draw enabled overlays onto a preview thumbnail so the live Preview
-        pane actually shows what the recording will look like.
-
-        Mirrors the normalized x/y/w/h(/font_size/color/opacity) fields used
-        by _build_overlay_vf (text) and _build_filter_graph (image/webcam)
-        for the real FFmpeg recording, just scaled to the small preview size
-        instead of the full record resolution - so overlay positions in the
-        live preview match where they land in the actual output.
-        """
         overlays = getattr(self, 'overlays', [])
         if not overlays:
             return img
@@ -3582,9 +3505,6 @@ class HomRecScreen:
                         continue
                     x = int(ov.get('x', 0.05) * pw)
                     y = int(ov.get('y', 0.05) * ph)
-                    # font_size is specified against the full record resolution;
-                    # scale it down proportionally to the preview's size so text
-                    # isn't comically oversized in the small thumbnail.
                     rw = getattr(self, 'record_width', 0) or getattr(self, 'original_width', 0) or pw
                     fs_full = int(ov.get('font_size', 24))
                     fs = max(6, int(fs_full * (pw / max(1, rw))))
@@ -3640,10 +3560,6 @@ class HomRecScreen:
                     oh = max(1, int(ov.get('h', 0.25) * ph))
                     ox = int(ov.get('x', 0.05) * pw)
                     oy = int(ov.get('y', 0.05) * ph)
-                    # Opening a real camera device just to render a thumbnail
-                    # isn't worth the cost/latency; show a clearly-labeled
-                    # placeholder box in the correct position/size instead so
-                    # at least placement is visible in the live preview.
                     d = ImageDraw.Draw(img)
                     d.rectangle([ox, oy, ox + ow, oy + oh], outline=(137, 180, 250, 255), width=2,
                                 fill=(30, 30, 46, 160))
@@ -3691,10 +3607,6 @@ class HomRecScreen:
                         rec_img = self._composite_overlays_on_preview(rec_img, pw, ph)
                         self._preview_queue.put_nowait(rec_img)
                     except Exception: pass
-                    # Was 2.0s (one frame every 2 seconds -> visibly choppy/frame-by-frame
-                    # preview while recording). 0.15s (~6-7 fps) is still cheap on CPU -
-                    # it's a small downsized thumbnail, not the recording frame itself -
-                    # but smooth enough that moving windows don't look like a slideshow.
                     time.sleep(0.15); continue
 
                 screenshot = sct.grab(monitor); sw, sh = screenshot.size
@@ -3756,7 +3668,7 @@ class HomRecScreen:
                 try:
                     from PIL import ImageFont; font = ImageFont.truetype("segoeui.ttf", 16)
                 except: font = None
-                msg = "Preview disabled" if getattr(self, 'current_language', 'en') == "en" else "Preview disabled"
+                msg = "Preview disabled"
                 try:
                     bbox = draw.textbbox((0,0), msg, font=font); tw = bbox[2]-bbox[0]
                 except: tw = len(msg)*8
@@ -3768,10 +3680,6 @@ class HomRecScreen:
         except Exception: pass
 
     def _probe_ddagrab_support(self) -> bool:
-        """Check if this FFmpeg build supports the ddagrab lavfi source (DXGI Desktop Duplication).
-        ddagrab works with fullscreen D3D/Vulkan games that GDI cannot capture (single-frame bug).
-        Returns True if supported and we are on Windows.
-        """
         if platform.system() != "Windows":
             return False
         if not getattr(self, 'ffmpeg_path', None) or not os.path.exists(self.ffmpeg_path):
@@ -3790,7 +3698,6 @@ class HomRecScreen:
             return False
 
     def _refresh_overlay_badge(self) -> None:
-        """Update the small badge under the Overlays button showing active count."""
         if not hasattr(self, '_overlay_badge'):
             return
         enabled = [o for o in getattr(self, 'overlays', []) if o.get('enabled', True)]
@@ -3800,21 +3707,9 @@ class HomRecScreen:
             self._overlay_badge.config(text="none active")
 
     def _open_overlays_panel(self) -> None:
-        """Open the standalone Overlays Manager window."""
         OverlayManagerWindow(self.root, self)
 
     def _build_overlay_vf(self) -> str:
-        """Build FFmpeg -vf string for enabled text overlays.
-
-        IMPORTANT: this filter is appended AFTER the scale= filter in the
-        chain (see start_recording), so coordinates must be computed against
-        the final OUTPUT resolution (record_width/record_height), not the
-        original capture resolution. Using original_width/height here caused
-        overlays to land in the wrong position (or off-frame) whenever
-        recording quality/scale was below 100%.
-
-        Image and webcam overlays are composited at post-process time.
-        """
         filters = []
         w = self.record_width or self.original_width or 1920
         h = self.record_height or self.original_height or 1080
@@ -3831,7 +3726,6 @@ class HomRecScreen:
             fs   = int(ov.get('font_size', 24))
             col  = ov.get('color', '#ffffff').lstrip('#')
             opacity = ov.get('opacity', 1.0)
-            # Convert hex color to ffmpeg format (0xRRGGBB@alpha)
             alpha_hex = f"{int(opacity * 255):02x}"
             color_ff = f"0x{col}@0x{alpha_hex}"
             filters.append(
@@ -3841,14 +3735,9 @@ class HomRecScreen:
         return ','.join(filters)
 
     def _build_filter_graph(self, base_label_in: str = "0:v") -> tuple[list, str, str | None]:
-        """
-        Build the full filter graph for scale + all overlay kinds (text,
-        image, webcam) as a single -filter_complex, plus any extra -i input
-        args needed for image/webcam sources.
-        """
         extra_inputs: list = []
         graph_parts: list = []
-        next_input_idx = 1  # 0 is the screen capture
+        next_input_idx = 1
 
         needs_scale = (self.record_width != self.original_width or
                        self.record_height != self.original_height)
@@ -3857,7 +3746,6 @@ class HomRecScreen:
             graph_parts.append(f"[{cur_label}]scale={self.record_width}:{self.record_height}:flags=fast_bilinear[scaled]")
             cur_label = "scaled"
 
-        # Text overlays — drawtext chained directly (cheap, no extra input)
         text_vf = self._build_overlay_vf()
         if text_vf:
             graph_parts.append(f"[{cur_label}]{text_vf}[txt]")
@@ -3931,7 +3819,6 @@ class HomRecScreen:
         return extra_inputs, filter_complex, cur_label
 
     def _dshow_cam_name(self, cam_index: int) -> str:
-        """Resolve a DirectShow camera device name by index (Windows)."""
         try:
             cached = getattr(self, '_dshow_cam_names_cache', None)
             if cached is None:
@@ -3973,32 +3860,23 @@ class HomRecScreen:
             draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
 
             gdi_flags = ['-thread_queue_size','128','-probesize','32','-fflags','nobuffer','-rtbufsize','16M']
-            fmt = getattr(self, 'video_format', 'mp4')
             out_flags = ['-vsync','0','-flush_packets','1','-max_muxing_queue_size','1024']
             if fmt == 'mp4':
                 out_flags += ['-movflags', '+faststart']
             safe_pix_fmt = self._safe_pix_fmt()
 
-            # Build the full filter graph (scale + text/image/webcam overlays).
-            # This replaces all per-branch -vf handling below — every capture
-            # mode now routes through the same -filter_complex so overlays
-            # behave identically (and correctly) regardless of capture method.
             extra_inputs, filter_complex, out_pad = self._build_filter_graph()
             if out_pad:
                 graph_args = ['-filter_complex', filter_complex, '-map', f'[{out_pad}]']
             else:
                 graph_args = []
 
-            # Bug fix: GDI capture produces a single frozen frame with fullscreen D3D/Vulkan games.
-            # Use ddagrab (Desktop Duplication API / DXGI) when available — works with game overlays
-            # and exclusive-fullscreen. Falls back to gdigrab if ddagrab is not supported.
             use_ddagrab = getattr(self, 'use_ddagrab', None)
             if use_ddagrab is None:
                 use_ddagrab = self._probe_ddagrab_support()
                 self.use_ddagrab = use_ddagrab
 
             if use_ddagrab and self.capture_mode != "window":
-                # ddagrab captures the whole desktop via DXGI — works with fullscreen games
                 dda_flags = ['-thread_queue_size','128','-fflags','nobuffer']
                 mon_idx = max(0, getattr(self, 'monitor_id', 1) - 1)
                 dda_input = ['-f','lavfi','-i',f'ddagrab=output_idx={mon_idx}:framerate={fps}:draw_mouse={draw_mouse}']
@@ -4086,7 +3964,6 @@ class HomRecScreen:
             time.sleep(0.25)
 
             has_ffmpeg = self.check_ffmpeg(); audio_merged = False
-            # Convert and save separate MP3 if requested
             mp3_file = None
             if audio_file and os.path.exists(audio_file) and getattr(self, 'separate_audio_mp3', False) and has_ffmpeg:
                 mp3_path = os.path.splitext(saved_filename)[0] + '.mp3'
@@ -4353,13 +4230,9 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = HomRecScreen(root)
 
-    # -- HomRec Plugin Engine --------------------------------------------------
     try:
         from hr_plugin_engine import init_plugin_engine
         app.plugin_engine = init_plugin_engine(app)
     except Exception as _pe:
-        import logging as _lg
-        _lg.getLogger("homrec").warning(f"Plugin engine failed to load: {_pe}")
-    # -------------------------------------------------------------------------
-
+        log.warning(f"Plugin engine failed to load: {_pe}")
     root.mainloop()
