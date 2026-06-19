@@ -19,6 +19,7 @@ except ImportError:
 import ctypes
 import sys
 import subprocess
+import glob
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 try:
@@ -1189,9 +1190,10 @@ class OverlayManagerWindow:
 
         win = tk.Toplevel(parent)
         win.title("Overlays")
-        win.geometry("820x560")
+        win.geometry("820x620")
         win.configure(bg=self.c["bg"])
         win.resizable(True, True)
+        win.minsize(640, 480)
         self.win = win
 
         hdr = tk.Frame(win, bg=self.c["surface"], pady=0)
@@ -1204,6 +1206,18 @@ class OverlayManagerWindow:
         tk.Button(hdr, text="＋  Add Overlay", command=self._add_overlay,
                   bg=self.c["success"], fg=self.c["bg"],
                   font=("Segoe UI", 9, "bold"), relief="flat", padx=12, pady=6).pack(side="right", padx=(0,4), pady=8)
+
+        ftr = tk.Frame(win, bg=self.c["bg"])
+        ftr.pack(side="bottom", fill="x", padx=12, pady=8)
+        tk.Button(ftr, text="Save & Apply", command=self._save_apply,
+                  bg=self.c["accent"], fg=self.c["bg"],
+                  font=("Segoe UI", 10, "bold"), relief="flat", padx=16, pady=6).pack(side="right")
+        tk.Button(ftr, text="Cancel", command=win.destroy,
+                  bg=self.c["surface"], fg=self.c["text"],
+                  font=("Segoe UI", 10), relief="flat", padx=12, pady=6).pack(side="right", padx=(0,6))
+        self._status_lbl = tk.Label(ftr, text="", bg=self.c["bg"],
+                                     fg=self.c["text_secondary"], font=("Segoe UI", 9))
+        self._status_lbl.pack(side="left")
 
         body = tk.Frame(win, bg=self.c["bg"])
         body.pack(fill="both", expand=True, padx=12, pady=(8, 0))
@@ -1224,20 +1238,25 @@ class OverlayManagerWindow:
         self._list_inner.bind("<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        self._editor_frame = tk.Frame(body, bg=self.c["bg"])
-        self._editor_frame.pack(side="left", fill="both", expand=True)
-
-        ftr = tk.Frame(win, bg=self.c["bg"])
-        ftr.pack(fill="x", padx=12, pady=8)
-        tk.Button(ftr, text="Save & Apply", command=self._save_apply,
-                  bg=self.c["accent"], fg=self.c["bg"],
-                  font=("Segoe UI", 10, "bold"), relief="flat", padx=16, pady=6).pack(side="right")
-        tk.Button(ftr, text="Cancel", command=win.destroy,
-                  bg=self.c["surface"], fg=self.c["text"],
-                  font=("Segoe UI", 10), relief="flat", padx=12, pady=6).pack(side="right", padx=(0,6))
-        self._status_lbl = tk.Label(ftr, text="", bg=self.c["bg"],
-                                     fg=self.c["text_secondary"], font=("Segoe UI", 9))
-        self._status_lbl.pack(side="left")
+        # Editor area is scrollable so tall per-type forms never push the footer
+        # off-screen or get clipped by a short window.
+        editor_outer = tk.Frame(body, bg=self.c["bg"])
+        editor_outer.pack(side="left", fill="both", expand=True)
+        editor_canvas = tk.Canvas(editor_outer, bg=self.c["bg"], highlightthickness=0)
+        editor_scroll = ttk.Scrollbar(editor_outer, orient="vertical", command=editor_canvas.yview)
+        editor_canvas.configure(yscrollcommand=editor_scroll.set)
+        editor_scroll.pack(side="right", fill="y")
+        editor_canvas.pack(side="left", fill="both", expand=True)
+        self._editor_frame = tk.Frame(editor_canvas, bg=self.c["bg"])
+        self._editor_canvas_window = editor_canvas.create_window((0, 0), window=self._editor_frame, anchor="nw")
+        self._editor_frame.bind("<Configure>",
+            lambda e: editor_canvas.configure(scrollregion=editor_canvas.bbox("all")))
+        editor_canvas.bind("<Configure>",
+            lambda e: editor_canvas.itemconfigure(self._editor_canvas_window, width=e.width))
+        def _on_editor_wheel(event):
+            editor_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        editor_canvas.bind("<Enter>", lambda e: editor_canvas.bind_all("<MouseWheel>", _on_editor_wheel))
+        editor_canvas.bind("<Leave>", lambda e: editor_canvas.unbind_all("<MouseWheel>"))
 
         self._sel_idx: int | None = None
         self._editor_widgets: dict = {}
@@ -1286,9 +1305,43 @@ class OverlayManagerWindow:
         self._set_status(f"Overlay deleted.")
 
     def _add_overlay(self) -> None:
-        new_ov = {"kind":"text","text":"New Text","font_size":28,"color":"#ffffff",
-                  "opacity":1.0,"x":0.05,"y":0.05,"w":0.25,"h":0.08,
-                  "path":"","cam_index":0,"enabled":True}
+        self._pick_overlay_kind(self._add_overlay_of_kind)
+
+    def _pick_overlay_kind(self, on_chosen) -> None:
+        """Small popup asking which overlay type to create. Calls on_chosen(kind)."""
+        c = self.c
+        dlg = tk.Toplevel(self.win)
+        dlg.title("Add Overlay")
+        dlg.configure(bg=c["bg"])
+        dlg.resizable(False, False)
+        dlg.transient(self.win)
+        dlg.grab_set()
+        tk.Label(dlg, text="What kind of overlay?", bg=c["bg"], fg=c["accent"],
+                 font=("Segoe UI", 11, "bold")).pack(padx=20, pady=(18, 12))
+        btn_row = tk.Frame(dlg, bg=c["bg"])
+        btn_row.pack(padx=20, pady=(0, 18))
+        def _choose(kind):
+            dlg.destroy()
+            on_chosen(kind)
+        for kind, label in [("text", "📝  Text"), ("webcam", "📷  Webcam"), ("image", "🖼  Image")]:
+            tk.Button(btn_row, text=label, command=lambda k=kind: _choose(k),
+                      bg=c.get("surface_light", "#45475a"), fg=c["text"],
+                      font=("Segoe UI", 10), relief="flat", padx=16, pady=10, width=10
+                      ).pack(side="left", padx=6)
+        dlg.update_idletasks()
+        x = self.win.winfo_rootx() + (self.win.winfo_width() - dlg.winfo_width()) // 2
+        y = self.win.winfo_rooty() + (self.win.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{max(0,x)}+{max(0,y)}")
+
+    def _add_overlay_of_kind(self, kind: str) -> None:
+        defaults_by_kind = {
+            "text":   {"text": "New Text", "font_size": 28, "color": "#ffffff"},
+            "webcam": {"cam_index": 0},
+            "image":  {"path": ""},
+        }
+        new_ov = {"kind": kind, "opacity": 1.0, "x": 0.05, "y": 0.05, "w": 0.25, "h": 0.08,
+                   "enabled": True}
+        new_ov.update(defaults_by_kind.get(kind, {}))
         self._overlays.append(new_ov)
         self._sel_idx = len(self._overlays) - 1
         self._refresh_list()
@@ -1400,15 +1453,23 @@ class OverlayManagerWindow:
             _next()
 
         elif kind == "webcam":
-            _lbl("Camera index:")
+            _lbl("Webcam:")
+            cam_names = self.app.list_webcams()
+            cur_idx = ov.get("cam_index", 0)
+            cur_name = cam_names[cur_idx] if 0 <= cur_idx < len(cam_names) else (cam_names[0] if cam_names else "Integrated Webcam")
+            cam_name_var = tk.StringVar(value=cur_name)
             cam_row = tk.Frame(ef, bg=c["bg"])
-            cam_row.grid(row=row[0], column=1, sticky="w", pady=4)
-            tk.Spinbox(cam_row, textvariable=w["cam_index"],
-                       from_=0, to=9, width=4,
-                       bg=c["surface"], fg=c["text"], relief="flat").pack(side="left")
-            tk.Label(cam_row, text="  (0 = default camera)",
-                     bg=c["bg"], fg=c["text_secondary"],
-                     font=("Segoe UI", 8)).pack(side="left")
+            cam_row.grid(row=row[0], column=1, columnspan=3, sticky="ew", pady=4)
+            cam_combo = ttk.Combobox(cam_row, textvariable=cam_name_var, values=cam_names,
+                                      width=24, state="readonly")
+            cam_combo.pack(side="left")
+            tk.Button(cam_row, text="⟳", command=lambda: (
+                        setattr(self.app, '_dshow_cam_names_cache', None),
+                        cam_combo.configure(values=self.app.list_webcams())
+                      ), bg=c["surface"], fg=c["accent"], font=("Segoe UI", 9),
+                      relief="flat", padx=6).pack(side="left", padx=4)
+            w["_cam_names"] = cam_names
+            w["cam_index"] = cam_name_var  # overridden: holds the selected name, resolved to index on apply
             _next()
 
         # Opacity (always shown)
@@ -1467,7 +1528,12 @@ class OverlayManagerWindow:
         ov["font_size"] = w["font_size"].get()
         ov["color"]     = w["color"].get()
         ov["path"]      = w["path"].get()
-        ov["cam_index"] = w["cam_index"].get()
+        if "_cam_names" in w:
+            cam_names = w["_cam_names"]
+            chosen_name = w["cam_index"].get()
+            ov["cam_index"] = cam_names.index(chosen_name) if chosen_name in cam_names else 0
+        else:
+            ov["cam_index"] = w["cam_index"].get()
         ov["opacity"]   = round(w["opacity"].get(), 2)
         ov["x"] = round(w["x"].get(), 3)
         ov["y"] = round(w["y"].get(), 3)
@@ -1780,8 +1846,9 @@ class AdvancedSettingsDialog:
         self._row(vt, "CRF (quality)", tk.Scale(vt, variable=self._crfv, from_=0, to=51, orient="horizontal", length=180, bg=c["bg"], fg=c["text"], highlightthickness=0, troughcolor=c["surface"]))
         self._pixv = tk.StringVar(value="yuv420p")
         self._row(vt, "Pixel format", ttk.Combobox(vt, textvariable=self._pixv, values=["yuv420p"], width=12, state="disabled"))
+        _row_note = vt.grid_size()[1]
         tk.Label(vt, text="Locked to yuv420p for player compatibility (yuv444p/rgb24 broke playback)",
-                 bg=c["bg"], fg=c.get("text_secondary", "#888"), font=("Segoe UI", 8)).pack(anchor="w", padx=4)
+                 bg=c["bg"], fg=c.get("text_secondary", "#888"), font=("Segoe UI", 8)).grid(row=_row_note, column=0, columnspan=3, sticky="w", padx=(20, 4), pady=(0, 6))
 
         at = tk.Frame(notebook, bg=c["bg"]); notebook.add(at, text="Audio")
         self._srv = tk.StringVar(value=str(getattr(a, "audio_sample_rate", 44100)))
@@ -3817,6 +3884,31 @@ class HomRecScreen:
 
         filter_complex = ';'.join(graph_parts)
         return extra_inputs, filter_complex, cur_label
+
+    def list_webcams(self) -> list[str]:
+        """Return a list of available webcam display names (Windows: DirectShow video devices)."""
+        try:
+            if platform.system() == 'Windows':
+                cached = getattr(self, '_dshow_cam_names_cache', None)
+                if cached is None:
+                    result = subprocess.run(
+                        [self.ffmpeg_path, '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
+                        capture_output=True, text=True, timeout=8,
+                        creationflags=subprocess.CREATE_NO_WINDOW)
+                    names = []
+                    for line in result.stderr.splitlines():
+                        if '(video)' in line and '"' in line:
+                            names.append(line.split('"')[1])
+                    self._dshow_cam_names_cache = names
+                    cached = names
+                return cached or ["Integrated Webcam"]
+            else:
+                # On Linux, enumerate /dev/video* nodes as a fallback.
+                found = sorted(glob.glob('/dev/video*'))
+                return found or ["/dev/video0"]
+        except Exception as e:
+            log.debug(f"webcam list probe failed: {e}")
+            return ["Integrated Webcam"]
 
     def _dshow_cam_name(self, cam_index: int) -> str:
         try:
