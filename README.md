@@ -29,6 +29,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
 | **Custom output folder** | Choose where recordings are saved |
 | **Recording stats** | Live FPS, duration, frame count in status bar |
+| **Console window** | A console window that allows you to access the most unusual settings. |
 | **Always on top** | Keep the window above everything else |
 | **System tray** | Minimise to tray, control recording from tray menu |
 | **Auto update check** | Notifies you when a new version is out |
