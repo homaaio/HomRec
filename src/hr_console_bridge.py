@@ -432,7 +432,27 @@ class NativeConsole:
         self.app = app
         self._lib = None  # BUG FIX: initialize before _load()
 
+        # --- security fuses (see $secui / $secp / $sec) -------------------
+        # All default to True ("protected"). They are intentionally
+        # runtime-only: every fresh launch starts protected again, so a
+        # one-off `$sec 0` in a previous session can never leave the app
+        # permanently unprotected.
+        self._sec_ui = True      # gates $rm --ui (incl. @ts)
+        self._sec_plugin = True  # gates plugin min-version checks + RAM watchdog
+        self._sec_core = True    # master fuse: gates $rm --system@.., $fs@.., $rm @homrec
+                                  # and, while OFF, also force-unlocks _sec_ui/_sec_plugin
+
         base = _get_base_dir()
+        self._console_disabled_marker = Path(base) / "create" / "console.disabled"
+        if self._console_disabled_marker.exists():
+            log.warning(
+                "NativeConsole: disabled via marker %s (set by `$rm --ui @ts`) — "
+                "skipping console init. Delete the marker file to restore it.",
+                self._console_disabled_marker,
+            )
+            self._disabled = True
+            return
+        self._disabled = False
         self._win_reg  = WindowRegistry(base)
         self._rule_reg = RuleRegistry(base)
         self._ae_reg   = AERegistry(base)
@@ -786,6 +806,18 @@ class NativeConsole:
             self._cmd_homrec(raw); return
         if cmd == "!log":
             self._cmd_log(raw); return
+        if cmd == "!hide":
+            self._cmd_hide(raw); return
+        if cmd == "$secui":
+            self._cmd_secui(raw); return
+        if cmd == "$secp":
+            self._cmd_secp(raw); return
+        if cmd == "$sec":
+            self._cmd_sec(raw); return
+        if cmd == "$do":
+            self._cmd_do(raw); return
+        if cmd.startswith("$fs@"):
+            self._cmd_fs(cmd, raw); return
 
         log.warning("_dispatch_extended: unknown command '%s'", cmd)
 
@@ -949,6 +981,10 @@ class NativeConsole:
                 self._toggle_desktop_shortcut(enable)
                 if not silent:
                     log.info("!edit --settings shortcut → %s", "on" if enable else "off")
+            elif name == "ldm":
+                self._set_low_detail_mode(enable)
+                if not silent:
+                    log.info("!edit --settings ldm → %s", "on" if enable else "off")
             else:
                 log.warning("!edit --settings: unknown parameter '%s'", name)
             return
@@ -958,6 +994,49 @@ class NativeConsole:
             return
 
         log.warning("!edit: use --file / --window / --rule / --settings / --terminal")
+
+    def _set_low_detail_mode(self, enable: bool) -> None:
+        """
+        Cuts everything that costs CPU/GPU for cosmetics: live preview,
+        the audio VU meter animation and the recording-start flash.
+        Reuses existing app hooks rather than re-implementing them.
+        """
+        app = self.app
+        if not self._root_alive():
+            return
+        app._low_detail_mode = enable
+
+        try:
+            app.disable_preview = enable
+            if hasattr(app, "_show_preview_placeholder") and enable:
+                app.root.after(0, app._show_preview_placeholder)
+        except Exception as e:
+            log.debug("ldm: preview toggle failed: %s", e)
+
+        try:
+            if hasattr(app, "audio_panel") and hasattr(app.audio_panel, "_meter_enabled_var"):
+                app.audio_panel._meter_enabled_var.set(not enable)
+                if hasattr(app.audio_panel, "_on_meter_toggle"):
+                    app.audio_panel._on_meter_toggle()
+        except Exception as e:
+            log.debug("ldm: VU meter toggle failed: %s", e)
+
+        try:
+            if enable:
+                app.notify_flash = False
+        except Exception as e:
+            log.debug("ldm: flash toggle failed: %s", e)
+
+        try:
+            if hasattr(app, "save_settings"):
+                app.save_settings(silent=True)
+        except TypeError:
+            try:
+                app.save_settings()
+            except Exception:
+                pass
+        except Exception as e:
+            log.debug("ldm: save_settings failed: %s", e)
 
     # --- !create --------------------------------------------------------------
 
@@ -2164,7 +2243,22 @@ class NativeConsole:
         $rm --rule   #name="x"     [-q][--if-disconnected]
         $rm --ae     #name="x"     [-q]
         $rm --all --window|--rule|--ae  [-y]
+
+        $rm --system@homrec.files #permission=core #type={recordings,plugins,logs,cache}
+        $rm --ui #type=button{many} #name=@all{exception(a, b, c)}
+        $rm --ui @ts                (removes the console itself)
+        $rm @homrec                 (uninstalls HomRec after the process exits)
+        Note: the last three never take -q/-y — they run unprompted as soon as
+        the relevant $sec*/$secui fuse is off; there is no confirmation dialog
+        for them by design (see $secui / $secp / $sec).
         """
+        if "--system@homrec.files" in raw:
+            self._cmd_rm_system_files(raw); return
+        if "--ui" in raw:
+            self._cmd_rm_ui(raw); return
+        if re.search(r'(?:^|\s)@homrec(?:\s|$)', raw):
+            self._cmd_rm_self_app(raw); return
+
         flags  = _parse_flags(raw)
         quiet  = "-q" in flags or "-y" in flags
         purge  = "--purge" in raw
@@ -2266,6 +2360,412 @@ class NativeConsole:
             return
 
         log.warning("$rm: use --window / --rule / --ae")
+
+    # --- security fuses: $secui / $secp / $sec ---------------------------------
+
+    def _ui_unlocked(self) -> bool:
+        """True once $rm --ui style operations are allowed to run."""
+        return (not self._sec_core) or (not self._sec_ui)
+
+    def _core_unlocked(self) -> bool:
+        """True once factory-reset / self-delete style operations are allowed."""
+        return not self._sec_core
+
+    def _cmd_secui(self, raw: str) -> None:
+        """$secui 0|1 — UI-removal protection ($rm --ui, incl. @ts)."""
+        tokens = raw.split()
+        if len(tokens) < 2:
+            log.info("$secui: %s", "1 (protected)" if self._sec_ui else "0 (UI protection disabled)")
+            return
+        self._sec_ui = tokens[1] not in ("0", "off", "false")
+        log.warning("$secui %s: UI protection %s", tokens[1],
+                    "ENABLED" if self._sec_ui else "DISABLED — $rm --ui is now unlocked")
+
+    def _cmd_secp(self, raw: str) -> None:
+        """$secp 0|1 — plugin min-core-version check + RAM watchdog enforcement."""
+        tokens = raw.split()
+        if len(tokens) < 2:
+            log.info("$secp: %s", "1 (protected)" if self._sec_plugin else "0 (plugin checks disabled)")
+            return
+        self._sec_plugin = tokens[1] not in ("0", "off", "false")
+        log.warning("$secp %s: plugin version-check / RAM watchdog %s", tokens[1],
+                    "ENABLED" if self._sec_plugin else "DISABLED — incompatible plugins load, runaway RAM use is ignored")
+
+    def _cmd_sec(self, raw: str) -> None:
+        """$sec 0|1 — master fuse; while OFF it force-overrides $secui and $secp too."""
+        tokens = raw.split()
+        if len(tokens) < 2:
+            log.info("$sec: %s", "1 (protected)" if self._sec_core else "0 (ALL protections disabled)")
+            return
+        self._sec_core = tokens[1] not in ("0", "off", "false")
+        log.warning("$sec %s: MASTER fuse %s — required for $rm --system@.., $fs@.., $rm @homrec",
+                    tokens[1], "ENABLED" if self._sec_core else "DISABLED (everything unlocked)")
+
+    # --- !hide ------------------------------------------------------------------
+
+    def _cmd_hide(self, raw: str) -> None:
+        """
+        !hide #name="x" 1|0 — non-destructive show/hide via the geometry
+        manager (pack/grid/place). Unlike $rm --ui this can always be undone.
+        """
+        name = _parse_named(raw, "name")
+        tokens = raw.split()
+        vals = [t for t in tokens if t in ("0", "1")]
+        if not name or not vals:
+            log.warning('!hide: syntax: !hide #name="x" 1|0'); return
+        hide = vals[-1] == "1"
+
+        registry = getattr(self.app, "ui_registry", {}) or {}
+        widget = registry.get(name)
+        if widget is None:
+            log.warning("!hide: unknown UI element '%s' (not in ui_registry)", name); return
+
+        cache = getattr(self.app, "_hide_geo_cache", None)
+        if cache is None:
+            cache = {}
+            self.app._hide_geo_cache = cache
+
+        try:
+            if hide:
+                mgr = widget.winfo_manager()
+                if mgr == "pack":
+                    cache[name] = ("pack", widget.pack_info())
+                    widget.pack_forget()
+                elif mgr == "grid":
+                    cache[name] = ("grid", widget.grid_info())
+                    widget.grid_remove()
+                elif mgr == "place":
+                    cache[name] = ("place", widget.place_info())
+                    widget.place_forget()
+                else:
+                    log.warning("!hide: '%s' has no geometry manager attached", name); return
+                log.info("!hide '%s' 1: hidden", name)
+            else:
+                info = cache.get(name)
+                if not info:
+                    log.info("!hide '%s' 0: nothing to restore (wasn't hidden via !hide)", name); return
+                mgr, kw = info
+                if mgr == "pack": widget.pack(**kw)
+                elif mgr == "grid": widget.grid(**kw)
+                elif mgr == "place": widget.place(**kw)
+                log.info("!hide '%s' 0: shown", name)
+        except Exception as e:
+            log.warning("!hide '%s': failed — %s", name, e)
+
+    # --- $rm --ui ---------------------------------------------------------------
+
+    def _cmd_rm_ui(self, raw: str) -> None:
+        """
+        $rm --ui #type=button{many} #name=--all{exception(a, b, c)}
+            (note: @all is rewritten to --all earlier in dispatch)
+            → destroys every widget except the named exceptions.
+        $rm --ui #name=--all
+            → destroys the entire interface; root becomes a bare window.
+        $rm --ui @ts
+            → removes the console itself (this overlay), permanently
+              (persists across restarts until the marker file is deleted).
+        Always gated by $secui (or the $sec master fuse).
+        """
+        if "@ts" in raw:
+            self._cmd_rm_ui_self(); return
+
+        if not self._ui_unlocked():
+            log.warning("$rm --ui: blocked — UI protection is ON. Run `$secui 0` first.")
+            return
+        if not self._root_alive():
+            log.warning("$rm --ui: root window not available"); return
+
+        m = re.search(r'#name=(--all(?:\{[^}]*\})?)', raw)
+        name_field = m.group(1) if m else None
+        if not name_field or not name_field.startswith("--all"):
+            log.warning('$rm --ui: only #name=@all{...} is currently supported'); return
+
+        exc_m = re.search(r'--all\{exception\(([^)]*)\)\}', name_field)
+        exceptions = [e.strip() for e in exc_m.group(1).split(",") if e.strip()] if exc_m else []
+
+        registry = getattr(self.app, "ui_registry", {}) or {}
+        keep_widgets = set()
+        for ex in exceptions:
+            w = registry.get(ex)
+            if w is not None:
+                keep_widgets.add(w)
+            else:
+                log.warning("$rm --ui: exception '%s' not found in ui_registry — ignored", ex)
+
+        removed = self._destroy_ui_except(keep_widgets)
+        if "menu" not in exceptions and "settings_window" not in exceptions:
+            try:
+                self.app.root.config(menu="")
+            except Exception:
+                pass
+
+        log.warning("$rm --ui: interface wiped (%d widgets removed). Kept: %s",
+                    removed, ", ".join(exceptions) if exceptions else "(nothing)")
+
+    def _destroy_ui_except(self, keep_widgets: set) -> int:
+        """Walk root's widget tree, destroying everything that is not an
+        ancestor of (or equal to) a widget in keep_widgets."""
+        keep_paths = set()
+        for w in keep_widgets:
+            node = w
+            while node is not None:
+                try:
+                    keep_paths.add(str(node))
+                    node = node.master
+                except Exception:
+                    break
+
+        removed = [0]
+
+        def _walk(widget):
+            for child in list(widget.winfo_children()):
+                try:
+                    path = str(child)
+                except Exception:
+                    continue
+                if path in keep_paths:
+                    _walk(child)
+                else:
+                    try:
+                        child.destroy()
+                        removed[0] += 1
+                    except Exception:
+                        pass
+
+        _walk(self.app.root)
+        return removed[0]
+
+    def _cmd_rm_ui_self(self) -> None:
+        """$rm --ui @ts — removes the console (this overlay) itself."""
+        if not self._ui_unlocked():
+            log.warning("$rm --ui @ts: blocked — UI protection is ON. Run `$secui 0` first.")
+            return
+
+        log.warning("$rm --ui @ts: removing the console. The process keeps running in the background "
+                    "(capture/recording logic is untouched), but there is no longer any way to reach it.")
+
+        if self._root_alive():
+            try:
+                self.app.root.unbind("<Control-Shift-T>")
+                self.app.root.unbind("<Control-Shift-t>")
+            except Exception:
+                pass
+
+        try:
+            if self._lib and hasattr(self._lib, "hr_con_shutdown"):
+                self._lib.hr_con_shutdown()
+        except Exception as e:
+            log.debug("$rm --ui @ts: hr_con_shutdown() unavailable/failed: %s", e)
+
+        try:
+            self._console_disabled_marker.parent.mkdir(parents=True, exist_ok=True)
+            self._console_disabled_marker.write_text(
+                "removed via `$rm --ui @ts` — delete this file to restore the console",
+                encoding="utf-8",
+            )
+        except Exception as e:
+            log.error("$rm --ui @ts: failed to persist disabled marker: %s", e)
+
+        self._lib = None
+
+    # --- $rm --system@homrec.files ----------------------------------------------
+
+    def _cmd_rm_system_files(self, raw: str) -> None:
+        """$rm --system@homrec.files #permission=core #type={recordings,plugins,logs,cache}"""
+        perm = _parse_named(raw, "permission")
+        if perm != "core":
+            log.warning("$rm --system@homrec.files: requires #permission=core"); return
+        if not self._core_unlocked():
+            log.warning("$rm --system@homrec.files: blocked — core protection is ON. Run `$sec 0` first.")
+            return
+
+        type_m = re.search(r'#type=\{([^}]*)\}', raw)
+        types = [t.strip() for t in type_m.group(1).split(",") if t.strip()] if type_m else []
+        if not types:
+            log.warning("$rm --system@homrec.files: #type={...} not specified"); return
+
+        import tempfile
+        base = _get_base_dir()
+        cleared = []
+        for t in types:
+            try:
+                if t == "recordings":
+                    p = os.path.join(base, "recordings")
+                    if os.path.isdir(p): shutil.rmtree(p); cleared.append(t)
+                elif t == "plugins":
+                    p = os.path.join(base, "plugins")
+                    if os.path.isdir(p): shutil.rmtree(p); cleared.append(t)
+                elif t == "logs":
+                    p = os.path.join(base, "homrec.log")
+                    if os.path.exists(p): os.remove(p); cleared.append(t)
+                elif t == "cache":
+                    for cp in (os.path.join(base, "create"), os.path.join(tempfile.gettempdir(), "homrec_plugins")):
+                        if os.path.isdir(cp): shutil.rmtree(cp)
+                        elif os.path.exists(cp): os.remove(cp)
+                    cleared.append(t)
+                else:
+                    log.warning("$rm --system@homrec.files: unknown #type entry '%s'", t)
+            except Exception as e:
+                log.warning("$rm --system@homrec.files: failed to clear '%s': %s", t, e)
+
+        log.warning("$rm --system@homrec.files: done. Cleared: %s", ", ".join(cleared) or "(nothing found)")
+
+    # --- $rm @homrec --------------------------------------------------------------
+
+    def _cmd_rm_self_app(self, raw: str) -> None:
+        """$rm @homrec — uninstalls HomRec from disk once the process exits."""
+        if not self._core_unlocked():
+            log.warning("$rm @homrec: blocked — core protection is ON. Run `$sec 0` first.")
+            return
+
+        log.warning("$rm @homrec: HomRec will delete itself once this process exits.")
+        base = _get_base_dir()
+        self._schedule_self_delete(base)
+
+        if self._root_alive():
+            self.app.root.after(300, self.app.quit_app)
+
+    def _schedule_self_delete(self, base: str) -> None:
+        import tempfile
+        try:
+            if platform.system() == "Windows":
+                bat_path = os.path.join(tempfile.gettempdir(), "homrec_uninstall.bat")
+                script = (
+                    "@echo off\r\n"
+                    ":wait_loop\r\n"
+                    "tasklist | findstr /i \"HomRec\" >nul 2>&1\r\n"
+                    "if not errorlevel 1 (\r\n"
+                    "  timeout /t 1 /nobreak >nul\r\n"
+                    "  goto wait_loop\r\n"
+                    ")\r\n"
+                    f'rmdir /s /q "{base}"\r\n'
+                    "(goto) 2>nul & del \"%~f0\"\r\n"
+                )
+                with open(bat_path, "w", encoding="utf-8") as f:
+                    f.write(script)
+                subprocess.Popen(
+                    ["cmd", "/c", "start", "", "/min", bat_path],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0),
+                )
+                log.info("$rm @homrec: uninstall script scheduled at %s "
+                         "(NB: the tasklist check matches the process name 'HomRec' — "
+                         "in dev/python.exe runs it won't detect exit correctly).", bat_path)
+            else:
+                sh_path = os.path.join(tempfile.gettempdir(), "homrec_uninstall.sh")
+                script = (
+                    "#!/bin/sh\n"
+                    'while pgrep -f HomRec >/dev/null 2>&1; do sleep 1; done\n'
+                    f'rm -rf "{base}"\n'
+                    'rm -- "$0"\n'
+                )
+                with open(sh_path, "w", encoding="utf-8") as f:
+                    f.write(script)
+                os.chmod(sh_path, 0o755)
+                subprocess.Popen(["/bin/sh", sh_path],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)
+                log.info("$rm @homrec: uninstall script scheduled at %s", sh_path)
+        except Exception as e:
+            log.error("$rm @homrec: failed to schedule self-delete: %s", e)
+
+    # --- $fs@homrec / $fs@plugins / $fs@settings ---------------------------------
+
+    def _cmd_fs(self, cmd: str, raw: str) -> None:
+        """$fs@homrec | $fs@plugins | $fs@settings — factory reset, gated by $sec."""
+        target = cmd[len("$fs@"):]
+        if not self._core_unlocked():
+            log.warning("%s: blocked — core protection is ON. Run `$sec 0` first.", cmd)
+            return
+
+        base = _get_base_dir()
+        if target == "homrec":
+            self._factory_reset_homrec(base)
+        elif target == "plugins":
+            self._factory_reset_plugins(base)
+        elif target == "settings":
+            self._factory_reset_settings(base)
+        else:
+            log.warning("%s: unknown factory-reset target '%s'", cmd, target)
+
+    def _factory_reset_homrec(self, base: str) -> None:
+        removed = []
+        for sub in ("recordings", "plugins", "create"):
+            p = os.path.join(base, sub)
+            if os.path.isdir(p):
+                try:
+                    shutil.rmtree(p); removed.append(sub)
+                except Exception as e:
+                    log.warning("$fs@homrec: failed to remove %s: %s", sub, e)
+        for f in ("homrec.log", "homrec_settings.json"):
+            p = os.path.join(base, f)
+            if os.path.exists(p):
+                try:
+                    os.remove(p); removed.append(f)
+                except Exception as e:
+                    log.warning("$fs@homrec: failed to remove %s: %s", f, e)
+        log.warning("$fs@homrec: factory reset complete. Removed: %s. Restart HomRec to reinitialize defaults.",
+                    ", ".join(removed) or "(nothing found)")
+
+    def _factory_reset_plugins(self, base: str) -> None:
+        p = os.path.join(base, "plugins")
+        if os.path.isdir(p):
+            try:
+                shutil.rmtree(p)
+                os.makedirs(p, exist_ok=True)
+                log.warning("$fs@plugins: all plugins removed.")
+            except Exception as e:
+                log.warning("$fs@plugins: failed: %s", e)
+        else:
+            log.info("$fs@plugins: no plugins folder found.")
+
+    def _factory_reset_settings(self, base: str) -> None:
+        p = os.path.join(base, "homrec_settings.json")
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+                log.warning("$fs@settings: settings reset to factory defaults (restart to apply).")
+            except Exception as e:
+                log.warning("$fs@settings: failed: %s", e)
+        else:
+            log.info("$fs@settings: no settings file found (already factory).")
+
+    # --- $do --ui@homrec ----------------------------------------------------------
+
+    def _cmd_do(self, raw: str) -> None:
+        """$do --ui@homrec 1 — re-downloads src/homrec.py from GitHub and reinstalls it.
+        Restorative, not destructive — not gated by $sec."""
+        if "--ui@homrec" not in raw:
+            log.warning("$do: only --ui@homrec is currently supported"); return
+        tokens = raw.split()
+        vals = [t for t in tokens if t in ("0", "1")]
+        if not vals or vals[-1] != "1":
+            log.info("$do --ui@homrec: nothing to do (expects a trailing `1`)"); return
+
+        log.warning("$do --ui@homrec 1: downloading latest UI from GitHub…")
+
+        def _fetch():
+            import urllib.request
+            url = "https://raw.githubusercontent.com/homaaio/HomREC/main/src/homrec.py"
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "HomRec"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = resp.read()
+                base = _get_base_dir()
+                target = os.path.join(base, "homrec.py")
+                backup = target + ".bak"
+                try:
+                    if os.path.exists(target):
+                        shutil.copy2(target, backup)
+                except Exception as e:
+                    log.warning("$do --ui@homrec: backup failed: %s", e)
+                with open(target, "wb") as f:
+                    f.write(data)
+                log.warning("$do --ui@homrec 1: UI reinstalled (%d bytes, backup at %s). Restart HomRec to apply.",
+                            len(data), backup)
+            except Exception as e:
+                log.error("$do --ui@homrec 1: download failed: %s", e)
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     # --- !connect -------------------------------------------------------------
 
