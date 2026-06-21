@@ -1,25 +1,3 @@
-"""
-hr_core_manager.py — HomRec Core Manager
-Allows downloading, installing and switching between Core versions.
-
-Core version = a set of behaviour-modifying DLL files (hr_console.dll, homrec_core.dll, etc.)
-that change HomRec's internal logic while the base app (Python layer, UI) stays on the
-current release version. This means bug fixes from the current release are always present;
-only the configurable behaviour modules are swapped.
-
-GitHub layout expected at homaaaio/homrec releases:
-  Attach assets named:   core-<version>.zip
-  Each zip contains:     core_manifest.json  +  *.dll files
-  core_manifest.json:
-  {
-    "version": "1.4.4",
-    "description": "Stable legacy core — original behaviour",
-    "compatible_with": ">=1.6.0",
-    "files": ["hr_console.dll", "homrec_core.dll"],
-    "changelog": "..."
-  }
-"""
-
 from __future__ import annotations
 import os, sys, json, shutil, zipfile, threading, platform
 import tkinter as tk
@@ -151,11 +129,6 @@ def _download_and_install(core_info: dict, progress_cb=None) -> tuple[bool, str]
 
 
 def apply_core(core_dir: str | None) -> tuple[bool, str]:
-    """
-    Copy DLL files from <core_dir> to app root, replacing current ones.
-    If core_dir is None, restore the backup (revert to default).
-    Returns (success, error_message).
-    """
     root = _app_root()
     backup_dir = os.path.join(_cores_dir(), "_backup_default")
 
