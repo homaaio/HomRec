@@ -997,6 +997,20 @@ HR_EXPORT void hr_con_toggle() {
 HR_EXPORT void hr_con_set_recording(int v) { g_recording.store(v!=0); }
 HR_EXPORT int  hr_con_log_connected()      { return g_log_conn.load()?1:0; }
 
+// Native counterpart of `$rm --ui @ts`: tears the overlay window down and
+// stops the pipe server so no external terminal can reattach. The Python
+// side (hr_console_bridge.py) already disables the toggle hotkey and
+// persists a disabled-marker on its own, so this is best-effort cleanup
+// on the native side — calling it is optional (guarded by hasattr()).
+HR_EXPORT void hr_con_shutdown() {
+    hr_pipe_server_stop();
+    if (g_hwnd && IsWindow(g_hwnd)) {
+        DestroyWindow(g_hwnd);
+    }
+    g_hwnd = nullptr;
+    g_visible.store(false);
+}
+
 /*
  * hr_con_write
  * Выводит строку в консоль с заданным тегом цвета:
