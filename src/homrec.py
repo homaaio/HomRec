@@ -2499,6 +2499,9 @@ class HomRecScreen:
         self.replay_buffer_sec = 0
         self.video_format = "mp4"       # "mp4" or "mkv"
         self.separate_audio_mp3 = False  # save audio as separate .mp3
+        self.core_version = CURRENT_VERSION
+        self.ui_registry: dict = {}      # logical name -> widget, built by _build_ui_registry()
+        self._hide_geo_cache: dict = {}  # !hide bookkeeping (geometry-manager info per hidden widget)
         self.overlays: list[dict] = []   # overlay definitions
         self.overlays_panel = None       # set once the OverlaysDockPanel is built
         self.show_audio_panel = True     # Audio Mixer panel visible (View -> Show)
@@ -2705,6 +2708,7 @@ class HomRecScreen:
 
     def create_menu(self) -> None:
         menubar = tk.Menu(self.root, bg=self.colors["surface"], fg=self.colors["fg"])
+        self.menubar = menubar
         self.root.config(menu=menubar)
 
         file_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
@@ -3049,6 +3053,7 @@ class HomRecScreen:
         main_container.pack(fill="both", expand=True, padx=15, pady=15)
 
         left_panel = tk.Frame(main_container, bg=self.colors["surface"], width=240)
+        self.left_panel = left_panel
         left_panel.pack(side="left", fill="y", padx=(0, 15))
         left_panel.pack_propagate(False)
 
@@ -3116,6 +3121,7 @@ class HomRecScreen:
         right_panel.pack(side="right", fill="both", expand=True)
 
         preview_container = tk.Frame(right_panel, bg=self.colors["surface_light"], relief="flat", bd=2)
+        self.preview_container = preview_container
         preview_container.pack(fill="both", expand=True, pady=(0, 15))
 
         preview_header = tk.Frame(preview_container, bg=self.colors.get("surface_light","#45475a"), height=30)
@@ -3173,6 +3179,7 @@ class HomRecScreen:
             self.audio_panel.audio_enabled.set(self._saved_audio_enabled)
 
         bottom_bar = tk.Frame(self.root, bg=self.colors["surface"], height=32)
+        self.bottom_bar = bottom_bar
         bottom_bar.pack(side="bottom", fill="x"); bottom_bar.pack_propagate(False)
         self._status_dot = tk.Label(bottom_bar, text="●", bg=self.colors["surface"], fg=self.colors.get("success","#a6e3a1"), font=("Segoe UI", 9))
         self._status_dot.pack(side="left", padx=(10, 2), pady=6)
@@ -3188,6 +3195,38 @@ class HomRecScreen:
         tk.Label(bottom_bar, text=self.lang["made_by"], bg=self.colors["surface"], fg=self.colors["accent"], font=("Segoe UI", 9, "bold")).pack(side="right", padx=12, pady=6)
         tk.Label(bottom_bar, text=f"v{CURRENT_VERSION}", bg=self.colors["surface"], fg=self.colors.get("text_secondary","#6c7086"), font=("Segoe UI", 8)).pack(side="right", padx=(0, 4), pady=6)
         self.update_preview_size()
+        self._build_ui_registry()
+
+    def _build_ui_registry(self) -> None:
+        """
+        Logical name -> widget map used by console commands (`!hide`, `$rm --ui`).
+        Curated at panel / key-button granularity, not every single label —
+        extend by adding more entries here.
+        """
+        reg: dict = {}
+
+        def add(name: str, widget) -> None:
+            if widget is not None:
+                reg[name] = widget
+
+        add("start_button", getattr(self, "record_btn", None))
+        add("pause_button", getattr(self, "pause_btn", None))
+        add("stop_button", getattr(self, "stop_btn", None))
+        add("left_panel", getattr(self, "left_panel", None))
+        add("preview_panel", getattr(self, "preview_container", None))
+        add("bottom_bar", getattr(self, "bottom_bar", None))
+        if hasattr(self, "audio_panel"):
+            add("audio_mixer", getattr(self.audio_panel, "frame", None))
+            add("mic_mute_button", getattr(self.audio_panel, "mic_mute_btn", None))
+            add("sys_mute_button", getattr(self.audio_panel, "sys_mute_btn", None))
+        if getattr(self, "overlays_panel", None):
+            add("overlays_panel", getattr(self.overlays_panel, "frame", None))
+        add("menu", getattr(self, "menubar", None))
+        # alias kept for the example in the spec — "settings_window" really means
+        # "keep the menu bar (so Settings is still reachable)"
+        add("settings_window", getattr(self, "menubar", None))
+
+        self.ui_registry = reg
 
     def get_audio_channels(self) -> int:
         try:
