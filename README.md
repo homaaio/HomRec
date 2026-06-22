@@ -45,7 +45,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 **2.** Unzip anywhere you want — no installer needed
 
-**3.** Launch `!hr.exe`
+**3.** Launch `hr.exe`
 
 > ffmpeg is already included in the archive — no extra downloads needed.
 
