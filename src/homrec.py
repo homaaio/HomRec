@@ -187,16 +187,24 @@ def optimize_for_performance() -> None:
         p.nice(psutil.HIGH_PRIORITY_CLASS if _plat.system() == "Windows" else -10)
     except Exception:
         pass
+    if sys.platform == 'win32':
+        try: ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception: pass
+        try:
+            _io = ctypes.c_ulong(3)
+            ctypes.windll.ntdll.NtSetInformationProcess(
+                ctypes.windll.kernel32.GetCurrentProcess(), 33,
+                ctypes.byref(_io), ctypes.sizeof(_io))
+        except Exception: pass
     try:
-        cpu_count = os.cpu_count() or 4
-        cv2.setNumThreads(1 if cpu_count <= 4 else max(1, cpu_count // 4))
+        cv2.setNumThreads(0)
         cv2.setUseOptimized(True)
     except Exception:
         pass
     import gc
-    gc.set_threshold(20000, 100, 100)
+    gc.set_threshold(50000, 200, 200)
     try:
-        sys.setswitchinterval(0.020)
+        sys.setswitchinterval(0.005)
     except Exception:
         pass
     try:
@@ -2542,7 +2550,7 @@ class HomRecScreen:
         self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._capture_thread.start()
         self.update_preview()
-        self.root.after(500, self._warm_up_gpu_probe)
+        self.root.after(3000, self._warm_up_gpu_probe)
         self._console = NativeConsole(self)
         self.root.bind("<Control-Shift-T>", lambda e: self._console.toggle())
         self.root.bind("<Control-Shift-t>", lambda e: self._console.toggle())
@@ -3413,16 +3421,17 @@ class HomRecScreen:
                     log.info(f"GPU encoder: {enc or 'none'}")
                     return
             except Exception as e: log.debug(f"C++ GPU probe error: {e}")
+            _cf = subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0
             for name, args in [
-                ('h264_nvenc',['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_nvenc','-f','null','-']),
-                ('h264_amf',  ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_amf',  '-f','null','-']),
-                ('h264_qsv',  ['-f','lavfi','-i','nullsrc=s=32x32:d=0.1','-c:v','h264_qsv',  '-f','null','-']),
+                ('h264_nvenc',['-f','lavfi','-i','nullsrc=s=8x8:d=0.01','-c:v','h264_nvenc','-f','null','-']),
+                ('h264_amf',  ['-f','lavfi','-i','nullsrc=s=8x8:d=0.01','-c:v','h264_amf',  '-f','null','-']),
+                ('h264_qsv',  ['-f','lavfi','-i','nullsrc=s=8x8:d=0.01','-c:v','h264_qsv',  '-f','null','-']),
             ]:
                 try:
-                    r = subprocess.run([ffpath, '-y', *args], capture_output=True, timeout=6,
-                        creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
+                    r = subprocess.run([ffpath, '-y', *args], capture_output=True, timeout=4, creationflags=_cf)
                     if r.returncode == 0:
-                        log.info(f"GPU encoder detected: {name}"); self._gpu_encoder_cache = name; return
+                        log.info(f"GPU encoder detected: {name}")
+                        self._gpu_encoder_cache = name; return
                 except Exception: pass
             self._gpu_encoder_cache = None
 
@@ -3430,6 +3439,22 @@ class HomRecScreen:
 
     def _safe_pix_fmt(self) -> str:
         return 'yuv420p'
+
+    def _ddagrab_vf(self) -> str:
+        """
+        Filter chain to convert ddagrab GPU-surface to a CPU frame.
+
+        hwdownload   — copies the DXGI texture from VRAM to RAM (bgra)
+        format=bgra  — explicit format after download
+        format=yuv420p — convert bgra→yuv420p for the encoder
+
+        We intentionally do NOT use hwmap here.  hwmap only works when
+        the source and encoder share the exact same HW context (e.g.
+        ddagrab on adapter-0 + QSV on adapter-0 with matching driver).
+        In practice this fails silently on many systems (-40 ENOSYS).
+        hwdownload is ~2% slower but works on every ffmpeg build.
+        """
+        return 'hwdownload,format=bgra,format=yuv420p'
 
     def _build_codec_args(self) -> list:
         codec = getattr(self, 'video_codec', 'libx264')
@@ -3447,19 +3472,31 @@ class HomRecScreen:
                 args = _te.build_codec_args(codec, quality, fps, cpu_count)
                 return args
         except Exception as e: log.debug(f"C++ build_codec_args error: {e}")
-        qp = max(23, min(34, int(34 - (quality / 100) * 11)))
+        qp = max(18, min(34, int(34 - (quality / 100) * 16)))
         gop = fps * 2
-        is_nvenc = 'nvenc' in codec; is_qsv = 'qsv' in codec; is_amf = 'amf' in codec
-        is_265 = codec == 'libx265' or 'hevc' in codec
+        is_nvenc = 'nvenc' in codec
+        is_qsv   = 'qsv'   in codec
+        is_amf   = 'amf'   in codec
+        is_265   = codec == 'libx265' or 'hevc' in codec
         args = ['-c:v', codec]
-        if is_nvenc:   args += ['-preset','p1','-tune','ull','-rc','constqp','-qp',str(qp),'-g',str(gop),'-profile:v','main']
-        elif is_qsv:   args += ['-preset','veryfast','-look_ahead','0','-low_power','1','-qp',str(qp),'-g',str(gop),'-profile:v','main']
-        elif is_amf:   args += ['-quality','speed','-rc','cqp','-qp_i',str(qp),'-qp_p',str(qp),'-g',str(gop),'-profile:v','main']
+        if is_nvenc:
+            args += ['-preset','p1','-tune','ull','-rc','constqp',
+                     '-qp',str(qp),'-g',str(gop),
+                     '-spatial-aq','1','-aq-strength','8',
+                     '-bf','0','-profile:v','high']
+        elif is_qsv:
+            args += ['-preset','veryfast','-look_ahead','0','-low_power','1',
+                     '-global_quality',str(qp),'-g',str(gop),'-profile:v','high']
+        elif is_amf:
+            args += ['-quality','speed','-rc','cqp',
+                     '-qp_i',str(qp),'-qp_p',str(qp),
+                     '-g',str(gop),'-profile:v','high']
         else:
-            thr = 1 if cpu_count <= 4 else max(1, cpu_count // 4)
-            args += ['-preset','ultrafast','-tune','zerolatency','-crf',str(qp),'-g',str(gop),'-threads',str(thr)]
-            if not is_265: args += ['-profile:v','main','-level','4.1']
-            if is_265: args += ['-x265-params','log-level=error']
+            thr = max(1, (cpu_count or 4) // 2)
+            args += ['-preset','ultrafast','-tune','zerolatency',
+                     '-crf',str(qp),'-g',str(gop),'-threads',str(thr)]
+            if not is_265: args += ['-profile:v','high','-level','4.2']
+            if is_265: args += ['-x265-params','log-level=error:no-open-gop=1']
         return args
 
     def start_audio_recording(self) -> None:
@@ -3990,10 +4027,14 @@ class HomRecScreen:
             codec_args = self._build_codec_args()
             draw_mouse = '1' if getattr(self, 'cursor_var', None) and self.cursor_var.get() else '0'
 
-            gdi_flags = ['-thread_queue_size','128','-probesize','32','-fflags','nobuffer','-rtbufsize','16M']
-            out_flags = ['-vsync','0','-flush_packets','1','-max_muxing_queue_size','1024']
+            gdi_flags = ['-thread_queue_size','512','-probesize','32',
+                         '-analyzeduration','0',
+                         '-fflags','nobuffer+genpts','-rtbufsize','256M']
+            out_flags = ['-vsync','0','-flush_packets','1','-max_muxing_queue_size','4096']
             if fmt == 'mp4':
                 out_flags += ['-movflags', '+faststart']
+            elif fmt == 'mkv':
+                out_flags += ['-cluster_size_limit', '2M']
             safe_pix_fmt = self._safe_pix_fmt()
 
             extra_inputs, filter_complex, out_pad = self._build_filter_graph()
@@ -4008,24 +4049,72 @@ class HomRecScreen:
                 self.use_ddagrab = use_ddagrab
 
             if use_ddagrab and self.capture_mode != "window":
-                dda_flags = ['-thread_queue_size','128','-fflags','nobuffer']
+                # ddagrab delivers a DXGI GPU-texture.
+                # We MUST download it to CPU before encoding:
+                #   hwdownload,format=bgra,format=yuv420p
+                # This works with ANY encoder (QSV, NVENC, libx264, …).
+                # hwmap is intentionally avoided — see _ddagrab_vf() docstring.
+                dda_flags = ['-thread_queue_size', '512', '-fflags', 'nobuffer']
                 mon_idx = max(0, getattr(self, 'monitor_id', 1) - 1)
-                dda_input = ['-f','lavfi','-i',f'ddagrab=output_idx={mon_idx}:framerate={fps}:draw_mouse={draw_mouse}']
-                cmd = [self.ffmpeg_path, '-y', *dda_flags, *dda_input, *extra_inputs, *graph_args, *codec_args, '-pix_fmt',safe_pix_fmt, *out_flags, '-an', self.filename]
+                dda_src = (
+                    f'ddagrab=output_idx={mon_idx}'
+                    f':framerate={fps}'
+                    f':draw_mouse={draw_mouse}'
+                    f':dup_frames=1'
+                )
+                dda_input = ['-f', 'lavfi', '-i', dda_src]
+                dda_vf    = ['-vf', self._ddagrab_vf()]
+
+                if graph_args:
+                    # Software overlays already in filter_complex —
+                    # chain hwdownload before them via -vf, then graph_args
+                    cmd = [self.ffmpeg_path, '-y', *dda_flags, *dda_input,
+                           *dda_vf, *extra_inputs, *graph_args,
+                           *codec_args, '-pix_fmt', 'yuv420p',
+                           *out_flags, '-an', self.filename]
+                else:
+                    cmd = [self.ffmpeg_path, '-y', *dda_flags, *dda_input,
+                           *dda_vf, *codec_args,
+                           '-pix_fmt', 'yuv420p',
+                           *out_flags, '-an', self.filename]
+
             elif self.capture_mode == "window" and self.capture_window_title:
-                cmd = [self.ffmpeg_path, '-y', *gdi_flags, '-f','gdigrab', '-framerate',str(fps), '-draw_mouse',draw_mouse, '-i',f'title={self.capture_window_title}', *extra_inputs, *graph_args, *codec_args, '-pix_fmt',safe_pix_fmt, *out_flags, '-an', self.filename]
+                cmd = [self.ffmpeg_path, '-y', *gdi_flags,
+                       '-f', 'gdigrab', '-framerate', str(fps),
+                       '-draw_mouse', draw_mouse,
+                       '-i', f'title={self.capture_window_title}',
+                       *extra_inputs, *graph_args, *codec_args,
+                       '-pix_fmt', safe_pix_fmt, *out_flags, '-an', self.filename]
             else:
-                cmd = [self.ffmpeg_path, '-y', *gdi_flags, '-f','gdigrab', '-framerate',str(fps), '-draw_mouse',draw_mouse, '-offset_x',str(self.monitor_left), '-offset_y',str(self.monitor_top), '-video_size',f'{self.original_width}x{self.original_height}', '-i','desktop', *extra_inputs, *graph_args, *codec_args, '-pix_fmt',safe_pix_fmt, *out_flags, '-an', self.filename]
+                cmd = [self.ffmpeg_path, '-y', *gdi_flags,
+                       '-f', 'gdigrab', '-framerate', str(fps),
+                       '-draw_mouse', draw_mouse,
+                       '-offset_x', str(self.monitor_left),
+                       '-offset_y', str(self.monitor_top),
+                       '-video_size', f'{self.original_width}x{self.original_height}',
+                       '-i', 'desktop',
+                       *extra_inputs, *graph_args, *codec_args,
+                       '-pix_fmt', safe_pix_fmt, *out_flags, '-an', self.filename]
 
             log.debug(f"FFmpeg cmd: {' '.join(cmd)}")
-            self.ffmpeg_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=="Windows" else 0)
+            self.ffmpeg_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=="Windows" else 0
+            )
 
             try:
                 import psutil as _ps; _fp = _ps.Process(self.ffmpeg_proc.pid)
                 _fp.nice(_ps.HIGH_PRIORITY_CLASS if platform.system()=="Windows" else -10)
             except Exception: pass
 
-            self.stop_ffmpeg_reader = False; self.ffmpeg_reader_thread = None
+            self.stop_ffmpeg_reader = False
+            self.ffmpeg_reader_thread = threading.Thread(
+                target=self._ffmpeg_reader, daemon=True, name='ffmpeg-stderr'
+            )
+            self.ffmpeg_reader_thread.start()
             if self.audio_panel.audio_enabled.get(): self.start_audio_recording()
             self.recording = True; self.start_time = time.time()
             self._set_taskbar_icon(recording=True)
@@ -4039,16 +4128,34 @@ class HomRecScreen:
             log.exception("Failed to start recording")
 
     def _ffmpeg_reader(self) -> None:
+        import re as _re
+        _frame_re = _re.compile(r'frame=\s*(\d+)')
+        _drop_re  = _re.compile(r'drop=(\d+)')
+        _size_re  = _re.compile(r'size=\s*(\d+)kB')
+        _total_drops = 0
         while not self.stop_flag and not self.stop_ffmpeg_reader and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
             try:
-                line = self.ffmpeg_proc.stderr.readline()
-                if not line: break
-                line = line.decode('utf-8', errors='ignore').strip()
+                raw = self.ffmpeg_proc.stderr.readline()
+                if not raw: break
+                line = raw.decode('utf-8', errors='ignore').strip()
                 if 'frame=' in line:
-                    import re as _re
-                    m = _re.search(r'frame=\s*(\d+)', line)
+                    m = _frame_re.search(line)
                     if m: self.frame_count = int(m.group(1))
-            except: break
+                    md = _drop_re.search(line)
+                    if md:
+                        drops = int(md.group(1))
+                        if drops > _total_drops:
+                            _total_drops = drops
+                            log.warning(f'FFmpeg dropped frames: {drops}')
+                    ms = _size_re.search(line)
+                    if ms: self._last_ffmpeg_size_kb = int(ms.group(1))
+                elif any(k in line.lower() for k in ('error','invalid','failed','overread')):
+                    log.warning(f'FFmpeg stderr: {line}')
+            except Exception: break
+        if self.ffmpeg_proc:
+            rc = self.ffmpeg_proc.poll()
+            if rc is not None and rc != 0 and not self.stop_ffmpeg_reader:
+                log.error(f'FFmpeg exited with code {rc} — output file may be corrupt')
 
     def _update_stats(self) -> None:
         if self.recording:
@@ -4083,9 +4190,9 @@ class HomRecScreen:
             if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
                 try: self.ffmpeg_proc.stdin.write(b'q'); self.ffmpeg_proc.stdin.flush()
                 except: pass
-                try: self.ffmpeg_proc.wait(timeout=5)
+                try: self.ffmpeg_proc.wait(timeout=30)
                 except:
-                    try: self.ffmpeg_proc.terminate(); self.ffmpeg_proc.wait(timeout=2)
+                    try: self.ffmpeg_proc.terminate(); self.ffmpeg_proc.wait(timeout=5)
                     except:
                         try: self.ffmpeg_proc.kill()
                         except: pass
@@ -4363,6 +4470,7 @@ if __name__ == "__main__":
 
     try:
         from hr_plugin_engine import init_plugin_engine
+        app._plugins_dir = os.path.join(_ROOT_DIR, 'plugins')
         app.plugin_engine = init_plugin_engine(app)
     except Exception as _pe:
         log.warning(f"Plugin engine failed to load: {_pe}")
