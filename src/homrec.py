@@ -898,7 +898,7 @@ class LanguageEditorDialog:
 
     def _set_icon(self) -> None:
         try:
-            ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
+            ico = os.path.join(_ROOT_DIR, "icons", "main.ico")
             if os.path.exists(ico): self.dialog.iconbitmap(ico)
         except Exception: pass
 
@@ -1058,7 +1058,7 @@ class ThemeEditorDialog:
 
     def _set_icon(self) -> None:
         try:
-            ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
+            ico = os.path.join(_ROOT_DIR, "icons", "main.ico")
             if os.path.exists(ico): self.dialog.iconbitmap(ico)
         except Exception: pass
 
@@ -2461,6 +2461,10 @@ class HomRecScreen:
         self.colors = self.get_theme_colors("dark")
         self.apply_theme()
         self.sct = mss.mss()
+        # C++ pipeline — заменяет mss+_capture_loop при наличии hr_pipeline.dll
+        self.cpp_pipeline = None
+        self._cpp_pipe_read_fd  = -1   # читающий конец pipe → ffmpeg stdin
+        self._cpp_pipe_write_fd = -1   # пишущий конец pipe → C++ pipeline
         self._preview_queue = queue.Queue(maxsize=1)
         self._preview_running = True
         self.audio_recording = False
@@ -2608,8 +2612,7 @@ class HomRecScreen:
         return False
 
     def set_app_icon(self) -> None:
-        base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-        self._icons_dir = os.path.join(base_dir, "icons")
+        self._icons_dir = os.path.join(_ROOT_DIR, "icons")
         self._main_ico = os.path.join(self._icons_dir, "main.ico")
         self._rec_ico  = os.path.join(self._icons_dir, "rec.ico")
         try:
@@ -3401,7 +3404,7 @@ class HomRecScreen:
 
     def _set_icon(self, window) -> None:
         try:
-            ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
+            ico = os.path.join(_ROOT_DIR, "icons", "main.ico")
             if os.path.exists(ico): window.iconbitmap(ico)
         except Exception: pass
 
@@ -3428,7 +3431,8 @@ class HomRecScreen:
                 ('h264_qsv',  ['-f','lavfi','-i','nullsrc=s=8x8:d=0.01','-c:v','h264_qsv',  '-f','null','-']),
             ]:
                 try:
-                    r = subprocess.run([ffpath, '-y', *args], capture_output=True, timeout=4, creationflags=_cf)
+                    r = subprocess.run([ffpath, '-y', *args],
+                        capture_output=True, timeout=4, creationflags=_cf)
                     if r.returncode == 0:
                         log.info(f"GPU encoder detected: {name}")
                         self._gpu_encoder_cache = name; return
@@ -3442,17 +3446,10 @@ class HomRecScreen:
 
     def _ddagrab_vf(self) -> str:
         """
-        Filter chain to convert ddagrab GPU-surface to a CPU frame.
-
-        hwdownload   — copies the DXGI texture from VRAM to RAM (bgra)
-        format=bgra  — explicit format after download
-        format=yuv420p — convert bgra→yuv420p for the encoder
-
-        We intentionally do NOT use hwmap here.  hwmap only works when
-        the source and encoder share the exact same HW context (e.g.
-        ddagrab on adapter-0 + QSV on adapter-0 with matching driver).
-        In practice this fails silently on many systems (-40 ENOSYS).
-        hwdownload is ~2% slower but works on every ffmpeg build.
+        Конвертация GPU-текстуры (ddagrab) → CPU-фрейм для любого энкодера.
+        hwdownload — копирует DXGI-текстуру из VRAM в RAM.
+        Работает с QSV, NVENC, AMF, libx264. hwmap намеренно не используется
+        (требует одного GPU-контекста у источника и энкодера — на практике даёт -40).
         """
         return 'hwdownload,format=bgra,format=yuv420p'
 
@@ -3713,6 +3710,31 @@ class HomRecScreen:
             return img.convert("RGB") if img.mode != "RGB" else img
 
     def _capture_loop(self) -> None:
+        # ── C++ pipeline путь ──────────────────────────────────────────────
+        # Если hr_pipeline.dll загружен, превью берём из C++ (нет GIL на захвате).
+        # Python только читает готовый RGB-буфер и отдаёт в Tkinter.
+        try:
+            from homrec_native import CppPipeline, PIPELINE_OK as _PLK
+        except ImportError:
+            _PLK = False
+
+        if _PLK and getattr(self, 'cpp_pipeline', None) is None:
+            pw = getattr(self, 'preview_width', 640)
+            ph = getattr(self, 'preview_height', 360)
+            pl = CppPipeline()
+            # pipe_write_fd=0 → только превью, без записи (запись стартует отдельно)
+            if pl.create(0, 0, getattr(self, 'target_fps', 30), 0, pw, ph):
+                if pl.start():
+                    self.cpp_pipeline = pl
+                    log.info("C++ pipeline started for preview")
+                else:
+                    pl.destroy()
+
+        if getattr(self, 'cpp_pipeline', None) is not None:
+            self._capture_loop_cpp()
+            return
+
+        # ── Python fallback (mss) ─────────────────────────────────────────
         import mss as _mss
         sct = _mss.mss()
         try:
@@ -3735,22 +3757,25 @@ class HomRecScreen:
                     self._preview_queue.put_nowait(None); time.sleep(0.5); continue
 
                 if recording:
-                    try:
-                        screenshot = sct.grab(monitor)
-                        sw2, sh2 = screenshot.size
-                        if _have_native and _native_core:
-                            rgb_np2 = _native_core.bgrx_to_rgb_np(screenshot.bgra, sw2, sh2)
-                            small_np2 = _native_core.resize_bilinear_np(rgb_np2, sw2, sh2, pw, ph)
-                            rec_img = Image.frombuffer("RGB", (pw, ph), small_np2, "raw", "RGB", 0, 1)
-                        else:
-                            rec_img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-                            rec_img.thumbnail((pw, ph), Image.Resampling.BILINEAR)
-                        try: self._preview_queue.get_nowait()
-                        except: pass
-                        rec_img = self._composite_overlays_on_preview(rec_img, pw, ph)
-                        self._preview_queue.put_nowait(rec_img)
-                    except Exception: pass
-                    time.sleep(0.15); continue
+                    _now = time.monotonic()
+                    if _now - getattr(self,'_rec_pv_last_t',0.0) >= 0.25:
+                        self._rec_pv_last_t = _now
+                        try:
+                            screenshot = sct.grab(monitor)
+                            sw2, sh2 = screenshot.size
+                            if _have_native and _native_core:
+                                rgb_np2 = _native_core.bgrx_to_rgb_np(screenshot.bgra, sw2, sh2)
+                                small_np2 = _native_core.resize_nearest_np(rgb_np2, sw2, sh2, pw, ph)
+                                rec_img = Image.frombuffer("RGB", (pw, ph), small_np2, "raw", "RGB", 0, 1)
+                            else:
+                                rec_img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+                                rec_img = rec_img.resize((pw, ph), Image.Resampling.NEAREST)
+                            try: self._preview_queue.get_nowait()
+                            except: pass
+                            rec_img = self._composite_overlays_on_preview(rec_img, pw, ph)
+                            self._preview_queue.put_nowait(rec_img)
+                        except Exception: pass
+                    time.sleep(0.05); continue
 
                 screenshot = sct.grab(monitor); sw, sh = screenshot.size
                 if _have_native and _native_core:
@@ -3778,6 +3803,52 @@ class HomRecScreen:
             except Exception as e: log.debug(f"_capture_loop error: {e}")
             time.sleep(0.083)
 
+    def _capture_loop_cpp(self) -> None:
+        """
+        Цикл превью через C++ pipeline.
+        C++ поток захватывает экран с THREAD_PRIORITY_TIME_CRITICAL,
+        конвертирует BGRA→RGB thumbnail внутри DLL.
+        Python только копирует готовый буфер в PIL Image.
+        """
+        import time as _t
+        pl = self.cpp_pipeline
+        while self._preview_running:
+            try:
+                pw = getattr(self, 'preview_width', 640)
+                ph = getattr(self, 'preview_height', 360)
+
+                # Обновляем размер превью если окно изменилось
+                if pl._pv_w.value != pw or pl._pv_h.value != ph:
+                    pl._pv_buf = __import__('ctypes').create_string_buffer(pw * ph * 3)
+                    _pipeline_mod = __import__('homrec_native', fromlist=['_pipeline'])
+                    if hasattr(_pipeline_mod, '_pipeline') and _pipeline_mod._pipeline:
+                        _pipeline_mod._pipeline.hr_pl_set_preview_size(pl._handle, pw, ph)
+
+                rgb_bytes, w, h = pl.get_preview()
+                if rgb_bytes and w > 0 and h > 0:
+                    img = Image.frombuffer("RGB", (w, h), rgb_bytes, "raw", "RGB", 0, 1)
+                    img = self._composite_overlays_on_preview(img, w, h)
+                    try: self._preview_queue.get_nowait()
+                    except Exception: pass
+                    self._preview_queue.put_nowait(img)
+
+                # Обновляем счётчик кадров из C++ stats
+                fc, fd, fps_act = pl.stats()
+                self.frame_count = int(fc)
+                if fd > 0:
+                    pass  # drops уже логирует C++ pipeline
+
+                # Пауза
+                if getattr(self, 'paused', False):
+                    pl.pause(True)
+                else:
+                    pl.pause(False)
+
+            except Exception as _e:
+                log.debug(f"_capture_loop_cpp error: {_e}")
+
+            _t.sleep(0.033)  # ~30 Hz опрос буфера — C++ захват идёт независимо
+
     def update_preview(self) -> None:
         try:
             img = self._preview_queue.get_nowait()
@@ -3789,7 +3860,7 @@ class HomRecScreen:
                 self.preview_label.image = photo
         except queue.Empty: pass
         except Exception: pass
-        self.root.after(150 if getattr(self, 'recording', False) else 80, self.update_preview)
+        self.root.after(250 if getattr(self, 'recording', False) else 80, self.update_preview)
 
     def _show_preview_placeholder(self) -> None:
         try:
@@ -4049,35 +4120,22 @@ class HomRecScreen:
                 self.use_ddagrab = use_ddagrab
 
             if use_ddagrab and self.capture_mode != "window":
-                # ddagrab delivers a DXGI GPU-texture.
-                # We MUST download it to CPU before encoding:
-                #   hwdownload,format=bgra,format=yuv420p
-                # This works with ANY encoder (QSV, NVENC, libx264, …).
-                # hwmap is intentionally avoided — see _ddagrab_vf() docstring.
                 dda_flags = ['-thread_queue_size', '512', '-fflags', 'nobuffer']
                 mon_idx = max(0, getattr(self, 'monitor_id', 1) - 1)
                 dda_src = (
                     f'ddagrab=output_idx={mon_idx}'
-                    f':framerate={fps}'
-                    f':draw_mouse={draw_mouse}'
-                    f':dup_frames=1'
+                    f':framerate={fps}:draw_mouse={draw_mouse}:dup_frames=1'
                 )
                 dda_input = ['-f', 'lavfi', '-i', dda_src]
-                dda_vf    = ['-vf', self._ddagrab_vf()]
-
+                dda_vf = ['-vf', self._ddagrab_vf()]
                 if graph_args:
-                    # Software overlays already in filter_complex —
-                    # chain hwdownload before them via -vf, then graph_args
                     cmd = [self.ffmpeg_path, '-y', *dda_flags, *dda_input,
                            *dda_vf, *extra_inputs, *graph_args,
-                           *codec_args, '-pix_fmt', 'yuv420p',
-                           *out_flags, '-an', self.filename]
+                           *codec_args, '-pix_fmt', 'yuv420p', *out_flags, '-an', self.filename]
                 else:
                     cmd = [self.ffmpeg_path, '-y', *dda_flags, *dda_input,
                            *dda_vf, *codec_args,
-                           '-pix_fmt', 'yuv420p',
-                           *out_flags, '-an', self.filename]
-
+                           '-pix_fmt', 'yuv420p', *out_flags, '-an', self.filename]
             elif self.capture_mode == "window" and self.capture_window_title:
                 cmd = [self.ffmpeg_path, '-y', *gdi_flags,
                        '-f', 'gdigrab', '-framerate', str(fps),
@@ -4097,24 +4155,90 @@ class HomRecScreen:
                        '-pix_fmt', safe_pix_fmt, *out_flags, '-an', self.filename]
 
             log.debug(f"FFmpeg cmd: {' '.join(cmd)}")
-            self.ffmpeg_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=="Windows" else 0
+
+            # ── Выбор пути запуска ffmpeg ─────────────────────────────────
+            _pl = getattr(self, 'cpp_pipeline', None)
+            _use_cpp_pipe = (
+                _pl is not None
+                and use_ddagrab  # C++ pipeline использует DXGI, как и ddagrab
+                and not graph_args  # с overlays пока только ffmpeg-путь
             )
 
-            try:
-                import psutil as _ps; _fp = _ps.Process(self.ffmpeg_proc.pid)
-                _fp.nice(_ps.HIGH_PRIORITY_CLASS if platform.system()=="Windows" else -10)
-            except Exception: pass
+            if _use_cpp_pipe:
+                # ── C++ pipeline путь ─────────────────────────────────────
+                # Открываем анонимный pipe: C++ → YUV420p → ffmpeg stdin
+                import os as _os
+                r_fd, w_fd = _os.pipe()
+                self._cpp_pipe_read_fd  = r_fd
+                self._cpp_pipe_write_fd = w_fd
 
+                # Переключаем pipeline на режим записи
+                _pl.set_recording(True, w_fd)
+                log.info("C++ pipeline: recording via pipe fd=%d", w_fd)
+
+                # Строим команду ffmpeg для чтения из pipe (YUV420p)
+                w_src = self.record_width  or self.original_width  or 1920
+                h_src = self.record_height or self.original_height or 1080
+                pipe_input = [
+                    '-f',            'rawvideo',
+                    '-pixel_format', 'yuv420p',
+                    '-video_size',   f'{w_src}x{h_src}',
+                    '-framerate',    str(fps),
+                    '-i',            f'pipe:{r_fd}',
+                ]
+                pipe_cmd = [
+                    self.ffmpeg_path, '-y',
+                    *pipe_input,
+                    *codec_args,
+                    '-pix_fmt', 'yuv420p',
+                    *out_flags, '-an', self.filename,
+                ]
+                log.debug(f"FFmpeg pipe cmd: {' '.join(pipe_cmd)}")
+
+                try:
+                    from homrec_native import FfmpegProcess as _FP
+                    self._native_ffmpeg = _FP(pipe_cmd)
+                    # subprocess.Popen-совместимый stub для stop_recording
+                    self.ffmpeg_proc = None
+                    self._using_native_ffmpeg = True
+                    log.info("C++ FfmpegProcess started (pipe mode)")
+                except Exception as _e:
+                    log.warning(f"Native FfmpegProcess failed ({_e}), falling back")
+                    _pl.set_recording(False, 0)
+                    _os.close(r_fd); _os.close(w_fd)
+                    self._cpp_pipe_read_fd = self._cpp_pipe_write_fd = -1
+                    self._using_native_ffmpeg = False
+                    # Fallback: обычный subprocess
+                    self.ffmpeg_proc = subprocess.Popen(
+                        cmd, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE, stdin=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=="Windows" else 0
+                    )
+            else:
+                # ── Python / ddagrab путь (без C++ pipeline) ─────────────
+                self._using_native_ffmpeg = False
+                self.ffmpeg_proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=="Windows" else 0
+                )
+                try:
+                    import psutil as _ps; _fp = _ps.Process(self.ffmpeg_proc.pid)
+                    _fp.nice(_ps.HIGH_PRIORITY_CLASS if platform.system()=="Windows" else -10)
+                except Exception: pass
+
+            # Stderr reader (только для subprocess-пути)
             self.stop_ffmpeg_reader = False
-            self.ffmpeg_reader_thread = threading.Thread(
-                target=self._ffmpeg_reader, daemon=True, name='ffmpeg-stderr'
-            )
-            self.ffmpeg_reader_thread.start()
+            if self.ffmpeg_proc is not None:
+                self.ffmpeg_reader_thread = threading.Thread(
+                    target=self._ffmpeg_reader, daemon=True, name='ffmpeg-stderr'
+                )
+                self.ffmpeg_reader_thread.start()
+            else:
+                self.ffmpeg_reader_thread = None
+
             if self.audio_panel.audio_enabled.get(): self.start_audio_recording()
             self.recording = True; self.start_time = time.time()
             self._set_taskbar_icon(recording=True)
@@ -4128,34 +4252,16 @@ class HomRecScreen:
             log.exception("Failed to start recording")
 
     def _ffmpeg_reader(self) -> None:
-        import re as _re
-        _frame_re = _re.compile(r'frame=\s*(\d+)')
-        _drop_re  = _re.compile(r'drop=(\d+)')
-        _size_re  = _re.compile(r'size=\s*(\d+)kB')
-        _total_drops = 0
         while not self.stop_flag and not self.stop_ffmpeg_reader and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
             try:
-                raw = self.ffmpeg_proc.stderr.readline()
-                if not raw: break
-                line = raw.decode('utf-8', errors='ignore').strip()
+                line = self.ffmpeg_proc.stderr.readline()
+                if not line: break
+                line = line.decode('utf-8', errors='ignore').strip()
                 if 'frame=' in line:
-                    m = _frame_re.search(line)
+                    import re as _re
+                    m = _re.search(r'frame=\s*(\d+)', line)
                     if m: self.frame_count = int(m.group(1))
-                    md = _drop_re.search(line)
-                    if md:
-                        drops = int(md.group(1))
-                        if drops > _total_drops:
-                            _total_drops = drops
-                            log.warning(f'FFmpeg dropped frames: {drops}')
-                    ms = _size_re.search(line)
-                    if ms: self._last_ffmpeg_size_kb = int(ms.group(1))
-                elif any(k in line.lower() for k in ('error','invalid','failed','overread')):
-                    log.warning(f'FFmpeg stderr: {line}')
-            except Exception: break
-        if self.ffmpeg_proc:
-            rc = self.ffmpeg_proc.poll()
-            if rc is not None and rc != 0 and not self.stop_ffmpeg_reader:
-                log.error(f'FFmpeg exited with code {rc} — output file may be corrupt')
+            except: break
 
     def _update_stats(self) -> None:
         if self.recording:
@@ -4165,8 +4271,20 @@ class HomRecScreen:
                     self.fps_label.config(text=f"{self.lang['fps']} {self.frame_count/elapsed:.1f}")
                 h = int(elapsed // 3600); m = int((elapsed % 3600) // 60); s = int(elapsed % 60)
                 self.time_label.config(text=f"{h:02d}:{m:02d}:{s:02d}")
-                if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
-                    self.file_label.config(text=self.lang["recording_status"].format(size=0, frames=self.frame_count))
+                proc_alive = (
+                    (self.ffmpeg_proc and self.ffmpeg_proc.poll() is None)
+                    or getattr(self, '_using_native_ffmpeg', False)
+                )
+                if proc_alive:
+                    _kb = getattr(self, '_last_ffmpeg_size_kb', 0)
+                    _mb = _kb / 1024.0
+                    _sz = f"{_mb:.1f} MB" if _mb >= 1.0 else f"{_kb} KB"
+                    try:
+                        self.file_label.config(
+                            text=self.lang['recording_status'].format(
+                                size=_mb, frames=self.frame_count))
+                    except Exception:
+                        self.file_label.config(text=f"{_sz}  {self.frame_count} кадров")
             except: pass
             self.root.after(1000, self._update_stats)
 
@@ -4187,10 +4305,44 @@ class HomRecScreen:
 
         def _finalize():
             self.stop_ffmpeg_reader = True
-            if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
+
+            if getattr(self, '_using_native_ffmpeg', False):
+                # ── C++ pipeline остановка ────────────────────────────────
+                _pl = getattr(self, 'cpp_pipeline', None)
+                if _pl:
+                    # Сначала останавливаем запись в pipe (C++ перестаёт писать YUV)
+                    _pl.set_recording(False, 0)
+                    log.info("C++ pipeline: recording stopped")
+
+                # Закрываем write-конец pipe → ffmpeg получает EOF → финализирует файл
+                import os as _os
+                wfd = getattr(self, '_cpp_pipe_write_fd', -1)
+                rfd = getattr(self, '_cpp_pipe_read_fd',  -1)
+                if wfd >= 0:
+                    try: _os.close(wfd)
+                    except OSError: pass
+                    self._cpp_pipe_write_fd = -1
+
+                # Ждём завершения ffmpeg (30 с — время финализации moov-атома)
+                nff = getattr(self, '_native_ffmpeg', None)
+                if nff:
+                    clean = nff.stop(timeout_ms=30000)
+                    log.info(f"Native ffmpeg stopped cleanly: {clean}")
+                    del nff; self._native_ffmpeg = None
+
+                if rfd >= 0:
+                    try: _os.close(rfd)
+                    except OSError: pass
+                    self._cpp_pipe_read_fd = -1
+                self._using_native_ffmpeg = False
+
+            elif self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
+                # ── subprocess путь ───────────────────────────────────────
                 try: self.ffmpeg_proc.stdin.write(b'q'); self.ffmpeg_proc.stdin.flush()
                 except: pass
-                try: self.ffmpeg_proc.wait(timeout=30)
+                try:
+                    # 30 с: даём ffmpeg время записать moov-атом
+                    self.ffmpeg_proc.wait(timeout=30)
                 except:
                     try: self.ffmpeg_proc.terminate(); self.ffmpeg_proc.wait(timeout=5)
                     except:
@@ -4363,6 +4515,12 @@ class HomRecScreen:
                 except: pass
             self.recording = False; self.audio_recording = False; self.sys_audio_recording = False
         self._preview_running = False
+        # Уничтожаем C++ pipeline — освобождает DXGI и D3D ресурсы
+        _pl = getattr(self, 'cpp_pipeline', None)
+        if _pl:
+            try: _pl.destroy()
+            except Exception: pass
+            self.cpp_pipeline = None
         if self.tray_icon:
             try: self.tray_icon.stop()
             except: pass
