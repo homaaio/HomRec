@@ -2317,16 +2317,6 @@ class SettingsDialog:
         self._fps_val_label = tk.Label(fps_frame, text=f"{a.target_fps} fps", bg=c["bg"], fg=c["accent"], font=("Segoe UI", 10, "bold"), width=7)
         self._fps_val_label.pack(side="left")
 
-        fps_presets_frame = tk.Frame(video_inner, bg=c["bg"])
-        fps_presets_frame.pack(fill="x", pady=(0, 6))
-        tk.Label(fps_presets_frame, text="", bg=c["bg"], width=10).pack(side="left")
-        for lbl, val in [("8", 8), ("15", 15), ("30", 30), ("60", 60)]:
-            def _make_fps_cmd(v=val):
-                def _cmd():
-                    self.fps_slider_var.set(v); self._fps_val_label.config(text=f"{v} fps")
-                return _cmd
-            tk.Button(fps_presets_frame, text=lbl, command=_make_fps_cmd(), bg=c["surface_light"], fg=c["text"], font=("Segoe UI", 8), relief="flat", padx=8, pady=2, cursor="hand2").pack(side="left", padx=2)
-
         fmt_frame = tk.Frame(video_inner, bg=c["bg"])
         fmt_frame.pack(fill="x", pady=10)
         tk.Label(fmt_frame, text="Format:", bg=c["bg"], fg=c["text"], font=("Segoe UI", 10), width=10, anchor="w").pack(side="left")
@@ -3113,25 +3103,6 @@ class HomRecScreen:
         self.fps_label.pack(anchor="w", pady=3)
         self.res_label = tk.Label(stats_frame, text=f"{self.lang['resolution']} {self.record_width}x{self.record_height}", bg=self.colors["surface"], fg=self.colors["text"], font=("Consolas", 11))
         self.res_label.pack(anchor="w", pady=3)
-
-        fps_ctrl_frame = tk.Frame(left_panel, bg=self.colors["surface"])
-        fps_ctrl_frame.pack(pady=(0, 8), padx=15, fill="x")
-        tk.Frame(fps_ctrl_frame, bg=self.colors.get("surface_light","#45475a"), height=1).pack(fill="x", pady=(0, 8))
-        fps_row = tk.Frame(fps_ctrl_frame, bg=self.colors["surface"])
-        fps_row.pack(fill="x")
-        tk.Label(fps_row, text="FPS limit:", bg=self.colors["surface"], fg=self.colors["text_secondary"], font=("Segoe UI", 8)).pack(side="left")
-        self._inline_fps_val = tk.Label(fps_row, text=str(self.target_fps), bg=self.colors["surface"], fg=self.colors["accent"], font=("Segoe UI", 8, "bold"), width=3)
-        self._inline_fps_val.pack(side="right")
-
-        def _fps_slide(v):
-            val = int(float(v)); self.target_fps = val
-            self._inline_fps_val.config(text=str(val)); self.save_settings_debounced()
-
-        self._inline_fps_slider = tk.Scale(fps_ctrl_frame, from_=1, to=60, orient="horizontal", length=160, showvalue=False,
-                                            bg=self.colors["surface"], fg=self.colors["text"], highlightthickness=0,
-                                            troughcolor=self.colors.get("surface_light","#45475a"), command=_fps_slide)
-        self._inline_fps_slider.set(self.target_fps)
-        self._inline_fps_slider.pack(fill="x", pady=(2, 0))
 
         right_panel = tk.Frame(main_container, bg=self.colors["bg"])
         right_panel.pack(side="right", fill="both", expand=True)
