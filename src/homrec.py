@@ -130,43 +130,6 @@ LANGUAGES = {
         "countdown": "Countdown (3s)", "timestamp": "Timestamp", "cursor": "Cursor",
         "notification": "Show summary", "made_by": "Homa4ella", "audio_file": "🎵 Audio file:",
         "show_log": "Show Log",
-    },
-    "ru": {
-        "app_title": "HomRec v1.7.0", "live_preview": "ПРЕДПРОСМОТР", "ready": "Готов",
-        "recording": "Запись", "paused": "Пауза", "fps": "FPS:", "resolution": "Разрешение:",
-        "start": "▶ СТАРТ", "pause": "⏸ ПАУЗА", "stop": "■ СТОП", "resume": "▶ ПРОДОЛЖИТЬ",
-        "recording_btn": "⏺ ЗАПИСЬ", "audio_mixer": "Аудио Микшер", "microphone": "Микрофон",
-        "desktop_audio": "Системный звук", "mute": "Выкл", "unmute": "Вкл", "vol": "Громк:",
-        "level": "Уровень:", "enable_audio": "Запись звука", "ffmpeg_found": "FFmpeg: ✅ Найден",
-        "ffmpeg_not_found": "FFmpeg: ❌ Не найден", "file_menu": "Файл",
-        "open_recordings": "Открыть папку", "exit": "Выход", "view_menu": "Вид",
-        "always_on_top": "Поверх окон", "fullscreen": "Полный экран F11",
-        "pc_analytics": "Аналитика", "cpu_info": "Инфо CPU", "ram_info": "Инфо RAM",
-        "disk_info": "Инфо диска", "language": "Язык", "english": "English",
-        "russian": "Русский", "theme": "Тема", "dark": "Темная", "light": "Светлая",
-        "settings_menu": "Настройки", "preferences": "Параметры...",
-        "performance_menu": "Производительность", "ultra": "Ультра (60 FPS)",
-        "turbo": "Турбо (30 FPS)", "balanced": "Средний (15 FPS)", "eco": "Эко (8 FPS)",
-        "stats": "СТАТИСТИКА", "time": "ВРЕМЯ", "status": "СТАТУС",
-        "warning": "Предупреждение", "error": "Ошибка", "info": "Информация",
-        "folder_not_exist": "Папка не существует!", "recording_failed": "Ошибка записи!",
-        "settings_saved": "Настройки сохранены!", "recording_saved": "✅ Запись сохранена!",
-        "open_folder": "Открыть папку?", "ffmpeg_not_found_msg": "⚠️ FFmpeg не найден - аудио отдельно",
-        "saved": "✅ Сохранено: {size:.1f} МБ | {duration:.1f}с",
-        "recording_status": "Запись: {size:.1f} МБ | {frames} кадров",
-        "file": "📁 Файл:", "size": "📊 Размер:", "duration": "⏱️ Длительность:",
-        "audio": "🎤 Аудио:", "merged": "Объединено", "separate": "Отдельно", "no_audio": "Нет",
-        "save": "Сохранить", "cancel": "Отмена", "browse": "Обзор",
-        "output_folder": "Папка записей:", "settings_title": "Настройки",
-        "video_settings": "Видео", "quality": "Качество:", "mode": "Режим:",
-        "advanced": "Дополнительно", "monitor": "Монитор:", "output": "Папка:",
-        "countdown": "Отсчет (3с)", "timestamp": "Время", "cursor": "Курсор",
-        "notification": "Показывать сводку", "made_by": "Homa4ella",
-        "audio_file": "🎵 Аудио файл:", "show_log": "Показать лог",
-        "help_menu": "Справка", "check_updates": "Проверить обновления",
-        "report_issue": "Сообщить об ошибке", "capture_source": "Источник",
-        "full_desktop": "Весь экран", "select_window": "Выбрать окно...",
-        "minimize_tray": "Сворачивать в трей",
     }
 }
 
@@ -860,7 +823,6 @@ LANGS_DIR     = os.path.join(ASSETS_DIR, "L")
 
 _HRC_MAGIC = b'HRC\x01'
 _HRL_MAGIC = b'HRL\x01'
-_HRT_MAGIC = b'HRT\x01'
 
 def _hrc_write(path: str, data: dict, magic: bytes) -> None:
     body = gzip.compress(json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8'))
@@ -879,314 +841,7 @@ def _hrc_detect(path: str) -> str:
         magic = f.read(4)
     if magic == _HRC_MAGIC: return 'hrc'
     if magic == _HRL_MAGIC: return 'hrl'
-    if magic == _HRT_MAGIC: return 'hrt'
     raise ValueError(f"Not a HomRec file (magic={magic!r})")
-
-
-class LanguageEditorDialog:
-    def __init__(self, parent, app) -> None:
-        self.app = app
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Language Editor")
-        self.dialog.geometry("700x560")
-        self.dialog.resizable(True, True)
-        self.dialog.configure(bg=app.colors["bg"])
-        self.dialog.grab_set()
-        self.dialog.after(50, self._set_icon)
-        self._data = {}; self._vars = {}; self._missing = set()
-        self._build_ui()
-
-    def _set_icon(self) -> None:
-        try:
-            ico = os.path.join(_ROOT_DIR, "icons", "main.ico")
-            if os.path.exists(ico): self.dialog.iconbitmap(ico)
-        except Exception: pass
-
-    def _build_ui(self) -> None:
-        a = self.app; c = a.colors
-        top = tk.Frame(self.dialog, bg=c["bg"])
-        top.pack(fill="x", padx=14, pady=(12, 4))
-        tk.Label(top, text="Language Editor", bg=c["bg"], fg=c["accent"], font=("Segoe UI", 13, "bold")).pack(side="left")
-
-        btn_row = tk.Frame(self.dialog, bg=c["bg"])
-        btn_row.pack(fill="x", padx=14, pady=(0, 6))
-        tk.Label(btn_row, text="Load base:", bg=c["bg"], fg=c["text_secondary"], font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
-        for lbl, code in [("English", "en"), ("Russian", "ru")]:
-            tk.Button(btn_row, text=lbl, command=lambda c=code: self._load_builtin(c),
-                      bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=10, pady=4).pack(side="left", padx=2)
-        tk.Button(btn_row, text="Open .hrl...", command=self._load_file,
-                  bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=10, pady=4).pack(side="left", padx=8)
-        self._status_lbl = tk.Label(btn_row, text="Load a base language to start.", bg=c["bg"], fg=c["text_secondary"], font=("Segoe UI", 8))
-        self._status_lbl.pack(side="left", padx=8)
-
-        name_row = tk.Frame(self.dialog, bg=c["bg"])
-        name_row.pack(fill="x", padx=14, pady=(0, 4))
-        tk.Label(name_row, text="Language name:", bg=c["bg"], fg=c["text"], font=("Segoe UI", 10)).pack(side="left")
-        self._name_var = tk.StringVar(value="My Language")
-        tk.Entry(name_row, textvariable=self._name_var, bg=c["surface"], fg=c["text"], font=("Segoe UI", 10), relief="flat", width=24).pack(side="left", padx=8)
-
-        outer = tk.Frame(self.dialog, bg=c["surface"])
-        outer.pack(fill="both", expand=True, padx=14, pady=4)
-        canvas = tk.Canvas(outer, bg=c["bg"], highlightthickness=0)
-        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y"); canvas.pack(side="left", fill="both", expand=True)
-        self._grid = tk.Frame(canvas, bg=c["bg"])
-        self._canvas_window = canvas.create_window((0, 0), window=self._grid, anchor="nw")
-        self._grid.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(self._canvas_window, width=e.width))
-        self._canvas = canvas
-        self._grid.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
-
-        tk.Label(self._grid, text="Key", bg=c["bg"], fg=c["accent"], font=("Segoe UI", 9, "bold"), width=24, anchor="w").grid(row=0, column=0, padx=(8,4), pady=2, sticky="w")
-        tk.Label(self._grid, text="English reference", bg=c["bg"], fg=c["accent"], font=("Segoe UI", 9, "bold"), width=30, anchor="w").grid(row=0, column=1, padx=4, pady=2, sticky="w")
-        tk.Label(self._grid, text="Your translation", bg=c["bg"], fg=c["accent"], font=("Segoe UI", 9, "bold"), anchor="w").grid(row=0, column=2, padx=4, pady=2, sticky="ew")
-        self._grid.columnconfigure(2, weight=1)
-        self._field_frame = self._grid
-
-        sep = tk.Frame(self.dialog, bg=c["surface"], height=1)
-        sep.pack(fill="x", padx=14, pady=(4, 0))
-        bot = tk.Frame(self.dialog, bg=c["bg"])
-        bot.pack(fill="x", padx=14, pady=8)
-        tk.Button(bot, text="Validate", command=self._validate, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="left", padx=(0,6))
-        tk.Button(bot, text="Cancel", command=self.dialog.destroy, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="right", padx=(6,0))
-        tk.Button(bot, text="Save As .hrl", command=self._save, bg=self.app.colors["success"], fg=self.app.colors["bg"], font=("Segoe UI", 9, "bold"), relief="flat", padx=16, pady=6).pack(side="right")
-
-    def _build_fields(self) -> None:
-        c = self.app.colors; en = LANGUAGES["en"]
-        for w in self._field_frame.winfo_children():
-            if int(w.grid_info().get("row", 0)) > 0: w.destroy()
-        self._vars = {}
-        for i, key in enumerate(LANG_REQUIRED_KEYS):
-            row = i + 1
-            is_missing = key not in self._data
-            fg = c["warning"] if is_missing else c["text"]
-            tk.Label(self._field_frame, text=key, bg=c["bg"], fg=c["text_secondary"], font=("Consolas", 8), width=24, anchor="w").grid(row=row, column=0, padx=(8,4), pady=1, sticky="w")
-            tk.Label(self._field_frame, text=en.get(key, "")[:40], bg=c["bg"], fg=c["text_secondary"], font=("Segoe UI", 8), width=30, anchor="w").grid(row=row, column=1, padx=4, pady=1, sticky="w")
-            var = tk.StringVar(value=self._data.get(key, ""))
-            entry = tk.Entry(self._field_frame, textvariable=var, bg=c["surface"], fg=fg, font=("Segoe UI", 9), relief="flat")
-            entry.grid(row=row, column=2, padx=(4,8), pady=1, sticky="ew")
-            self._vars[key] = (var, entry)
-        self._update_status()
-
-    def _load_builtin(self, code: str) -> None:
-        self._data = dict(LANGUAGES[code])
-        self._name_var.set(self._data.get("lang_name", code))
-        self._build_fields()
-
-    def _load_file(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("HomRec Language", "*.hrl"), ("All files", "*.*")], title="Open .hrl file")
-        if not path: return
-        try:
-            self._data = _hrc_read(path, _HRL_MAGIC)
-            self._name_var.set(self._data.get("lang_name", "My Language"))
-            self._build_fields()
-        except Exception as e:
-            messagebox.showerror("Load failed", str(e))
-
-    def _update_status(self) -> None:
-        missing = [k for k in LANG_REQUIRED_KEYS if not str(self._vars.get(k, (tk.StringVar(),))[0].get()).strip()]
-        total = len(LANG_REQUIRED_KEYS); done = total - len(missing)
-        c = self.app.colors
-        if missing:
-            self._status_lbl.config(text=f"{done}/{total} translated  ⚠ {len(missing)} missing", fg=c["warning"])
-        else:
-            self._status_lbl.config(text=f"✅ All {total} keys translated", fg=c["success"])
-
-    def _validate(self) -> None:
-        c = self.app.colors
-        missing = []
-        for key, (var, entry) in self._vars.items():
-            if not var.get().strip():
-                missing.append(key); entry.config(fg=c["error"])
-            else:
-                entry.config(fg=c["text"])
-        self._update_status()
-        if missing:
-            messagebox.showwarning("Validation", f"{len(missing)} keys are empty:\n" + ", ".join(missing[:10]) + ("..." if len(missing) > 10 else ""))
-        else:
-            messagebox.showinfo("Validation", "✅ All keys are filled in!")
-
-    def _save(self) -> None:
-        if not self._vars:
-            messagebox.showwarning("Nothing to save", "Load a base language first."); return
-        data = {key: var.get() for key, (var, _) in self._vars.items()}
-        data["lang_name"] = self._name_var.get() or "My Language"
-        data["schema_version"] = LANG_SCHEMA_VERSION
-        missing = [k for k, v in data.items() if isinstance(v, str) and not v.strip() and k not in ("schema_version", "lang_name")]
-        if missing:
-            if not messagebox.askyesno("Missing keys", f"{len(missing)} keys are empty. Save anyway?"): return
-        fname = data["lang_name"].lower().replace(" ", "_") + ".hrl"
-        langs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), LANGS_DIR)
-        os.makedirs(langs_dir, exist_ok=True)
-        path = filedialog.asksaveasfilename(defaultextension=".hrl", filetypes=[("HomRec Language", "*.hrl"), ("All files", "*.*")], initialfile=fname, initialdir=langs_dir, title="Save language as")
-        if not path: return
-        try:
-            _hrc_write(path, data, _HRL_MAGIC)
-            dst = os.path.join(langs_dir, os.path.basename(path))
-            if os.path.abspath(path) != os.path.abspath(dst):
-                shutil.copy2(path, dst)
-            messagebox.showinfo("Saved", f"Language saved and installed:\n{os.path.basename(path)}\n\nRestart HomRec to see it in Settings → Language.")
-            log.info(f"Language saved: {path}")
-        except Exception as e:
-            messagebox.showerror("Save failed", str(e))
-
-
-class ThemeEditorDialog:
-    THEME_KEYS = [
-        ("bg",             "Main background",  "Window background color"),
-        ("surface",        "Surface / panels", "Cards, inputs, panels"),
-        ("accent",         "Accent",           "Buttons, highlights, active elements"),
-        ("text",           "Text",             "Primary text color"),
-        ("text_secondary", "Secondary text",   "Labels, hints, secondary info"),
-        ("success",        "Success",          "Recording active, positive state"),
-        ("warning",        "Warning",          "Alerts, cautions"),
-        ("error",          "Error",            "Errors, stop button, mute"),
-    ]
-
-    def __init__(self, parent, app) -> None:
-        self.app = app
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Theme Editor")
-        self.dialog.geometry("520x480")
-        self.dialog.resizable(False, True)
-        self.dialog.configure(bg=app.colors["bg"])
-        self.dialog.grab_set()
-        self.dialog.after(50, self._set_icon)
-        self._vars = {}; self._swatches = {}
-        self._build_ui()
-
-    def _set_icon(self) -> None:
-        try:
-            ico = os.path.join(_ROOT_DIR, "icons", "main.ico")
-            if os.path.exists(ico): self.dialog.iconbitmap(ico)
-        except Exception: pass
-
-    def _build_ui(self) -> None:
-        a = self.app; c = a.colors
-        top = tk.Frame(self.dialog, bg=c["bg"])
-        top.pack(fill="x", padx=14, pady=(12, 4))
-        tk.Label(top, text="Theme Editor", bg=c["bg"], fg=c["accent"], font=("Segoe UI", 13, "bold")).pack(side="left")
-
-        btn_row = tk.Frame(self.dialog, bg=c["bg"])
-        btn_row.pack(fill="x", padx=14, pady=(0, 6))
-        for name, code in [("Dark","dark"),("Light","light"),("Catppuccin","catppuccin"),("Nord","nord"),("Dracula","dracula")]:
-            tk.Button(btn_row, text=name, command=lambda n=code: self._load_builtin(n),
-                      bg=c["surface"], fg=c["text"], font=("Segoe UI", 8), relief="flat", padx=8, pady=3).pack(side="left", padx=2)
-        tk.Button(btn_row, text="Open .hrt...", command=self._load_file, bg=c["surface"], fg=c["text"], font=("Segoe UI", 8), relief="flat", padx=8, pady=3).pack(side="left", padx=6)
-
-        name_row = tk.Frame(self.dialog, bg=c["bg"])
-        name_row.pack(fill="x", padx=14, pady=(0, 8))
-        tk.Label(name_row, text="Theme name:", bg=c["bg"], fg=c["text"], font=("Segoe UI", 10)).pack(side="left")
-        self._name_var = tk.StringVar(value="My Theme")
-        tk.Entry(name_row, textvariable=self._name_var, bg=c["surface"], fg=c["text"], font=("Segoe UI", 10), relief="flat", width=22).pack(side="left", padx=8)
-
-        grid = tk.Frame(self.dialog, bg=c["bg"])
-        grid.pack(fill="both", expand=True, padx=14)
-        for i, (key, label, desc) in enumerate(self.THEME_KEYS):
-            val = c.get(key, "#ffffff")
-            var = tk.StringVar(value=val)
-            self._vars[key] = var
-            tk.Label(grid, text=label, bg=c["bg"], fg=c["text"], font=("Segoe UI", 10), width=18, anchor="w").grid(row=i, column=0, padx=(0,8), pady=5, sticky="w")
-            swatch = tk.Button(grid, bg=val, width=3, relief="flat", command=lambda k=key: self._pick_color(k))
-            swatch.grid(row=i, column=1, padx=4, pady=5)
-            self._swatches[key] = swatch
-            entry = tk.Entry(grid, textvariable=var, bg=c["surface"], fg=c["text"], font=("Consolas", 10), relief="flat", width=10)
-            entry.grid(row=i, column=2, padx=4, pady=5, sticky="w")
-            entry.bind("<FocusOut>", lambda e, k=key: self._on_hex_change(k))
-            entry.bind("<Return>",   lambda e, k=key: self._on_hex_change(k))
-            tk.Label(grid, text=desc, bg=c["bg"], fg=c["text_secondary"], font=("Segoe UI", 8), anchor="w").grid(row=i, column=3, padx=8, pady=5, sticky="w")
-
-        sep = tk.Frame(self.dialog, bg=c["surface"], height=1)
-        sep.pack(fill="x", padx=14, pady=(8, 0))
-        bot = tk.Frame(self.dialog, bg=c["bg"])
-        bot.pack(fill="x", padx=14, pady=8)
-        tk.Button(bot, text="Preview", command=self._preview, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="left")
-        tk.Button(bot, text="Cancel", command=self.dialog.destroy, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="right", padx=(6,0))
-        tk.Button(bot, text="Save As .hrt", command=self._save, bg=self.app.colors["success"], fg=self.app.colors["bg"], font=("Segoe UI", 9, "bold"), relief="flat", padx=16, pady=6).pack(side="right")
-
-    def _pick_color(self, key: str) -> None:
-        from tkinter.colorchooser import askcolor
-        result = askcolor(color=self._vars[key].get(), title=f"Pick color for {key}", parent=self.dialog)
-        if result and result[1]:
-            self._vars[key].set(result[1]); self._swatches[key].config(bg=result[1])
-
-    def _on_hex_change(self, key: str) -> None:
-        val = self._vars[key].get().strip()
-        if not val.startswith("#"): val = "#" + val
-        try:
-            self.dialog.winfo_rgb(val)
-            self._vars[key].set(val); self._swatches[key].config(bg=val)
-        except Exception: pass
-
-    def _collect(self) -> dict:
-        data = {"theme_name": self._name_var.get() or "My Theme", "schema_version": THEME_SCHEMA_VERSION}
-        for key, var in self._vars.items(): data[key] = var.get()
-        return data
-
-    def _load_builtin(self, name: str) -> None:
-        colors = self.app.BUILTIN_THEMES.get(name, self.app.BUILTIN_THEMES["dark"])
-        self._name_var.set(name.capitalize())
-        for key, var in self._vars.items():
-            val = colors.get(key, "#ffffff"); var.set(val); self._swatches[key].config(bg=val)
-
-    def _load_file(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("HomRec Theme", "*.hrt"), ("All files", "*.*")], title="Open .hrt file")
-        if not path: return
-        try:
-            data = _hrc_read(path, _HRT_MAGIC)
-            self._name_var.set(data.get("theme_name", "My Theme"))
-            for key, var in self._vars.items():
-                val = data.get(key, "#ffffff"); var.set(val); self._swatches[key].config(bg=val)
-        except Exception as e:
-            messagebox.showerror("Load failed", str(e))
-
-    def _preview(self) -> None:
-        data = self._collect()
-        self.app.colors = {**self.app.BUILTIN_THEMES["dark"], **data}
-        self.app.apply_theme()
-        messagebox.showinfo("Preview", "Theme applied temporarily.\nSave to keep it.")
-
-    def _save(self) -> None:
-        data = self._collect()
-        bad = [key for key in THEME_REQUIRED_KEYS if not self._try_rgb(data.get(key, ""))]
-        if bad:
-            messagebox.showerror("Invalid colors", f"These colors are invalid: {', '.join(bad)}"); return
-        fname = data["theme_name"].lower().replace(" ", "_") + ".hrt"
-        path = filedialog.asksaveasfilename(defaultextension=".hrt", filetypes=[("HomRec Theme", "*.hrt"), ("All files", "*.*")], initialfile=fname, title="Save theme as")
-        if not path: return
-        try:
-            _hrc_write(path, data, _HRT_MAGIC)
-            themes_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR)
-            os.makedirs(themes_dir, exist_ok=True)
-            shutil.copy2(path, os.path.join(themes_dir, os.path.basename(path)))
-            messagebox.showinfo("Saved", f"Theme saved and installed:\n{path}")
-            log.info(f"Theme saved: {path}")
-        except Exception as e:
-            messagebox.showerror("Save failed", str(e))
-
-    def _try_rgb(self, color: str) -> bool:
-        try: self.dialog.winfo_rgb(color); return True
-        except: return False
-
-    def _delete_asset(self, name: str, kind: str, combo: ttk.Combobox) -> None:
-        if not name:
-            messagebox.showwarning("Nothing selected", f"Select a {kind} to delete."); return
-        if not messagebox.askyesno("Confirm delete", f"Delete {kind} '{name}'?\nThis cannot be undone."): return
-        base = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(base, THEMES_DIR if kind == "theme" else LANGS_DIR, f"{name}.{'hrt' if kind == 'theme' else 'hrl'}")
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-                log.info(f"Deleted {kind}: {path}")
-                messagebox.showinfo("Deleted", f"{kind.capitalize()} '{name}' deleted.")
-                combo.config(values=self.app._scan_custom_themes() if kind == "theme" else [c for c, _ in self.app._scan_custom_languages()])
-                combo.set("")
-            else:
-                messagebox.showerror("Not found", f"File not found:\n{path}")
-        except Exception as e:
-            messagebox.showerror("Delete failed", str(e))
-
 
 
 
@@ -1876,21 +1531,14 @@ class AdvancedSettingsDialog:
 
         it = tk.Frame(notebook, bg=c["bg"]); notebook.add(it, text="Interface")
         self._thv = tk.StringVar(value=getattr(a, "ui_theme", "dark"))
-        self._row(it, "Theme", ttk.Combobox(it, textvariable=self._thv, values=["dark","light","catppuccin","nord","dracula"], width=14, state="readonly"))
-        row_te = it.grid_size()[1]
-        tk.Button(it, text="🎨 Theme Editor...", command=lambda: ThemeEditorDialog(self.dialog, self.app), bg=c["surface"], fg=c["accent"], font=("Segoe UI", 9), relief="flat", padx=10, pady=5).grid(row=row_te, column=1, sticky="w", padx=(0,20), pady=(8,2))
-        row_le = it.grid_size()[1]
-        tk.Button(it, text="🌐 Language Editor...", command=lambda: LanguageEditorDialog(self.dialog, self.app), bg=c["surface"], fg=c["accent"], font=("Segoe UI", 9), relief="flat", padx=10, pady=5).grid(row=row_le, column=1, sticky="w", padx=(0,20), pady=2)
+        self._row(it, "Theme", ttk.Combobox(it, textvariable=self._thv, values=["dark","light"], width=10, state="readonly"))
 
         row_sep = it.grid_size()[1]
         tk.Frame(it, bg=c["surface"], height=1).grid(row=row_sep, column=0, columnspan=3, sticky="ew", padx=20, pady=(12,4))
 
-        row_dt = it.grid_size()[1]
-        tk.Label(it, text="Delete theme", bg=c["bg"], fg=c["text"], font=("Segoe UI", 10), anchor="w").grid(row=row_dt, column=0, sticky="w", padx=(20,8), pady=4)
-        self._del_theme_var = tk.StringVar()
-        del_theme_combo = ttk.Combobox(it, textvariable=self._del_theme_var, values=self.app._scan_custom_themes(), width=16, state="readonly")
-        del_theme_combo.grid(row=row_dt, column=1, sticky="w", padx=(0,4), pady=4)
-        tk.Button(it, text="🗑 Delete", command=lambda: self._delete_asset(self._del_theme_var.get(), "theme", del_theme_combo), bg=c["error"], fg=c["bg"], font=("Segoe UI", 9), relief="flat", padx=8, pady=3).grid(row=row_dt, column=2, sticky="w", pady=4)
+        row_hrl = it.grid_size()[1]
+        tk.Label(it, text="Language", bg=c["bg"], fg=c["text"], font=("Segoe UI", 10), anchor="w").grid(row=row_hrl, column=0, sticky="w", padx=(20,8), pady=4)
+        tk.Button(it, text="📥 Install .hrl...", command=self._install_hrl, bg=c["surface"], fg=c["accent"], font=("Segoe UI", 9), relief="flat", padx=10, pady=5).grid(row=row_hrl, column=1, sticky="w", pady=4)
 
         row_dl = it.grid_size()[1]
         tk.Label(it, text="Delete language", bg=c["bg"], fg=c["text"], font=("Segoe UI", 10), anchor="w").grid(row=row_dl, column=0, sticky="w", padx=(20,8), pady=4)
@@ -1944,6 +1592,13 @@ class AdvancedSettingsDialog:
         tk.Button(bot, text="⬇ Import .hrc", command=self._import, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="left")
         tk.Button(bot, text="Cancel", command=self.dialog.destroy, bg=c["surface"], fg=c["text"], font=("Segoe UI", 9), relief="flat", padx=12, pady=6).pack(side="right", padx=(6, 0))
         tk.Button(bot, text="Save", command=self._save, bg=c["success"], fg=c["bg"], font=("Segoe UI", 9, "bold"), relief="flat", padx=16, pady=6).pack(side="right")
+
+    def _install_hrl(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("HomRec Language", "*.hrl"), ("All files", "*.*")],
+            title="Install language (.hrl)")
+        if not path: return
+        self.app._import_hrl(path)
 
     def _build_overlays_tab(self, parent: tk.Frame) -> None:
         c = self.app.colors
@@ -2187,12 +1842,12 @@ class AdvancedSettingsDialog:
             messagebox.showwarning("Nothing selected", f"Select a {kind} to delete."); return
         if not messagebox.askyesno("Confirm delete", f"Delete {kind} '{name}'?\nThis cannot be undone."): return
         base = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(base, THEMES_DIR if kind == "theme" else LANGS_DIR, f"{name}.{'hrt' if kind == 'theme' else 'hrl'}")
+        path = os.path.join(base, LANGS_DIR, f"{name}.hrl")
         try:
             if os.path.exists(path):
                 os.remove(path); log.info(f"Deleted {kind}: {path}")
                 messagebox.showinfo("Deleted", f"{kind.capitalize()} '{name}' deleted.")
-                combo.config(values=self.app._scan_custom_themes() if kind == "theme" else [c for c, _ in self.app._scan_custom_languages()])
+                combo.config(values=[c for c, _ in self.app._scan_custom_languages()])
                 combo.set("")
             else:
                 messagebox.showerror("Not found", f"File not found:\n{path}")
@@ -2327,13 +1982,6 @@ class SettingsDialog:
                            activebackground=c["bg"], activeforeground=c["accent"]).pack(side="left", padx=8)
         tk.Label(video_inner, text="Codec and HW Accel settings are in ⚙ Advanced tab.", bg=c["bg"], fg=c["text_secondary"], font=("Segoe UI", 9, "italic")).pack(anchor="w", pady=(8, 0))
 
-        lang_tab = ttk.Frame(notebook); notebook.add(lang_tab, text=a.lang["language"])
-        lang_inner = tk.Frame(lang_tab, bg=c["bg"])
-        lang_inner.pack(fill="both", expand=True, padx=15, pady=15)
-        tk.Label(lang_inner, text="Select language:", bg=c["bg"], fg=c["text"], font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=10)
-        self.lang_var = tk.StringVar(value=a.current_language)
-        tk.Radiobutton(lang_inner, text="English", variable=self.lang_var, value="en", bg=c["bg"], fg=c["text"], selectcolor=c["surface"], font=("Segoe UI", 10)).pack(anchor="w", pady=2)
-        tk.Radiobutton(lang_inner, text="Русский", variable=self.lang_var, value="ru", bg=c["bg"], fg=c["text"], selectcolor=c["surface"], font=("Segoe UI", 10)).pack(anchor="w", pady=2)
 
         adv_tab = ttk.Frame(notebook); notebook.add(adv_tab, text=a.lang["advanced"])
         adv_inner = tk.Frame(adv_tab, bg=c["bg"])
@@ -2402,11 +2050,6 @@ class SettingsDialog:
             self.folder_label.config(text=os.path.basename(folder))
 
     def save_settings(self) -> None:
-        new_lang = self.lang_var.get()
-        if new_lang != self.app.current_language:
-            self.app.current_language = new_lang
-            self.app.lang = LANGUAGES[new_lang]
-            self.app.update_ui_language()
         self.app.quality = int(self.quality_var.get())
         new_fps = int(self.fps_slider_var.get())
         self.app.target_fps = new_fps
@@ -2648,21 +2291,10 @@ class HomRecScreen:
     BUILTIN_THEMES = {
         "dark": {"bg":"#1e1e2e","fg":"#cdd6f4","accent":"#89b4fa","success":"#a6e3a1","warning":"#f9e2af","error":"#f38ba8","surface":"#313244","surface_light":"#45475a","preview_bg":"#11111b","text":"#cdd6f4","text_secondary":"#a6adc8"},
         "light": {"bg":"#f5f5f5","fg":"#2c3e50","accent":"#3498db","success":"#27ae60","warning":"#f39c12","error":"#e74c3c","surface":"#ecf0f1","surface_light":"#bdc3c7","preview_bg":"#ffffff","text":"#2c3e50","text_secondary":"#7f8c8d"},
-        "catppuccin": {"bg":"#1e1e2e","fg":"#cdd6f4","accent":"#cba6f7","success":"#a6e3a1","warning":"#f9e2af","error":"#f38ba8","surface":"#181825","surface_light":"#313244","preview_bg":"#11111b","text":"#cdd6f4","text_secondary":"#6c7086"},
-        "nord": {"bg":"#2e3440","fg":"#eceff4","accent":"#88c0d0","success":"#a3be8c","warning":"#ebcb8b","error":"#bf616a","surface":"#3b4252","surface_light":"#434c5e","preview_bg":"#242933","text":"#eceff4","text_secondary":"#d8dee9"},
-        "dracula": {"bg":"#282a36","fg":"#f8f8f2","accent":"#bd93f9","success":"#50fa7b","warning":"#f1fa8c","error":"#ff5555","surface":"#44475a","surface_light":"#6272a4","preview_bg":"#21222c","text":"#f8f8f2","text_secondary":"#6272a4"},
     }
 
     def get_theme_colors(self, theme: str) -> dict:
         if theme in self.BUILTIN_THEMES: return self.BUILTIN_THEMES[theme]
-        hrt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR, f"{theme}.hrt")
-        if os.path.exists(hrt_path):
-            try:
-                data = _hrc_read(hrt_path, _HRT_MAGIC)
-                result = dict(self.BUILTIN_THEMES["dark"]); result.update(data)
-                return result
-            except Exception as e:
-                log.warning(f"Failed to load theme {hrt_path}: {e}")
         return self.BUILTIN_THEMES["dark"]
 
     def _load_language(self, lang_code: str) -> dict:
@@ -2692,10 +2324,6 @@ class HomRecScreen:
                     log.warning(f"Failed to scan language {fname}: {e}")
         return result
 
-    def _scan_custom_themes(self) -> list:
-        themes_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR)
-        os.makedirs(themes_dir, exist_ok=True)
-        return [f[:-4] for f in os.listdir(themes_dir) if f.endswith(".hrt")]
 
     def apply_theme(self) -> None:
         self.root.configure(bg=self.colors["bg"])
@@ -2737,28 +2365,13 @@ class HomRecScreen:
             view_menu.add_command(label=self.lang["pc_analytics"], command=self.show_analytics)
             view_menu.add_separator()
 
-        lang_menu = tk.Menu(view_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
-        view_menu.add_cascade(label=self.lang["language"], menu=lang_menu)
-        lang_menu.add_radiobutton(label="English", variable=self.language_var, value="en", command=lambda: self.change_language("en"))
-        lang_menu.add_radiobutton(label="Русский", variable=self.language_var, value="ru", command=lambda: self.change_language("ru"))
-        _custom_langs = self._scan_custom_languages()
-        if _custom_langs:
-            lang_menu.add_separator()
-            for _lcode, _lname in _custom_langs:
-                lang_menu.add_radiobutton(label=f"★ {_lname}", variable=self.language_var, value=_lcode, command=lambda c=_lcode: self.change_language(c))
-
         view_menu.add_command(label=self.lang["show_log"], command=self.show_log)
         view_menu.add_separator()
 
         theme_menu = tk.Menu(view_menu, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
         view_menu.add_cascade(label=self.lang["theme"], menu=theme_menu)
-        for _tid, _tlabel in [("dark","Dark"),("light","Light"),("catppuccin","Catppuccin"),("nord","Nord"),("dracula","Dracula")]:
+        for _tid, _tlabel in [("dark","Dark"),("light","Light")]:
             theme_menu.add_radiobutton(label=_tlabel, variable=self.theme_var, value=_tid, command=lambda t=_tid: self.change_theme(t))
-        _custom_themes = self._scan_custom_themes()
-        if _custom_themes:
-            theme_menu.add_separator()
-            for _ct in _custom_themes:
-                theme_menu.add_radiobutton(label=f"★ {_ct}", variable=self.theme_var, value=_ct, command=lambda t=_ct: self.change_theme(t))
 
         settings_menu = tk.Menu(menubar, tearoff=0, bg=self.colors["surface"], fg=self.colors["fg"])
         menubar.add_cascade(label=self.lang["settings_menu"], menu=settings_menu)
@@ -3287,7 +2900,7 @@ class HomRecScreen:
             import winreg
             base = os.path.dirname(os.path.abspath(__file__))
             icons_dir = os.path.join(base, "icons")
-            types = [(".hrc","HomRec.Profile","HomRec Profile","hrc.ico"), (".hrl","HomRec.Language","HomRec Language","hrl.ico"), (".hrt","HomRec.Theme","HomRec Theme","hrt.ico")]
+            types = [(".hrc","HomRec.Profile","HomRec Profile","hrc.ico"), (".hrl","HomRec.Language","HomRec Language","hrl.ico")]
             for ext, prog_id, description, ico_file in types:
                 ico_path = os.path.join(icons_dir, ico_file)
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{ext}") as k:
@@ -3335,7 +2948,6 @@ class HomRecScreen:
                 kind = _hrc_detect(path)
                 if kind == 'hrc': self._import_hrc(path)
                 elif kind == 'hrl': self._import_hrl(path)
-                elif kind == 'hrt': self._import_hrt(path)
             except ValueError as e:
                 messagebox.showerror("Invalid file", str(e))
 
@@ -3354,22 +2966,17 @@ class HomRecScreen:
             langs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), LANGS_DIR)
             os.makedirs(langs_dir, exist_ok=True)
             shutil.copy2(path, os.path.join(langs_dir, os.path.basename(path)))
-            messagebox.showinfo("Language imported", f"Language file installed:\n{os.path.basename(path)}\n\nRestart HomRec and select it in Settings → Language.")
-            log.info(f"HRL language imported: {path}")
+            data = _hrc_read(path, _HRL_MAGIC)
+            lang_code = os.path.splitext(os.path.basename(path))[0]
+            self.current_language = lang_code
+            self.lang = dict(LANGUAGES["en"]); self.lang.update(data)
+            self.language_var.set(lang_code)
+            self.save_settings(silent=True)
+            self.update_ui_language()
+            messagebox.showinfo("Language installed", f"Language '{data.get('lang_name', lang_code)}' applied!")
+            log.info(f"HRL language imported and applied: {path}")
         except Exception as e: messagebox.showerror("Import failed", str(e))
 
-    def _import_hrt(self, path: str) -> None:
-        try:
-            themes_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), THEMES_DIR)
-            os.makedirs(themes_dir, exist_ok=True)
-            shutil.copy2(path, os.path.join(themes_dir, os.path.basename(path)))
-            data = _hrc_read(path, _HRT_MAGIC)
-            self.ui_theme = os.path.splitext(os.path.basename(path))[0]
-            self.colors = self.get_theme_colors(self.ui_theme); self.apply_theme()
-            self.save_settings(silent=True)
-            messagebox.showinfo("Theme imported", f"Theme '{data.get('theme_name', '')}' applied!")
-            log.info(f"HRT theme imported: {path}")
-        except Exception as e: messagebox.showerror("Import failed", str(e))
 
     def _setup_drag_drop(self) -> None:
         if not _DND_AVAILABLE: return
