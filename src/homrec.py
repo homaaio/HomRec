@@ -2916,8 +2916,13 @@ class HomRecScreen:
 
     def recreate_widgets(self) -> None:
         was_recording = self.recording; was_paused = self.paused
+        # Останавливаем текущий цикл update_preview — он держит ссылку на старые виджеты.
+        self._preview_active = False
         for widget in self.root.winfo_children(): widget.destroy()
         self.create_menu(); self.create_widgets()
+        # Запускаем новый цикл для только что созданного preview_label.
+        self._preview_active = True
+        self.update_preview()
         if was_recording:
             self.record_btn.config(text=self.lang["stop"], bg=self.colors["error"], command=self.stop_recording)
             self.pause_btn.config(state="normal")
@@ -3850,6 +3855,10 @@ class HomRecScreen:
             _t.sleep(0.033)  # ~30 Hz опрос буфера — C++ захват идёт независимо
 
     def update_preview(self) -> None:
+        # Если виджеты были пересозданы (recreate_widgets сбросил флаг) — останавливаем
+        # старый цикл; новый уже запущен recreate_widgets.
+        if not getattr(self, '_preview_active', True):
+            return
         try:
             img = self._preview_queue.get_nowait()
             if img is None:
