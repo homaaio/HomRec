@@ -25,11 +25,11 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | **Multi-monitor** | Select which monitor to record |
 | **PC Analytics** | CPU, RAM and disk in one combined window |
 | **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
-| **Languages** | English and Russian UI (You can add more with .hrl files!) |
-| **Catppuccin theme** | Dark UI inspired by Catppuccin Macchiato |
+| **Custom languages** | Drop a `.hrl` file in Advanced Settings to add any language instantly |
+| **Themes** | Dark and Light built-in; plugin system coming soon |
 | **Custom output folder** | Choose where recordings are saved |
 | **Recording stats** | Live FPS, duration, frame count in status bar |
-| **Console window** | A console window that allows you to access the most unusual settings. |
+| **Console window** | Access the most unusual settings directly via the built-in console |
 | **Always on top** | Keep the window above everything else |
 | **System tray** | Minimise to tray, control recording from tray menu |
 | **Auto update check** | Notifies you when a new version is out |
@@ -41,14 +41,11 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 ### Option A — .exe (recommended)
 
-**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip`
-
-**2.** Unzip anywhere you want — no installer needed
-
+**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip`  
+**2.** Unzip anywhere you want — no installer needed  
 **3.** Launch `hr.exe`
 
-> ffmpeg is already included in the archive — no extra downloads needed.
-
+> FFmpeg is already included in the archive — no extra downloads needed.  
 > **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus — the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
 
 ---
@@ -66,8 +63,7 @@ cd homrec
 pip install -r requirements.txt
 ```
 
-**3. Place ffmpeg**
-
+**3. Place ffmpeg**  
 Download from [ffmpeg.org](https://ffmpeg.org/download.html) and either:
 - Place `ffmpeg.exe` in the HomRec folder, **or**
 - Add FFmpeg to your system PATH
@@ -89,13 +85,22 @@ python homrec.py
 
 ---
 
+## Custom languages (.hrl)
+
+HomRec supports custom language files in the `.hrl` format (HomRec Language).  
+To install one: **Advanced Settings → Interface → 📥 Install .hrl...**
+
+The language applies instantly — no restart needed. You can also drop `.hrl` files directly onto the HomRec window if drag-and-drop is available on your system.
+
+Want to create your own? Each `.hrl` file is a compressed JSON with all UI strings based on the English template. Community-made language files can be shared on the Discord server.
+
+---
+
 ## Dependencies
 
 ```
-opencv-python
 Pillow
 mss
-numpy
 psutil           # optional — PC Analytics panel
 pystray          # optional — system tray support
 ```
