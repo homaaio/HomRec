@@ -1,4 +1,4 @@
-# HomRec
+# HomRec (Hardware Optimized Mechanism Recorder)
 **Screen recorder built for weak PCs.**  
 No lags. No bloat. No GPU required.
 
