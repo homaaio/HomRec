@@ -2504,7 +2504,7 @@ class HomRecScreen:
     def change_language(self, lang: str) -> None:
         if lang != self.current_language:
             self.current_language = lang
-            self.lang = LANGUAGES[lang]
+            self.lang = self._load_language(lang)   # BUG FIX: was LANGUAGES[lang] — crashed for custom .hrl languages
             self.language_var.set(lang)
             self.update_ui_language()
             self.save_settings(silent=True)
@@ -2560,7 +2560,7 @@ class HomRecScreen:
                 self.recording_mode = s.get("mode", "balanced")
                 self.current_theme = s.get("theme", "dark")
                 self.current_language = s.get("language", "en")
-                self.lang = LANGUAGES[self.current_language]
+                self.lang = self._load_language(self.current_language)  # BUG FIX: was LANGUAGES[...] — crashed if saved language was a custom .hrl that's now missing
                 self.always_on_top.set(s.get("always_on_top", False))
                 self.countdown_var.set(s.get("countdown", True))
                 self.timestamp_var.set(s.get("timestamp", False))
@@ -2642,8 +2642,14 @@ class HomRecScreen:
             "sys_mute": bool(self.audio_panel.sys_mute.get()) if hasattr(self, 'audio_panel') else False,
             "audio_enabled": bool(self.audio_panel.audio_enabled.get()) if hasattr(self, 'audio_panel') else True,
         }
-        with open(SETTINGS_PATH, "w") as f:
-            json.dump(settings, f, indent=2)
+        try:
+            with open(SETTINGS_PATH, "w") as f:
+                json.dump(settings, f, indent=2)
+        except Exception as e:
+            log.error(f"save_settings failed: {e}")
+            if not silent:
+                messagebox.showerror(self.lang["error"], f"Could not save settings:\n{e}")
+            return
         if not silent:
             messagebox.showinfo(self.lang["info"], self.lang["settings_saved"])
 
@@ -3155,7 +3161,16 @@ class HomRecScreen:
 
     def open_recordings(self) -> None:
         if os.path.exists(self.output_folder):
-            os.startfile(self.output_folder)
+            # BUG FIX: os.startfile is Windows-only; use platform-aware open
+            try:
+                if sys.platform == "win32":
+                    os.startfile(self.output_folder)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", self.output_folder])
+                else:
+                    subprocess.Popen(["xdg-open", self.output_folder])
+            except Exception as e:
+                log.warning(f"Failed to open recordings folder: {e}")
         else:
             messagebox.showwarning(self.lang["warning"], self.lang["folder_not_exist"])
 
@@ -3340,6 +3355,11 @@ class HomRecScreen:
                     self._preview_queue.put_nowait(None); time.sleep(0.5); continue
 
                 if recording:
+                    # BUG FIX: when paused, skip new screenshots entirely — ffmpeg will duplicate
+                    # the last frame automatically.  This saves CPU and avoids stale frames.
+                    if getattr(self, 'paused', False):
+                        time.sleep(0.05)
+                        continue
                     _now = time.monotonic()
                     if _now - getattr(self,'_rec_pv_last_t',0.0) >= 0.25:
                         self._rec_pv_last_t = _now
@@ -3384,7 +3404,7 @@ class HomRecScreen:
                         try: self._preview_fps_lbl.config(text=f"{fps_val:.0f} fps")
                         except: pass
             except Exception as e: log.debug(f"_capture_loop error: {e}")
-            time.sleep(0.083)
+            time.sleep(0.1)  # BUG FIX: was 0.083 (~12 fps) but preview only redraws at 100 ms; align to avoid wasted captures
 
     def _capture_loop_cpp(self) -> None:
         """
@@ -3447,7 +3467,11 @@ class HomRecScreen:
                 self.preview_label.image = photo
         except queue.Empty: pass
         except Exception: pass
-        self.root.after(250 if getattr(self, 'recording', False) else 80, self.update_preview)
+        # BUG FIX: during recording the preview was rescheduled at 250 ms, but the capture
+        # loop already throttles to ~250 ms, so the label was always one cycle stale.
+        # Idle polling at 80 ms (12.5 fps) was unnecessarily burning CPU for a preview.
+        # Use 100 ms idle (10 fps preview is plenty) and 150 ms while recording.
+        self.root.after(150 if getattr(self, 'recording', False) else 100, self.update_preview)
 
     def _show_preview_placeholder(self) -> None:
         try:
@@ -3672,7 +3696,15 @@ class HomRecScreen:
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             fmt = getattr(self, 'video_format', 'mp4')
-            self.filename = f"{self.output_folder}/HomRec_{timestamp}.{fmt}"
+            # BUG FIX: filename_template was stored/loaded but never actually used; apply it now.
+            template = getattr(self, 'filename_template', 'HomRec_{date}_{time}')
+            date_str = datetime.now().strftime("%Y%m%d")
+            time_str = datetime.now().strftime("%H%M%S")
+            base_name = template.replace('{date}', date_str).replace('{time}', time_str)
+            # Strip characters that are invalid in filenames on Windows/Linux
+            import re as _re
+            base_name = _re.sub(r'[\\/:*?"<>|]', '_', base_name)
+            self.filename = f"{self.output_folder}/{base_name}.{fmt}"
             log.info(f"Starting recording: {self.filename}")
             self._notify_recording_start()
             if not self.ffmpeg_path: raise Exception("FFmpeg not found!")
@@ -3858,12 +3890,28 @@ class HomRecScreen:
                     self.fps_label.config(text=f"{self.lang['fps']} {self.frame_count/elapsed:.1f}")
                 h = int(elapsed // 3600); m = int((elapsed % 3600) // 60); s = int(elapsed % 60)
                 self.time_label.config(text=f"{h:02d}:{m:02d}:{s:02d}")
+                # BUG FIX: auto_stop_min was stored/loaded but never checked — auto-stop never fired.
+                auto_stop = getattr(self, 'auto_stop_min', 0)
+                if auto_stop > 0 and elapsed >= auto_stop * 60:
+                    log.info(f"Auto-stop triggered after {auto_stop} min")
+                    self.stop_recording()
+                    return
                 proc_alive = (
                     (self.ffmpeg_proc and self.ffmpeg_proc.poll() is None)
                     or getattr(self, '_using_native_ffmpeg', False)
                 )
                 if proc_alive:
-                    _kb = getattr(self, '_last_ffmpeg_size_kb', 0)
+                    # BUG FIX: _last_ffmpeg_size_kb was read but never written, so the status
+                    # bar always showed "0 MB".  Read the actual file size from disk instead.
+                    try:
+                        fn = getattr(self, 'filename', '')
+                        if fn and os.path.exists(fn):
+                            _kb = os.path.getsize(fn) // 1024
+                            self._last_ffmpeg_size_kb = _kb
+                        else:
+                            _kb = getattr(self, '_last_ffmpeg_size_kb', 0)
+                    except OSError:
+                        _kb = getattr(self, '_last_ffmpeg_size_kb', 0)
                     _mb = _kb / 1024.0
                     _sz = f"{_mb:.1f} MB" if _mb >= 1.0 else f"{_kb} KB"
                     try:
@@ -4015,13 +4063,24 @@ class HomRecScreen:
         if self.recording:
             self.paused = not self.paused
             if self.paused:
+                # NOTE: gdigrab/ddagrab capture pipelines have no true pause command.
+                # Setting self.paused=True signals the capture loop (C++ pipeline or mss)
+                # to stop pushing frames so FFmpeg inserts duplicate/frozen frames instead.
+                # This is the only pause mechanism available without stopping the process.
                 self.pause_btn.config(text=self.lang["resume"], bg=self.colors["success"])
                 self.status_icon.config(fg=self.colors["warning"])
                 self.status_label.config(text=self.lang["paused"])
+                # Freeze the recording timer so elapsed time doesn't advance while paused
+                self._pause_start = time.time()
             else:
                 self.pause_btn.config(text=self.lang["pause"], bg=self.colors["warning"])
                 self.status_icon.config(fg=self.colors["success"])
                 self.status_label.config(text=self.lang["recording"])
+                # BUG FIX: shift start_time forward by the duration of the pause so that
+                # the elapsed timer and FPS counter aren't thrown off by the pause period.
+                if hasattr(self, '_pause_start'):
+                    self.start_time += time.time() - self._pause_start
+                    del self._pause_start
 
     def _show_welcome_and_save(self) -> None:
         self.save_settings(silent=True); WelcomeDialog.show(self)
