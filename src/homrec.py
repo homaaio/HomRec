@@ -3079,8 +3079,9 @@ class HomRecScreen:
                      '-g',str(gop),'-profile:v','high']
         else:
             thr = max(1, (cpu_count or 4) // 2)
-            args += ['-preset','ultrafast','-tune','zerolatency',
-                     '-crf',str(qp),'-g',str(gop),'-threads',str(thr)]
+            # OPTIMIZED: Lower CPU usage with restricted threads
+            args += ['-preset','superfast','-tune','zerolatency',
+         '-crf','28','-g',str(gop),'-threads','2']
             if not is_265: args += ['-profile:v','high','-level','4.2']
             if is_265: args += ['-x265-params','log-level=error:no-open-gop=1']
         return args
