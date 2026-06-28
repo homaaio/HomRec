@@ -23,6 +23,8 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <queue>
+#include <condition_variable>
 
 static constexpr int HR_DX_OK      =  0;
 static constexpr int HR_DX_TIMEOUT =  1;
@@ -198,6 +200,14 @@ struct Pipeline {
     std::atomic<int64_t> frames_dropped{0};
     std::atomic<double>  fps_actual{0.0};
 
+    // ====== FRAME QUEUE FOR ASYNC WRITING ======
+    std::queue<std::vector<uint8_t>> pipe_queue;
+    std::mutex pipe_queue_mtx;
+    std::condition_variable pipe_queue_cv;
+    std::thread writer_thread;
+    std::atomic<bool> writer_running{false};
+    static constexpr size_t MAX_QUEUE_SIZE = 4;  // Max frames in queue
+
     // -------------------------------------------------------------------------
     // Write raw bytes to pipe
     // -------------------------------------------------------------------------
@@ -222,6 +232,65 @@ struct Pipeline {
         }
 #endif
         return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // Writer thread - consumes frames from queue and writes to pipe
+    // -------------------------------------------------------------------------
+    void writer_loop() {
+#ifdef _WIN32
+        // Set high priority for writer to keep pipe full
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#if defined(HR_HAS_SET_THREAD_DESC)
+        typedef HRESULT (WINAPI *PFN_SET_THREAD_DESC)(HANDLE, PCWSTR);
+        static PFN_SET_THREAD_DESC set_thread_desc = 
+            (PFN_SET_THREAD_DESC)GetProcAddress(
+                GetModuleHandleW(L"KernelBase.dll"), "SetThreadDescription");
+        if (set_thread_desc) {
+            set_thread_desc(GetCurrentThread(), L"HomRec Writer");
+        }
+#endif
+#endif
+
+        writer_running.store(true, std::memory_order_relaxed);
+
+        while (writer_running.load(std::memory_order_relaxed)) {
+            std::vector<uint8_t> frame;
+            
+            {
+                std::unique_lock<std::mutex> lock(pipe_queue_mtx);
+                
+                // Wait for frames or shutdown signal
+                pipe_queue_cv.wait_for(lock, std::chrono::milliseconds(10), [this]() {
+                    return !pipe_queue.empty() || 
+                           !writer_running.load(std::memory_order_relaxed);
+                });
+                
+                // Exit if shutting down and queue is empty
+                if (!writer_running.load(std::memory_order_relaxed) && pipe_queue.empty()) {
+                    break;
+                }
+                
+                if (pipe_queue.empty()) {
+                    continue;
+                }
+                
+                // Move frame out of queue (no copy)
+                frame = std::move(pipe_queue.front());
+                pipe_queue.pop();
+            }
+            
+            // Write to pipe outside the lock
+            if (!frame.empty()) {
+                if (!write_pipe(frame.data(), frame.size())) {
+                    // Pipe write failed - stop everything
+                    recording = false;
+                    writer_running.store(false, std::memory_order_relaxed);
+                    running.store(false, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -253,24 +322,26 @@ struct Pipeline {
     // -------------------------------------------------------------------------
     void capture_loop() {
 #ifdef _WIN32
-        // OPT: TIME_CRITICAL вместо ABOVE_NORMAL — защита от 15 мс вытеснений
+        // CRITICAL priority to avoid 15ms preemptions
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-{
-    typedef HRESULT (WINAPI *PFN_STD)(HANDLE, PCWSTR);
-    static auto fn = (PFN_STD)GetProcAddress(
-        GetModuleHandleW(L"KernelBase.dll"), "SetThreadDescription");
-    if (fn) fn(GetCurrentThread(), L"HomRec Capture");
-}
+#if defined(HR_HAS_SET_THREAD_DESC)
+        typedef HRESULT (WINAPI *PFN_SET_THREAD_DESC)(HANDLE, PCWSTR);
+        static PFN_SET_THREAD_DESC set_thread_desc = 
+            (PFN_SET_THREAD_DESC)GetProcAddress(
+                GetModuleHandleW(L"KernelBase.dll"), "SetThreadDescription");
+        if (set_thread_desc) {
+            set_thread_desc(GetCurrentThread(), L"HomRec Capture");
+        }
+#endif
 #endif
         const int64_t frame_ns = (fps > 0)
                                  ? (1'000'000'000LL / fps)
                                  : (1'000'000'000LL / 30);
 
-        // OPT: PREVIEW_EVERY динамический — fps/20, минимум 1
-        // 30fps → каждые ~1-2 кадра; 60fps → каждые 3
+        // Dynamic preview frequency: fps/20, minimum 1
         const int PREVIEW_EVERY = std::max(1, fps / 20);
 
-        // OPT: timeout_ms = 2/3 frame (было 1/2) → меньше TIMEOUT-пропусков
+        // timeout_ms = 2/3 frame (was 1/2) → fewer TIMEOUT drops
         int timeout_ms = static_cast<int>(frame_ns * 2 / 3'000'000LL);
         if (timeout_ms < 8)  timeout_ms = 8;
         if (timeout_ms > 33) timeout_ms = 33;
@@ -329,19 +400,30 @@ struct Pipeline {
                 break;
             }
 
-            // OPT: YUV конвертация только при активной записи
+            // YUV conversion + queue push (only when recording)
 #ifdef _WIN32
             if (recording && g_libs.bgra_to_yuv) {
                 g_libs.bgra_to_yuv(bgra_buf.data(), yuv_buf.data(), src_w, src_h);
-                if (!write_pipe(yuv_buf.data(), yuv_buf.size())) {
-                    running.store(false);
-                    break;
+                
+                // Push to queue with backpressure handling
+                {
+                    std::lock_guard<std::mutex> lock(pipe_queue_mtx);
+                    
+                    // If queue is full, drop oldest frame to keep up
+                    if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
+                        pipe_queue.pop();
+                        frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    
+                    // Copy YUV frame to queue
+                    pipe_queue.push(yuv_buf);
+                    pipe_queue_cv.notify_one();
                 }
             }
 #endif
             frames_captured.fetch_add(1, std::memory_order_relaxed);
 
-            // Preview: динамическая частота
+            // Preview: dynamic frequency
             if (++frame_idx % PREVIEW_EVERY == 0)
                 update_preview();
 
@@ -362,6 +444,10 @@ struct Pipeline {
             }
 #endif
         }
+        
+        // Signal writer thread to stop
+        writer_running.store(false, std::memory_order_relaxed);
+        pipe_queue_cv.notify_all();
     }
 };
 
@@ -400,8 +486,17 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     if (!handle) return;
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
-    pl->running.store(false);
+    
+    // Stop all threads
+    pl->writer_running.store(false, std::memory_order_relaxed);
+    pl->pipe_queue_cv.notify_all();
+    pl->running.store(false, std::memory_order_relaxed);
+    
+    // Wait for threads to finish
+    if (pl->writer_thread.joinable()) pl->writer_thread.join();
     if (pl->capture_thread.joinable()) pl->capture_thread.join();
+    
+    // Cleanup resources
     if (pl->dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(pl->dx_ctx);
     if (pl->sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(pl->sw_ctx);
     delete pl;
@@ -423,7 +518,7 @@ HR_EXPORT int hr_pl_start(void* handle) {
     if (pl->recording)
         pl->yuv_buf.resize((size_t)pl->src_w * pl->src_h * 3 / 2);
 
-    // OPT: pre-allocate preview buffer once
+    // Pre-allocate preview buffer
     int tw = pl->pv_w, th = pl->pv_h;
     if (pl->src_w > 0 && pl->src_h > 0) {
         float ar = (float)pl->src_w / (float)pl->src_h;
@@ -432,8 +527,14 @@ HR_EXPORT int hr_pl_start(void* handle) {
     }
     pl->pv_buf.resize((size_t)(std::max(tw & ~1, 2)) * std::max(th & ~1, 2) * 3);
 
-    pl->running.store(true);
-    pl->capture_thread = std::thread([pl]{ pl->capture_loop(); });
+    // Start writer thread first
+    pl->writer_running.store(true, std::memory_order_relaxed);
+    pl->writer_thread = std::thread([pl]() { pl->writer_loop(); });
+
+    // Start capture thread
+    pl->running.store(true, std::memory_order_relaxed);
+    pl->capture_thread = std::thread([pl]() { pl->capture_loop(); });
+    
     return 1;
 #endif
 }
@@ -442,19 +543,25 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     if (!handle) return;
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
-    pl->running.store(false);
+    
+    // Signal stop
+    pl->running.store(false, std::memory_order_relaxed);
+    pl->writer_running.store(false, std::memory_order_relaxed);
+    pl->pipe_queue_cv.notify_all();
+    
+    // Wait for threads
     if (pl->capture_thread.joinable()) pl->capture_thread.join();
+    if (pl->writer_thread.joinable()) pl->writer_thread.join();
 #endif
 }
 
 HR_EXPORT void hr_pl_pause(void* handle, int flag) {
     if (!handle) return;
 #ifdef _WIN32
-    static_cast<Pipeline*>(handle)->paused.store(flag != 0);
+    static_cast<Pipeline*>(handle)->paused.store(flag != 0, std::memory_order_relaxed);
 #endif
 }
 
-// OPT: новая функция — переключить запись на лету без пересоздания pipeline
 HR_EXPORT void hr_pl_set_recording(void* handle, int active, int pipe_fd) {
     if (!handle) return;
 #ifdef _WIN32
