@@ -207,6 +207,9 @@ struct Pipeline {
     std::thread writer_thread;
     std::atomic<bool> writer_running{false};
     static constexpr size_t MAX_QUEUE_SIZE = 4;  // Max frames in queue
+    
+    // ====== FRAME SKIP COUNTER FOR BACKPRESSURE ======
+    int frame_skip_counter = 0;
 
     // -------------------------------------------------------------------------
     // Write raw bytes to pipe
@@ -400,24 +403,45 @@ struct Pipeline {
                 break;
             }
 
-            // YUV conversion + queue push (only when recording)
+            // ====== YUV CONVERSION WITH SMART SKIPPING ======
+            // Only convert every other frame if queue is backed up
 #ifdef _WIN32
             if (recording && g_libs.bgra_to_yuv) {
-                g_libs.bgra_to_yuv(bgra_buf.data(), yuv_buf.data(), src_w, src_h);
+                bool should_convert = true;
                 
-                // Push to queue with backpressure handling
                 {
                     std::lock_guard<std::mutex> lock(pipe_queue_mtx);
-                    
-                    // If queue is full, drop oldest frame to keep up
-                    if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
-                        pipe_queue.pop();
-                        frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                    // If queue is getting full, skip every other frame to save CPU
+                    if (pipe_queue.size() > 1) {
+                        frame_skip_counter++;
+                        if (frame_skip_counter % 2 == 0) {
+                            should_convert = false;
+                        }
+                    } else {
+                        frame_skip_counter = 0;
                     }
+                }
+                
+                if (should_convert) {
+                    g_libs.bgra_to_yuv(bgra_buf.data(), yuv_buf.data(), src_w, src_h);
                     
-                    // Copy YUV frame to queue
-                    pipe_queue.push(yuv_buf);
-                    pipe_queue_cv.notify_one();
+                    // Push to queue
+                    {
+                        std::lock_guard<std::mutex> lock(pipe_queue_mtx);
+                        
+                        // If queue is full, drop oldest frame to keep up
+                        if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
+                            pipe_queue.pop();
+                            frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        
+                        // Copy YUV frame to queue
+                        pipe_queue.push(yuv_buf);
+                        pipe_queue_cv.notify_one();
+                    }
+                } else {
+                    // Frame skipped conversion - count as dropped for stats
+                    frames_dropped.fetch_add(1, std::memory_order_relaxed);
                 }
             }
 #endif
@@ -471,6 +495,7 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     pl->pv_h        = pv_h;
     pl->pipe_handle = static_cast<intptr_t>(pipe_fd);
     pl->recording   = (pipe_fd != 0 && pipe_fd != -1);
+    pl->frame_skip_counter = 0;
 
     pl->dx_ctx = g_libs.dx_create(0, 0);
     if (!pl->dx_ctx) { delete pl; return nullptr; }
@@ -527,6 +552,9 @@ HR_EXPORT int hr_pl_start(void* handle) {
     }
     pl->pv_buf.resize((size_t)(std::max(tw & ~1, 2)) * std::max(th & ~1, 2) * 3);
 
+    // Reset skip counter
+    pl->frame_skip_counter = 0;
+
     // Start writer thread first
     pl->writer_running.store(true, std::memory_order_relaxed);
     pl->writer_thread = std::thread([pl]() { pl->writer_loop(); });
@@ -570,6 +598,7 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, int pipe_fd) {
     pl->recording   = (active != 0) && (pipe_fd != 0) && (pipe_fd != -1);
     if (pl->recording && pl->yuv_buf.empty())
         pl->yuv_buf.resize((size_t)pl->src_w * pl->src_h * 3 / 2);
+    pl->frame_skip_counter = 0;
 #endif
 }
 
