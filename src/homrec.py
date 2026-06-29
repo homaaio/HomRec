@@ -3974,16 +3974,25 @@ class HomRecScreen:
 
             elif self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
                 # ── subprocess путь ───────────────────────────────────────
-                try: self.ffmpeg_proc.stdin.write(b'q'); self.ffmpeg_proc.stdin.flush()
-                except: pass
+                try: 
+                    self.ffmpeg_proc.stdin.write(b'q')
+                    self.ffmpeg_proc.stdin.flush()
+                except: 
+                    pass
+                
+                # Wait max 3 seconds for graceful exit (was 30 seconds)
                 try:
-                    # 30 с: даём ffmpeg время записать moov-атом
-                    self.ffmpeg_proc.wait(timeout=30)
-                except:
-                    try: self.ffmpeg_proc.terminate(); self.ffmpeg_proc.wait(timeout=5)
+                    self.ffmpeg_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    # Force kill if stuck
+                    try:
+                        self.ffmpeg_proc.terminate()
+                        self.ffmpeg_proc.wait(timeout=1)
                     except:
-                        try: self.ffmpeg_proc.kill()
-                        except: pass
+                        try:
+                            self.ffmpeg_proc.kill()
+                        except:
+                            pass
 
             audio_file = None
             if self.audio_recording: audio_file = self.stop_audio_recording()
