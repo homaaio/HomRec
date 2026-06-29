@@ -508,9 +508,35 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     pl->pipe_queue_cv.notify_all();
     pl->running.store(false, std::memory_order_relaxed);
     
-    // Wait for threads to finish
-    if (pl->writer_thread.joinable()) pl->writer_thread.join();
-    if (pl->capture_thread.joinable()) pl->capture_thread.join();
+    // Wait for writer thread with timeout
+    if (pl->writer_thread.joinable()) {
+        HANDLE hThread = pl->writer_thread.native_handle();
+        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+            pl->writer_thread.join();
+        } else {
+            // Force detach if stuck
+            pl->writer_thread.detach();
+        }
+    }
+    
+    // Wait for capture thread with timeout
+    if (pl->capture_thread.joinable()) {
+        HANDLE hThread = pl->capture_thread.native_handle();
+        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+            pl->capture_thread.join();
+        } else {
+            // Force detach if stuck
+            pl->capture_thread.detach();
+        }
+    }
+    
+    // Clear remaining queue to free memory
+    {
+        std::lock_guard<std::mutex> lock(pl->pipe_queue_mtx);
+        while (!pl->pipe_queue.empty()) {
+            pl->pipe_queue.pop();
+        }
+    }
     
     // Cleanup resources
     if (pl->dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(pl->dx_ctx);
@@ -565,9 +591,33 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     pl->writer_running.store(false, std::memory_order_relaxed);
     pl->pipe_queue_cv.notify_all();
     
-    // Wait for threads
-    if (pl->capture_thread.joinable()) pl->capture_thread.join();
-    if (pl->writer_thread.joinable()) pl->writer_thread.join();
+    // Wait for capture thread with timeout
+    if (pl->capture_thread.joinable()) {
+        HANDLE hThread = pl->capture_thread.native_handle();
+        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+            pl->capture_thread.join();
+        } else {
+            pl->capture_thread.detach();
+        }
+    }
+    
+    // Wait for writer thread with timeout
+    if (pl->writer_thread.joinable()) {
+        HANDLE hThread = pl->writer_thread.native_handle();
+        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+            pl->writer_thread.join();
+        } else {
+            pl->writer_thread.detach();
+        }
+    }
+    
+    // Clear queue
+    {
+        std::lock_guard<std::mutex> lock(pl->pipe_queue_mtx);
+        while (!pl->pipe_queue.empty()) {
+            pl->pipe_queue.pop();
+        }
+    }
 #endif
 }
 
