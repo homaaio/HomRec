@@ -19,6 +19,7 @@ except ImportError:
 import ctypes
 import sys
 import subprocess
+import re
 import glob
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -2944,7 +2945,6 @@ class HomRecScreen:
         raw = event.data.strip()
         paths = []
         if raw.startswith('{'):
-            import re
             paths = re.findall(r'{([^}]+)}', raw) or [raw.strip('{}')]
         else:
             paths = raw.split()
@@ -4073,21 +4073,28 @@ class HomRecScreen:
         if self.recording:
             self.paused = not self.paused
             if self.paused:
-                # NOTE: gdigrab/ddagrab capture pipelines have no true pause command.
-                # Setting self.paused=True signals the capture loop (C++ pipeline or mss)
-                # to stop pushing frames so FFmpeg inserts duplicate/frozen frames instead.
-                # This is the only pause mechanism available without stopping the process.
+                # Pause audio too
+                if self.audio_recording and hasattr(self, '_ae') and self._ae:
+                    try:
+                        self._ae.pause()
+                    except Exception as e:
+                        log.warning(f"Audio pause failed: {e}")
+                
                 self.pause_btn.config(text=self.lang["resume"], bg=self.colors["success"])
                 self.status_icon.config(fg=self.colors["warning"])
                 self.status_label.config(text=self.lang["paused"])
-                # Freeze the recording timer so elapsed time doesn't advance while paused
                 self._pause_start = time.time()
             else:
+                # Resume audio
+                if self.audio_recording and hasattr(self, '_ae') and self._ae:
+                    try:
+                        self._ae.resume()
+                    except Exception as e:
+                        log.warning(f"Audio resume failed: {e}")
+                
                 self.pause_btn.config(text=self.lang["pause"], bg=self.colors["warning"])
                 self.status_icon.config(fg=self.colors["success"])
                 self.status_label.config(text=self.lang["recording"])
-                # BUG FIX: shift start_time forward by the duration of the pause so that
-                # the elapsed timer and FPS counter aren't thrown off by the pause period.
                 if hasattr(self, '_pause_start'):
                     self.start_time += time.time() - self._pause_start
                     del self._pause_start
