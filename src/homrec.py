@@ -7,6 +7,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 from PIL import Image, ImageTk, ImageDraw
+from tkinter import colorchooser as cc
 import mss
 import threading
 import json
@@ -927,7 +928,7 @@ class OverlayManagerWindow:
         self._refresh_list()
         win.protocol("WM_DELETE_WINDOW", win.destroy)
 
-    # ── List ──────────────────────────────────────────────────────────────────
+    # List ------------------------------------------------------------------
     def _refresh_list(self) -> None:
         for w in self._list_inner.winfo_children():
             w.destroy()
@@ -1011,7 +1012,7 @@ class OverlayManagerWindow:
         self._refresh_list()
         self._build_editor(self._sel_idx)
 
-    # ── Editor ────────────────────────────────────────────────────────────────
+    # Editor ----------------------------------------------------------------
     def _clear_editor(self) -> None:
         for w in self._editor_frame.winfo_children():
             w.destroy()
@@ -1092,7 +1093,7 @@ class OverlayManagerWindow:
                                 relief="flat", cursor="hand2")
             col_prev.pack(side="left")
             def _pick_color():
-                from tkinter import colorchooser as cc
+                
                 res = cc.askcolor(color=w["color"].get(), parent=self.win)
                 if res[1]:
                     w["color"].set(res[1]); col_prev.config(bg=res[1])
@@ -1290,7 +1291,7 @@ class OverlayPreviewDialog:
         self._bg_tk = None
         self.dlg.after(120, self._grab_bg)
 
-    # ── Screenshot ────────────────────────────────────────────────────────────
+    # Screenshot ------------------------------------------------------------
     def _grab_bg(self) -> None:
         """Grab a screenshot of the selected monitor, store as PIL Image."""
         try:
@@ -1308,7 +1309,7 @@ class OverlayPreviewDialog:
             self._bg_orig_h = 1080
         self.dlg.after(0, self._render)
 
-    # ── Render ────────────────────────────────────────────────────────────────
+    # Render ----------------------------------------------------------------
     def _render(self) -> None:
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
@@ -1404,7 +1405,7 @@ class OverlayPreviewDialog:
                     fill="", outline="#ffffff", width=1, dash=(3, 3)
                 )
 
-    # ── Geometry helpers ──────────────────────────────────────────────────────
+    # Geometry helpers ------------------------------------------------------
     def _ov_canvas_rect(self, ov: dict) -> tuple:
         bw = max(self._render_bw, 1)
         bh = max(self._render_bh, 1)
@@ -1416,7 +1417,7 @@ class OverlayPreviewDialog:
         y2 = int(y1 + max(0.02, ov.get("h", 0.1)) * bh)
         return x1, y1, x2, y2
 
-    # ── Interaction ───────────────────────────────────────────────────────────
+    # Interaction -----------------------------------------------------------
     def _hit_test(self, mx: int, my: int) -> tuple:
         h = self._HANDLE
         for i, ov in enumerate(self._overlays):
@@ -3309,9 +3310,7 @@ class HomRecScreen:
             return img.convert("RGB") if img.mode != "RGB" else img
 
     def _capture_loop(self) -> None:
-        # ── C++ pipeline путь ──────────────────────────────────────────────
-        # Если hr_pipeline.dll загружен, превью берём из C++ (нет GIL на захвате).
-        # Python только читает готовый RGB-буфер и отдаёт в Tkinter.
+        # C++ pipeline path ----------------------------------------------
         try:
             from homrec_native import CppPipeline, PIPELINE_OK as _PLK
         except ImportError:
@@ -3333,7 +3332,7 @@ class HomRecScreen:
             self._capture_loop_cpp()
             return
 
-        # ── Python fallback (mss) ─────────────────────────────────────────
+        # Python fallback (mss) -----------------------------------------
         import mss as _mss
         sct = _mss.mss()
         try:
@@ -3776,7 +3775,7 @@ class HomRecScreen:
 
             log.debug(f"FFmpeg cmd: {' '.join(cmd)}")
 
-            # ── Выбор пути запуска ffmpeg ─────────────────────────────────
+            # Выбор пути запуска ffmpeg ---------------------------------
             _pl = getattr(self, 'cpp_pipeline', None)
             _use_cpp_pipe = (
                 _pl is not None
@@ -3785,8 +3784,8 @@ class HomRecScreen:
             )
 
             if _use_cpp_pipe:
-                # ── C++ pipeline путь ─────────────────────────────────────
-                # Открываем анонимный pipe: C++ → YUV420p → ffmpeg stdin
+                # C++ pipeline path -------------------------------------
+                # Open pipe: C++ → YUV420p → ffmpeg stdin
                 import os as _os
                 r_fd, w_fd = _os.pipe()
                 self._cpp_pipe_read_fd  = r_fd
@@ -3835,7 +3834,7 @@ class HomRecScreen:
                         creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=="Windows" else 0
                     )
             else:
-                # ── Python / ddagrab путь (без C++ pipeline) ─────────────
+                # Python / ddagrab путь (без C++ pipeline) -------------
                 self._using_native_ffmpeg = False
                 self.ffmpeg_proc = subprocess.Popen(
                     cmd,
@@ -3943,7 +3942,7 @@ class HomRecScreen:
             self.stop_ffmpeg_reader = True
 
             if getattr(self, '_using_native_ffmpeg', False):
-                # ── C++ pipeline остановка ────────────────────────────────
+                # C++ pipeline остановка --------------------------------
                 _pl = getattr(self, 'cpp_pipeline', None)
                 if _pl:
                     # Сначала останавливаем запись в pipe (C++ перестаёт писать YUV)
@@ -3973,7 +3972,7 @@ class HomRecScreen:
                 self._using_native_ffmpeg = False
 
             elif self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
-                # ── subprocess путь ───────────────────────────────────────
+                # subprocess путь ---------------------------------------
                 try: 
                     self.ffmpeg_proc.stdin.write(b'q')
                     self.ffmpeg_proc.stdin.flush()
