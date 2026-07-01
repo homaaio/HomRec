@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+*.so.*
+
 # Distribution / packaging
 .Python
 build/
