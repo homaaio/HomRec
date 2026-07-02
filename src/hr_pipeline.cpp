@@ -184,7 +184,6 @@ struct Pipeline {
     void* sw_ctx = nullptr;
 
     std::vector<uint8_t> bgra_buf;  // src_w * src_h * 4
-    std::vector<uint8_t> yuv_buf;   // src_w * src_h * 3/2  (only when recording)
 
     // Preview
     std::vector<uint8_t> pv_buf;
@@ -207,6 +206,16 @@ struct Pipeline {
     std::thread writer_thread;
     std::atomic<bool> writer_running{false};
     static constexpr size_t MAX_QUEUE_SIZE = 3;  // Max frames in queue - reduced for lower latency
+
+    // ====== RECYCLED BUFFER POOL ======
+    // PERF FIX: previously every frame allocated a fresh conversion buffer and
+    // pipe_queue.push(yuv_buf) *copied* the full YUV frame (~3 MB at 1080p) on
+    // top of that. The writer thread now returns finished buffers here so the
+    // capture thread can reuse them via move — steady-state adds zero heap
+    // allocations and zero extra memcpy per frame.
+    std::queue<std::vector<uint8_t>> free_bufs;
+    std::mutex free_bufs_mtx;
+    static constexpr size_t MAX_FREE_BUFS = MAX_QUEUE_SIZE + 2;
 
     // -------------------------------------------------------------------------
     // Write raw bytes to pipe
@@ -282,7 +291,18 @@ struct Pipeline {
             
             // Write to pipe outside the lock
             if (!frame.empty()) {
-                if (!write_pipe(frame.data(), frame.size())) {
+                bool ok = write_pipe(frame.data(), frame.size());
+
+                // PERF FIX: hand the buffer back to the free-list instead of
+                // letting it fall out of scope and get freed — the capture
+                // thread will reuse it for the next frame (no realloc/memcpy).
+                {
+                    std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                    if (free_bufs.size() < MAX_FREE_BUFS)
+                        free_bufs.push(std::move(frame));
+                }
+
+                if (!ok) {
                     // Pipe write failed - stop everything
                     recording = false;
                     writer_running.store(false, std::memory_order_relaxed);
@@ -400,40 +420,57 @@ struct Pipeline {
                 break;
             }
 
-            // ====== OPTIMIZED YUV CONVERSION ======
-            // Skip conversion entirely if queue already has frames ready
+            // ====== YUV CONVERSION ======
+            // BUG FIX: the previous version skipped conversion (and dropped the
+            // frame) whenever the queue held *any* frame at all — with
+            // MAX_QUEUE_SIZE == 3 that meant most frames were silently dropped
+            // even though the writer was nowhere close to falling behind, since
+            // there is almost always ≥1 frame in flight. That caused visibly
+            // choppy recordings while barely saving any CPU. We now only drop
+            // when the queue is genuinely full (the writer really is behind),
+            // matching the MAX_QUEUE_SIZE backpressure the queue was designed
+            // to provide.
+            //
+            // PERF FIX: conversion now writes into a buffer recycled from the
+            // free-list (filled by the writer thread once it's done with a
+            // frame) and is moved — not copied — into pipe_queue. This removes
+            // both the per-frame heap allocation and the full-frame memcpy
+            // that pipe_queue.push(yuv_buf) used to perform.
 #ifdef _WIN32
             if (recording && g_libs.bgra_to_yuv) {
-                bool should_convert = true;
-                
+                std::vector<uint8_t> yuv_frame;
                 {
-                    std::lock_guard<std::mutex> lock(pipe_queue_mtx);
-                    
-                    // Don't convert if queue already has frames ready
-                    // This saves 10-15% CPU when FFmpeg is catching up
-                    if (!pipe_queue.empty()) {
-                        should_convert = false;
-                        frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                    if (!free_bufs.empty()) {
+                        yuv_frame = std::move(free_bufs.front());
+                        free_bufs.pop();
                     }
                 }
-                
-                if (should_convert) {
-                    g_libs.bgra_to_yuv(bgra_buf.data(), yuv_buf.data(), src_w, src_h);
-                    
-                    // Push to queue
-                    {
-                        std::lock_guard<std::mutex> lock(pipe_queue_mtx);
-                        
-                        // If queue is full, drop oldest frame to keep up
-                        if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
-                            pipe_queue.pop();
-                            frames_dropped.fetch_add(1, std::memory_order_relaxed);
-                        }
-                        
-                        // Copy YUV frame to queue
-                        pipe_queue.push(yuv_buf);
-                        pipe_queue_cv.notify_one();
+
+                const size_t needed = (size_t)src_w * src_h * 3 / 2;
+                if (yuv_frame.size() != needed) yuv_frame.resize(needed);
+
+                g_libs.bgra_to_yuv(bgra_buf.data(), yuv_frame.data(), src_w, src_h);
+
+                std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
+                {
+                    std::lock_guard<std::mutex> lock(pipe_queue_mtx);
+
+                    // Only drop when the writer is genuinely behind (queue full)
+                    if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
+                        dropped = std::move(pipe_queue.front());
+                        pipe_queue.pop();
+                        frames_dropped.fetch_add(1, std::memory_order_relaxed);
                     }
+
+                    pipe_queue.push(std::move(yuv_frame));
+                    pipe_queue_cv.notify_one();
+                }
+
+                if (!dropped.empty()) {
+                    std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                    if (free_bufs.size() < MAX_FREE_BUFS)
+                        free_bufs.push(std::move(dropped));
                 }
             }
 #endif
@@ -510,7 +547,7 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     
     // Wait for writer thread with timeout
     if (pl->writer_thread.joinable()) {
-        HANDLE hThread = pl->writer_thread.native_handle();
+        HANDLE hThread = reinterpret_cast<HANDLE>(pl->writer_thread.native_handle());
         if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
             pl->writer_thread.join();
         } else {
@@ -521,7 +558,7 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     
     // Wait for capture thread with timeout
     if (pl->capture_thread.joinable()) {
-        HANDLE hThread = pl->capture_thread.native_handle();
+        HANDLE hThread = reinterpret_cast<HANDLE>(pl->capture_thread.native_handle());
         if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
             pl->capture_thread.join();
         } else {
@@ -535,6 +572,12 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
         std::lock_guard<std::mutex> lock(pl->pipe_queue_mtx);
         while (!pl->pipe_queue.empty()) {
             pl->pipe_queue.pop();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(pl->free_bufs_mtx);
+        while (!pl->free_bufs.empty()) {
+            pl->free_bufs.pop();
         }
     }
     
@@ -557,8 +600,8 @@ HR_EXPORT int hr_pl_start(void* handle) {
     if (real_w > 0 && real_h > 0) { pl->src_w = real_w; pl->src_h = real_h; }
 
     pl->bgra_buf.resize((size_t)pl->src_w * pl->src_h * 4);
-    if (pl->recording)
-        pl->yuv_buf.resize((size_t)pl->src_w * pl->src_h * 3 / 2);
+    // YUV conversion buffers are now lazily sized from the free-list pool
+    // the first time a frame is converted (see capture_loop()).
 
     // Pre-allocate preview buffer
     int tw = pl->pv_w, th = pl->pv_h;
@@ -593,7 +636,7 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     
     // Wait for capture thread with timeout
     if (pl->capture_thread.joinable()) {
-        HANDLE hThread = pl->capture_thread.native_handle();
+        HANDLE hThread = reinterpret_cast<HANDLE>(pl->capture_thread.native_handle());
         if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
             pl->capture_thread.join();
         } else {
@@ -603,7 +646,7 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     
     // Wait for writer thread with timeout
     if (pl->writer_thread.joinable()) {
-        HANDLE hThread = pl->writer_thread.native_handle();
+        HANDLE hThread = reinterpret_cast<HANDLE>(pl->writer_thread.native_handle());
         if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
             pl->writer_thread.join();
         } else {
@@ -634,8 +677,7 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, int pipe_fd) {
     auto* pl = static_cast<Pipeline*>(handle);
     pl->pipe_handle = static_cast<intptr_t>(pipe_fd);
     pl->recording   = (active != 0) && (pipe_fd != 0) && (pipe_fd != -1);
-    if (pl->recording && pl->yuv_buf.empty())
-        pl->yuv_buf.resize((size_t)pl->src_w * pl->src_h * 3 / 2);
+    // YUV conversion buffers are lazily sized from the free-list pool.
 #endif
 }
 
