@@ -2076,10 +2076,6 @@ class SettingsDialog:
 
 
 from hr_console_bridge import NativeConsole
-try:
-    from hr_core_manager import CoreManagerWindow
-except ImportError:
-    CoreManagerWindow = None
 
 
 class HomRecScreen:
@@ -2389,16 +2385,6 @@ class HomRecScreen:
         help_menu.add_command(label=self.lang["check_updates"], command=self._manual_update_check)
         help_menu.add_separator()
         help_menu.add_command(label=self.lang["report_issue"], command=self._open_issues)
-
-        settings_menu.add_separator()
-        settings_menu.add_command(label="⚙ Core Manager…", command=self._open_core_manager)
-
-    def _open_core_manager(self) -> None:
-        if CoreManagerWindow is None:
-            messagebox.showinfo("Core Manager",
-                "hr_core_manager.py not found. Place it in the same folder as homrec.py.")
-            return
-        CoreManagerWindow(self.root, self)
 
     def toggle_always_on_top(self) -> None:
         self.root.attributes('-topmost', self.always_on_top.get())
