@@ -20,9 +20,9 @@ PLUGINS_DIR = "plugins"
 PLUGIN_EXTENSIONS = {".hrp", ".jar", ".zip"}
 
 
-# ─────────────────────────────────────────────────────────────
+#-----------------------------------------------------------
 #  Base class — every plugin extends this
-# ─────────────────────────────────────────────────────────────
+#-----------------------------------------------------------
 
 class HomRecPluginBase:
     # Заполняется движком
@@ -30,25 +30,25 @@ class HomRecPluginBase:
     meta: dict = {}
     engine: "PluginEngine" = None
 
-    # ── lifecycle ──────────────────────────────────────────
+    # lifecycle ------------------------------------------
     def on_load(self) -> None: pass
     def on_unload(self) -> None: pass
 
-    # ── recording hooks ───────────────────────────────────
+    # recording hooks -----------------------------------
     def on_recording_start(self) -> None: pass
     def on_recording_stop(self) -> None: pass
 
-    # ── streaming hooks ───────────────────────────────────
+    # streaming hooks -----------------------------------
     def on_stream_start(self) -> None: pass
     def on_stream_stop(self) -> None: pass
 
-    # ── ui hooks ──────────────────────────────────────────
+    # ui hooks ------------------------------------------
     def on_theme_change(self, colors: dict) -> None: pass
     def on_frame(self, frame) -> None: pass
     def on_menu_build(self, menubar: tk.Menu) -> None: pass
     def on_settings_build(self, frame: tk.Frame) -> None: pass
 
-    # ── helpers (используй freely в плагине) ─────────────
+    # helpers (используй freely в плагине) -------------
     def get_app(self) -> "HomRecScreen":
         """Прямой доступ к главному приложению."""
         return self.app
@@ -90,25 +90,56 @@ class HomRecPluginBase:
         return self.engine._plugin_store_get(self.meta.get("id", "?"), key, default)
 
 
-# ─────────────────────────────────────────────────────────────
+#-----------------------------------------------------------
 #  Plugin Engine
-# ─────────────────────────────────────────────────────────────
+#-----------------------------------------------------------
 
 class PluginEngine:
     def __init__(self, app: "HomRecScreen") -> None:
         self.app = app
         self.plugins: dict[str, HomRecPluginBase] = {}   # id → instance
+        self._plugin_paths: dict[str, str] = {}           # id → source .hrp/.jar/.zip path
         self._store: dict[str, dict] = {}                # id → {key: val}
-        self._plugins_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), PLUGINS_DIR
-        )
+        self._plugins_dir = self._resolve_plugins_dir()
         os.makedirs(self._plugins_dir, exist_ok=True)
         self._plugins_menu_ref: tk.Menu | None = None
         self._plugins_menubar_ref: tk.Menu | None = None
         self._patch_app()
         log.info(f"PluginEngine init, plugins dir: {self._plugins_dir}")
 
-    # ── patch app with plugin hooks ───────────────────────
+    def _resolve_plugins_dir(self) -> str:
+        """Resolve the plugins directory at the APP ROOT, not next to this
+        module.
+
+        BUG FIX: this used to be computed from __file__ (i.e. the folder
+        hr_plugin_engine.py itself lives in — src/ during development),
+        so the engine silently created and used src/plugins/ instead of
+        the project's real plugins/ folder at the app root. That's why
+        installed plugins ended up in src/plugins and why deleting them
+        via the app appeared to do nothing — the app was reading/writing
+        a different folder than the one being inspected.
+
+        homrec.py already computes the correct root-relative path and
+        assigns it to app._plugins_dir right before constructing this
+        engine — use that when present. Otherwise fall back to the same
+        frozen-aware root-detection homrec.py's _get_root_dir() uses.
+        """
+        configured = getattr(self.app, "_plugins_dir", None)
+        if configured:
+            return configured
+
+        if getattr(sys, "frozen", False):
+            root = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            _src = os.path.dirname(os.path.abspath(__file__))
+            _parent = os.path.dirname(_src)
+            if os.path.isdir(os.path.join(_parent, "src")) or os.path.basename(_src).lower() == "src":
+                root = _parent
+            else:
+                root = _src
+        return os.path.join(root, PLUGINS_DIR)
+
+    # patch app with plugin hooks -----------------------
 
     def _patch_app(self) -> None:
         """Патчим методы app, чтобы вызывать хуки плагинов."""
@@ -151,7 +182,7 @@ class PluginEngine:
         # Inject plugin menu after app fully built
         app.root.after(300, self._rebuild_plugin_menu)
 
-    # ── loading ───────────────────────────────────────────
+    # loading ----------------------------------------------
 
     def load_all(self) -> None:
         """Загрузить все плагины из папки plugins/."""
@@ -218,6 +249,7 @@ class PluginEngine:
             instance.engine = self
 
             self.plugins[pid] = instance
+            self._plugin_paths[pid] = path
             self._store.setdefault(pid, {})
 
             instance.on_load()
@@ -237,6 +269,41 @@ class PluginEngine:
             del self.plugins[pid]
             log.info(f"Plugin unloaded: {pid}")
 
+    def uninstall_plugin(self, pid: str) -> bool:
+        """Fully remove a plugin: unload it, delete its .hrp/.jar/.zip from
+        plugins/, and clean up its extracted temp copy.
+
+        BUG FIX: previously there was no way to actually remove an installed
+        plugin from disk — unload_plugin() only dropped it from memory, so
+        the file stayed in plugins/ and got reloaded again on next launch.
+        This is the method that should back the "Delete"/"Uninstall" UI action.
+        """
+        self.unload_plugin(pid)
+
+        ok = True
+        src_path = self._plugin_paths.pop(pid, None)
+        if src_path and os.path.exists(src_path):
+            try:
+                os.remove(src_path)
+                log.info(f"Deleted plugin file: {src_path}")
+            except Exception as e:
+                log.warning(f"Failed to delete plugin file {src_path}: {e}")
+                ok = False
+        else:
+            log.warning(f"uninstall_plugin: no known source path for {pid}")
+            ok = False
+
+        # Clean up the extracted copy in %TEMP%/homrec_plugins/<pid>/
+        try:
+            import tempfile, shutil
+            tmp_dir = os.path.join(tempfile.gettempdir(), "homrec_plugins", pid)
+            if os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            log.warning(f"Failed to clean temp dir for {pid}: {e}")
+
+        return ok
+
     def install_plugin(self, path: str) -> bool:
         """Скопировать .hrp/.jar/.zip в plugins/ и загрузить."""
         import shutil
@@ -245,7 +312,7 @@ class PluginEngine:
         shutil.copy2(path, dest)
         return self.load_plugin(dest)
 
-    # ── event bus ─────────────────────────────────────────
+    # event bus -----------------------------------------
 
     def emit_hook(self, hook: str, *args, **kwargs) -> None:
         """Вызвать хук у всех загруженных плагинов."""
@@ -258,30 +325,15 @@ class PluginEngine:
                 log.warning(f"Plugin {pid} hook {hook} error: {e}")
 
     def emit(self, event: str, *args, **kwargs) -> None:
-        """Кастомное событие между плагинами."""
         for pid, plugin in list(self.plugins.items()):
             try:
                 plugin.on_custom_event(event, *args, **kwargs)
             except Exception as e:
                 log.warning(f"Plugin {pid} custom event {event} error: {e}")
 
-    # ── menu ──────────────────────────────────────────────
+    # menu ----------------------------------------------
 
     def _rebuild_plugin_menu(self) -> None:
-        """Добавить меню Plugins в menubar.
-
-        Uses a tracked reference (self._plugins_menu_ref /
-        self._plugins_menubar_ref) instead of searching for the cascade by
-        its label string. The previous implementation used
-        menubar.index("Plugins") wrapped in try/except — on some Tk/Tcl
-        builds, .index() lookups against labels containing emoji can raise
-        or silently fail to match, which let the except swallow the error
-        and skip deletion, leaving the old "🧩 Plugins" cascade in place
-        while a second one got added right after it (the reported
-        duplicate-tab bug). Tracking the actual menu widget sidesteps that
-        entirely — we delete it directly if it still exists, no string
-        matching involved.
-        """
         try:
             menubar = self.app.root.nametowidget(self.app.root["menu"])
             c = self.app.colors
@@ -311,7 +363,7 @@ class PluginEngine:
                     pass
 
             plugin_menu = tk.Menu(menubar, tearoff=0, bg=c["surface"], fg=c["fg"])
-            menubar.add_cascade(label="🧩 Plugins", menu=plugin_menu)
+            menubar.add_cascade(label="Plugins", menu=plugin_menu)
             self._plugins_menu_ref = plugin_menu
             self._plugins_menubar_ref = menubar
 
@@ -335,7 +387,7 @@ class PluginEngine:
         except Exception as e:
             log.warning(f"_rebuild_plugin_menu: {e}")
 
-    # ── dialogs ───────────────────────────────────────────
+    # dialogs -----------------------------------------
 
     def _open_install_dialog(self) -> None:
         path = filedialog.askopenfilename(
@@ -389,9 +441,8 @@ class PluginEngine:
 
         btn_row = tk.Frame(dlg, bg=c["bg"])
         btn_row.pack(fill="x", padx=16, pady=12)
-        tk.Button(btn_row, text="Unload Plugin",
-                  command=lambda: (self.unload_plugin(plugin.meta["id"]),
-                                   self._rebuild_plugin_menu(), dlg.destroy()),
+        tk.Button(btn_row, text="Uninstall Plugin",
+                  command=lambda: self._uninstall_from_settings(plugin, dlg),
                   bg=c["error"], fg=c["bg"],
                   font=("Segoe UI", 9), relief="flat", padx=12, pady=5,
                   cursor="hand2").pack(side="left")
@@ -400,7 +451,26 @@ class PluginEngine:
                   font=("Segoe UI", 9), relief="flat", padx=12, pady=5,
                   cursor="hand2").pack(side="right")
 
-    # ── toast notification ────────────────────────────────
+    def _uninstall_from_settings(self, plugin: HomRecPluginBase, dlg: tk.Toplevel) -> None:
+        name = plugin.meta.get("name", plugin.meta.get("id", "?"))
+        if not messagebox.askyesno(
+            "Uninstall Plugin",
+            f"Uninstall '{name}'?\n\nThis removes it from memory AND deletes "
+            "its plugin file from disk. This cannot be undone.",
+            parent=dlg,
+        ):
+            return
+        ok = self.uninstall_plugin(plugin.meta["id"])
+        self._rebuild_plugin_menu()
+        dlg.destroy()
+        if not ok:
+            messagebox.showwarning(
+                "Uninstall",
+                f"'{name}' was unloaded, but its file could not be found/deleted "
+                "automatically. Check homrec.log for details.",
+            )
+
+    # toast notification --------------------------------
 
     def _show_toast(self, message: str, color: str = "#89b4fa", duration: int = 3000) -> None:
         try:
@@ -419,7 +489,7 @@ class PluginEngine:
         except Exception:
             pass
 
-    # ── persistent storage ────────────────────────────────
+    # persistent storage --------------------------------
 
     def _plugin_store_set(self, pid: str, key: str, value) -> None:
         self._store.setdefault(pid, {})[key] = value
@@ -447,9 +517,9 @@ class PluginEngine:
             log.warning(f"Plugin store load failed: {e}")
 
 
-# ─────────────────────────────────────────────────────────────
+#-----------------------------------------------------------
 #  Plugin Manager Window
-# ─────────────────────────────────────────────────────────────
+#-----------------------------------------------------------
 
 class PluginManagerWindow:
     def __init__(self, parent: tk.Tk, engine: PluginEngine) -> None:
@@ -518,7 +588,7 @@ class PluginManagerWindow:
 
         _btn("📂 Install…", self.engine._open_install_dialog, c["accent"])
         _btn("⚙ Settings", self._open_selected_settings, c["surface_light"], c["fg"])
-        _btn("🗑 Unload", self._unload_selected, c["error"])
+        _btn("🗑 Uninstall", self._uninstall_selected, c["error"])
 
         tk.Button(btn_row, text="Close", command=self.win.destroy,
                   bg=c["surface"], fg=c["fg"],
@@ -556,18 +626,32 @@ class PluginManagerWindow:
         if p:
             self.engine._open_plugin_settings(p)
 
-    def _unload_selected(self) -> None:
+    def _uninstall_selected(self) -> None:
         p = self._get_selected_plugin()
-        if p:
-            self.engine.unload_plugin(p.meta["id"])
-            self._refresh_list()
-            self.engine._rebuild_plugin_menu()
+        if not p:
+            return
+        name = p.meta.get("name", p.meta.get("id", "?"))
+        if not messagebox.askyesno(
+            "Uninstall Plugin",
+            f"Uninstall '{name}'?\n\nThis removes it from memory AND deletes "
+            "its plugin file from disk. This cannot be undone.",
+            parent=self.win,
+        ):
+            return
+        ok = self.engine.uninstall_plugin(p.meta["id"])
+        self._refresh_list()
+        self.engine._rebuild_plugin_menu()
+        if not ok:
+            messagebox.showwarning(
+                "Uninstall",
+                f"'{name}' was unloaded, but its file could not be found/deleted "
+                "automatically. Check homrec.log for details.",
+                parent=self.win,
+            )
 
 
 def init_plugin_engine(app: "HomRecScreen") -> PluginEngine:
-    """Создать движок и загрузить все плагины. Вызывать из HomRecScreen.__init__."""
     engine = PluginEngine(app)
     engine._load_store()
-    # загружаем в фоне чтобы не тормозить запуск
     threading.Thread(target=engine.load_all, daemon=True).start()
     return engine
