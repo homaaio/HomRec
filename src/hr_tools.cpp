@@ -203,7 +203,13 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
     if (is_nvenc) {
         ss << L" -preset p1 -tune ull -rc constqp -qp " << qp << L" -g " << gop;
     } else if (is_qsv) {
-        ss << L" -preset veryfast -look_ahead 0 -low_power 1 -qp " << qp << L" -g " << gop;
+        // BUG FIX: -low_power 1 forces Intel QSV's VDENC hardware path, which
+        // on many GPU generations requires width/height divisible by 16
+        // (sometimes 8) — stricter than the general even-dimension rule
+        // enforced elsewhere. Resolutions like 1200x674 (even, but not a
+        // multiple of 16) fail to encode with low_power on affected hardware.
+        // The standard QSV path handles arbitrary even dimensions fine.
+        ss << L" -preset veryfast -look_ahead 0 -qp " << qp << L" -g " << gop;
     } else if (is_amf) {
         ss << L" -quality speed -rc cqp -qp_i " << qp << L" -qp_p " << qp << L" -g " << gop;
     } else {
