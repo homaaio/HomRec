@@ -1515,6 +1515,18 @@ class AdvancedSettingsDialog:
         tk.Label(vt, text="Locked to yuv420p for player compatibility (yuv444p/rgb24 broke playback)",
                  bg=c["bg"], fg=c.get("text_secondary", "#888"), font=("Segoe UI", 8)).grid(row=_row_note, column=0, columnspan=3, sticky="w", padx=(20, 4), pady=(0, 6))
 
+        row_cfa = vt.grid_size()[1]
+        tk.Frame(vt, bg=c["surface"], height=1).grid(row=row_cfa, column=0, columnspan=3, sticky="ew", padx=20, pady=(10, 4))
+        row_cfa2 = vt.grid_size()[1]
+        tk.Label(vt, text="Custom FFmpeg Args", bg=c["bg"], fg=c["accent"], font=("Segoe UI", 10, "bold"), anchor="w").grid(row=row_cfa2, column=0, columnspan=3, sticky="w", padx=(20, 8), pady=(0, 4))
+        self._cfav = tk.StringVar(value=getattr(a, "custom_ffmpeg_args", ""))
+        row_cfa3 = vt.grid_size()[1]
+        tk.Entry(vt, textvariable=self._cfav, bg=c["surface"], fg=c["text"], font=("Consolas", 9),
+                 relief="flat", width=44).grid(row=row_cfa3, column=0, columnspan=3, sticky="w", padx=20, pady=(0, 2))
+        row_cfa4 = vt.grid_size()[1]
+        tk.Label(vt, text="Appended to the encode command as-is (e.g. -profile:v main -x264-params ref=4).\nApplies to encoding AND audio/video merging. Invalid flags will break recording — test after changing.",
+                 bg=c["bg"], fg=c.get("text_secondary", "#888"), font=("Segoe UI", 8), justify="left").grid(row=row_cfa4, column=0, columnspan=3, sticky="w", padx=(20, 4), pady=(0, 8))
+
         at = tk.Frame(notebook, bg=c["bg"]); notebook.add(at, text="Audio")
         self._srv = tk.StringVar(value=str(getattr(a, "audio_sample_rate", 44100)))
         self._row(at, "Sample rate", ttk.Combobox(at, textvariable=self._srv, values=["44100","48000","96000"], width=10, state="readonly"))
@@ -1861,6 +1873,7 @@ class AdvancedSettingsDialog:
             "hrc_version": self.HRC_VERSION,
             "video_codec": self._cv.get(), "hw_accel": self._hwv.get(),
             "enc_preset": self._prev.get(), "enc_crf": self._crfv.get(),
+            "custom_ffmpeg_args": self._cfav.get(),
             "pix_fmt": self._pixv.get(), "audio_sample_rate": int(self._srv.get()),
             "audio_aac_bitrate": self._abrv.get(), "audio_out_channels": int(self._achv.get()),
             "ui_theme": self._thv.get(), "ui_scale": int(self._uisv.get().replace("%", "")) / 100,
@@ -1904,6 +1917,7 @@ class AdvancedSettingsDialog:
             self._hwv.set(data.get("hw_accel", "auto"))
             self._prev.set(data.get("enc_preset", "ultrafast"))
             self._crfv.set(data.get("enc_crf", 18))
+            self._cfav.set(data.get("custom_ffmpeg_args", ""))
             self._pixv.set(data.get("pix_fmt", "yuv420p"))
             self._srv.set(str(data.get("audio_sample_rate", 44100)))
             self._abrv.set(data.get("audio_aac_bitrate", "192k"))
@@ -2130,6 +2144,7 @@ class HomRecScreen:
         self.hw_accel = "auto"
         self.enc_preset = "ultrafast"
         self.enc_crf = 18
+        self.custom_ffmpeg_args = ""
         self.pix_fmt = "yuv420p"
         self.audio_sample_rate = 44100
         self.audio_aac_bitrate = "192k"
@@ -2222,18 +2237,39 @@ class HomRecScreen:
             log.warning(f"merge_audio_video: video missing: {video_file!r}"); return False
         if not self.ffmpeg_path:
             log.warning("merge_audio_video: no ffmpeg path"); return False
-        try:
-            from homrec_native import tools_engine as _te, TOOLS_OK as _TOK
-            if _TOK and _te:
-                ok = _te.merge_av(self.ffmpeg_path, video_file, audio_file)
-                if ok:
-                    log.info(f"merge_audio_video: C++ success → {video_file}"); return True
-        except Exception as e:
-            log.warning(f"merge_audio_video: C++ path error: {e}")
+
+        # BUG FIX: audio_aac_bitrate was a real, saved UI setting (Advanced
+        # Settings → Audio) but was never actually passed to ffmpeg — the
+        # fallback merge command always used the encoder's default bitrate.
+        # Also route custom_ffmpeg_args here for full control over the mux step.
+        audio_bitrate = getattr(self, 'audio_aac_bitrate', '192k') or '192k'
+        custom_args_str = (getattr(self, 'custom_ffmpeg_args', '') or '').strip()
+
+        # The native merge_av() has no way to accept a custom bitrate/args,
+        # so only take that fast path when there's nothing for it to ignore.
+        if not custom_args_str and audio_bitrate == '192k':
+            try:
+                from homrec_native import tools_engine as _te, TOOLS_OK as _TOK
+                if _TOK and _te:
+                    ok = _te.merge_av(self.ffmpeg_path, video_file, audio_file)
+                    if ok:
+                        log.info(f"merge_audio_video: C++ success → {video_file}"); return True
+            except Exception as e:
+                log.warning(f"merge_audio_video: C++ path error: {e}")
         ext = os.path.splitext(video_file)[1] or '.mp4'
         tmp = video_file.replace(ext, f'_merge_tmp{ext}')
         try:
-            cmd = [self.ffmpeg_path, '-i', video_file, '-i', audio_file, '-c:v', 'copy', '-c:a', 'aac', '-af', 'aresample=async=1000', '-map', '0:v:0', '-map', '1:a:0', '-shortest', '-y', tmp]
+            cmd = [self.ffmpeg_path, '-i', video_file, '-i', audio_file,
+                   '-c:v', 'copy', '-c:a', 'aac', '-b:a', audio_bitrate,
+                   '-af', 'aresample=async=1000', '-map', '0:v:0', '-map', '1:a:0',
+                   '-shortest']
+            if custom_args_str:
+                try:
+                    import shlex
+                    cmd += shlex.split(custom_args_str)
+                except Exception as e:
+                    log.warning(f"Invalid custom ffmpeg args, ignoring: {e}")
+            cmd += ['-y', tmp]
             result = subprocess.run(cmd, capture_output=True, timeout=120, creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0)
             if result.returncode == 0 and os.path.exists(tmp):
                 os.remove(video_file); os.remove(audio_file); os.rename(tmp, video_file)
@@ -2559,6 +2595,7 @@ class HomRecScreen:
                 self.hw_accel = s.get("hw_accel", "auto")
                 self.enc_preset = s.get("enc_preset", "ultrafast")
                 self.enc_crf = s.get("enc_crf", 18)
+                self.custom_ffmpeg_args = s.get("custom_ffmpeg_args", "")
                 self.pix_fmt = s.get("pix_fmt", "yuv420p")
                 self.audio_sample_rate = s.get("audio_sample_rate", 44100)
                 self.audio_aac_bitrate = s.get("audio_aac_bitrate", "192k")
@@ -2602,6 +2639,7 @@ class HomRecScreen:
             "hw_accel": getattr(self, 'hw_accel', 'auto'),
             "enc_preset": getattr(self, 'enc_preset', 'ultrafast'),
             "enc_crf": getattr(self, 'enc_crf', 18),
+            "custom_ffmpeg_args": getattr(self, 'custom_ffmpeg_args', ''),
             "pix_fmt": getattr(self, 'pix_fmt', 'yuv420p'),
             "audio_sample_rate": getattr(self, 'audio_sample_rate', 44100),
             "audio_aac_bitrate": getattr(self, 'audio_aac_bitrate', '192k'),
@@ -3039,38 +3077,66 @@ class HomRecScreen:
         quality = getattr(self, 'quality', 70)
         fps = getattr(self, 'target_fps', 30)
         cpu_count = os.cpu_count() or 4
-        try:
-            from homrec_native import tools_engine as _te, TOOLS_OK as _TOK
-            if _TOK and _te:
-                args = _te.build_codec_args(codec, quality, fps, cpu_count)
-                return args
-        except Exception as e: log.debug(f"C++ build_codec_args error: {e}")
-        qp = max(18, min(34, int(34 - (quality / 100) * 16)))
-        gop = fps * 2
-        is_nvenc = 'nvenc' in codec
-        is_qsv   = 'qsv'   in codec
-        is_amf   = 'amf'   in codec
-        is_265   = codec == 'libx265' or 'hevc' in codec
-        args = ['-c:v', codec]
-        if is_nvenc:
-            args += ['-preset','p1','-tune','ull','-rc','constqp',
-                     '-qp',str(qp),'-g',str(gop),
-                     '-spatial-aq','1','-aq-strength','8',
-                     '-bf','0','-profile:v','high']
-        elif is_qsv:
-            args += ['-preset','veryfast','-look_ahead','0','-low_power','1',
-                     '-global_quality',str(qp),'-g',str(gop),'-profile:v','high']
-        elif is_amf:
-            args += ['-quality','speed','-rc','cqp',
-                     '-qp_i',str(qp),'-qp_p',str(qp),
-                     '-g',str(gop),'-profile:v','high']
-        else:
-            thr = max(1, (cpu_count or 4) // 2)
-            # OPTIMIZED: Lower CPU usage with restricted threads
-            args += ['-preset','superfast','-tune','zerolatency',
-         '-crf','28','-g',str(gop),'-threads','2']
-            if not is_265: args += ['-profile:v','high','-level','4.2']
-            if is_265: args += ['-x265-params','log-level=error:no-open-gop=1']
+
+        # BUG FIX: enc_preset / enc_crf already existed as real, saved UI
+        # settings (Advanced Settings → Video), but were never actually read
+        # here — the software-encoder branch below always hardcoded
+        # 'superfast' / crf 28 regardless of what the user picked.
+        preset_override = (getattr(self, 'enc_preset', '') or '').strip()
+        crf_override = getattr(self, 'enc_crf', None)
+        custom_args_str = (getattr(self, 'custom_ffmpeg_args', '') or '').strip()
+        has_overrides = bool(preset_override or crf_override is not None or custom_args_str)
+
+        args = None
+        if not has_overrides:
+            # Fast path: hand off to the native encoder-args builder, unchanged.
+            try:
+                from homrec_native import tools_engine as _te, TOOLS_OK as _TOK
+                if _TOK and _te:
+                    args = _te.build_codec_args(codec, quality, fps, cpu_count)
+            except Exception as e: log.debug(f"C++ build_codec_args error: {e}")
+
+        if args is None:
+            # Python fallback — also used whenever overrides are active, since
+            # the native builder has no way to accept enc_preset/enc_crf/custom args.
+            qp = max(18, min(34, int(34 - (quality / 100) * 16)))
+            gop = fps * 2
+            is_nvenc = 'nvenc' in codec
+            is_qsv   = 'qsv'   in codec
+            is_amf   = 'amf'   in codec
+            is_265   = codec == 'libx265' or 'hevc' in codec
+            args = ['-c:v', codec]
+            if is_nvenc:
+                args += ['-preset','p1','-tune','ull','-rc','constqp',
+                         '-qp',str(qp),'-g',str(gop),
+                         '-spatial-aq','1','-aq-strength','8',
+                         '-bf','0','-profile:v','high']
+            elif is_qsv:
+                args += ['-preset','veryfast','-look_ahead','0','-low_power','1',
+                         '-global_quality',str(qp),'-g',str(gop),'-profile:v','high']
+            elif is_amf:
+                args += ['-quality','speed','-rc','cqp',
+                         '-qp_i',str(qp),'-qp_p',str(qp),
+                         '-g',str(gop),'-profile:v','high']
+            else:
+                thr = max(1, (cpu_count or 4) // 2)
+                # Software encoder: honor enc_preset/enc_crf if the user set them
+                preset = preset_override or 'superfast'
+                crf = crf_override if crf_override is not None else 28
+                args += ['-preset', preset, '-tune','zerolatency',
+                         '-crf', str(crf), '-g',str(gop),'-threads','2']
+                if not is_265: args += ['-profile:v','high','-level','4.2']
+                if is_265: args += ['-x265-params','log-level=error:no-open-gop=1']
+
+        if custom_args_str:
+            # Raw passthrough — appended last, so it can add to or override
+            # anything above (including -c:v itself) for full manual control.
+            try:
+                import shlex
+                args = args + shlex.split(custom_args_str)
+            except Exception as e:
+                log.warning(f"Invalid custom ffmpeg args, ignoring: {e}")
+
         return args
 
     def start_audio_recording(self) -> None:
