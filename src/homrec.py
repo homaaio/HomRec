@@ -3586,10 +3586,38 @@ class HomRecScreen:
     def _open_overlays_panel(self) -> None:
         OverlayManagerWindow(self.root, self)
 
+    def _drawtext_fontfile(self) -> str:
+        """Resolve a real font file path for ffmpeg's drawtext filter.
+
+        BUG FIX: drawtext previously had no fontfile= at all. ffmpeg's
+        Windows builds have no fontconfig, so drawtext can't resolve a
+        font by name and fails to initialize the filter graph entirely —
+        which kills ffmpeg (and therefore the whole recording) as soon as
+        any text overlay is enabled. This mirrors the font fallback already
+        used for the live preview (_composite_overlays_on_preview).
+        """
+        cached = getattr(self, '_drawtext_fontfile_cache', None)
+        if cached is not None:
+            return cached
+        windir = os.environ.get('WINDIR', 'C:\\Windows')
+        candidates = [
+            os.path.join(windir, 'Fonts', 'segoeui.ttf'),
+            os.path.join(windir, 'Fonts', 'arial.ttf'),
+        ]
+        result = ''
+        for path in candidates:
+            if os.path.exists(path):
+                # ffmpeg filter arg syntax: forward slashes, escape the drive colon
+                result = path.replace('\\', '/').replace(':', '\\:')
+                break
+        self._drawtext_fontfile_cache = result
+        return result
+
     def _build_overlay_vf(self) -> str:
         filters = []
         w = self.record_width or self.original_width or 1920
         h = self.record_height or self.original_height or 1080
+        fontfile = self._drawtext_fontfile()
         for ov in getattr(self, 'overlays', []):
             if not ov.get('enabled', True):
                 continue
@@ -3605,8 +3633,9 @@ class HomRecScreen:
             opacity = ov.get('opacity', 1.0)
             alpha_hex = f"{int(opacity * 255):02x}"
             color_ff = f"0x{col}@0x{alpha_hex}"
+            fontfile_part = f"fontfile='{fontfile}':" if fontfile else ""
             filters.append(
-                f"drawtext=text='{text}':x={x_px}:y={y_px}:fontsize={fs}:"
+                f"drawtext={fontfile_part}text='{text}':x={x_px}:y={y_px}:fontsize={fs}:"
                 f"fontcolor={color_ff}:shadowcolor=0x00000080:shadowx=1:shadowy=1"
             )
         return ','.join(filters)
