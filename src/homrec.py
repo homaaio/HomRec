@@ -3112,7 +3112,14 @@ class HomRecScreen:
                          '-spatial-aq','1','-aq-strength','8',
                          '-bf','0','-profile:v','high']
             elif is_qsv:
-                args += ['-preset','veryfast','-look_ahead','0','-low_power','1',
+                # BUG FIX: -low_power 1 forces Intel QSV's VDENC hardware path,
+                # which on many GPU generations requires width/height divisible
+                # by 16 (sometimes 8) — stricter than the general even-dimension
+                # rule enforced elsewhere. A resolution like 1200x674 (even, but
+                # not a multiple of 16: 674/16 = 42.125) fails to encode with
+                # low_power on affected hardware. The standard QSV path handles
+                # arbitrary even dimensions fine via internal padding.
+                args += ['-preset','veryfast','-look_ahead','0',
                          '-global_quality',str(qp),'-g',str(gop),'-profile:v','high']
             elif is_amf:
                 args += ['-quality','speed','-rc','cqp',
