@@ -220,48 +220,6 @@ class AERegistry:
         return list(self._data.keys())
 
 
-# --- TerminalFuncRegistry -----------------------------------------------------
-
-class TerminalFuncRegistry:
-    """
-    Stores functions bound to @terminal via !connect --func @terminal <alias> <cmd>.
-    These are short aliases that hr_terminal.exe resolves locally when typed.
-    Persisted to <base>/create/terminal_funcs.json
-    """
-    def __init__(self, base_dir: str):
-        self._path = Path(base_dir) / "create" / "terminal_funcs.json"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._data: dict[str, str] = {}  # alias -> full command
-        self._load()
-
-    def _load(self):
-        try:
-            if self._path.exists():
-                self._data = json.loads(self._path.read_text("utf-8"))
-        except Exception as e:
-            log.warning("TerminalFuncRegistry._load: %s", e)
-
-    def _save(self):
-        self._path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), "utf-8")
-
-    def bind(self, alias: str, cmd: str):
-        self._data[alias] = cmd
-        self._save()
-
-    def unbind(self, alias: str) -> bool:
-        if alias in self._data:
-            del self._data[alias]
-            self._save()
-            return True
-        return False
-
-    def resolve(self, alias: str) -> str | None:
-        return self._data.get(alias)
-
-    def all(self) -> dict[str, str]:
-        return dict(self._data)
-
-
 # --- AliasRegistry ------------------------------------------------------------
 
 class AliasRegistry:
@@ -492,17 +450,6 @@ class NativeConsole:
             self._lib.hr_con_set_command_cb.restype = None
             self._lib.hr_con_set_command_cb(self._cb_command)
 
-        # Start pipe server for hr_terminal.exe
-        # Bug fix: terminal.exe used to hang because the pipe had no keepalive.
-        # We now start a daemon thread that sends a NUL heartbeat every 2 seconds
-        # so terminal's ReadFile never blocks indefinitely.
-        if hasattr(self._lib, 'hr_pipe_server_start'):
-            self._lib.hr_pipe_server_start.argtypes = []
-            self._lib.hr_pipe_server_start.restype  = None
-            self._lib.hr_pipe_server_start()
-            log.info("Pipe server started for external terminals")
-            self._start_pipe_keepalive()
-
         # Filter for !disconnect --log
         # BUG FIX: check self._lib != None before calling
         class LogFilter(logging.Filter):
@@ -637,40 +584,6 @@ class NativeConsole:
         if self._root_alive():
             self.app.root.after(0, lambda: self.run_command(cmd))
 
-    def _push_terminal_funcs(self) -> None:
-        """Send the full terminal func table to hr_terminal.exe via pipe as JSON packet."""
-        try:
-            if self._lib and hasattr(self._lib, 'hr_pipe_send'):
-                import json as _json
-                payload = _json.dumps({
-                    "__type__": "terminal_funcs",
-                    "funcs": self._term_funcs.all()
-                })
-                data = payload.encode("utf-8") + b"\n"
-                self._lib.hr_pipe_send.argtypes = [ctypes.c_char_p]
-                self._lib.hr_pipe_send.restype = None
-                self._lib.hr_pipe_send(data)
-        except Exception as e:
-            log.debug("_push_terminal_funcs: %s", e)
-
-    def _start_pipe_keepalive(self) -> None:
-        """Start a daemon thread that sends periodic heartbeat pings through the DLL pipe.
-        Prevents terminal.exe ReadFile from blocking forever (Bug fix v1.7.0).
-        """
-        import threading, time
-        def _beat():
-            while True:
-                try:
-                    if self._lib and hasattr(self._lib, 'hr_pipe_send'):
-                        self._lib.hr_pipe_send.argtypes = [ctypes.c_char_p]
-                        self._lib.hr_pipe_send.restype  = None
-                        self._lib.hr_pipe_send(b"\x00")  # NUL keepalive byte
-                except Exception:
-                    pass
-                time.sleep(2.0)
-        t = threading.Thread(target=_beat, daemon=True, name="pipe-keepalive")
-        t.start()
-
     def _open_log(self):
         base = _get_base_dir()
         path = os.path.join(base, "homrec.log")
@@ -747,8 +660,6 @@ class NativeConsole:
         if cmd == "!start":
             if "--rec" in raw:
                 self._cmd_start_rec(raw)
-            elif "--terminal" in raw:
-                self._cmd_start_terminal(raw)
             else:
                 self._cmd_start_window(raw)
             return
@@ -798,8 +709,6 @@ class NativeConsole:
             self._cmd_ping(raw); return
         if cmd == "!check.er":
             self._cmd_check_er(raw); return
-        if cmd == "!func.list":
-            self._cmd_func_list(raw); return
         if cmd == "!version":
             self._cmd_version(raw); return
         if cmd == "!homrec":
@@ -1303,16 +1212,6 @@ class NativeConsole:
             log.info("hotkeys  : %d bindings", hk_count)
 
     # --- !info ----------------------------------------------------------------
-
-    def _cmd_func_list(self, raw: str):
-        """!func.list — list all functions bound to @terminal."""
-        funcs = self._term_funcs.all()
-        if not funcs:
-            log.info("No functions bound to @terminal. Use: !connect --func @terminal <alias> <cmd>")
-            return
-        log.info("Terminal functions (%d):", len(funcs))
-        for alias, cmd in funcs.items():
-            log.info("  %-18s → %s", alias, cmd)
 
     # ------------------------------------------------------------------ !check.er
     # ------------------------------------------------------------------ !check.er
@@ -2070,27 +1969,6 @@ class NativeConsole:
             if not silent:
                 log.info("  rule '%s' → %s", rule_name, step)
             self._dispatch_extended(step)
-
-    # --- !start --terminal as @terminal ------------------------------------
-
-    def _cmd_start_terminal(self, raw: str):
-        """!start --terminal as @terminal  — launch hr_terminal.exe."""
-        tokens = raw.split()
-        silent = "-s" in tokens or "--silent" in tokens
-        if "as" not in tokens or "@terminal" not in tokens:
-            log.warning("!start --terminal: syntax: !start --terminal as @terminal")
-            return
-        base = _get_base_dir()
-        exe  = os.path.join(base, "hr_terminal.exe")
-        if not os.path.exists(exe):
-            log.warning("!start --terminal: hr_terminal.exe not found in %s", base)
-            return
-        try:
-            _popen_no_window([exe], cwd=base)
-            if not silent:
-                log.info("!start --terminal: hr_terminal.exe started")
-        except Exception as e:
-            log.error("!start --terminal: launch error: %s", e)
 
     # --- !start --window ------------------------------------------------------
 
@@ -2863,24 +2741,7 @@ class NativeConsole:
                          f"  (name={func_name})" if func_name else "")
             return
 
-        if "--func" in raw and "@terminal" in raw:
-            # Syntax: !connect --func @terminal <alias> <cmd...>
-            # Example: !connect --func @terminal status !status --verbose
-            import re
-            m = re.search(r'--func\s+@terminal\s+(\S+)\s+(.+)', raw, re.IGNORECASE)
-            if not m:
-                log.warning('!connect --func @terminal: syntax: !connect --func @terminal <alias> <command>')
-                return
-            alias = m.group(1).strip()
-            cmd_str = m.group(2).strip()
-            self._term_funcs.bind(alias, cmd_str)
-            # Push updated func table to terminal via pipe
-            self._push_terminal_funcs()
-            if not silent:
-                log.info("!connect --func @terminal '%s' → %s", alias, cmd_str)
-            return
-
-        log.warning("!connect: use --window / --rule / --function / --func @terminal")
+        log.warning("!connect: use --window / --rule / --function")
 
     # --- !disconnect ----------------------------------------------------------
 
@@ -2982,21 +2843,7 @@ class NativeConsole:
                 log.warning("!disconnect #name='%s': not found", name)
             return
 
-        if "--func" in raw and "@terminal" in raw:
-            import re
-            m = re.search(r'--func\s+@terminal\s+(\S+)', raw, re.IGNORECASE)
-            if not m:
-                log.warning('!disconnect --func @terminal: syntax: !disconnect --func @terminal <alias>')
-                return
-            alias = m.group(1).strip()
-            if self._term_funcs.unbind(alias):
-                self._push_terminal_funcs()
-                if not silent: log.info("!disconnect --func @terminal '%s': unbound", alias)
-            else:
-                log.warning("!disconnect --func @terminal '%s': not found", alias)
-            return
-
-        log.warning("!disconnect: use --window / --rule / --ae / --function / --func @terminal  or #name=")
+        log.warning("!disconnect: use --window / --rule / --ae / --function  or #name=")
 
 
     # --- !edit --terminal ---------------------------------------------------------
