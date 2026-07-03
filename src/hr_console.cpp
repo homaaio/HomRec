@@ -28,12 +28,12 @@ extern "C" void hr_pipe_broadcast(const wchar_t* text, int tag);
 extern "C" void hr_pipe_server_start();
 extern "C" void hr_pipe_server_stop();
 
-// ─── Callbacks ────────────────────────────────────────────────────────────────
+// Callbacks ----------------------------------------------------------------
 typedef void (*CB_VOID)();
 typedef void (*CB_URL)    (const wchar_t*);
 typedef void (*CB_COMMAND)(const wchar_t*);   // новый: произвольная команда → Python
 
-// ─── Palette (Catppuccin Mocha) ───────────────────────────────────────────────
+// Palette (Catppuccin Mocha) -----------------------------------------------
 static const COLORREF C_BG      = 0x002E1E1E;
 static const COLORREF C_SURFACE = 0x00443231;
 static const COLORREF C_INPUTBG = 0x00201811;
@@ -48,7 +48,7 @@ static const COLORREF TAG_COL[6] = {
     C_TEXT, C_GREEN, C_YELLOW, C_RED, C_DIM, C_ACCENT
 };
 
-// ─── State ────────────────────────────────────────────────────────────────────
+// State --------------------------------------------------------------------
 static CB_VOID    g_cb_start    = nullptr;
 static CB_VOID    g_cb_stop     = nullptr;
 static CB_VOID    g_cb_quit     = nullptr;
@@ -76,25 +76,25 @@ static std::atomic<bool> g_visible     {false};
 static std::atomic<bool> g_recording   {false};
 static std::atomic<bool> g_log_conn    {true};
 
-// ─── Message queue ─────────────────────────────────────────────────────────────
+// Message queue -------------------------------------------------------------
 struct Msg { std::wstring text; int tag; };
 static std::mutex          g_msg_mx;
 static std::vector<Msg>    g_msg_q;
 
-// ─── Exec queue ────────────────────────────────────────────────────────────────
+// Exec queue ----------------------------------------------------------------
 static std::mutex                          g_ex_mx;
 static std::vector<std::function<void()>>  g_ex_q;
 
 static const UINT WMA_FLUSH = WM_APP + 1;
 static const UINT WMA_EXEC  = WM_APP + 2;
 
-// ─── Input history ─────────────────────────────────────────────────────────────
+// Input history -------------------------------------------------------------
 static std::deque<std::wstring> g_hist;
 static int g_hist_idx = 0;
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Helpers
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 static void post_exec(std::function<void()> fn) {
     { std::lock_guard<std::mutex> lk(g_ex_mx); g_ex_q.push_back(std::move(fn)); }
@@ -104,7 +104,7 @@ static void post_exec(std::function<void()> fn) {
 void write_line(const wchar_t* text, int tag) {
     { std::lock_guard<std::mutex> lk(g_msg_mx); g_msg_q.push_back({text, tag}); }
     if (g_hwnd) PostMessageW(g_hwnd, WMA_FLUSH, 0, 0);
-    hr_pipe_broadcast(text, tag);   // дублировать вывод во все подключённые терминалы
+    hr_pipe_broadcast(text, tag);   
 }
 
 static void wok  (const wchar_t* s) { write_line((std::wstring(L"  \u2714  ") + s).c_str(), 1); }
@@ -174,7 +174,7 @@ static std::vector<std::wstring> strip_flags(
 }
 
 
-// ─── Математика: {int.random(a, b)} ──────────────────────────────────────────
+// Математика: {int.random(a, b)} ------------------------------------------
 static std::wstring resolve_math(std::wstring s) {
     for (;;) {
         auto pos = s.find(L"{int.random(");
@@ -200,19 +200,19 @@ static std::wstring resolve_math(std::wstring s) {
     return s;
 }
 
-// ─── Переслать команду в Python ───────────────────────────────────────────────
+// Переслать команду в Python -----------------------------------------------
 static void forward_to_python(const std::wstring& raw) {
     if (g_cb_command) {
         std::wstring cmd = raw;
         post_exec([cmd]{ if (g_cb_command) g_cb_command(cmd.c_str()); });
     } else {
-        wwarn(L"Python-обработчик не подключён (hr_con_set_command_cb не вызван)");
+        wwarn(L"Python handler not connected (hr_con_set_command_cb was not called)");
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Commands
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 bool dispatch(const std::wstring& raw); // forward
 
@@ -261,7 +261,6 @@ static void cmd_help(const std::vector<std::wstring>& args, bool silent) {
             {L"  $clear  --app",                            L"Wipe ALL app data and close the window"},
             {L"  {int.random(a, b)}",                       L"Random int in [a,b] — usable anywhere"},
             {L"  @all",                                      L"Universal selector: applies to every object (works with !rename, $rm, !connect, !disconnect)"},
-            {L"  --- New in v3.0 ---",                        L""},
             {L"  !rename --window|--rule|--ae|--hotkey #name=\"old\" to #name=\"new\"",
                                                              L"Rename object in registry"},
             {L"  !rename --window @all <transform>\",",      L"Batch-rename all objects of type"},
@@ -361,7 +360,7 @@ static void cmd_homrec(const std::vector<std::wstring>&, bool silent) {
     }
 }
 
-// ─── Log connect/disconnect ───────────────────────────────────────────────────
+// Log connect/disconnect ---------------------------------------------------
 static void cmd_log_disconnect(const std::vector<std::wstring>&, bool silent) {
     g_log_conn.store(false);
     if (!silent) wok(L"homrec.log disconnected");
@@ -371,7 +370,7 @@ static void cmd_log_connect(const std::vector<std::wstring>&, bool silent) {
     if (!silent) wok(L"homrec.log reconnected");
 }
 
-// ─── !rule ────────────────────────────────────────────────────────────────────
+// !rule --------------------------------------------------------------------
 static void cmd_rule(const std::vector<std::wstring>& args, bool silent,
                      const std::wstring& raw) {
     if (!has(args, L"--get") && !has(args, L"--check")) {
@@ -382,8 +381,8 @@ static void cmd_rule(const std::vector<std::wstring>& args, bool silent,
     forward_to_python(raw);
 }
 
-// ─── !edit ────────────────────────────────────────────────────────────────────
-// ─── Helpers for !edit --terminal ─────────────────────────────────────────────
+// !edit --------------------------------------------------------------------
+// Helpers for !edit --terminal ---------------------------------------------
 // Parse #key=value or #key="value" from a wstring
 static std::wstring parse_named_arg(const std::wstring& raw, const wchar_t* key) {
     std::wstring needle = std::wstring(L"#") + key + L"=";
@@ -473,7 +472,7 @@ static void cmd_edit(const std::vector<std::wstring>& args, bool silent,
     forward_to_python(raw);
 }
 
-// ─── !create ──────────────────────────────────────────────────────────────────
+// !create ------------------------------------------------------------------
 static void cmd_create(const std::vector<std::wstring>& args, bool silent,
                        const std::wstring& raw) {
     bool is_window = has(args, L"--window");
@@ -484,13 +483,13 @@ static void cmd_create(const std::vector<std::wstring>& args, bool silent,
     }
     if (!silent) {
         if (is_window) {
-            if (has(args, L"-o")) winfo(L"-o: не открывать сразу");
-            if (has(args, L"-c")) winfo(L"-c: автоподключить");
-            if (has(args, L"-d")) winfo(L"-d: создать как disconnected");
+            if (has(args, L"-o")) winfo(L"-o: don't open immediately");
+            if (has(args, L"-c")) winfo(L"-c: auto-connect");
+            if (has(args, L"-d")) winfo(L"-d: create as disconnected");
         }
         if (is_rule) {
-            if (has(args, L"-c")) winfo(L"-c: подключить правило сразу");
-            if (has(args, L"-d")) winfo(L"-d: правило будет disconnected");
+            if (has(args, L"-c")) winfo(L"-c: connect the rule immediately");
+            if (has(args, L"-d")) winfo(L"-d: rule will be disconnected");
         }
         winfo((L"Sending to Python: " + raw).c_str());
     }
@@ -498,7 +497,7 @@ static void cmd_create(const std::vector<std::wstring>& args, bool silent,
     if (!silent) wok(L"!create → Python");
 }
 
-// ─── !start ───────────────────────────────────────────────────────────────────
+// !start -------------------------------------------------------------------
 static void cmd_start(const std::vector<std::wstring>& args, bool silent,
                       const std::wstring& raw) {
     if (has(args, L"--rec")) {
@@ -546,7 +545,7 @@ static void cmd_start(const std::vector<std::wstring>& args, bool silent,
     forward_to_python(raw);
 }
 
-// ─── !connect ─────────────────────────────────────────────────────────────────
+// !connect -----------------------------------------------------------------
 static void cmd_connect(const std::vector<std::wstring>& args, bool silent,
                         const std::wstring& raw) {
     if (has(args, L"--log")) {
@@ -564,7 +563,7 @@ static void cmd_connect(const std::vector<std::wstring>& args, bool silent,
     if (!silent) wok(L"!connect → Python");
 }
 
-// ─── !disconnect ──────────────────────────────────────────────────────────────
+// !disconnect --------------------------------------------------------------
 static void cmd_disconnect(const std::vector<std::wstring>& args, bool silent,
                            const std::wstring& raw) {
     if (has(args, L"--log")) {
@@ -585,7 +584,7 @@ static void cmd_disconnect(const std::vector<std::wstring>& args, bool silent,
     if (!silent) wok(L"!disconnect → Python");
 }
 
-// ─── $rm ──────────────────────────────────────────────────────────────────────
+// $rm ----------------------------------------------------------------------
 static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
                    const std::wstring& raw) {
     bool is_window = has(args, L"--window");
@@ -598,12 +597,12 @@ static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
     }
     bool quiet = has(args, L"-q") || has(args, L"-y");
     if (!quiet && !silent)
-        wwarn(L"Добавьте флаг -q чтобы пропустить подтверждение");
+        wwarn(L"No confirmation prompt — re-run with -q on this same line to suppress this warning");
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
 }
 
-// ─── !rename ──────────────────────────────────────────────────────────────────
+// !rename ------------------------------------------------------------------
 static void cmd_rename(const std::vector<std::wstring>& args, bool silent,
                        const std::wstring& raw) {
     bool is_window = has(args, L"--window");
@@ -618,7 +617,7 @@ static void cmd_rename(const std::vector<std::wstring>& args, bool silent,
     forward_to_python(raw);
 }
 
-// ─── Главный диспетчер ────────────────────────────────────────────────────────
+// Главный диспетчер --------------------------------------------------------
 // Возвращает true если команда выполнена успешно, false при ошибке.
 // Используется флагом -return/-ret для вывода 1/0 вместо обычного текста.
 bool dispatch(const std::wstring& raw) {
@@ -649,11 +648,6 @@ bool dispatch(const std::wstring& raw) {
 
     bool ok = true;
 
-    // Перехватить werr: если команда вызывает werr — это неуспех.
-    // Реализуем через временный флаг.
-    // Поскольку werr/wok — глобальные функции без возврата, используем
-    // обёртки-лямбды только там где нужно, а для команд которые
-    // вызывают forward_to_python считаем успех по факту (Python сам логирует).
 
     if      (cmd==L"!help")       cmd_help(clean,silent);
     else if (cmd==L"!rec")        cmd_rec(clean,silent);
@@ -693,7 +687,6 @@ bool dispatch(const std::wstring& raw) {
         { auto pos = raw_rm.find(L"@all"); while (pos != std::wstring::npos) { raw_rm.replace(pos,4,L"--all"); pos = raw_rm.find(L"@all",pos+5); } }
         std::vector<std::wstring> clean_rm;
         for (auto& t : clean) { std::wstring x=t; if(x==L"@all") x=L"--all"; clean_rm.push_back(x); }
-        // BUG FIX: --notepad нормализуем в --window, чтобы $rm работал с notepad-объектами
         for (auto& t : clean_rm) if (t == L"--notepad") t = L"--window";
         bool rm_ok = has(clean_rm,L"--window") || has(clean_rm,L"--rule") ||
                      has(clean_rm,L"--ae") || has(clean_rm,L"--all");
@@ -716,7 +709,7 @@ bool dispatch(const std::wstring& raw) {
         if (!rn_ok) ok = false;
         else cmd_rename(clean,silent,raw_clean);
     }
-    // ── Новые команды (v3.0): перенаправляются в Python ──────────────────────
+    // New commands
     else if (cmd==L"!ls"      || cmd==L"!status"  || cmd==L"!info"   ||
              cmd==L"!history" || cmd==L"!alias"   || cmd==L"!repeat" ||
              cmd==L"!delay"   || cmd==L"!batch"   || cmd==L"!run"    ||
@@ -762,9 +755,9 @@ static void commit_input() {
     dispatch(line);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Window
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 static const int HDR_H    = 32;
 static const int INP_H    = 36;
@@ -956,9 +949,9 @@ static DWORD CALLBACK con_thread(LPVOID) {
     return 0;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 //  Public API
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 
 HR_EXPORT void hr_con_init(
     CB_VOID cb_start, CB_VOID cb_stop, CB_VOID cb_quit,
@@ -997,11 +990,6 @@ HR_EXPORT void hr_con_toggle() {
 HR_EXPORT void hr_con_set_recording(int v) { g_recording.store(v!=0); }
 HR_EXPORT int  hr_con_log_connected()      { return g_log_conn.load()?1:0; }
 
-// Native counterpart of `$rm --ui @ts`: tears the overlay window down and
-// stops the pipe server so no external terminal can reattach. The Python
-// side (hr_console_bridge.py) already disables the toggle hotkey and
-// persists a disabled-marker on its own, so this is best-effort cleanup
-// on the native side — calling it is optional (guarded by hasattr()).
 HR_EXPORT void hr_con_shutdown() {
     hr_pipe_server_stop();
     if (g_hwnd && IsWindow(g_hwnd)) {
