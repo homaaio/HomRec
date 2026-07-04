@@ -1,6 +1,6 @@
 welcome to changelog :D
 
-[Version 1.7.0] - 2026-06-21
+[Version 1.7.0] - 2026-07-04
 
 === Added ===
 - Video format selector — choose .mp4 or .mkv in Settings → Video
