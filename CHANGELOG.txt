@@ -1,5 +1,36 @@
 welcome to changelog :D
 
+[Version 1.7.0] - 2026-06-21
+
+=== Added ===
+- Video format selector — choose .mp4 or .mkv in Settings → Video
+- Separate audio export — Advanced Settings → Audio → "Save audio as separate .mp3"
+- Overlays system — Advanced Settings → Overlays tab:
+  - Text overlays (rendered live via FFmpeg drawtext filter)
+  - Webcam overlay (cam index selector)
+  - Image overlay (browse for .png/.jpg/.bmp)
+  - Per-overlay: opacity slider, X/Y position (%), W/H size (%)
+  - **Preview window** — OBS-style drag-to-position: live screen grab + draggable handles
+- `!check.er` terminal command — interactive integrity scanner:
+  - `!check.er 1` — scan most recent video file
+  - `!check.er 2` — scan all videos in output folder
+  - `!check.er 3` — HomRec self-diagnostics (FFmpeg, DLL, ddagrab, audio, overlays)
+  - `!check.er scan #file="path"` — scan a specific file
+
+=== Fixed ===
+- Bug 1 — Minecraft/game capture single frame: Added DXGI Desktop Duplication (ddagrab) support. HomRec now auto-detects if your FFmpeg supports ddagrab and uses it instead of GDI. Works with fullscreen D3D11/D3D12/Vulkan games.
+- Bug 2 — CMD windows on startup: All subprocess calls now use CREATE_NO_WINDOW on Windows. No more flashing black console windows.
+- Bug 3 — terminal.exe freezes on connect: Added pipe keepalive heartbeat thread (2s NUL ping). Terminal's ReadFile no longer blocks indefinitely.
+- Bug 4 — `-ret` incorrect behavior: `-ret` / `-return` now wraps execution and prints `(1)` on success or `(0)` on failure in the console.
+- Bug 5 — ddagrab + scaling filter conflict: Fixed FFmpeg error "Simple and complex filtering cannot be used together" when recording with ddagrab at non-standard resolutions (e.g., 1200x674). The -vf filter is no longer applied when -filter_complex (scaling) is active, preventing the incompatible filter mix.
+
+=== Changed ===
+- All UI strings and terminal output translated to English (Russian locale strings preserved in the `"ru"` language dict)
+- Welcome dialog simplified — no more redundant tips block
+- `.mkv` output fully supported: filenames, audio merge temp files all use correct extension
+- Overlay VF chain merges cleanly with existing scale/crop filters
+- Removed RU language, only EN now (but you still can add your language from .hrl)
+
 [Version 1.6.4] - 2026-06-09
 
 === Added ===
@@ -15,6 +46,24 @@ welcome to changelog :D
 Version bumped to 1.6.4
 Console version bumped to 1.2.2
 Minor bugs has been fixed (Tray bugs, icons bugs etc.)
+
+
+[Version 1.6.4] - 2026-06-09
+
+=== Added ===
+
+!start --terminal as @terminal command — launches hr_terminal.exe as an
+  external terminal window directly from the console. The command is handled
+  natively in hr_console.cpp (ShellExecuteExW next to the DLL) and mirrored
+  in hr_console_bridge.py (subprocess.Popen next to the script).
+  Appears in !help output under the !start group.
+
+=== Fixed ===
+
+Version bumped to 1.6.4
+Console version bumped to 1.2.2
+Minor bugs has been fixed (Tray bugs, icons bugs etc.)
+
 
 [Version 1.6.3] - 2026-06-07
 
