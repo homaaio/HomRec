@@ -3959,16 +3959,41 @@ class HomRecScreen:
             log.exception("Failed to start recording")
 
     def _ffmpeg_reader(self) -> None:
+        # BUG FIX: this used to read ffmpeg's stderr purely to scrape frame=
+        # progress numbers and threw away every other line — including the
+        # actual error message when ffmpeg fails to init a filter/encoder or
+        # crashes mid-recording. That's why failed recordings only ever
+        # showed "Starting recording" / "Stopping recording..." in
+        # homrec.log with nothing explaining why.
+        recent_lines = []
         while not self.stop_flag and not self.stop_ffmpeg_reader and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
             try:
                 line = self.ffmpeg_proc.stderr.readline()
                 if not line: break
                 line = line.decode('utf-8', errors='ignore').strip()
+                if not line:
+                    continue
                 if 'frame=' in line:
                     import re as _re
                     m = _re.search(r'frame=\s*(\d+)', line)
                     if m: self.frame_count = int(m.group(1))
-            except: break
+                else:
+                    recent_lines.append(line)
+                    if len(recent_lines) > 40:
+                        recent_lines.pop(0)
+                    low = line.lower()
+                    if any(k in low for k in ('error', 'invalid', 'failed', 'unsupported', 'no such', 'cannot', 'unable')):
+                        log.warning(f"ffmpeg: {line}")
+                    else:
+                        log.debug(f"ffmpeg: {line}")
+            except Exception:
+                break
+        # If ffmpeg died on its own while we still thought we were recording
+        # (i.e. this wasn't triggered by the user pressing Stop), the tail of
+        # its own stderr is the actual answer to "why did it fail" — log it
+        # instead of leaving homrec.log silent about it.
+        if self.recording and not self.stop_flag and recent_lines:
+            log.warning("ffmpeg exited unexpectedly. Last output:\n" + "\n".join(recent_lines[-15:]))
 
     def _update_stats(self) -> None:
         if self.recording:
