@@ -72,7 +72,7 @@ try:
 except ImportError:
     HAS_TRAY = False
 
-CURRENT_VERSION = "1.7.0"
+CURRENT_VERSION = "1.7.1"
 GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
@@ -98,7 +98,7 @@ def _version_gt(a: str, b: str) -> bool:
 
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.7.0", "live_preview": "PREVIEW", "ready": "Ready",
+        "app_title": "HomRec v1.7.1", "live_preview": "PREVIEW", "ready": "Ready",
         "recording": "Recording", "paused": "Paused", "fps": "FPS:", "resolution": "Resolution:",
         "start": "▶ START", "pause": "⏸ PAUSE", "stop": "■ STOP", "resume": "▶ RESUME",
         "recording_btn": "⏺ RECORDING", "audio_mixer": "Audio Mixer", "microphone": "Microphone",
@@ -2210,7 +2210,7 @@ class HomRecScreen:
         self._register_file_types()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_tray()
-        log.info("HomRec v1.7.0 started, language: %s", self.current_language)
+        log.info("HomRec v1.7.1 started, language: %s", self.current_language)
         self.root.after(2000, self._start_update_check)
         if getattr(self, '_first_launch', False):
             self.root.after(400, self._show_welcome_and_save)
@@ -2294,7 +2294,7 @@ class HomRecScreen:
                 self.root.iconphoto(True, ImageTk.PhotoImage(icon_image))
             except: pass
         if sys.platform == "win32":
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.7.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("homrec.1.7.1")
         self._rec_icon_img = None
         self._rec_frames = self._make_rec_frames()
         self._rec_frame_idx = 0
@@ -2711,7 +2711,7 @@ class HomRecScreen:
         title_frame = tk.Frame(left_panel, bg=self.colors["surface"])
         title_frame.pack(pady=20, fill="x")
         tk.Label(title_frame, text="HomRec", font=("Segoe UI", 22, "bold"), bg=self.colors["surface"], fg=self.colors["accent"]).pack()
-        tk.Label(title_frame, text="v1.7.0", font=("Segoe UI", 11), bg=self.colors["surface"], fg=self.colors["text_secondary"]).pack()
+        tk.Label(title_frame, text="v1.7.1", font=("Segoe UI", 11), bg=self.colors["surface"], fg=self.colors["text_secondary"]).pack()
 
         btn_frame = tk.Frame(left_panel, bg=self.colors["surface"])
         btn_frame.pack(pady=25, padx=15, fill="x")
@@ -3460,28 +3460,13 @@ class HomRecScreen:
                     except Exception: pass
 
     def _capture_loop(self) -> None:
-        # C++ pipeline path ----------------------------------------------
-        try:
-            from homrec_native import CppPipeline, PIPELINE_OK as _PLK
-        except ImportError:
-            _PLK = False
-
-        if _PLK and getattr(self, 'cpp_pipeline', None) is None:
-            pw = getattr(self, 'preview_width', 640)
-            ph = getattr(self, 'preview_height', 360)
-            pl = CppPipeline()
-            # pipe_write_fd=0 → только превью, без записи (запись стартует отдельно)
-            if pl.create(0, 0, getattr(self, 'target_fps', 30), 0, pw, ph):
-                if pl.start():
-                    self.cpp_pipeline = pl
-                    log.info("C++ pipeline started for preview")
-                else:
-                    pl.destroy()
-
-        if getattr(self, 'cpp_pipeline', None) is not None:
-            self._capture_loop_cpp()
-            return
-
+        # CLEANUP: this used to try importing a `CppPipeline` class from
+        # homrec_native for a DXGI-based fast preview path, but that class
+        # was never actually implemented there — the import always failed,
+        # so this always silently fell through to the Python/mss fallback
+        # below anyway. Removed the dead branch (and the now-unreachable
+        # _capture_loop_cpp method) rather than leave code around that
+        # references something that doesn't exist.
         # Python fallback (mss) -----------------------------------------
         import mss as _mss
         sct = _mss.mss()
@@ -3555,52 +3540,6 @@ class HomRecScreen:
                         except: pass
             except Exception as e: log.debug(f"_capture_loop error: {e}")
             time.sleep(0.1)  # BUG FIX: was 0.083 (~12 fps) but preview only redraws at 100 ms; align to avoid wasted captures
-
-    def _capture_loop_cpp(self) -> None:
-        """
-        Цикл превью через C++ pipeline.
-        C++ поток захватывает экран с THREAD_PRIORITY_TIME_CRITICAL,
-        конвертирует BGRA→RGB thumbnail внутри DLL.
-        Python только копирует готовый буфер в PIL Image.
-        """
-        import time as _t
-        pl = self.cpp_pipeline
-        while self._preview_running:
-            try:
-                pw = getattr(self, 'preview_width', 640)
-                ph = getattr(self, 'preview_height', 360)
-
-                # Обновляем размер превью если окно изменилось
-                if pl._pv_w.value != pw or pl._pv_h.value != ph:
-                    pl._pv_buf = __import__('ctypes').create_string_buffer(pw * ph * 3)
-                    _pipeline_mod = __import__('homrec_native', fromlist=['_pipeline'])
-                    if hasattr(_pipeline_mod, '_pipeline') and _pipeline_mod._pipeline:
-                        _pipeline_mod._pipeline.hr_pl_set_preview_size(pl._handle, pw, ph)
-
-                rgb_bytes, w, h = pl.get_preview()
-                if rgb_bytes and w > 0 and h > 0:
-                    img = Image.frombuffer("RGB", (w, h), rgb_bytes, "raw", "RGB", 0, 1)
-                    img = self._composite_overlays_on_preview(img, w, h)
-                    try: self._preview_queue.get_nowait()
-                    except Exception: pass
-                    self._preview_queue.put_nowait(img)
-
-                # Обновляем счётчик кадров из C++ stats
-                fc, fd, fps_act = pl.stats()
-                self.frame_count = int(fc)
-                if fd > 0:
-                    pass  # drops уже логирует C++ pipeline
-
-                # Пауза
-                if getattr(self, 'paused', False):
-                    pl.pause(True)
-                else:
-                    pl.pause(False)
-
-            except Exception as _e:
-                log.debug(f"_capture_loop_cpp error: {_e}")
-
-            _t.sleep(0.033)  # ~30 Hz опрос буфера — C++ захват идёт независимо
 
     def update_preview(self) -> None:
         # Если виджеты были пересозданы (recreate_widgets сбросил флаг) — останавливаем
@@ -4524,6 +4463,22 @@ if __name__ == "__main__":
         _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "HomRec_SingleInstance_150")
         if ctypes.windll.kernel32.GetLastError() == 183:
             sys.exit(0)
+
+        # BUG FIX: a CMD/console window would flash up on launch. This happens
+        # because homrec.py (and a console-subsystem hr.exe build) is a
+        # console-subsystem program: Windows auto-creates a brand new console
+        # for it whenever there's no parent console to inherit (double-clicking
+        # the .exe/.py from Explorer, a shortcut, a scheduled task, etc). That
+        # auto-created console is what people are seeing and finding
+        # confusing/scary — it's not any of the ffmpeg/helper subprocesses
+        # (those already run with CREATE_NO_WINDOW).
+        #
+        # We hide it here rather than relying only on a build flag, so this
+        # also covers `python homrec.py` from source. We only hide a console
+        # that was auto-created *for us* (nothing else attached to it) — if a
+        # developer runs `python homrec.py` from their own already-open
+        # terminal to watch log output, that console is shared with their
+        # shell and is left alone. Set HOMREC_SHOW_CONSOLE=1 to opt out.
         if not os.environ.get("HOMREC_SHOW_CONSOLE"):
             try:
                 kernel32 = ctypes.windll.kernel32
