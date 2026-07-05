@@ -174,9 +174,12 @@ class _NativeCore:
     """
     Pure-Python / NumPy fallback for the C++ capture accelerator.
 
-    homrec.py uses two methods from this object:
+    homrec.py uses these methods from this object:
       bgrx_to_rgb_np(bgra_bytes, w, h)  → numpy uint8 array (h, w, 3) RGB
       resize_bilinear_np(rgb_np, sw, sh, dw, dh) → bytes  (dw*dh*3)
+      resize_nearest_np(rgb_np, sw, sh, dw, dh)  → bytes  (dw*dh*3)  (used on the
+        recording-preview path, where the cheaper nearest-neighbour resize is
+        preferred since it runs alongside the actual encode)
 
     When hr_app_logic.dll is present these are backed by C++; here we
     provide equivalent NumPy implementations so the capture loop works
@@ -209,6 +212,36 @@ class _NativeCore:
             return img.tobytes()
         except Exception:
             # Last resort: nearest-neighbour via numpy
+            y_idx = (np.arange(dh) * sh // dh).astype(np.int32)
+            x_idx = (np.arange(dw) * sw // dw).astype(np.int32)
+            return rgb_np[np.ix_(y_idx, x_idx)].tobytes()
+
+    @staticmethod
+    def resize_nearest_np(rgb_np, sw: int, sh: int, dw: int, dh: int) -> bytes:
+        """Resize an (h, w, 3) numpy array to (dh, dw) using nearest-neighbour and
+        return raw bytes.
+
+        BUG FIX: this method was called from homrec.py's recording-preview path
+        (_capture_loop) but never existed on this class — only resize_bilinear_np
+        did. Every throttled preview update while recording raised AttributeError,
+        which was silently caught, so the preview queue never got refilled and the
+        on-screen preview froze on the last frame for the rest of the recording.
+        Nearest-neighbour is used here (rather than bilinear) because it's cheaper,
+        which matters since this runs concurrently with the actual encode.
+        """
+        import numpy as np
+        try:
+            import cv2
+            resized = cv2.resize(rgb_np, (dw, dh), interpolation=cv2.INTER_NEAREST)
+            return resized.tobytes()
+        except Exception:
+            pass
+        try:
+            from PIL import Image
+            img = Image.fromarray(rgb_np, "RGB")
+            img = img.resize((dw, dh), Image.Resampling.NEAREST)
+            return img.tobytes()
+        except Exception:
             y_idx = (np.arange(dh) * sh // dh).astype(np.int32)
             x_idx = (np.arange(dw) * sw // dw).astype(np.int32)
             return rgb_np[np.ix_(y_idx, x_idx)].tobytes()
