@@ -72,8 +72,8 @@ try:
 except ImportError:
     HAS_TRAY = False
 
-CURRENT_VERSION = "1.7.1"
-GITHUB_REPO = "homaaio/HomRec"
+CURRENT_VERSION = "1.7.0"
+GITHUB_REPO = "homaaio/homrec"
 
 def check_for_updates(callback) -> None:
     def _fetch():
@@ -98,7 +98,7 @@ def _version_gt(a: str, b: str) -> bool:
 
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.7.1", "live_preview": "PREVIEW", "ready": "Ready",
+        "app_title": "HomRec v1.7.0", "live_preview": "PREVIEW", "ready": "Ready",
         "recording": "Recording", "paused": "Paused", "fps": "FPS:", "resolution": "Resolution:",
         "start": "▶ START", "pause": "⏸ PAUSE", "stop": "■ STOP", "resume": "▶ RESUME",
         "recording_btn": "⏺ RECORDING", "audio_mixer": "Audio Mixer", "microphone": "Microphone",
@@ -4524,22 +4524,6 @@ if __name__ == "__main__":
         _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "HomRec_SingleInstance_150")
         if ctypes.windll.kernel32.GetLastError() == 183:
             sys.exit(0)
-
-        # BUG FIX: a CMD/console window would flash up on launch. This happens
-        # because homrec.py (and a console-subsystem hr.exe build) is a
-        # console-subsystem program: Windows auto-creates a brand new console
-        # for it whenever there's no parent console to inherit (double-clicking
-        # the .exe/.py from Explorer, a shortcut, a scheduled task, etc). That
-        # auto-created console is what people are seeing and finding
-        # confusing/scary — it's not any of the ffmpeg/helper subprocesses
-        # (those already run with CREATE_NO_WINDOW).
-        #
-        # We hide it here rather than relying only on a build flag, so this
-        # also covers `python homrec.py` from source. We only hide a console
-        # that was auto-created *for us* (nothing else attached to it) — if a
-        # developer runs `python homrec.py` from their own already-open
-        # terminal to watch log output, that console is shared with their
-        # shell and is left alone. Set HOMREC_SHOW_CONSOLE=1 to opt out.
         if not os.environ.get("HOMREC_SHOW_CONSOLE"):
             try:
                 kernel32 = ctypes.windll.kernel32
