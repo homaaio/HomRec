@@ -72,8 +72,8 @@ try:
 except ImportError:
     HAS_TRAY = False
 
-CURRENT_VERSION = "1.7.0"
-GITHUB_REPO = "homaaio/homrec"
+CURRENT_VERSION = "1.7.1"
+GITHUB_REPO = "homaaio/HomRec"
 
 def check_for_updates(callback) -> None:
     def _fetch():
@@ -98,7 +98,7 @@ def _version_gt(a: str, b: str) -> bool:
 
 LANGUAGES = {
     "en": {
-        "app_title": "HomRec v1.7.0", "live_preview": "PREVIEW", "ready": "Ready",
+        "app_title": "HomRec v1.7.1", "live_preview": "PREVIEW", "ready": "Ready",
         "recording": "Recording", "paused": "Paused", "fps": "FPS:", "resolution": "Resolution:",
         "start": "▶ START", "pause": "⏸ PAUSE", "stop": "■ STOP", "resume": "▶ RESUME",
         "recording_btn": "⏺ RECORDING", "audio_mixer": "Audio Mixer", "microphone": "Microphone",
@@ -3291,9 +3291,11 @@ class HomRecScreen:
     def _composite_overlays_on_preview(self, img: "Image.Image", pw: int, ph: int) -> "Image.Image":
         overlays = getattr(self, 'overlays', [])
         if not overlays:
+            self._sync_webcam_captures(set())
             return img
         try:
             img = img.convert("RGBA")
+            active_cam_indices: set = set()
             for ov in overlays:
                 if not ov.get('enabled', True):
                     continue
@@ -3359,14 +3361,103 @@ class HomRecScreen:
                     oh = max(1, int(ov.get('h', 0.25) * ph))
                     ox = int(ov.get('x', 0.05) * pw)
                     oy = int(ov.get('y', 0.05) * ph)
-                    d = ImageDraw.Draw(img)
-                    d.rectangle([ox, oy, ox + ow, oy + oh], outline=(137, 180, 250, 255), width=2,
-                                fill=(30, 30, 46, 160))
-                    d.text((ox + 4, oy + 4), f"📷 Cam {ov.get('cam_index', 0)}", fill=(205, 214, 244, 255))
+                    cam_index = ov.get('cam_index', 0)
+                    active_cam_indices.add(cam_index)
+                    # BUG FIX: this used to always draw a static placeholder box —
+                    # the webcam never actually showed up live, neither in the
+                    # Overlays settings preview nor in the main recording preview
+                    # (the *actual* recorded video captures the real camera via
+                    # ffmpeg separately in _build_filter_graph — this path is only
+                    # about what the user sees on screen while editing/recording).
+                    # Grab a real frame so what you see here is what you get.
+                    cam_frame = self._get_webcam_preview_frame(cam_index, ow, oh)
+                    if cam_frame is not None:
+                        opacity = ov.get('opacity', 1.0)
+                        if opacity < 1.0:
+                            cam_frame = cam_frame.convert("RGBA")
+                            a = cam_frame.split()[-1].point(lambda p: int(p * opacity))
+                            cam_frame.putalpha(a)
+                            img.paste(cam_frame, (ox, oy), cam_frame)
+                        else:
+                            img.paste(cam_frame, (ox, oy))
+                    else:
+                        # Camera unavailable (unplugged / in use / still opening) —
+                        # fall back to a labeled placeholder instead of showing nothing.
+                        d = ImageDraw.Draw(img)
+                        d.rectangle([ox, oy, ox + ow, oy + oh], outline=(137, 180, 250, 255), width=2,
+                                    fill=(30, 30, 46, 160))
+                        d.text((ox + 4, oy + 4), f"📷 Cam {cam_index} (no signal)", fill=(205, 214, 244, 255))
+            self._sync_webcam_captures(active_cam_indices)
             return img.convert("RGB")
         except Exception as e:
             log.debug(f"overlay preview composite error: {e}")
             return img.convert("RGB") if img.mode != "RGB" else img
+
+    def _get_webcam_preview_frame(self, cam_index: int, ow: int, oh: int):
+        """Grab one live frame from the given camera for the overlay preview.
+
+        Keeps a cv2.VideoCapture open per cam_index across calls (opening a
+        capture device takes hundreds of ms, so doing it every frame would
+        make the preview stutter). Failed opens are retried periodically
+        rather than forever, in case the camera was unplugged/busy and later
+        becomes available again.
+        """
+        caps = getattr(self, '_webcam_captures', None)
+        if caps is None:
+            caps = {}
+            self._webcam_captures = caps
+        now = time.time()
+        entry = caps.get(cam_index)
+        if entry is None or (entry.get('cap') is None and now >= entry.get('retry_at', 0)):
+            cap = None
+            try:
+                backend = cv2.CAP_DSHOW if platform.system() == 'Windows' else cv2.CAP_ANY
+                cap = cv2.VideoCapture(cam_index, backend)
+                if not cap.isOpened():
+                    cap.release()
+                    cap = None
+            except Exception as e:
+                log.debug(f"webcam preview open failed (cam {cam_index}): {e}")
+                cap = None
+            entry = {'cap': cap, 'retry_at': now + 5.0}
+            caps[cam_index] = entry
+        cap = entry.get('cap')
+        if cap is None:
+            return None
+        try:
+            ok, frame = cap.read()
+        except Exception as e:
+            log.debug(f"webcam preview read failed (cam {cam_index}): {e}")
+            ok, frame = False, None
+        if not ok or frame is None:
+            # Device likely unplugged/lost — release it and retry later.
+            try: cap.release()
+            except Exception: pass
+            entry['cap'] = None
+            entry['retry_at'] = now + 5.0
+            return None
+        try:
+            frame = cv2.resize(frame, (ow, oh), interpolation=cv2.INTER_LINEAR)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(frame_rgb, "RGB")
+        except Exception as e:
+            log.debug(f"webcam preview frame convert failed (cam {cam_index}): {e}")
+            return None
+
+    def _sync_webcam_captures(self, active_cam_indices: set) -> None:
+        """Release any open webcam captures that are no longer used by an
+        enabled overlay, so the camera isn't held open (and its indicator
+        light left on) once it's no longer needed."""
+        caps = getattr(self, '_webcam_captures', None)
+        if not caps:
+            return
+        for idx in list(caps.keys()):
+            if idx not in active_cam_indices:
+                entry = caps.pop(idx)
+                cap = entry.get('cap') if entry else None
+                if cap is not None:
+                    try: cap.release()
+                    except Exception: pass
 
     def _capture_loop(self) -> None:
         # C++ pipeline path ----------------------------------------------
@@ -3732,22 +3823,58 @@ class HomRecScreen:
         filter_complex = ';'.join(graph_parts)
         return extra_inputs, filter_complex, cur_label
 
+    def _probe_dshow_video_devices(self) -> list[str]:
+        r"""Probe FFmpeg's DirectShow device list and return the video device names.
+
+        BUG FIX: this used to filter lines with `'(video)' in line and '"' in line`,
+        but that substring never actually appears in FFmpeg's real dshow output.
+        A real `-list_devices true -f dshow -i dummy` run prints something like:
+
+            [dshow @ ...] DirectShow video devices (some may be both video and audio devices)
+            [dshow @ ...]  "Integrated Webcam"
+            [dshow @ ...]     Alternative name "@device_pnp_\\?\..."
+            [dshow @ ...] DirectShow audio devices
+            [dshow @ ...]  "Microphone (Realtek Audio)"
+
+        The "(video)" text only ever appears once, in the *section header*, which
+        has no quoted name on the same line — so the old filter matched nothing,
+        `names` was always empty, and every caller silently fell back to the
+        literal string "Integrated Webcam". On most machines no device is
+        actually named that, so FFmpeg couldn't find the camera at all: the combo
+        box in Settings only ever offered the fake fallback name, and recording
+        with a webcam overlay failed to pick up any camera in the output video.
+
+        Fixed by tracking which section of the listing we're in and reading the
+        quoted name from lines that aren't "Alternative name" sub-lines.
+        """
+        result = subprocess.run(
+            [self.ffmpeg_path, '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
+            capture_output=True, text=True, timeout=8,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        names = []
+        in_video_section = False
+        for line in result.stderr.splitlines():
+            if 'DirectShow video devices' in line:
+                in_video_section = True
+                continue
+            if 'DirectShow audio devices' in line:
+                in_video_section = False
+                continue
+            if not in_video_section or 'Alternative name' in line:
+                continue
+            m = re.search(r'"([^"]+)"', line)
+            if m:
+                names.append(m.group(1))
+        return names
+
     def list_webcams(self) -> list[str]:
         """Return a list of available webcam display names (Windows: DirectShow video devices)."""
         try:
             if platform.system() == 'Windows':
                 cached = getattr(self, '_dshow_cam_names_cache', None)
                 if cached is None:
-                    result = subprocess.run(
-                        [self.ffmpeg_path, '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
-                        capture_output=True, text=True, timeout=8,
-                        creationflags=subprocess.CREATE_NO_WINDOW)
-                    names = []
-                    for line in result.stderr.splitlines():
-                        if '(video)' in line and '"' in line:
-                            names.append(line.split('"')[1])
-                    self._dshow_cam_names_cache = names
-                    cached = names
+                    cached = self._probe_dshow_video_devices()
+                    self._dshow_cam_names_cache = cached
                 return cached or ["Integrated Webcam"]
             else:
                 # On Linux, enumerate /dev/video* nodes as a fallback.
@@ -3761,16 +3888,8 @@ class HomRecScreen:
         try:
             cached = getattr(self, '_dshow_cam_names_cache', None)
             if cached is None:
-                result = subprocess.run(
-                    [self.ffmpeg_path, '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
-                    capture_output=True, text=True, timeout=8,
-                    creationflags=subprocess.CREATE_NO_WINDOW)
-                names = []
-                for line in result.stderr.splitlines():
-                    if '(video)' in line and '"' in line:
-                        names.append(line.split('"')[1])
-                self._dshow_cam_names_cache = names
-                cached = names
+                cached = self._probe_dshow_video_devices()
+                self._dshow_cam_names_cache = cached
             if cached and 0 <= cam_index < len(cached):
                 return cached[cam_index]
         except Exception as e:
@@ -4296,6 +4415,7 @@ class HomRecScreen:
                 except: pass
             self.recording = False; self.audio_recording = False; self.sys_audio_recording = False
         self._preview_running = False
+        self._sync_webcam_captures(set())  # release any open webcam devices
         # Уничтожаем C++ pipeline — освобождает DXGI и D3D ресурсы
         _pl = getattr(self, 'cpp_pipeline', None)
         if _pl:
@@ -4404,6 +4524,34 @@ if __name__ == "__main__":
         _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "HomRec_SingleInstance_150")
         if ctypes.windll.kernel32.GetLastError() == 183:
             sys.exit(0)
+
+        # BUG FIX: a CMD/console window would flash up on launch. This happens
+        # because homrec.py (and a console-subsystem hr.exe build) is a
+        # console-subsystem program: Windows auto-creates a brand new console
+        # for it whenever there's no parent console to inherit (double-clicking
+        # the .exe/.py from Explorer, a shortcut, a scheduled task, etc). That
+        # auto-created console is what people are seeing and finding
+        # confusing/scary — it's not any of the ffmpeg/helper subprocesses
+        # (those already run with CREATE_NO_WINDOW).
+        #
+        # We hide it here rather than relying only on a build flag, so this
+        # also covers `python homrec.py` from source. We only hide a console
+        # that was auto-created *for us* (nothing else attached to it) — if a
+        # developer runs `python homrec.py` from their own already-open
+        # terminal to watch log output, that console is shared with their
+        # shell and is left alone. Set HOMREC_SHOW_CONSOLE=1 to opt out.
+        if not os.environ.get("HOMREC_SHOW_CONSOLE"):
+            try:
+                kernel32 = ctypes.windll.kernel32
+                hwnd = kernel32.GetConsoleWindow()
+                if hwnd:
+                    pids = (ctypes.c_uint * 2)()
+                    attached = kernel32.GetConsoleProcessList(pids, 2)
+                    if attached <= 1:
+                        ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            except Exception as _ce:
+                log.debug(f"console auto-hide skipped: {_ce}")
+
     root = tk.Tk()
     app = HomRecScreen(root)
 
