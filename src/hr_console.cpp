@@ -591,12 +591,22 @@ static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
     bool is_rule   = has(args, L"--rule");
     bool is_ae     = has(args, L"--ae");
     bool rm_all    = has(args, L"--all");
-    if (!is_window && !is_rule && !is_ae && !rm_all) {
-        werr(L"Usage: $rm --window|--rule|--ae #name=\"...\" [-q][--all][--purge][--if-disconnected]");
+    bool is_vid    = has(args, L"--vid");
+    bool is_ui     = has(args, L"--ui");
+    bool is_homrec = has(args, L"@homrec");
+    bool is_sysfiles = false;
+    for (auto& t : args) if (t.rfind(L"--system@homrec.files", 0) == 0) is_sysfiles = true;
+    if (!is_window && !is_rule && !is_ae && !rm_all &&
+        !is_vid && !is_ui && !is_homrec && !is_sysfiles) {
+        werr(L"Usage: rm --window|--rule|--ae #name=\"...\" [-q][--all][--purge][--if-disconnected]"
+             L"  |  rm --vid #name=\"...\"|@all|@last [-q]  |  rm @homrec [-q]");
         return;
     }
+    // Real Yes/No confirmation for --vid/@homrec/etc. happens on the Python
+    // side (it can show an actual dialog); this console only shows the
+    // lighter "no confirmation" warning for the plain window/rule/ae/all forms.
     bool quiet = has(args, L"-q") || has(args, L"-y");
-    if (!quiet && !silent)
+    if (!quiet && !silent && (is_window || is_rule || is_ae || rm_all))
         wwarn(L"No confirmation prompt — re-run with -q on this same line to suppress this warning");
     if (!silent) winfo((L"Sending to Python: " + raw).c_str());
     forward_to_python(raw);
@@ -628,6 +638,14 @@ bool dispatch(const std::wstring& raw) {
     auto parts = split(raw_norm);
     if (parts.empty()) return false;
     auto cmd  = tolw(parts[0]);
+    // BUG FIX: the "!" / "$" prefix used to be mandatory here — typing
+    // `create ...` or `rm ...` without it always fell through to
+    // "Unknown command", even though the Python side already accepts both
+    // forms. Strip a single leading "!" or "$" before matching, so the
+    // prefix becomes optional here too (old prefixed commands, aliases,
+    // rules, and hotkeys keep working unchanged).
+    auto bare = cmd;
+    if (!bare.empty() && (bare[0] == L'!' || bare[0] == L'$')) bare.erase(0, 1);
     std::vector<std::wstring> args(parts.begin()+1, parts.end());
 
     // -return / -ret: подавить весь вывод команды и напечатать только 1 или 0
@@ -649,12 +667,12 @@ bool dispatch(const std::wstring& raw) {
     bool ok = true;
 
 
-    if      (cmd==L"!help")       cmd_help(clean,silent);
-    else if (cmd==L"!rec")        cmd_rec(clean,silent);
+    if      (bare==L"help")       cmd_help(clean,silent);
+    else if (bare==L"rec")        cmd_rec(clean,silent);
     // !start --log handled inside cmd_start below
-    else if (cmd==L"!exit")       cmd_exit(clean,silent);
-    else if (cmd==L"!date")       cmd_date(clean,silent);
-    else if (cmd==L"!homrec") {
+    else if (bare==L"exit")       cmd_exit(clean,silent);
+    else if (bare==L"date")       cmd_date(clean,silent);
+    else if (bare==L"homrec") {
         bool has_version = has(clean, L"--version") || has(clean, L"-v");
         bool has_help    = has(clean, L"--help")    || has(clean, L"-h");
         if (has_version || has_help) {
@@ -664,64 +682,75 @@ bool dispatch(const std::wstring& raw) {
             cmd_homrec(clean, silent);
         }
     }
-    else if (cmd==L"!rule") {
+    else if (bare==L"rule") {
         if (!has(clean, L"--get") && !has(clean, L"--check")) ok = false;
         else cmd_rule(clean,silent,raw_clean);
     }
-    else if (cmd==L"!edit") {
+    else if (bare==L"edit") {
         bool e_ok = has(clean,L"--file")||has(clean,L"--window")||
                     has(clean,L"--rule")||has(clean,L"--settings")||has(clean,L"--terminal");
         if (!e_ok) ok = false;
         else cmd_edit(clean,silent,raw_clean);
     }
-    else if (cmd==L"!create") {
+    else if (bare==L"create") {
         bool c_ok = has(clean,L"--window")||has(clean,L"--rule")||has(clean,L"--ae");
         if (!c_ok) ok = false;
         else cmd_create(clean,silent,raw_clean);
     }
-    else if (cmd==L"!start")      cmd_start(clean,silent,raw_clean);
-    else if (cmd==L"!connect")    cmd_connect(clean,silent,raw_clean);
-    else if (cmd==L"!disconnect") cmd_disconnect(clean,silent,raw_clean);
-    else if (cmd==L"$rm") {
+    else if (bare==L"start")      cmd_start(clean,silent,raw_clean);
+    else if (bare==L"connect")    cmd_connect(clean,silent,raw_clean);
+    else if (bare==L"disconnect") cmd_disconnect(clean,silent,raw_clean);
+    else if (bare==L"rm") {
         std::wstring raw_rm = raw_clean;
         { auto pos = raw_rm.find(L"@all"); while (pos != std::wstring::npos) { raw_rm.replace(pos,4,L"--all"); pos = raw_rm.find(L"@all",pos+5); } }
         std::vector<std::wstring> clean_rm;
         for (auto& t : clean) { std::wstring x=t; if(x==L"@all") x=L"--all"; clean_rm.push_back(x); }
         for (auto& t : clean_rm) if (t == L"--notepad") t = L"--window";
+        // BUG FIX: this gate used to only recognize --window/--rule/--ae/--all,
+        // so `rm --vid ...`, `rm --ui ...`, `rm --system@homrec.files ...`,
+        // and `rm @homrec` were silently swallowed right here and never even
+        // reached Python (no error either — they just did nothing).
+        bool has_sysfiles = false;
+        for (auto& t : clean_rm) if (t.rfind(L"--system@homrec.files", 0) == 0) has_sysfiles = true;
         bool rm_ok = has(clean_rm,L"--window") || has(clean_rm,L"--rule") ||
-                     has(clean_rm,L"--ae") || has(clean_rm,L"--all");
+                     has(clean_rm,L"--ae") || has(clean_rm,L"--all") ||
+                     has(clean_rm,L"--vid") || has(clean_rm,L"--ui") ||
+                     has(clean_rm,L"@homrec") || has_sysfiles;
         if (!rm_ok) ok = false;
         else cmd_rm(clean_rm,silent,raw_rm);
     }
-    else if (cmd==L"$clear") {
+    else if (bare==L"clear") {
         if (has(clean, L"--app")) {
             if (!silent) wok(L"Clearing all app data...");
             forward_to_python(raw_clean);
         } else {
-            std::wstring clear_cmd = L"!clear";
-            if (!silent) winfo(L"→ Python: !clear");
+            std::wstring clear_cmd = L"clear";
+            if (!silent) winfo(L"→ Python: clear");
             forward_to_python(clear_cmd);
         }
     }
-    else if (cmd==L"!rename") {
+    else if (bare==L"rename") {
         bool rn_ok = has(clean,L"--window") || has(clean,L"--rule") ||
                      has(clean,L"--ae") || has(clean,L"--hotkey");
         if (!rn_ok) ok = false;
         else cmd_rename(clean,silent,raw_clean);
     }
     // New commands
-    else if (cmd==L"!ls"      || cmd==L"!status"  || cmd==L"!info"   ||
-             cmd==L"!history" || cmd==L"!alias"   || cmd==L"!repeat" ||
-             cmd==L"!delay"   || cmd==L"!batch"   || cmd==L"!run"    ||
-             cmd==L"!clear"   || cmd==L"!echo"    || cmd==L"!clip"   ||
-             cmd==L"!env"     || cmd==L"!timer"   || cmd==L"!watch"  ||
-             cmd==L"!ping"    || cmd==L"!version" || cmd==L"!log") {
+    else if (bare==L"ls"      || bare==L"status"  || bare==L"info"   ||
+             bare==L"history" || bare==L"alias"   || bare==L"repeat" ||
+             bare==L"delay"   || bare==L"batch"   || bare==L"run"    ||
+             bare==L"echo"    || bare==L"clip"    ||
+             bare==L"env"     || bare==L"timer"   || bare==L"watch"  ||
+             bare==L"ping"    || bare==L"version" || bare==L"log"    ||
+             bare==L"check.er"|| bare==L"hide"    ||
+             bare==L"secui"   || bare==L"secp"    || bare==L"sec"    ||
+             bare==L"do"      || bare.rfind(L"fs@", 0) == 0) {
         if (!silent) winfo((L"→ Python: " + raw_clean).c_str());
         forward_to_python(raw_clean);
     }
     else {
         if (!ret_mode)
-            werr((L"Unknown command: " + cmd + L"  (try !help)").c_str());
+            werr((L"Unknown command: " + cmd + L"  (try help or !help)").c_str());
         ok = false;
     }
 
@@ -898,7 +927,7 @@ static DWORD CALLBACK con_thread(LPVOID) {
     g_hwnd = hw;
 
     g_hdr = CreateWindowExW(0,L"STATIC",
-        L"  \u2328  HomRec Console v1.2.2   \u2014   Ctrl+Shift+T  |  !help",
+        L"  \u2328  HomRec Console v1.7.1   \u2014   Ctrl+Shift+T  |  !help",
         WS_CHILD|WS_VISIBLE|SS_LEFT|SS_CENTERIMAGE,
         0,0,0,0,hw,nullptr,hi,nullptr);
     SendMessageW(g_hdr,WM_SETFONT,(WPARAM)g_fbold,TRUE);
@@ -930,7 +959,7 @@ static DWORD CALLBACK con_thread(LPVOID) {
 
     layout(hw);
 
-    write_line(L"HomRec Developer Console v1.2.2", 0);
+    write_line(L"HomRec Developer Console v1.7.1", 0);
     winfo(L"type !help to see all commands  |  Esc or \u00d7 to close");
     write_line(L"", 4);
 
