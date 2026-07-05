@@ -26,9 +26,8 @@ CB_COMMAND = ctypes.CFUNCTYPE(None, ctypes.c_wchar_p)
 CONSOLE_VERSION = "1.2.3"
 BRIDGE_VERSION  = "1.2.3"
 
-# HomRec application version constants
-HOMREC_VERSION = "1.6.5"
-CORE_VERSION   = "1.6.0"
+HOMREC_VERSION = "1.7.1 (Stable)"
+CORE_VERSION   = "None"
 
 # --------------------------------------------------------------------------------
 #  Argument parsing utilities
