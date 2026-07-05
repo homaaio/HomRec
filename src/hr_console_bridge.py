@@ -639,6 +639,10 @@ class NativeConsole:
         raw = _resolve_math(raw)
 
         cmd = raw.split()[0] if raw.split() else ""
+        # BACKWARDS-COMPAT: the leading "!" / "$" used to be mandatory. They are
+        # now optional — `rm --vid @last` works exactly like `$rm --vid @last` —
+        # but old commands/aliases/rules saved with the prefix keep working too.
+        bare_cmd = cmd.lstrip("!$")
 
         # Check alias
         alias_cmd = self._alias_reg.get(cmd)
@@ -649,84 +653,82 @@ class NativeConsole:
 
         self._record_history(raw)
 
-        if cmd == "!rename":
+        if bare_cmd == "rename":
             self._cmd_rename(raw); return
-        if cmd == "$rm":
+        if bare_cmd == "rm":
             self._cmd_rm(raw); return
-        if cmd == "!edit":
+        if bare_cmd == "edit":
             self._cmd_edit(raw); return
-        if cmd == "!create":
+        if bare_cmd == "create":
             self._cmd_create(raw); return
-        if cmd == "!start":
+        if bare_cmd == "start":
             if "--rec" in raw:
                 self._cmd_start_rec(raw)
             else:
                 self._cmd_start_window(raw)
             return
-        if cmd == "!rule":
+        if bare_cmd == "rule":
             self._cmd_rule(raw); return
-        if cmd == "!connect":
+        if bare_cmd == "connect":
             self._cmd_connect(raw); return
-        if cmd == "!disconnect":
+        if bare_cmd == "disconnect":
             self._cmd_disconnect(raw); return
 
         # -- New commands -------------------------------------------------------
-        if cmd == "!ls":
+        if bare_cmd == "ls":
             self._cmd_ls(raw); return
-        if cmd == "!status":
+        if bare_cmd == "status":
             self._cmd_status(raw); return
-        if cmd == "!info":
+        if bare_cmd == "info":
             self._cmd_info(raw); return
-        if cmd == "!history":
+        if bare_cmd == "history":
             self._cmd_history(raw); return
-        if cmd == "!alias":
+        if bare_cmd == "alias":
             self._cmd_alias(raw); return
-        if cmd == "!repeat":
+        if bare_cmd == "repeat":
             self._cmd_repeat(raw); return
-        if cmd == "!delay":
+        if bare_cmd == "delay":
             self._cmd_delay(raw); return
-        if cmd == "!batch":
+        if bare_cmd == "batch":
             self._cmd_batch(raw); return
-        if cmd == "!run":
+        if bare_cmd == "run":
             self._cmd_run(raw); return
-        if cmd == "!clear":
-            self._cmd_clear(raw); return
-        if cmd == "$clear":
+        if bare_cmd == "clear":
+            # `clear` and `clear --app` are one command — _cmd_dollar_clear
+            # already falls back to a plain console-clear when --app is absent.
             self._cmd_dollar_clear(raw); return
-        if cmd == "$clear":
-            self._cmd_dollar_clear(raw); return
-        if cmd == "!echo":
+        if bare_cmd == "echo":
             self._cmd_echo(raw); return
-        if cmd == "!clip":
+        if bare_cmd == "clip":
             self._cmd_clip(raw); return
-        if cmd == "!env":
+        if bare_cmd == "env":
             self._cmd_env(raw); return
-        if cmd == "!timer":
+        if bare_cmd == "timer":
             self._cmd_timer(raw); return
-        if cmd == "!watch":
+        if bare_cmd == "watch":
             self._cmd_watch(raw); return
-        if cmd == "!ping":
+        if bare_cmd == "ping":
             self._cmd_ping(raw); return
-        if cmd == "!check.er":
+        if bare_cmd == "check.er":
             self._cmd_check_er(raw); return
-        if cmd == "!version":
+        if bare_cmd == "version":
             self._cmd_version(raw); return
-        if cmd == "!homrec":
+        if bare_cmd == "homrec":
             self._cmd_homrec(raw); return
-        if cmd == "!log":
+        if bare_cmd == "log":
             self._cmd_log(raw); return
-        if cmd == "!hide":
+        if bare_cmd == "hide":
             self._cmd_hide(raw); return
-        if cmd == "$secui":
+        if bare_cmd == "secui":
             self._cmd_secui(raw); return
-        if cmd == "$secp":
+        if bare_cmd == "secp":
             self._cmd_secp(raw); return
-        if cmd == "$sec":
+        if bare_cmd == "sec":
             self._cmd_sec(raw); return
-        if cmd == "$do":
+        if bare_cmd == "do":
             self._cmd_do(raw); return
-        if cmd.startswith("$fs@"):
-            self._cmd_fs(cmd, raw); return
+        if bare_cmd.startswith("fs@"):
+            self._cmd_fs(bare_cmd, raw); return
 
         log.warning("_dispatch_extended: unknown command '%s'", cmd)
 
@@ -1480,56 +1482,56 @@ class NativeConsole:
         self._alias_reg.add(name, cmd)
         log.info("!alias: '%s' → %s", name, cmd)
 
-    # --- !repeat --------------------------------------------------------------
+    # --- repeat --------------------------------------------------------------
 
     def _cmd_repeat(self, raw: str):
-        """!repeat #count=N <command>"""
+        """repeat #count=N <command>  (the `!` prefix is optional)"""
         import re
-        m = re.match(r'!repeat\s+#count=(\d+)\s+(.+)', raw, re.IGNORECASE)
+        m = re.match(r'\S+\s+#count=(\d+)\s+(.+)', raw, re.IGNORECASE)
         if not m:
-            log.warning("!repeat: syntax: !repeat #count=N <command>"); return
+            log.warning("repeat: syntax: repeat #count=N <command>"); return
         count = int(m.group(1))
         cmd   = m.group(2).strip()
         for i in range(count):
-            log.info("!repeat [%d/%d]: %s", i + 1, count, cmd)
+            log.info("repeat [%d/%d]: %s", i + 1, count, cmd)
             self._dispatch_extended(cmd)
 
-    # --- !delay ---------------------------------------------------------------
+    # --- delay ---------------------------------------------------------------
 
     def _cmd_delay(self, raw: str):
-        """!delay #ms=N <command>"""
+        """delay #ms=N <command>  (the `!` prefix is optional)"""
         import re
-        m = re.match(r'!delay\s+#ms=(\d+)\s+(.+)', raw, re.IGNORECASE)
+        m = re.match(r'\S+\s+#ms=(\d+)\s+(.+)', raw, re.IGNORECASE)
         if not m:
-            log.warning("!delay: syntax: !delay #ms=N <command>"); return
+            log.warning("delay: syntax: delay #ms=N <command>"); return
         ms  = int(m.group(1))
         cmd = m.group(2).strip()
-        log.info("!delay: after %dms → %s", ms, cmd)
+        log.info("delay: after %dms → %s", ms, cmd)
         t = threading.Timer(ms / 1000.0, lambda: self._dispatch_extended(cmd))
         t.daemon = True
         t.start()
 
-    # --- !batch ---------------------------------------------------------------
+    # --- batch ---------------------------------------------------------------
 
     def _cmd_batch(self, raw: str):
-        """!batch cmd1 && cmd2 && ...  [-x / --stop-on-error]"""
+        """batch cmd1 && cmd2 && ...  [-x / --stop-on-error]  (`!` prefix optional)"""
         import re
         stop_on_error = "-x" in raw.split() or "--stop-on-error" in raw
-        body = re.sub(r'^!batch\s*', '', raw, flags=re.IGNORECASE)
+        body = re.sub(r'^\S+\s*', '', raw)
         body = re.sub(r'\s+(-x|--stop-on-error)\b', '', body)
         parts = [p.strip() for p in body.split("&&") if p.strip()]
         if not parts:
-            log.warning("!batch: no commands"); return
+            log.warning("batch: no commands"); return
         for part in parts:
-            log.info("!batch → %s", part)
+            log.info("batch → %s", part)
             try:
                 self._dispatch_extended(part)
             except Exception as e:
-                log.error("!batch error: %s", e)
+                log.error("batch error: %s", e)
                 if stop_on_error:
-                    log.warning("!batch: stopped on error (-x)"); return
+                    log.warning("batch: stopped on error (-x)"); return
 
-    # --- !run -----------------------------------------------------------------
+    # --- run -----------------------------------------------------------------
 
     def _cmd_run(self, raw: str):
         """!run #file="script.hrc" [--encoding utf8|cp1251] [--ignore-errors] [--echo-each] [-x]"""
@@ -1639,9 +1641,9 @@ class NativeConsole:
     # --- !echo ----------------------------------------------------------------
 
     def _cmd_echo(self, raw: str):
-        """!echo [--ok|--warn|--err] <text>"""
+        """echo [--ok|--warn|--err] <text>  (the `!` prefix is optional)"""
         import re
-        body = re.sub(r'^!echo\s*', '', raw, flags=re.IGNORECASE)
+        body = re.sub(r'^\S+\s*', '', raw)
         level = "info"
         if body.startswith("--ok"):
             level = "ok";   body = body[4:].lstrip()
@@ -2122,13 +2124,19 @@ class NativeConsole:
         $rm --ae     #name="x"     [-q]
         $rm --all --window|--rule|--ae  [-y]
 
+        $rm --vid #name="..."       [-q]        (delete one recording by name)
+        $rm --vid @all              [-q/-y]     (delete every recording in the output folder)
+        $rm --vid @last             [-q/-y]     (delete the most recently recorded file)
+
         $rm --system@homrec.files #permission=core #type={recordings,plugins,logs,cache}
         $rm --ui #type=button{many} #name=@all{exception(a, b, c)}
         $rm --ui @ts                (removes the console itself)
         $rm @homrec                 (uninstalls HomRec after the process exits)
-        Note: the last three never take -q/-y — they run unprompted as soon as
-        the relevant $sec*/$secui fuse is off; there is no confirmation dialog
-        for them by design (see $secui / $secp / $sec).
+        Note: `--system@homrec.files` and `--ui` never take -q/-y — they run
+        unprompted as soon as the relevant $sec*/$secui fuse is off; there is
+        no confirmation dialog for them by design (see $secui / $secp / $sec).
+        `$rm @homrec` is the exception: being a full uninstall, it always asks
+        "are you sure?" first (pass -q/-y to skip the prompt).
         """
         if "--system@homrec.files" in raw:
             self._cmd_rm_system_files(raw); return
@@ -2136,6 +2144,8 @@ class NativeConsole:
             self._cmd_rm_ui(raw); return
         if re.search(r'(?:^|\s)@homrec(?:\s|$)', raw):
             self._cmd_rm_self_app(raw); return
+        if "--vid" in raw:
+            self._cmd_rm_vid(raw); return
 
         flags  = _parse_flags(raw)
         quiet  = "-q" in flags or "-y" in flags
@@ -2238,6 +2248,113 @@ class NativeConsole:
             return
 
         log.warning("$rm: use --window / --rule / --ae")
+
+    # --- $rm --vid ---------------------------------------------------------------
+
+    _VIDEO_EXTS = (".mp4", ".mkv")
+
+    def _vid_output_dir(self) -> str:
+        return getattr(self.app, "output_folder", "") or os.path.join(_get_base_dir(), "recordings")
+
+    def _vid_list_files(self) -> list[Path]:
+        """All recordings in the output folder (video files + their separate .mp3 exports)."""
+        out_dir = Path(self._vid_output_dir())
+        if not out_dir.is_dir():
+            return []
+        files = [p for p in out_dir.iterdir() if p.is_file() and p.suffix.lower() in self._VIDEO_EXTS]
+        return files
+
+    def _vid_is_active_file(self, path: Path) -> bool:
+        """True if `path` is the file currently being written to by an active recording."""
+        if not getattr(self.app, "recording", False):
+            return False
+        current = getattr(self.app, "filename", "") or ""
+        try:
+            return current and Path(current).resolve() == path.resolve()
+        except Exception:
+            return current and os.path.basename(current) == path.name
+
+    def _cmd_rm_vid(self, raw: str) -> None:
+        """
+        $rm --vid #name="HomRec_20260704_120000"   [-q]
+        $rm --vid @all                               [-q/-y]
+        $rm --vid @last                               [-q/-y]
+
+        Deletes recordings from the output folder (self.app.output_folder,
+        `recordings/` by default). #name matches with or without extension.
+        A companion separate-audio export (same stem + .mp3) is removed too,
+        if present. The file currently being recorded is never deleted.
+        """
+        flags = _parse_flags(raw)
+        quiet = "-q" in flags or "-y" in flags
+
+        def _confirm(msg: str) -> bool:
+            if quiet:
+                return True
+            if self._root_alive():
+                import tkinter.messagebox as mb
+                return mb.askyesno("Delete", msg)
+            return True
+
+        def _delete_one(path: Path) -> bool:
+            if self._vid_is_active_file(path):
+                log.warning("$rm --vid: '%s' is currently being recorded — skipped", path.name)
+                return False
+            try:
+                path.unlink()
+                mp3 = path.with_suffix(".mp3")
+                if mp3.exists():
+                    try:
+                        mp3.unlink()
+                    except Exception as e:
+                        log.warning("$rm --vid: failed to delete companion audio '%s': %s", mp3.name, e)
+                log.info("$rm --vid: '%s' deleted", path.name)
+                return True
+            except Exception as e:
+                log.warning("$rm --vid: failed to delete '%s': %s", path.name, e)
+                return False
+
+        if re.search(r'(?:^|\s)@all(?:\s|$)', raw):
+            files = self._vid_list_files()
+            if not files:
+                log.info("$rm --vid @all: no recordings found in '%s'", self._vid_output_dir())
+                return
+            if not _confirm(f"Delete all {len(files)} recording(s) from the output folder?"):
+                log.info("$rm --vid @all: cancelled"); return
+            removed = sum(1 for f in files if _delete_one(f))
+            log.info("$rm --vid @all: removed %d/%d file(s)", removed, len(files))
+            return
+
+        if re.search(r'(?:^|\s)@last(?:\s|$)', raw):
+            files = self._vid_list_files()
+            if not files:
+                log.warning("$rm --vid @last: no recordings found in '%s'", self._vid_output_dir())
+                return
+            last = max(files, key=lambda p: p.stat().st_mtime)
+            if not _confirm(f"Delete the most recent recording '{last.name}'?"):
+                log.info("$rm --vid @last: cancelled"); return
+            _delete_one(last)
+            return
+
+        name = _parse_named(raw, "name")
+        if not name:
+            log.warning('$rm --vid: #name not specified  (example: $rm --vid #name="HomRec_20260704_120000")')
+            return
+
+        out_dir = Path(self._vid_output_dir())
+        candidates: list[Path] = []
+        stem = Path(name).stem if Path(name).suffix else name
+        if out_dir.is_dir():
+            for p in out_dir.iterdir():
+                if p.is_file() and p.suffix.lower() in self._VIDEO_EXTS and p.stem == stem:
+                    candidates.append(p)
+        if not candidates:
+            log.warning("$rm --vid: '%s' not found in '%s'", name, out_dir)
+            return
+        if not _confirm(f"Delete recording '{candidates[0].name}'?"):
+            log.info("$rm --vid: cancelled"); return
+        for c in candidates:
+            _delete_one(c)
 
     # --- security fuses: $secui / $secp / $sec ---------------------------------
 
@@ -2491,10 +2608,34 @@ class NativeConsole:
     # --- $rm @homrec --------------------------------------------------------------
 
     def _cmd_rm_self_app(self, raw: str) -> None:
-        """$rm @homrec — uninstalls HomRec from disk once the process exits."""
+        """$rm @homrec — uninstalls HomRec from disk once the process exits.
+
+        Destructive and irreversible, so unlike the other `$rm --ui`/`--system`
+        fuse-gated commands, this one always asks for confirmation first
+        (pass -q or -y to skip the prompt, e.g. for scripted/`!create --rule` use).
+        """
         if not self._core_unlocked():
             log.warning("$rm @homrec: blocked — core protection is ON. Run `$sec 0` first.")
             return
+
+        flags = _parse_flags(raw)
+        quiet = "-q" in flags or "-y" in flags
+        if not quiet:
+            if self._root_alive():
+                import tkinter.messagebox as mb
+                confirmed = mb.askyesno(
+                    "Uninstall HomRec",
+                    "This will permanently uninstall HomRec from this computer "
+                    "once the app closes. This cannot be undone.\n\n"
+                    "Are you sure you want to continue?",
+                    icon="warning",
+                )
+            else:
+                log.warning("$rm @homrec: no UI available to confirm — pass -y to run non-interactively.")
+                confirmed = False
+            if not confirmed:
+                log.info("$rm @homrec: cancelled")
+                return
 
         log.warning("$rm @homrec: HomRec will delete itself once this process exits.")
         base = _get_base_dir()
@@ -2549,10 +2690,15 @@ class NativeConsole:
     # --- $fs@homrec / $fs@plugins / $fs@settings ---------------------------------
 
     def _cmd_fs(self, cmd: str, raw: str) -> None:
-        """$fs@homrec | $fs@plugins | $fs@settings — factory reset, gated by $sec."""
-        target = cmd[len("$fs@"):]
+        """fs@homrec | fs@plugins | fs@settings — factory reset, gated by sec.
+
+        `cmd` here is the bare command token (e.g. "fs@homrec"), with any
+        leading "$" already stripped by the dispatcher — the "$" prefix is
+        optional now, so this must not assume it's still there.
+        """
+        target = cmd[len("fs@"):]
         if not self._core_unlocked():
-            log.warning("%s: blocked — core protection is ON. Run `$sec 0` first.", cmd)
+            log.warning("%s: blocked — core protection is ON. Run `sec 0` first.", cmd)
             return
 
         base = _get_base_dir()
