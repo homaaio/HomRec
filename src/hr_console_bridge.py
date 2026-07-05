@@ -2756,11 +2756,24 @@ class NativeConsole:
     # --- $do --ui@homrec ----------------------------------------------------------
 
     def _cmd_do(self, raw: str) -> None:
-        """$do --ui@homrec 1 — re-downloads src/homrec.py from GitHub and reinstalls it.
-        Restorative, not destructive — not gated by $sec."""
+        """$do --ui@homrec 1 [--force] — re-downloads src/homrec.py from GitHub and reinstalls it.
+        Restorative, not destructive — not gated by $sec.
+
+        SECURITY FIX: this used to write whatever bytes came back from the
+        download straight over the running app's own source with no
+        verification at all — a compromised repo/account, a MITM, or even a
+        corrupted download would have been installed silently. It now checks
+        the download's SHA-256 against a `homrec.py.sha256` file published
+        next to it in the same repo before writing anything; if that
+        checksum file can't be fetched or doesn't match, the update is
+        aborted and nothing on disk is touched. Pass --force to skip
+        verification if you understand the risk (e.g. the checksum file
+        hasn't been published yet).
+        """
         if "--ui@homrec" not in raw:
             log.warning("$do: only --ui@homrec is currently supported"); return
         tokens = raw.split()
+        force = "--force" in tokens or "-f" in tokens
         vals = [t for t in tokens if t in ("0", "1")]
         if not vals or vals[-1] != "1":
             log.info("$do --ui@homrec: nothing to do (expects a trailing `1`)"); return
@@ -2768,12 +2781,41 @@ class NativeConsole:
         log.warning("$do --ui@homrec 1: downloading latest UI from GitHub…")
 
         def _fetch():
-            import urllib.request
-            url = "https://raw.githubusercontent.com/homaaio/HomREC/main/src/homrec.py"
+            import urllib.request, hashlib
+            base_url = "https://raw.githubusercontent.com/homaaio/HomREC/main/src/homrec.py"
+            sum_url = base_url + ".sha256"
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "HomRec"})
+                req = urllib.request.Request(base_url, headers={"User-Agent": "HomRec"})
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     data = resp.read()
+
+                digest = hashlib.sha256(data).hexdigest()
+                expected = None
+                try:
+                    sreq = urllib.request.Request(sum_url, headers={"User-Agent": "HomRec"})
+                    with urllib.request.urlopen(sreq, timeout=15) as sresp:
+                        expected = sresp.read().decode("utf-8", "ignore").strip().split()[0].lower()
+                except Exception as e:
+                    log.debug("$do --ui@homrec: no checksum file available (%s)", e)
+
+                if expected is None:
+                    if not force:
+                        log.error(
+                            "$do --ui@homrec 1: aborted — could not verify integrity "
+                            "(no %s found) and --force was not given. Nothing was changed. "
+                            "Re-run with --force to install anyway if you trust the source.",
+                            os.path.basename(sum_url))
+                        return
+                    log.warning("$do --ui@homrec 1: --force given, skipping integrity check.")
+                elif digest != expected:
+                    log.error(
+                        "$do --ui@homrec 1: aborted — checksum mismatch (got %s, expected %s). "
+                        "The download may be corrupted or tampered with. Nothing was changed.",
+                        digest, expected)
+                    return
+                else:
+                    log.info("$do --ui@homrec: checksum verified OK (%s)", digest)
+
                 base = _get_base_dir()
                 target = os.path.join(base, "homrec.py")
                 backup = target + ".bak"
