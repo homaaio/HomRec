@@ -41,7 +41,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 ### Option A — .exe (recommended)
 
-**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip` or `.7z`
+**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip` or `.7z`       
 **2.** Unzip anywhere you want — no installer needed  
 **3.** Launch `hr.exe`
 
