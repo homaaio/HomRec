@@ -2,7 +2,7 @@
 **Screen recorder built for weak PCs.**  
 No lags. No bloat. No GPU required.
 
-[![Version](https://img.shields.io/badge/version-1.7.0-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
+[![Version](https://img.shields.io/badge/version-1.7.1-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
 [![Discord](https://img.shields.io/badge/Discord-0047ab?style=flat-square&logo=discord)](https://discord.gg/Gv4t6Xhy7E)
 [![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
 
@@ -41,7 +41,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 ### Option A — .exe (recommended)
 
-**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip`  
+**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip` or `.7z`
 **2.** Unzip anywhere you want — no installer needed  
 **3.** Launch `hr.exe`
 
