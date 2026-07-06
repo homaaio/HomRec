@@ -2237,11 +2237,6 @@ class HomRecScreen:
             log.warning(f"merge_audio_video: video missing: {video_file!r}"); return False
         if not self.ffmpeg_path:
             log.warning("merge_audio_video: no ffmpeg path"); return False
-
-        # BUG FIX: audio_aac_bitrate was a real, saved UI setting (Advanced
-        # Settings → Audio) but was never actually passed to ffmpeg — the
-        # fallback merge command always used the encoder's default bitrate.
-        # Also route custom_ffmpeg_args here for full control over the mux step.
         audio_bitrate = getattr(self, 'audio_aac_bitrate', '192k') or '192k'
         custom_args_str = (getattr(self, 'custom_ffmpeg_args', '') or '').strip()
 
@@ -3078,10 +3073,6 @@ class HomRecScreen:
         fps = getattr(self, 'target_fps', 30)
         cpu_count = os.cpu_count() or 4
 
-        # BUG FIX: enc_preset / enc_crf already existed as real, saved UI
-        # settings (Advanced Settings → Video), but were never actually read
-        # here — the software-encoder branch below always hardcoded
-        # 'superfast' / crf 28 regardless of what the user picked.
         preset_override = (getattr(self, 'enc_preset', '') or '').strip()
         crf_override = getattr(self, 'enc_crf', None)
         custom_args_str = (getattr(self, 'custom_ffmpeg_args', '') or '').strip()
@@ -3112,13 +3103,6 @@ class HomRecScreen:
                          '-spatial-aq','1','-aq-strength','8',
                          '-bf','0','-profile:v','high']
             elif is_qsv:
-                # BUG FIX: -low_power 1 forces Intel QSV's VDENC hardware path,
-                # which on many GPU generations requires width/height divisible
-                # by 16 (sometimes 8) — stricter than the general even-dimension
-                # rule enforced elsewhere. A resolution like 1200x674 (even, but
-                # not a multiple of 16: 674/16 = 42.125) fails to encode with
-                # low_power on affected hardware. The standard QSV path handles
-                # arbitrary even dimensions fine via internal padding.
                 args += ['-preset','veryfast','-look_ahead','0','-low_power','0',
                         '-global_quality',str(qp),'-g',str(gop),'-profile:v','high']
             elif is_amf:
@@ -3363,13 +3347,6 @@ class HomRecScreen:
                     oy = int(ov.get('y', 0.05) * ph)
                     cam_index = ov.get('cam_index', 0)
                     active_cam_indices.add(cam_index)
-                    # BUG FIX: this used to always draw a static placeholder box —
-                    # the webcam never actually showed up live, neither in the
-                    # Overlays settings preview nor in the main recording preview
-                    # (the *actual* recorded video captures the real camera via
-                    # ffmpeg separately in _build_filter_graph — this path is only
-                    # about what the user sees on screen while editing/recording).
-                    # Grab a real frame so what you see here is what you get.
                     cam_frame = self._get_webcam_preview_frame(cam_index, ow, oh)
                     if cam_frame is not None:
                         opacity = ov.get('opacity', 1.0)
@@ -3394,14 +3371,6 @@ class HomRecScreen:
             return img.convert("RGB") if img.mode != "RGB" else img
 
     def _get_webcam_preview_frame(self, cam_index: int, ow: int, oh: int):
-        """Grab one live frame from the given camera for the overlay preview.
-
-        Keeps a cv2.VideoCapture open per cam_index across calls (opening a
-        capture device takes hundreds of ms, so doing it every frame would
-        make the preview stutter). Failed opens are retried periodically
-        rather than forever, in case the camera was unplugged/busy and later
-        becomes available again.
-        """
         caps = getattr(self, '_webcam_captures', None)
         if caps is None:
             caps = {}
@@ -3556,10 +3525,6 @@ class HomRecScreen:
                 self.preview_label.image = photo
         except queue.Empty: pass
         except Exception: pass
-        # BUG FIX: during recording the preview was rescheduled at 250 ms, but the capture
-        # loop already throttles to ~250 ms, so the label was always one cycle stale.
-        # Idle polling at 80 ms (12.5 fps) was unnecessarily burning CPU for a preview.
-        # Use 100 ms idle (10 fps preview is plenty) and 150 ms while recording.
         self.root.after(150 if getattr(self, 'recording', False) else 100, self.update_preview)
 
     def _show_preview_placeholder(self) -> None:
