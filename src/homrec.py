@@ -4023,12 +4023,6 @@ class HomRecScreen:
             log.exception("Failed to start recording")
 
     def _ffmpeg_reader(self) -> None:
-        # BUG FIX: this used to read ffmpeg's stderr purely to scrape frame=
-        # progress numbers and threw away every other line — including the
-        # actual error message when ffmpeg fails to init a filter/encoder or
-        # crashes mid-recording. That's why failed recordings only ever
-        # showed "Starting recording" / "Stopping recording..." in
-        # homrec.log with nothing explaining why.
         recent_lines = []
         while not self.stop_flag and not self.stop_ffmpeg_reader and self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
             try:
@@ -4052,10 +4046,6 @@ class HomRecScreen:
                         log.debug(f"ffmpeg: {line}")
             except Exception:
                 break
-        # If ffmpeg died on its own while we still thought we were recording
-        # (i.e. this wasn't triggered by the user pressing Stop), the tail of
-        # its own stderr is the actual answer to "why did it fail" — log it
-        # instead of leaving homrec.log silent about it.
         if self.recording and not self.stop_flag and recent_lines:
             log.warning("ffmpeg exited unexpectedly. Last output:\n" + "\n".join(recent_lines[-15:]))
 
@@ -4463,30 +4453,21 @@ if __name__ == "__main__":
         _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "HomRec_SingleInstance_150")
         if ctypes.windll.kernel32.GetLastError() == 183:
             sys.exit(0)
-
-        # BUG FIX: a CMD/console window would flash up on launch. This happens
-        # because homrec.py (and a console-subsystem hr.exe build) is a
-        # console-subsystem program: Windows auto-creates a brand new console
-        # for it whenever there's no parent console to inherit (double-clicking
-        # the .exe/.py from Explorer, a shortcut, a scheduled task, etc). That
-        # auto-created console is what people are seeing and finding
-        # confusing/scary — it's not any of the ffmpeg/helper subprocesses
-        # (those already run with CREATE_NO_WINDOW).
-        #
-        # We hide it here rather than relying only on a build flag, so this
-        # also covers `python homrec.py` from source. We only hide a console
-        # that was auto-created *for us* (nothing else attached to it) — if a
-        # developer runs `python homrec.py` from their own already-open
-        # terminal to watch log output, that console is shared with their
-        # shell and is left alone. Set HOMREC_SHOW_CONSOLE=1 to opt out.
         if not os.environ.get("HOMREC_SHOW_CONSOLE"):
             try:
                 kernel32 = ctypes.windll.kernel32
                 hwnd = kernel32.GetConsoleWindow()
                 if hwnd:
-                    pids = (ctypes.c_uint * 2)()
-                    attached = kernel32.GetConsoleProcessList(pids, 2)
-                    if attached <= 1:
+                    hide = True
+                    if HAS_PSUTIL:
+                        try:
+                            parent = psutil.Process(os.getpid()).parent()
+                            parent_name = (parent.name() if parent else "").lower()
+                            if parent_name in ("cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe"):
+                                hide = False  # inherited from a shell the user is actively using
+                        except Exception as _pe:
+                            log.debug(f"console parent lookup failed, hiding anyway: {_pe}")
+                    if hide:
                         ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
             except Exception as _ce:
                 log.debug(f"console auto-hide skipped: {_ce}")
