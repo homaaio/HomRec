@@ -1,6 +1,6 @@
 welcome to changelog :D
 
-[Version 1.7.1] - 2026-07-04
+[Version 1.7.1] - 2026-07-07
 
 === Added ===
 - `rm --vid` terminal commands — delete recordings straight from the console:
