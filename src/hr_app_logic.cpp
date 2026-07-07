@@ -64,6 +64,45 @@
 
 static std::string _str(const char *s) { return s ? std::string(s) : std::string(); }
 
+/*
+ * BUG FIX: run a shell command the same way system() does (blocking, returns
+ * the process exit code), but without the visible cmd.exe flash that plain
+ * system() causes on Windows. system() always spawns via cmd.exe, and it has
+ * no way to pass CREATE_NO_WINDOW / SW_HIDE — the window is created and
+ * shown by the OS before cmd.exe even gets a chance to run, so redirecting
+ * the *command's* output (e.g. "... >nul 2>&1") does nothing to hide it.
+ *
+ * This was firing on every launch via hr_probe_gpu_encoder() (called ~3s
+ * after startup to detect NVENC/AMF/QSV support), and again after any
+ * recording that needed a separate audio/video merge — each one flashing a
+ * console window that had nothing to do with any of the app's own windows.
+ */
+static int _run_hidden(const std::string &cmd) {
+#ifdef _WIN32
+    STARTUPINFOA si = {sizeof(si)};
+    si.dwFlags     = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+
+    std::string full = "cmd.exe /c \"" + cmd + "\"";
+    std::vector<char> cl(full.begin(), full.end());
+    cl.push_back('\0');
+
+    if (!CreateProcessA(nullptr, cl.data(), nullptr, nullptr, FALSE,
+                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return -1;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int)code;
+#else
+    return system(cmd.c_str());
+#endif
+}
+
 /* Split string by delimiter */
 static std::vector<std::string> _split(const std::string &s, char delim) {
     std::vector<std::string> out;
@@ -369,7 +408,7 @@ HR_EXPORT int hr_probe_gpu_encoder(const char *ffmpeg_path,
 #else
         cmd += " >/dev/null 2>&1";
 #endif
-        int rc = system(cmd.c_str());
+        int rc = _run_hidden(cmd);
         if (rc == 0) {
             _scopy(out, (size_t)out_len, probes[i].name);
             return 1;
@@ -695,7 +734,7 @@ HR_EXPORT int hr_merge_audio_video(const char *ffmpeg_path,
     cmd += " >/dev/null 2>&1";
 #endif
 
-    int rc = system(cmd.c_str());
+    int rc = _run_hidden(cmd);
     if (rc != 0) return 0;
 
     /* Check tmp exists */
