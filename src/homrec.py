@@ -2237,6 +2237,11 @@ class HomRecScreen:
             log.warning(f"merge_audio_video: video missing: {video_file!r}"); return False
         if not self.ffmpeg_path:
             log.warning("merge_audio_video: no ffmpeg path"); return False
+
+        # BUG FIX: audio_aac_bitrate was a real, saved UI setting (Advanced
+        # Settings → Audio) but was never actually passed to ffmpeg — the
+        # fallback merge command always used the encoder's default bitrate.
+        # Also route custom_ffmpeg_args here for full control over the mux step.
         audio_bitrate = getattr(self, 'audio_aac_bitrate', '192k') or '192k'
         custom_args_str = (getattr(self, 'custom_ffmpeg_args', '') or '').strip()
 
@@ -3073,6 +3078,10 @@ class HomRecScreen:
         fps = getattr(self, 'target_fps', 30)
         cpu_count = os.cpu_count() or 4
 
+        # BUG FIX: enc_preset / enc_crf already existed as real, saved UI
+        # settings (Advanced Settings → Video), but were never actually read
+        # here — the software-encoder branch below always hardcoded
+        # 'superfast' / crf 28 regardless of what the user picked.
         preset_override = (getattr(self, 'enc_preset', '') or '').strip()
         crf_override = getattr(self, 'enc_crf', None)
         custom_args_str = (getattr(self, 'custom_ffmpeg_args', '') or '').strip()
@@ -3103,6 +3112,13 @@ class HomRecScreen:
                          '-spatial-aq','1','-aq-strength','8',
                          '-bf','0','-profile:v','high']
             elif is_qsv:
+                # BUG FIX: -low_power 1 forces Intel QSV's VDENC hardware path,
+                # which on many GPU generations requires width/height divisible
+                # by 16 (sometimes 8) — stricter than the general even-dimension
+                # rule enforced elsewhere. A resolution like 1200x674 (even, but
+                # not a multiple of 16: 674/16 = 42.125) fails to encode with
+                # low_power on affected hardware. The standard QSV path handles
+                # arbitrary even dimensions fine via internal padding.
                 args += ['-preset','veryfast','-look_ahead','0','-low_power','0',
                         '-global_quality',str(qp),'-g',str(gop),'-profile:v','high']
             elif is_amf:
@@ -3429,13 +3445,6 @@ class HomRecScreen:
                     except Exception: pass
 
     def _capture_loop(self) -> None:
-        # CLEANUP: this used to try importing a `CppPipeline` class from
-        # homrec_native for a DXGI-based fast preview path, but that class
-        # was never actually implemented there — the import always failed,
-        # so this always silently fell through to the Python/mss fallback
-        # below anyway. Removed the dead branch (and the now-unreachable
-        # _capture_loop_cpp method) rather than leave code around that
-        # references something that doesn't exist.
         # Python fallback (mss) -----------------------------------------
         import mss as _mss
         sct = _mss.mss()
@@ -3589,15 +3598,6 @@ class HomRecScreen:
         OverlayManagerWindow(self.root, self)
 
     def _drawtext_fontfile(self) -> str:
-        """Resolve a real font file path for ffmpeg's drawtext filter.
-
-        BUG FIX: drawtext previously had no fontfile= at all. ffmpeg's
-        Windows builds have no fontconfig, so drawtext can't resolve a
-        font by name and fails to initialize the filter graph entirely —
-        which kills ffmpeg (and therefore the whole recording) as soon as
-        any text overlay is enabled. This mirrors the font fallback already
-        used for the live preview (_composite_overlays_on_preview).
-        """
         cached = getattr(self, '_drawtext_fontfile_cache', None)
         if cached is not None:
             return cached
@@ -3642,17 +3642,27 @@ class HomRecScreen:
             )
         return ','.join(filters)
 
-    def _build_filter_graph(self, base_label_in: str = "0:v") -> tuple[list, str, str | None]:
+    def _build_filter_graph(self, base_label_in: str = "0:v", use_ddagrab: bool = False) -> tuple[list, str, str | None]:
         extra_inputs: list = []
         graph_parts: list = []
         next_input_idx = 1
 
         needs_scale = (self.record_width != self.original_width or
                        self.record_height != self.original_height)
+        has_any_overlay = any(ov.get('enabled', True) for ov in getattr(self, 'overlays', []))
+        needs_hwdownload = use_ddagrab and (needs_scale or has_any_overlay)
         cur_label = base_label_in
-        if needs_scale:
-            # When using ddagrab, convert D3D11 hardware frames to CPU frames first
-            graph_parts.append(f"[{cur_label}]hwdownload,format=bgra,format=yuv420p,scale={self.record_width}:{self.record_height}:flags=fast_bilinear[scaled]")
+        if needs_hwdownload:
+            if needs_scale:
+                # When using ddagrab, convert D3D11 hardware frames to CPU frames first
+                graph_parts.append(f"[{cur_label}]hwdownload,format=bgra,format=yuv420p,scale={self.record_width}:{self.record_height}:flags=fast_bilinear[scaled]")
+            else:
+                graph_parts.append(f"[{cur_label}]hwdownload,format=bgra,format=yuv420p[scaled]")
+            cur_label = "scaled"
+        elif needs_scale:
+            # Non-ddagrab capture (gdigrab) already yields plain CPU frames —
+            # just scale, no hwdownload needed.
+            graph_parts.append(f"[{cur_label}]scale={self.record_width}:{self.record_height}:flags=fast_bilinear[scaled]")
             cur_label = "scaled"
 
         text_vf = self._build_overlay_vf()
@@ -3728,29 +3738,6 @@ class HomRecScreen:
         return extra_inputs, filter_complex, cur_label
 
     def _probe_dshow_video_devices(self) -> list[str]:
-        r"""Probe FFmpeg's DirectShow device list and return the video device names.
-
-        BUG FIX: this used to filter lines with `'(video)' in line and '"' in line`,
-        but that substring never actually appears in FFmpeg's real dshow output.
-        A real `-list_devices true -f dshow -i dummy` run prints something like:
-
-            [dshow @ ...] DirectShow video devices (some may be both video and audio devices)
-            [dshow @ ...]  "Integrated Webcam"
-            [dshow @ ...]     Alternative name "@device_pnp_\\?\..."
-            [dshow @ ...] DirectShow audio devices
-            [dshow @ ...]  "Microphone (Realtek Audio)"
-
-        The "(video)" text only ever appears once, in the *section header*, which
-        has no quoted name on the same line — so the old filter matched nothing,
-        `names` was always empty, and every caller silently fell back to the
-        literal string "Integrated Webcam". On most machines no device is
-        actually named that, so FFmpeg couldn't find the camera at all: the combo
-        box in Settings only ever offered the fake fallback name, and recording
-        with a webcam overlay failed to pick up any camera in the output video.
-
-        Fixed by tracking which section of the listing we're in and reading the
-        quoted name from lines that aren't "Alternative name" sub-lines.
-        """
         result = subprocess.run(
             [self.ffmpeg_path, '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
             capture_output=True, text=True, timeout=8,
@@ -3839,16 +3826,16 @@ class HomRecScreen:
                 out_flags += ['-cluster_size_limit', '2M']
             safe_pix_fmt = self._safe_pix_fmt()
 
-            extra_inputs, filter_complex, out_pad = self._build_filter_graph()
-            if out_pad:
-                graph_args = ['-filter_complex', filter_complex, '-map', f'[{out_pad}]']
-            else:
-                graph_args = []
-
             use_ddagrab = getattr(self, 'use_ddagrab', None)
             if use_ddagrab is None:
                 use_ddagrab = self._probe_ddagrab_support()
                 self.use_ddagrab = use_ddagrab
+
+            extra_inputs, filter_complex, out_pad = self._build_filter_graph(use_ddagrab=(use_ddagrab and self.capture_mode != "window"))
+            if out_pad:
+                graph_args = ['-filter_complex', filter_complex, '-map', f'[{out_pad}]']
+            else:
+                graph_args = []
 
             if use_ddagrab and self.capture_mode != "window":
                 dda_flags = ['-thread_queue_size', '512', '-fflags', 'nobuffer']
