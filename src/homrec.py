@@ -1,12 +1,3 @@
-"""
-HomRec entry point.
-
-This file used to be a ~4,400-line monolith containing the whole
-application. All of that logic now lives in the `homrec_app` package
-(see homrec_app/README.md for the module map); this file only wires
-things up and starts the Tk mainloop, exactly as the original
-`if __name__ == "__main__":` block did.
-"""
 from __future__ import annotations
 
 import ctypes
@@ -41,7 +32,7 @@ def main() -> None:
                             parent = psutil.Process(os.getpid()).parent()
                             parent_name = (parent.name() if parent else "").lower()
                             if parent_name in ("cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe"):
-                                hide = False  # inherited from a shell the user is actively using
+                                hide = False  # inherited from a shell the user is actively using.
                         except Exception as _pe:
                             log.debug(f"console parent lookup failed, hiding anyway: {_pe}")
                     if hide:
