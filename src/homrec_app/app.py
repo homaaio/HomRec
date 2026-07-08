@@ -21,17 +21,7 @@ log = logging.getLogger("homrec")
 
 
 class HomRecScreen(RecordingMixin, AudioMixin, SettingsMixin, UIMixin):
-    """
-    Main HomRec application window.
-
-    All the actual method bodies live in the mixins above -- this class is
-    intentionally just the __init__ plus the inheritance list. Splitting a
-    single 2300-line class into mixins (rather than separate unrelated
-    classes) keeps `self.xxx` attribute access working exactly as it did in
-    the original monolithic file: Python resolves `self.method()` through the
-    MRO regardless of which mixin file the method is physically defined in,
-    so behaviour is unchanged -- only the file layout is.
-    """
+    """ Main HomRec application window """
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
