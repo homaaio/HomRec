@@ -211,3 +211,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# .exe/.bat/trash
+
+ffmpeg.exe
+hr.exe
+!hr.exe
+homrec_settings.json
+*.bat
