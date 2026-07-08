@@ -70,7 +70,7 @@ Download from [ffmpeg.org](https://ffmpeg.org/download.html) and either:
 
 **4. Run**
 ```bash
-python homrec.py
+python src/homrec.py
 ```
 
 ---
