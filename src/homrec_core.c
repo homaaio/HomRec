@@ -217,7 +217,7 @@ HR_EXPORT int hr_timestamp_str(char *buf, size_t buf_size)
  * RGB clamped brightness adjustment
  * Adds delta to every byte, clamping to [0, 255].
  * Useful for boosting a dark preview without touching capture data.
- * ---------------------------------------------------------------------- */
+ * ----------------------------------------------------------------------- */
 HR_EXPORT void hr_rgb_brightness(uint8_t *pixels, size_t n_bytes, int delta)
 {
     if (delta == 0) return;
