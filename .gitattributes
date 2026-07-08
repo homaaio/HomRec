@@ -1,3 +1,3 @@
-src/homrec_app/core/system_utils.py      linguist-generated=true
-src/homrec_app/mixins/audio_mixin.py     linguist-generated=true
-src/homrec_app/mixins/recording_mixin.py linguist-generated=true
+src/homrec_app/core/system_utils.py      linguist-vendored=true
+src/homrec_app/mixins/audio_mixin.py     linguist-vendored=true
+src/homrec_app/mixins/recording_mixin.py linguist-vendored=true
