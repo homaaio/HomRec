@@ -1,5 +1,5 @@
 /*
- * hr_hotkey.cpp  —  HomRec global hotkey manager  (v1.6.1)
+ * hr_hotkey.cpp  —  HomRec global hotkey manager  (v1.7.2)
  *
  * Replaces the keyboard shortcut wiring in homrec.py:
  *   F9  = Start / Stop recording toggle
