@@ -116,7 +116,7 @@ pip install -r requirements.txt
 
 ## Stay updated
 
-### **[t.me/homaexe](https://t.me/homaexe)** / **[x.com/homrec_dev](https://x.com/homrec_dev)**
+### **[t.me/homaexe](https://t.me/homaexe)** / **[x.com/homrec_dev](https://x.com/homrec_dev)** / [discord.gg](https://discord.gg/Gv4t6Xhy7E)
 
 ---
 
