@@ -1,7 +1,8 @@
-src/homrec_app/** linguist-generated=true
+# src/homrec_app/** linguist-generated=true
 src/homrec_native.py linguist-generated=true
+src/homrec_app/mixins/** linguist-generated=true
 
-# src/homrec_app/core/system_utils.py linguist-generated=true
+src/homrec_app/core/system_utils.py linguist-generated=true
 # src/homrec_app/mixins/audio_mixin.py linguist-generated=true
 # src/homrec_app/mixins/recording_mixin.py linguist-generated=true
 # src/homrec_app/mixins/settings_mixin.py linguist-generated=true
