@@ -1,5 +1,17 @@
 welcome to changelog :D
 
+[Version 1.7.2] - 2026-07-09
+
+=== Changed ===
+
+- UI Console
+- homrec.py divided into modules
+- minor bugs has been fixed
+
+=== Fixed ===
+
+- Path bugs (in src\homrec_app)
+
 [Version 1.7.1] - 2026-07-07
 
 === Added ===
