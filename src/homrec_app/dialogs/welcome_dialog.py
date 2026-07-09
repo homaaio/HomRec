@@ -21,6 +21,7 @@ import logging
 from ..core.optional_deps import (_PYAUDIO_AVAILABLE, _pyaudio_mod, _audioop_mod,
                                    HAS_PSUTIL, HAS_TRAY)
 from ..core.constants import (CURRENT_VERSION, ASSETS_DIR, THEMES_DIR, LANGS_DIR, SETTINGS_PATH,
+                               SRC_DIR,
                                THEME_REQUIRED_KEYS, LANG_REQUIRED_KEYS,
                                LANG_SCHEMA_VERSION, THEME_SCHEMA_VERSION,
                                _HRC_MAGIC, _HRL_MAGIC)
@@ -44,7 +45,7 @@ class WelcomeDialog:
         dlg.resizable(False, False)
         dlg.configure(bg=BG)
         try:
-            base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+            base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else SRC_DIR
             ico_path = os.path.join(base_dir, "icons", "main.ico")
             if os.path.exists(ico_path):
                 dlg.iconbitmap(ico_path)

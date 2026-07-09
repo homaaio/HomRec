@@ -19,7 +19,7 @@ import logging
 
 from ..core.optional_deps import (_PYAUDIO_AVAILABLE, _pyaudio_mod, _audioop_mod,
                                    HAS_PSUTIL, HAS_TRAY)
-from ..core.constants import (ASSETS_DIR, THEMES_DIR, LANGS_DIR, SETTINGS_PATH,
+from ..core.constants import (ASSETS_DIR, THEMES_DIR, LANGS_DIR, SETTINGS_PATH, SRC_DIR,
                                THEME_REQUIRED_KEYS, LANG_REQUIRED_KEYS,
                                LANG_SCHEMA_VERSION, THEME_SCHEMA_VERSION,
                                _HRC_MAGIC, _HRL_MAGIC)
@@ -43,7 +43,7 @@ class AdvancedSettingsDialog:
         self.dialog.configure(bg=app.colors["bg"])
         self.dialog.grab_set()
         try:
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.ico")
+            icon_path = os.path.join(SRC_DIR, "main.ico")
             if os.path.exists(icon_path):
                 self.dialog.after(50, lambda: self.dialog.iconbitmap(icon_path))
         except Exception: pass

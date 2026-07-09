@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+import json
+import gzip
+
+from ._paths import ROOT_DIR
+
+
+def _get_root_dir() -> str:
+    """Kept for API compatibility -- delegates to core._paths, which is the
+    single place this is actually computed now."""
+    return ROOT_DIR
+
+
+_HRC_MAGIC = b'HRC\x01'
+_HRL_MAGIC = b'HRL\x01'
+
+
+def _hrc_write(path: str, data: dict, magic: bytes) -> None:
+    body = gzip.compress(json.dumps(data, indent=2, ensure_ascii=False).encode('utf-8'))
+    with open(path, 'wb') as f:
+        f.write(magic); f.write(body)
+
+def _hrc_read(path: str, expected_magic: bytes) -> dict:
+    with open(path, 'rb') as f:
+        magic = f.read(4); body = f.read()
+    if magic != expected_magic:
+        raise ValueError(f"Invalid file format. Expected {expected_magic!r}, got {magic!r}")
+    return json.loads(gzip.decompress(body).decode('utf-8'))
+
+def _hrc_detect(path: str) -> str:
+    with open(path, 'rb') as f:
+        magic = f.read(4)
+    if magic == _HRC_MAGIC: return 'hrc'
+    if magic == _HRL_MAGIC: return 'hrl'
+    raise ValueError(f"Not a HomRec file (magic={magic!r})")

@@ -30,7 +30,7 @@ if HAS_PSUTIL:
     import psutil
 if _DND_AVAILABLE:
     from tkinterdnd2 import DND_FILES
-from ..core.constants import (CURRENT_VERSION, GITHUB_REPO, ASSETS_DIR, THEMES_DIR,
+from ..core.constants import (CURRENT_VERSION, GITHUB_REPO, ASSETS_DIR, THEMES_DIR, SRC_DIR,
                                LANGS_DIR, SETTINGS_PATH, THEME_REQUIRED_KEYS,
                                LANG_REQUIRED_KEYS, LANG_SCHEMA_VERSION,
                                THEME_SCHEMA_VERSION, _HRC_MAGIC, _HRL_MAGIC, _ROOT_DIR)
@@ -645,7 +645,7 @@ class UIMixin:
         if platform.system() != "Windows": return
         try:
             import winreg
-            base = os.path.dirname(os.path.abspath(__file__))
+            base = SRC_DIR
             icons_dir = os.path.join(base, "icons")
             types = [(".hrc","HomRec.Profile","HomRec Profile","hrc.ico"), (".hrl","HomRec.Language","HomRec Language","hrl.ico")]
             for ext, prog_id, description, ico_file in types:
@@ -657,7 +657,7 @@ class UIMixin:
                 if os.path.exists(ico_path):
                     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{prog_id}\\DefaultIcon") as k:
                         winreg.SetValue(k, "", winreg.REG_SZ, ico_path)
-                exe_path = os.path.abspath(__file__)
+                exe_path = os.path.join(SRC_DIR, "homrec.py")
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\Classes\\{prog_id}\\shell\\open\\command") as k:
                     winreg.SetValue(k, "", winreg.REG_SZ, f'"{exe_path}" "%1"')
             try: ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
