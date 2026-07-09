@@ -128,7 +128,7 @@ def _resolve_math(s: str) -> str:
 
 
 
-# RuleRegistry -------------------------------------------------------------
+# --- RuleRegistry -------------------------------------------------------------
 
 class RuleRegistry:
     def __init__(self, base_dir: str):
@@ -175,7 +175,7 @@ class RuleRegistry:
         return list(self._data.keys())
 
 
-# AERegistry ---------------------------------------------------------------
+# --- AERegistry ---------------------------------------------------------------
 
 class AERegistry:
     """
@@ -219,7 +219,7 @@ class AERegistry:
         return list(self._data.keys())
 
 
-# AliasRegistry ------------------------------------------------------------
+# --- AliasRegistry ------------------------------------------------------------
 
 class AliasRegistry:
     """
@@ -260,7 +260,7 @@ class AliasRegistry:
         return dict(self._data)
 
 
-# EnvStore -----------------------------------------------------------------
+# --- EnvStore -----------------------------------------------------------------
 
 class EnvStore:
     """Stores internal console environment variables ($name)."""
@@ -389,11 +389,15 @@ class NativeConsole:
         self.app = app
         self._lib = None  # BUG FIX: initialize before _load()
 
-        # security fuses (see $secui / $secp / $sec) -------------------
+        # --- security fuses (see $secui / $secp / $sec) -------------------
+        # All default to True ("protected"). They are intentionally
+        # runtime-only: every fresh launch starts protected again, so a
+        # one-off `$sec 0` in a previous session can never leave the app
         # permanently unprotected.
-        self._sec_ui = True      
-        self._sec_plugin = True  
-        self._sec_core = True    
+        self._sec_ui = True      # gates $rm --ui (incl. @ts)
+        self._sec_plugin = True  # gates plugin min-version checks + RAM watchdog
+        self._sec_core = True    # master fuse: gates $rm --system@.., $fs@.., $rm @homrec
+                                  # and, while OFF, also force-unlocks _sec_ui/_sec_plugin
 
         base = _get_base_dir()
         self._console_disabled_marker = Path(base) / "create" / "console.disabled"
@@ -466,6 +470,10 @@ class NativeConsole:
         log.info("hr_console.dll OK")
 
     def _load(self):
+        # Search order:
+        #   1. next to __file__  (dev: src/)
+        #   2. next to sys.executable  (frozen: root)
+        #   3. src/ subfolder next to sys.executable  (frozen + dlls in src/)
         def _candidates():
             if not getattr(sys, "frozen", False):
                 yield os.path.dirname(os.path.abspath(__file__))
@@ -504,6 +512,14 @@ class NativeConsole:
 
             lib.hr_con_write.argtypes = [ctypes.c_wchar_p, ctypes.c_int]
             lib.hr_con_write.restype  = None
+
+            # Optional: newer DLL builds export this so -ret/-return can get a
+            # real, up-to-date success/failure result instead of an assumed "1".
+            # Guarded with hasattr(...) everywhere it's used, so older DLLs
+            # that don't have it yet keep working exactly as before.
+            if hasattr(lib, "hr_con_report_result"):
+                lib.hr_con_report_result.argtypes = [ctypes.c_int]
+                lib.hr_con_report_result.restype  = None
 
             return lib
         except Exception as e:
@@ -570,10 +586,48 @@ class NativeConsole:
             sys.exit(0)
 
     def _on_command(self, cmd: str):
-        """Callback for extended commands from DLL (new)."""
+        """Callback for extended commands from DLL (new).
+
+        Runs on the console's own native worker thread (see hr_console.cpp),
+        never on the Tkinter thread, so the actual command still has to be
+        marshaled onto the Tkinter thread via root.after(0, ...) exactly as
+        before. The difference: we now wait (briefly, with a timeout so we
+        can never hang the console) for that marshaled call to finish, then
+        report the real outcome back to C++ via hr_con_report_result() so
+        -ret/-return reflects what actually happened instead of always
+        assuming success.
+
+        If a command takes longer than the timeout (e.g. it opened a modal
+        confirmation dialog and is waiting on the user), we give up waiting
+        and let it keep running in the background -- reporting a default
+        "ok" back to C++ rather than blocking indefinitely or guessing wrong.
+        """
         log.info("Console command: %s", cmd)
-        if self._root_alive():
-            self.app.root.after(0, lambda: self.run_command(cmd))
+        if not self._root_alive():
+            return
+
+        done = threading.Event()
+        outcome = {"ok": True}
+
+        def _run():
+            try:
+                c = cmd.strip()
+                if c:
+                    self._dispatch_extended(c)
+            except Exception as e:
+                outcome["ok"] = False
+                log.warning("Console command '%s' failed: %s", cmd, e)
+            finally:
+                done.set()
+
+        self.app.root.after(0, _run)
+
+        if self._lib and hasattr(self._lib, "hr_con_report_result"):
+            finished = done.wait(timeout=2.0)
+            if not finished:
+                self._lib.hr_con_report_result(1)  # still running (e.g. a dialog) -- assume ok, don't guess wrong
+            else:
+                self._lib.hr_con_report_result(1 if outcome["ok"] else 0)
 
     def _open_log(self):
         base = _get_base_dir()
@@ -730,7 +784,7 @@ class NativeConsole:
 
 
 
-    # !start --rec ---------------------------------------------------------
+    # --- !start --rec ---------------------------------------------------------
 
     def _cmd_start_rec(self, raw: str):
         """!start --rec 1|0"""
@@ -769,9 +823,15 @@ class NativeConsole:
                 if not silent:
                     log.info("!start --rec 0: recording was not active")
 
-    # !rule ----------------------------------------------------------------
+    # --- !rule ----------------------------------------------------------------
 
     def _cmd_rule(self, raw: str):
+        """
+        !rule --check #name="example"
+            → shows: active/inactive + body
+        !rule --get from connect #name="example"
+            → reads rule from registry (source — !connect --rule)
+        """
         tokens = raw.split()
         silent = "-s" in tokens
         name = _parse_named(raw, "name")
@@ -801,9 +861,15 @@ class NativeConsole:
 
         log.warning("!rule: use --check or --get from connect")
 
-    # !edit ----------------------------------------------------------------
+    # --- !edit ----------------------------------------------------------------
 
     def _cmd_edit(self, raw: str):
+        """
+        !edit --file    #name="x"           → open file in notepad for editing
+        !edit --window  #name="x"           → reopen window
+        !edit --rule    #name="x"; <step>; <step>  → replace rule body
+        !edit --settings #name=shortcut 1|0 → desktop shortcut
+        """
         import re
         tokens = raw.split()
         silent = "-s" in tokens
@@ -886,6 +952,11 @@ class NativeConsole:
         log.warning("!edit: use --file / --window / --rule / --settings / --terminal")
 
     def _set_low_detail_mode(self, enable: bool) -> None:
+        """
+        Cuts everything that costs CPU/GPU for cosmetics: live preview,
+        the audio VU meter animation and the recording-start flash.
+        Reuses existing app hooks rather than re-implementing them.
+        """
         app = self.app
         if not self._root_alive():
             return
@@ -923,9 +994,23 @@ class NativeConsole:
         except Exception as e:
             log.debug("ldm: save_settings failed: %s", e)
 
-    # !create --------------------------------------------------------------
+    # --- !create --------------------------------------------------------------
 
     def _cmd_create(self, raw: str):
+        """
+        !create --window #name="x" [#bg=COLOR] [#fg=COLOR] [#size=(WxH)]
+                         [--notepad [as .EXT]]
+                         [-o] [-s] [-n] [-c] [-d]
+
+        !create --rule #name="x"; step1; step2; step3  [-c] [-d]
+            Steps — console commands separated by ';'.
+            With -c: executes immediately (connect).
+            With -d: saved as disconnected.
+            Example: !create --rule #name="auto"; !start --rec 1 then; $rm #name="notepad2"
+
+        !create --ae #type=color{rgb=(255,0,0)} #name="red"
+        !create --ae #type=color{hex=(#FF0000)}  #name="red"
+        """
         import re
         flags       = _parse_flags(raw)
         is_notepad  = "--notepad" in raw
@@ -1070,7 +1155,7 @@ class NativeConsole:
         if auto_connect and not disconnected:
             self._cmd_connect(f'!connect --window #name="{name}" 1')
 
-    # !ls ------------------------------------------------------------------
+    # --- !ls ------------------------------------------------------------------
 
     def _cmd_ls(self, raw: str):
         """!ls [--windows][--rules][--ae][--hotkeys][--all][-v][--json][--connected][--disconnected][--count]"""
@@ -1142,7 +1227,7 @@ class NativeConsole:
                         brief = "  ".join(f"{k}={v}" for k, v in data.items())
                         log.info("  %-24s  %s", name, brief)
 
-    # !status --------------------------------------------------------------
+    # --- !status --------------------------------------------------------------
 
     def _cmd_status(self, raw: str):
         """Current system state in one block."""
@@ -1173,12 +1258,20 @@ class NativeConsole:
             log.info("rules    : %d connected / %d total", rules_on, len(self._rule_reg.all_names()))
             log.info("hotkeys  : %d bindings", hk_count)
 
-    # !info ----------------------------------------------------------------
+    # --- !info ----------------------------------------------------------------
 
     # ------------------------------------------------------------------ !check.er
     # ------------------------------------------------------------------ !check.er
 
     def _cmd_check_er(self, raw: str):
+        """!check.er — interactive text-mode integrity/diagnostic scanner.
+        Opens a text console menu (no GUI) in a daemon thread so the main thread stays responsive.
+        Menu options:
+          1 - Scan a specific video file for corruption
+          2 - Scan all video files in output folder
+          3 - Run HomRec self-diagnostics (FFmpeg, DLL, audio, overlays)
+          q - Quit
+        """
         import threading
         def _run_checker():
             import sys, os, subprocess as sp, re
@@ -1387,7 +1480,7 @@ class NativeConsole:
 
         log.warning("!info: use --window / --rule / --ae / --hotkey")
 
-    # !history -------------------------------------------------------------
+    # --- !history -------------------------------------------------------------
 
     def _cmd_history(self, raw: str):
         """!history [#count=N] [--clear] [--search "text"]"""
@@ -1407,7 +1500,7 @@ class NativeConsole:
         for i, line in enumerate(hist, 1):
             log.info("  %3d  %s", i, line)
 
-    # !alias ---------------------------------------------------------------
+    # --- !alias ---------------------------------------------------------------
 
     def _cmd_alias(self, raw: str):
         """!alias #name="sr" #cmd="!start --rec 1" | --list | --remove #name="sr" """
@@ -1434,7 +1527,7 @@ class NativeConsole:
         self._alias_reg.add(name, cmd)
         log.info("!alias: '%s' → %s", name, cmd)
 
-    # repeat --------------------------------------------------------------
+    # --- repeat --------------------------------------------------------------
 
     def _cmd_repeat(self, raw: str):
         """repeat #count=N <command>  (the `!` prefix is optional)"""
@@ -1448,7 +1541,7 @@ class NativeConsole:
             log.info("repeat [%d/%d]: %s", i + 1, count, cmd)
             self._dispatch_extended(cmd)
 
-    # delay ---------------------------------------------------------------
+    # --- delay ---------------------------------------------------------------
 
     def _cmd_delay(self, raw: str):
         """delay #ms=N <command>  (the `!` prefix is optional)"""
@@ -1463,7 +1556,7 @@ class NativeConsole:
         t.daemon = True
         t.start()
 
-    # batch ---------------------------------------------------------------
+    # --- batch ---------------------------------------------------------------
 
     def _cmd_batch(self, raw: str):
         """batch cmd1 && cmd2 && ...  [-x / --stop-on-error]  (`!` prefix optional)"""
@@ -1483,7 +1576,7 @@ class NativeConsole:
                 if stop_on_error:
                     log.warning("batch: stopped on error (-x)"); return
 
-    # run -----------------------------------------------------------------
+    # --- run -----------------------------------------------------------------
 
     def _cmd_run(self, raw: str):
         """!run #file="script.hrc" [--encoding utf8|cp1251] [--ignore-errors] [--echo-each] [-x]"""
@@ -1519,7 +1612,7 @@ class NativeConsole:
                 if stop_on_error and not ignore_errors:
                     log.warning("!run: stopped (-x)"); return
 
-    # !clear ---------------------------------------------------------------
+    # --- !clear ---------------------------------------------------------------
 
     def _cmd_dollar_clear(self, raw: str):
         """
@@ -1590,7 +1683,7 @@ class NativeConsole:
         # Special marker that can be intercepted on the UI side
         log.info("\x00CLEAR_CONSOLE\x00")
 
-    # !echo ----------------------------------------------------------------
+    # --- !echo ----------------------------------------------------------------
 
     def _cmd_echo(self, raw: str):
         """echo [--ok|--warn|--err] <text>  (the `!` prefix is optional)"""
@@ -1613,7 +1706,7 @@ class NativeConsole:
         else:
             log.info(body)
 
-    # !clip ----------------------------------------------------------------
+    # --- !clip ----------------------------------------------------------------
 
     def _cmd_clip(self, raw: str):
         """!clip --copy "text" | --paste | --clear"""
@@ -1653,7 +1746,7 @@ class NativeConsole:
             return
         log.warning("!clip: use --copy \"text\" / --paste / --clear")
 
-    # !env -----------------------------------------------------------------
+    # --- !env -----------------------------------------------------------------
 
     def _cmd_env(self, raw: str):
         """!env --set #name="x" #val="y" | --get #name | --list | --unset #name"""
@@ -1686,7 +1779,7 @@ class NativeConsole:
             return
         log.warning("!env: use --set / --get / --list / --unset")
 
-    # !timer ---------------------------------------------------------------
+    # --- !timer ---------------------------------------------------------------
 
     def _cmd_timer(self, raw: str):
         """!timer #name="x" #ms=N <cmd> | --cancel #name | --list"""
@@ -1727,7 +1820,7 @@ class NativeConsole:
         self._timers[name] = t
         log.info("!timer '%s': after %dms → %s", name, ms, cmd)
 
-    # !watch ---------------------------------------------------------------
+    # --- !watch ---------------------------------------------------------------
 
     def _cmd_watch(self, raw: str):
         """!watch #name="x" #ms=N <cmd> [--max-runs #count=N] | --stop #name | --list"""
@@ -1800,7 +1893,7 @@ class NativeConsole:
                  name, ms, f"±{jitter_ms}ms" if jitter_ms else "",
                  cmd, f"  (max {max_runs})" if max_runs else "")
 
-    # Console output helper ------------------------------------------------
+    # --- Console output helper ------------------------------------------------
 
     def _con_write(self, text: str, tag: int = 0):
         """Print a line directly to the DLL console window (tag: 0=text 1=ok 2=warn 3=err 4=dim 5=accent)."""
@@ -1817,7 +1910,7 @@ class NativeConsole:
     def _con_warn(self, s: str): self._con_write("  \u26a0  " + s, 2)
     def _con_err (self, s: str): self._con_write("  \u2716  " + s, 3)
 
-    # !ping ----------------------------------------------------------------
+    # --- !ping ----------------------------------------------------------------
 
     def _cmd_ping(self, raw: str):
         import time
@@ -1825,12 +1918,12 @@ class NativeConsole:
         elapsed = (time.perf_counter() - t0) * 1000
         self._con_ok(f"pong  ({elapsed:.3f} ms)")
 
-    # !version -------------------------------------------------------------
+    # --- !version -------------------------------------------------------------
 
     def _cmd_version(self, raw: str):
         self._con_write(f"  Console  {CONSOLE_VERSION}  |  Bridge  {BRIDGE_VERSION}  |  Python  {sys.version.split()[0]}", 5)
 
-    # !homrec --------------------------------------------------------------
+    # --- !homrec --------------------------------------------------------------
 
     def _cmd_homrec(self, raw: str):
         """
@@ -1853,7 +1946,9 @@ class NativeConsole:
             return
         self._con_warn("!homrec: unknown option. Try  !homrec --version  or  !homrec --help")
 
-    # !log -----------------------------------------------------------------
+    # --- !log -----------------------------------------------------------------
+
+    _LOG_KNOWN_FLAGS = {"--tail", "--search", "--level", "--clear", "--since", "--invert"}
 
     def _cmd_log(self, raw: str):
         """!log --tail [#count=N] | --search "x" [--invert] | --level info|warn|err | --clear"""
@@ -1861,20 +1956,39 @@ class NativeConsole:
         base     = _get_base_dir()
         log_path = Path(base) / "homrec.log"
 
+        # Reject unrecognized flags instead of silently ignoring them (e.g.
+        # `log -sodjsak` used to just fall through and print the plain tail,
+        # making it look like the command "succeeded" when the flag was
+        # actually just never understood).
+        unknown = [t for t in tokens[1:] if t.startswith("-") and t not in self._LOG_KNOWN_FLAGS
+                   and not t.startswith("#")]
+        if unknown:
+            msg = f"!log: unrecognized option(s): {' '.join(unknown)}  (try --tail, --search, --level, --clear, --since)"
+            log.warning(msg)
+            self._con_warn(msg)
+            return
+
         if "--clear" in tokens:
             try:
                 log_path.write_text("", "utf-8")
                 log.info("!log: homrec.log cleared")
+                self._con_ok("!log: homrec.log cleared")
             except Exception as e:
-                log.warning("!log --clear: %s", e)
+                msg = f"!log --clear: {e}"
+                log.warning(msg)
+                self._con_err(msg)
             return
 
         if not log_path.exists():
-            log.warning("!log: homrec.log not found"); return
+            msg = "!log: homrec.log not found"
+            log.warning(msg); self._con_warn(msg)
+            return
         try:
             lines = log_path.read_text("utf-8", errors="replace").splitlines()
         except Exception as e:
-            log.warning("!log: read error: %s", e); return
+            msg = f"!log: read error: {e}"
+            log.warning(msg); self._con_err(msg)
+            return
 
         if "--search" in tokens:
             import re
@@ -1901,8 +2015,12 @@ class NativeConsole:
         count_s = _parse_named(raw, "count")
         count   = int(count_s) if count_s and count_s.isdigit() else 20
         lines   = lines[-count:]
+        if not lines:
+            self._con_info("!log: no matching lines")
+            return
         for line in lines:
             log.info(line)
+            self._con_write("  " + line, 4)
 
     # --------------------------------------------------------------------------
 
@@ -1924,7 +2042,7 @@ class NativeConsole:
                 log.info("  rule '%s' → %s", rule_name, step)
             self._dispatch_extended(step)
 
-    # !start --window ------------------------------------------------------
+    # --- !start --window ------------------------------------------------------
 
     def _cmd_start_window(self, raw: str):
         """!start --window #name="x"  — reopen a created window."""
@@ -1945,9 +2063,18 @@ class NativeConsole:
         else:
             self._open_tk_window(name)
 
-    # !rename --------------------------------------------------------------
+    # --- !rename --------------------------------------------------------------
 
     def _cmd_rename(self, raw: str):
+        """
+        !rename --window  #name="old_name" to #name="new_name"
+        !rename --rule    #name="old_name" to #name="new_name"
+        !rename --ae      #name="old_name" to #name="new_name"
+        !rename --hotkey  #name="old_name" to #name="new_name"
+        !rename --window  @all #prefix="pfx_"          (add prefix to all)
+        !rename --window  @all #suffix="_v2"           (add suffix to all)
+        !rename --window  @all #replace="old" to="new" (replace substring in all names)
+        """
         import re
         tokens = raw.split()
         silent = "-s" in tokens or "--silent" in tokens
@@ -2058,9 +2185,29 @@ class NativeConsole:
             if not silent:
                 self._con_ok(f"!rename --{reg_type} '{old}' → '{new_name}'")
 
-    # $rm ------------------------------------------------------------------
+    # --- $rm ------------------------------------------------------------------
 
     def _cmd_rm(self, raw: str):
+        """
+        $rm --window #name="x"     [-q][--purge][--if-disconnected]
+        $rm --rule   #name="x"     [-q][--if-disconnected]
+        $rm --ae     #name="x"     [-q]
+        $rm --all --window|--rule|--ae  [-y]
+
+        $rm --vid #name="..."       [-q]        (delete one recording by name)
+        $rm --vid @all              [-q/-y]     (delete every recording in the output folder)
+        $rm --vid @last             [-q/-y]     (delete the most recently recorded file)
+
+        $rm --system@homrec.files #permission=core #type={recordings,plugins,logs,cache}
+        $rm --ui #type=button{many} #name=@all{exception(a, b, c)}
+        $rm --ui @ts                (removes the console itself)
+        $rm @homrec                 (uninstalls HomRec after the process exits)
+        Note: `--system@homrec.files` and `--ui` never take -q/-y — they run
+        unprompted as soon as the relevant $sec*/$secui fuse is off; there is
+        no confirmation dialog for them by design (see $secui / $secp / $sec).
+        `$rm @homrec` is the exception: being a full uninstall, it always asks
+        "are you sure?" first (pass -q/-y to skip the prompt).
+        """
         if "--system@homrec.files" in raw:
             self._cmd_rm_system_files(raw); return
         if "--ui" in raw:
@@ -2172,7 +2319,7 @@ class NativeConsole:
 
         log.warning("$rm: use --window / --rule / --ae")
 
-    # $rm --vid ---------------------------------------------------------------
+    # --- $rm --vid ---------------------------------------------------------------
 
     _VIDEO_EXTS = (".mp4", ".mkv")
 
@@ -2279,7 +2426,7 @@ class NativeConsole:
         for c in candidates:
             _delete_one(c)
 
-    # security fuses: $secui / $secp / $sec ---------------------------------
+    # --- security fuses: $secui / $secp / $sec ---------------------------------
 
     def _ui_unlocked(self) -> bool:
         """True once $rm --ui style operations are allowed to run."""
@@ -2319,7 +2466,7 @@ class NativeConsole:
         log.warning("$sec %s: MASTER fuse %s — required for $rm --system@.., $fs@.., $rm @homrec",
                     tokens[1], "ENABLED" if self._sec_core else "DISABLED (everything unlocked)")
 
-    # !hide ------------------------------------------------------------------
+    # --- !hide ------------------------------------------------------------------
 
     def _cmd_hide(self, raw: str) -> None:
         """
@@ -2370,9 +2517,20 @@ class NativeConsole:
         except Exception as e:
             log.warning("!hide '%s': failed — %s", name, e)
 
-    # $rm --ui ---------------------------------------------------------------
+    # --- $rm --ui ---------------------------------------------------------------
 
     def _cmd_rm_ui(self, raw: str) -> None:
+        """
+        $rm --ui #type=button{many} #name=--all{exception(a, b, c)}
+            (note: @all is rewritten to --all earlier in dispatch)
+            → destroys every widget except the named exceptions.
+        $rm --ui #name=--all
+            → destroys the entire interface; root becomes a bare window.
+        $rm --ui @ts
+            → removes the console itself (this overlay), permanently
+              (persists across restarts until the marker file is deleted).
+        Always gated by $secui (or the $sec master fuse).
+        """
         if "@ts" in raw:
             self._cmd_rm_ui_self(); return
 
@@ -2475,7 +2633,7 @@ class NativeConsole:
 
         self._lib = None
 
-    # $rm --system@homrec.files ----------------------------------------------
+    # --- $rm --system@homrec.files ----------------------------------------------
 
     def _cmd_rm_system_files(self, raw: str) -> None:
         """$rm --system@homrec.files #permission=core #type={recordings,plugins,logs,cache}"""
@@ -2483,7 +2641,9 @@ class NativeConsole:
         if perm != "core":
             log.warning("$rm --system@homrec.files: requires #permission=core"); return
         if not self._core_unlocked():
-            log.warning("$rm --system@homrec.files: blocked — core protection is ON. Run `$sec 0` first.")
+            msg = "$rm --system@homrec.files: blocked — core protection is ON. Run `$sec 0` first."
+            log.warning(msg)
+            self._con_warn(msg)
             return
 
         type_m = re.search(r'#type=\{([^}]*)\}', raw)
@@ -2517,11 +2677,19 @@ class NativeConsole:
 
         log.warning("$rm --system@homrec.files: done. Cleared: %s", ", ".join(cleared) or "(nothing found)")
 
-    # $rm @homrec --------------------------------------------------------------
+    # --- $rm @homrec --------------------------------------------------------------
 
     def _cmd_rm_self_app(self, raw: str) -> None:
+        """$rm @homrec — uninstalls HomRec from disk once the process exits.
+
+        Destructive and irreversible, so unlike the other `$rm --ui`/`--system`
+        fuse-gated commands, this one always asks for confirmation first
+        (pass -q or -y to skip the prompt, e.g. for scripted/`!create --rule` use).
+        """
         if not self._core_unlocked():
-            log.warning("$rm @homrec: blocked — core protection is ON. Run `$sec 0` first.")
+            msg = "$rm @homrec: blocked — core protection is ON. Run `$sec 0` first."
+            log.warning(msg)
+            self._con_warn(msg)
             return
 
         flags = _parse_flags(raw)
@@ -2537,13 +2705,18 @@ class NativeConsole:
                     icon="warning",
                 )
             else:
-                log.warning("$rm @homrec: no UI available to confirm — pass -y to run non-interactively.")
+                msg = "$rm @homrec: no UI available to confirm — pass -y to run non-interactively."
+                log.warning(msg)
+                self._con_warn(msg)
                 confirmed = False
             if not confirmed:
                 log.info("$rm @homrec: cancelled")
+                self._con_info("$rm @homrec: cancelled")
                 return
 
-        log.warning("$rm @homrec: HomRec will delete itself once this process exits.")
+        msg = "$rm @homrec: HomRec will delete itself once this process exits."
+        log.warning(msg)
+        self._con_warn(msg)
         base = _get_base_dir()
         self._schedule_self_delete(base)
 
@@ -2572,9 +2745,11 @@ class NativeConsole:
                     ["cmd", "/c", "start", "", "/min", bat_path],
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0),
                 )
-                log.info("$rm @homrec: uninstall script scheduled at %s "
-                         "(NB: the tasklist check matches the process name 'HomRec' — "
-                         "in dev/python.exe runs it won't detect exit correctly).", bat_path)
+                msg = (f"$rm @homrec: uninstall script scheduled at {bat_path} "
+                       "(NB: the tasklist check matches the process name 'HomRec' — "
+                       "in dev/python.exe runs it won't detect exit correctly).")
+                log.info(msg)
+                self._con_ok(msg)
             else:
                 sh_path = os.path.join(tempfile.gettempdir(), "homrec_uninstall.sh")
                 script = (
@@ -2589,13 +2764,23 @@ class NativeConsole:
                 subprocess.Popen(["/bin/sh", sh_path],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   start_new_session=True)
-                log.info("$rm @homrec: uninstall script scheduled at %s", sh_path)
+                msg = f"$rm @homrec: uninstall script scheduled at {sh_path}"
+                log.info(msg)
+                self._con_ok(msg)
         except Exception as e:
-            log.error("$rm @homrec: failed to schedule self-delete: %s", e)
+            msg = f"$rm @homrec: failed to schedule self-delete: {e}"
+            log.error(msg)
+            self._con_err(msg)
 
-    # $fs@homrec / $fs@plugins / $fs@settings ---------------------------------
+    # --- $fs@homrec / $fs@plugins / $fs@settings ---------------------------------
 
     def _cmd_fs(self, cmd: str, raw: str) -> None:
+        """fs@homrec | fs@plugins | fs@settings — factory reset, gated by sec.
+
+        `cmd` here is the bare command token (e.g. "fs@homrec"), with any
+        leading "$" already stripped by the dispatcher — the "$" prefix is
+        optional now, so this must not assume it's still there.
+        """
         target = cmd[len("fs@"):]
         if not self._core_unlocked():
             log.warning("%s: blocked — core protection is ON. Run `sec 0` first.", cmd)
@@ -2653,9 +2838,23 @@ class NativeConsole:
         else:
             log.info("$fs@settings: no settings file found (already factory).")
 
-    # $do --ui@homrec ----------------------------------------------------------
+    # --- $do --ui@homrec ----------------------------------------------------------
 
     def _cmd_do(self, raw: str) -> None:
+        """$do --ui@homrec 1 [--force] — re-downloads src/homrec.py from GitHub and reinstalls it.
+        Restorative, not destructive — not gated by $sec.
+
+        SECURITY FIX: this used to write whatever bytes came back from the
+        download straight over the running app's own source with no
+        verification at all — a compromised repo/account, a MITM, or even a
+        corrupted download would have been installed silently. It now checks
+        the download's SHA-256 against a `homrec.py.sha256` file published
+        next to it in the same repo before writing anything; if that
+        checksum file can't be fetched or doesn't match, the update is
+        aborted and nothing on disk is touched. Pass --force to skip
+        verification if you understand the risk (e.g. the checksum file
+        hasn't been published yet).
+        """
         if "--ui@homrec" not in raw:
             log.warning("$do: only --ui@homrec is currently supported"); return
         tokens = raw.split()
@@ -2719,9 +2918,14 @@ class NativeConsole:
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    # !connect -------------------------------------------------------------
+    # --- !connect -------------------------------------------------------------
 
     def _cmd_connect(self, raw: str):
+        """
+        !connect --window  #name="x" 1   [-s][-q][--all][--toggle][-f]
+        !connect --rule    #name="x"     [-s][-q][--all][--toggle]
+        !connect --function <cmd> to|; <key> [#name="func"]  [-s][-q]
+        """
         import re
         tokens = raw.split()
         silent  = "-s" in tokens or "--silent" in tokens
@@ -2812,9 +3016,16 @@ class NativeConsole:
 
         log.warning("!connect: use --window / --rule / --function")
 
-    # !disconnect ----------------------------------------------------------
+    # --- !disconnect ----------------------------------------------------------
 
     def _cmd_disconnect(self, raw: str):
+        """
+        !disconnect --window  #name="x"      [-s][-q][--all][--toggle][-f]
+        !disconnect --rule    #name="x"      [-s][-q][--all][--toggle]
+        !disconnect --ae      #type=... #name="x"
+        !disconnect --function <cmd> to|; <key>
+        !disconnect           #name="func"   (by name set in !connect --function)
+        """
         import re
         tokens = raw.split()
         silent  = "-s" in tokens or "--silent" in tokens
@@ -2908,9 +3119,17 @@ class NativeConsole:
         log.warning("!disconnect: use --window / --rule / --ae / --function  or #name=")
 
 
-    # !edit --terminal ---------------------------------------------------------
+    # --- !edit --terminal ---------------------------------------------------------
 
     def _cmd_edit_terminal(self, raw: str):
+        """
+        !edit --terminal [#name="title"] [#bg=color] [#fg=color] [#size=(WxH)]
+        Use # instead of a value to skip a parameter.
+
+        Examples:
+          !edit --terminal #name="MyConsole" #size=(1200x700)
+          !edit --terminal ##bg=# #size=(800x600)   <- bg skipped
+        """
         import re
         tokens = raw.split()
         silent = "-s" in tokens or "--silent" in tokens
@@ -2957,7 +3176,7 @@ class NativeConsole:
         if all(v is None for v in (name_val, size_val, bg_val, fg_val)):
             self._con_warn("!edit --terminal: no parameters given (use #name=, #size=, #bg=, #fg= or # to skip)")
 
-    # Helper methods -------------------------------------------------------
+    # --- Helper methods -------------------------------------------------------
 
     def _root_alive(self) -> bool:
         """Check whether the Tkinter root window still exists."""

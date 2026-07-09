@@ -33,16 +33,17 @@ typedef void (*CB_VOID)();
 typedef void (*CB_URL)    (const wchar_t*);
 typedef void (*CB_COMMAND)(const wchar_t*);   // новый: произвольная команда → Python
 
-// Palette (Catppuccin Mocha) -----------------------------------------------
-static const COLORREF C_BG      = 0x002E1E1E;
-static const COLORREF C_SURFACE = 0x00443231;
-static const COLORREF C_INPUTBG = 0x00201811;
-static const COLORREF C_TEXT    = 0x00F4D6CD;
-static const COLORREF C_ACCENT  = 0x00FAB489;
-static const COLORREF C_GREEN   = 0x00A1E3A6;
-static const COLORREF C_YELLOW  = 0x00AEF2F9;
-static const COLORREF C_RED     = 0x00A88BF3;
-static const COLORREF C_DIM     = 0x00C8ADA6;
+// Palette (Linux terminal style: pure black bg, classic ANSI-ish accents) ---
+// NOTE: Windows COLORREF is 0x00BBGGRR (blue/green/red), not RGB order.
+static const COLORREF C_BG      = 0x00000000;  // pure black
+static const COLORREF C_SURFACE = 0x00101010;  // near-black, for input bar / header
+static const COLORREF C_INPUTBG = 0x00000000;  // pure black
+static const COLORREF C_TEXT    = 0x00C0C0C0;  // light gray, classic terminal fg
+static const COLORREF C_ACCENT  = 0x00FFFF00;  // cyan   (BGR: R=00 G=FF B=FF)
+static const COLORREF C_GREEN   = 0x0000FF00;  // green  (BGR: R=00 G=FF B=00)
+static const COLORREF C_YELLOW  = 0x0000FFFF;  // yellow (BGR: R=FF G=FF B=00)
+static const COLORREF C_RED     = 0x000000FF;  // red    (BGR: R=FF G=00 B=00)
+static const COLORREF C_DIM     = 0x00808080;  // mid gray
 
 static const COLORREF TAG_COL[6] = {
     C_TEXT, C_GREEN, C_YELLOW, C_RED, C_DIM, C_ACCENT
@@ -200,14 +201,42 @@ static std::wstring resolve_math(std::wstring s) {
     return s;
 }
 
+// Result channel for -return/-ret --------------------------------------
+// forward_to_python() is normally *asynchronous* (queued via post_exec()
+// and executed on a later pass of the message loop), so by the time
+// dispatch() would print the 1/0 line for -ret, Python hasn't even run
+// the command yet -- that's why -ret used to always print 1 regardless
+// of whether the command actually succeeded.
+// Fix: when ret_mode is requested, call the Python callback directly
+// (synchronously, same thread, no queue) and have Python report the
+// real outcome immediately afterwards via hr_con_report_result().
+static int g_last_result = 1;
+
+HR_EXPORT void hr_con_report_result(int ok) {
+    g_last_result = ok ? 1 : 0;
+}
+
 // Переслать команду в Python -----------------------------------------------
-static void forward_to_python(const std::wstring& raw) {
-    if (g_cb_command) {
-        std::wstring cmd = raw;
-        post_exec([cmd]{ if (g_cb_command) g_cb_command(cmd.c_str()); });
-    } else {
+// Returns true/false. For the normal (non -ret) async path this is always
+// true (fire-and-forget, unchanged from before). For ret_mode it reflects
+// whatever Python actually reported via hr_con_report_result().
+static bool forward_to_python(const std::wstring& raw, bool ret_mode = false) {
+    if (!g_cb_command) {
         wwarn(L"Python handler not connected (hr_con_set_command_cb was not called)");
+        return false;
     }
+    if (ret_mode) {
+        // Default to "ok" if the Python handler doesn't call
+        // hr_con_report_result() at all (e.g. an older/unmigrated
+        // handler) -- keeps existing behavior for those, while handlers
+        // that do report get an accurate result.
+        g_last_result = 1;
+        g_cb_command(raw.c_str());
+        return g_last_result != 0;
+    }
+    std::wstring cmd = raw;
+    post_exec([cmd]{ if (g_cb_command) g_cb_command(cmd.c_str()); });
+    return true;
 }
 
 // =============================================================================
@@ -371,14 +400,13 @@ static void cmd_log_connect(const std::vector<std::wstring>&, bool silent) {
 }
 
 // !rule --------------------------------------------------------------------
-static void cmd_rule(const std::vector<std::wstring>& args, bool silent,
-                     const std::wstring& raw) {
+static bool cmd_rule(const std::vector<std::wstring>& args, bool silent,
+                     const std::wstring& raw, bool ret_mode) {
     if (!has(args, L"--get") && !has(args, L"--check")) {
-        werr(L"Usage: !rule --get from connect #name=\"...\" | !rule --check #name=\"...\"");
-        return;
+        if (!ret_mode) werr(L"Usage: !rule --get from connect #name=\"...\" | !rule --check #name=\"...\"");
+        return false;
     }
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
-    forward_to_python(raw);
+    return forward_to_python(raw, ret_mode);
 }
 
 // !edit --------------------------------------------------------------------
@@ -399,21 +427,22 @@ static std::wstring parse_named_arg(const std::wstring& raw, const wchar_t* key)
     return raw.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
 }
 
-static void cmd_edit(const std::vector<std::wstring>& args, bool silent,
-                     const std::wstring& raw) {
-    bool ok = has(args, L"--file") || has(args, L"--window") ||
+static bool cmd_edit(const std::vector<std::wstring>& args, bool silent,
+                     const std::wstring& raw, bool ret_mode) {
+    bool args_ok = has(args, L"--file") || has(args, L"--window") ||
               has(args, L"--rule") || has(args, L"--settings") ||
               has(args, L"--terminal");
-    if (!ok) {
-        werr(L"Usage: !edit --file|--window|--rule|--settings|--terminal #...");
-        return;
+    if (!args_ok) {
+        if (!ret_mode) werr(L"Usage: !edit --file|--window|--rule|--settings|--terminal #...");
+        return false;
     }
 
     // !edit --terminal [#name=	itle\] [#bg=color] [#fg=color] [#size=(WxH)]
     // Use # as skip placeholder (e.g. ##bg=# means keep existing bg)
     if (has(args, L"--terminal")) {
         if (!g_hwnd || !IsWindow(g_hwnd)) {
-            werr(L"!edit --terminal: console not open"); return;
+            if (!ret_mode) werr(L"!edit --terminal: console not open");
+            return false;
         }
         // Parse optional overrides (# = skip / keep current)
         std::wstring name_val = parse_named_arg(raw, L"name");
@@ -465,21 +494,21 @@ static void cmd_edit(const std::vector<std::wstring>& args, bool silent,
         // Bring to front if needed
         ShowWindow(g_hwnd, SW_SHOW);
         SetForegroundWindow(g_hwnd);
-        return;
+        return true;
     }
 
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
-    forward_to_python(raw);
+    return forward_to_python(raw, ret_mode);
 }
 
 // !create ------------------------------------------------------------------
-static void cmd_create(const std::vector<std::wstring>& args, bool silent,
-                       const std::wstring& raw) {
+static bool cmd_create(const std::vector<std::wstring>& args, bool silent,
+                       const std::wstring& raw, bool ret_mode) {
     bool is_window = has(args, L"--window");
     bool is_rule   = has(args, L"--rule");
     bool is_ae     = has(args, L"--ae");
     if (!is_window && !is_rule && !is_ae) {
-        werr(L"Usage: !create --window|--rule|--ae ..."); return;
+        if (!ret_mode) werr(L"Usage: !create --window|--rule|--ae ...");
+        return false;
     }
     if (!silent) {
         if (is_window) {
@@ -491,23 +520,21 @@ static void cmd_create(const std::vector<std::wstring>& args, bool silent,
             if (has(args, L"-c")) winfo(L"-c: connect the rule immediately");
             if (has(args, L"-d")) winfo(L"-d: rule will be disconnected");
         }
-        winfo((L"Sending to Python: " + raw).c_str());
     }
-    forward_to_python(raw);
-    if (!silent) wok(L"!create → Python");
+    return forward_to_python(raw, ret_mode);
 }
 
 // !start -------------------------------------------------------------------
-static void cmd_start(const std::vector<std::wstring>& args, bool silent,
-                      const std::wstring& raw) {
+static bool cmd_start(const std::vector<std::wstring>& args, bool silent,
+                      const std::wstring& raw, bool ret_mode) {
     if (has(args, L"--rec")) {
         cmd_start_rec(args, silent);
-        return;
+        return true;
     }
     if (has(args, L"--log")) {
         if (g_cb_open_log) post_exec([=]{ g_cb_open_log(); });
         if (!silent) wok(L"Opening homrec.log...");
-        return;
+        return true;
     }
     // !start --terminal as @terminal  → запустить hr_terminal.exe
     if (has(args, L"--terminal")) {
@@ -515,7 +542,8 @@ static void cmd_start(const std::vector<std::wstring>& args, bool silent,
         bool has_as       = has(args, L"as");
         bool has_at_term  = has(args, L"@terminal");
         if (!has_as || !has_at_term) {
-            werr(L"Usage: !start --terminal as @terminal"); return;
+            if (!ret_mode) werr(L"Usage: !start --terminal as @terminal");
+            return false;
         }
         if (!silent) winfo(L"Launching hr_terminal.exe...");
         // Запустить hr_terminal.exe рядом с DLL
@@ -533,60 +561,57 @@ static void cmd_start(const std::vector<std::wstring>& args, bool silent,
         if (ShellExecuteExW(&sei)) {
             if (sei.hProcess) CloseHandle(sei.hProcess);
             if (!silent) wok(L"hr_terminal.exe launched");
+            return true;
         } else {
-            werr((L"Failed to launch: " + exe).c_str());
+            if (!ret_mode) werr((L"Failed to launch: " + exe).c_str());
+            return false;
         }
-        return;
     }
     if (!has(args, L"--window")) {
-        werr(L"Usage: !start --rec 1|0 | !start --log | !start --window #name=\"...\" | !start --terminal as @terminal"); return;
+        if (!ret_mode) werr(L"Usage: !start --rec 1|0 | !start --log | !start --window #name=\"...\" | !start --terminal as @terminal");
+        return false;
     }
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
-    forward_to_python(raw);
+    return forward_to_python(raw, ret_mode);
 }
 
 // !connect -----------------------------------------------------------------
-static void cmd_connect(const std::vector<std::wstring>& args, bool silent,
-                        const std::wstring& raw) {
+static bool cmd_connect(const std::vector<std::wstring>& args, bool silent,
+                        const std::wstring& raw, bool ret_mode) {
     if (has(args, L"--log")) {
-        cmd_log_connect(args, silent); return;
+        cmd_log_connect(args, silent); return true;
     }
-    bool ok = false;
+    bool args_ok = false;
     for (auto& a : args)
-        if (a==L"--window"||a==L"--rule"||a.find(L"--function")==0) ok=true;
-    if (!ok) {
-        werr(L"Usage: !connect --window|--rule|--function <cmd> to|; <key>  [--log]");
-        return;
+        if (a==L"--window"||a==L"--rule"||a.find(L"--function")==0) args_ok=true;
+    if (!args_ok) {
+        if (!ret_mode) werr(L"Usage: !connect --window|--rule|--function <cmd> to|; <key>  [--log]");
+        return false;
     }
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
-    forward_to_python(raw);
-    if (!silent) wok(L"!connect → Python");
+    return forward_to_python(raw, ret_mode);
 }
 
 // !disconnect --------------------------------------------------------------
-static void cmd_disconnect(const std::vector<std::wstring>& args, bool silent,
-                           const std::wstring& raw) {
+static bool cmd_disconnect(const std::vector<std::wstring>& args, bool silent,
+                           const std::wstring& raw, bool ret_mode) {
     if (has(args, L"--log")) {
-        cmd_log_disconnect(args, silent); return;
+        cmd_log_disconnect(args, silent); return true;
     }
-    bool ok = false;
+    bool args_ok = false;
     for (auto& a : args)
-        if (a==L"--window"||a==L"--rule"||a==L"--ae"||a.find(L"--function")==0) ok=true;
+        if (a==L"--window"||a==L"--rule"||a==L"--ae"||a.find(L"--function")==0) args_ok=true;
     // also allow #name= only (disconnect named function by name)
     for (auto& a : args)
-        if (a.find(L"#name=") == 0) ok = true;
-    if (!ok) {
-        werr(L"Usage: !disconnect --window|--rule|--ae|--function ...|--log");
-        return;
+        if (a.find(L"#name=") == 0) args_ok = true;
+    if (!args_ok) {
+        if (!ret_mode) werr(L"Usage: !disconnect --window|--rule|--ae|--function ...|--log");
+        return false;
     }
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
-    forward_to_python(raw);
-    if (!silent) wok(L"!disconnect → Python");
+    return forward_to_python(raw, ret_mode);
 }
 
 // $rm ----------------------------------------------------------------------
-static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
-                   const std::wstring& raw) {
+static bool cmd_rm(const std::vector<std::wstring>& args, bool silent,
+                   const std::wstring& raw, bool ret_mode) {
     bool is_window = has(args, L"--window");
     bool is_rule   = has(args, L"--rule");
     bool is_ae     = has(args, L"--ae");
@@ -598,9 +623,10 @@ static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
     for (auto& t : args) if (t.rfind(L"--system@homrec.files", 0) == 0) is_sysfiles = true;
     if (!is_window && !is_rule && !is_ae && !rm_all &&
         !is_vid && !is_ui && !is_homrec && !is_sysfiles) {
-        werr(L"Usage: rm --window|--rule|--ae #name=\"...\" [-q][--all][--purge][--if-disconnected]"
-             L"  |  rm --vid #name=\"...\"|@all|@last [-q]  |  rm @homrec [-q]");
-        return;
+        if (!ret_mode)
+            werr(L"Usage: rm --window|--rule|--ae #name=\"...\" [-q][--all][--purge][--if-disconnected]"
+                 L"  |  rm --vid #name=\"...\"|@all|@last [-q]  |  rm @homrec [-q]");
+        return false;
     }
     // Real Yes/No confirmation for --vid/@homrec/etc. happens on the Python
     // side (it can show an actual dialog); this console only shows the
@@ -608,23 +634,21 @@ static void cmd_rm(const std::vector<std::wstring>& args, bool silent,
     bool quiet = has(args, L"-q") || has(args, L"-y");
     if (!quiet && !silent && (is_window || is_rule || is_ae || rm_all))
         wwarn(L"No confirmation prompt — re-run with -q on this same line to suppress this warning");
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
-    forward_to_python(raw);
+    return forward_to_python(raw, ret_mode);
 }
 
 // !rename ------------------------------------------------------------------
-static void cmd_rename(const std::vector<std::wstring>& args, bool silent,
-                       const std::wstring& raw) {
+static bool cmd_rename(const std::vector<std::wstring>& args, bool silent,
+                       const std::wstring& raw, bool ret_mode) {
     bool is_window = has(args, L"--window");
     bool is_rule   = has(args, L"--rule");
     bool is_ae     = has(args, L"--ae");
     bool is_hotkey = has(args, L"--hotkey");
     if (!is_window && !is_rule && !is_ae && !is_hotkey) {
-        werr(L"Usage: !rename --window|--rule|--ae|--hotkey #name=\"old\" to #name=\"new\"");
-        return;
+        if (!ret_mode) werr(L"Usage: !rename --window|--rule|--ae|--hotkey #name=\"old\" to #name=\"new\"");
+        return false;
     }
-    if (!silent) winfo((L"Sending to Python: " + raw).c_str());
-    forward_to_python(raw);
+    return forward_to_python(raw, ret_mode);
 }
 
 // Главный диспетчер --------------------------------------------------------
@@ -676,7 +700,6 @@ bool dispatch(const std::wstring& raw) {
         bool has_version = has(clean, L"--version") || has(clean, L"-v");
         bool has_help    = has(clean, L"--help")    || has(clean, L"-h");
         if (has_version || has_help) {
-            if (!silent) winfo((L"→ Python: " + raw_clean).c_str());
             forward_to_python(raw_clean);
         } else {
             cmd_homrec(clean, silent);
@@ -684,22 +707,22 @@ bool dispatch(const std::wstring& raw) {
     }
     else if (bare==L"rule") {
         if (!has(clean, L"--get") && !has(clean, L"--check")) ok = false;
-        else cmd_rule(clean,silent,raw_clean);
+        else ok = cmd_rule(clean,silent,raw_clean,ret_mode);
     }
     else if (bare==L"edit") {
         bool e_ok = has(clean,L"--file")||has(clean,L"--window")||
                     has(clean,L"--rule")||has(clean,L"--settings")||has(clean,L"--terminal");
         if (!e_ok) ok = false;
-        else cmd_edit(clean,silent,raw_clean);
+        else ok = cmd_edit(clean,silent,raw_clean,ret_mode);
     }
     else if (bare==L"create") {
         bool c_ok = has(clean,L"--window")||has(clean,L"--rule")||has(clean,L"--ae");
         if (!c_ok) ok = false;
-        else cmd_create(clean,silent,raw_clean);
+        else ok = cmd_create(clean,silent,raw_clean,ret_mode);
     }
-    else if (bare==L"start")      cmd_start(clean,silent,raw_clean);
-    else if (bare==L"connect")    cmd_connect(clean,silent,raw_clean);
-    else if (bare==L"disconnect") cmd_disconnect(clean,silent,raw_clean);
+    else if (bare==L"start")      ok = cmd_start(clean,silent,raw_clean,ret_mode);
+    else if (bare==L"connect")    ok = cmd_connect(clean,silent,raw_clean,ret_mode);
+    else if (bare==L"disconnect") ok = cmd_disconnect(clean,silent,raw_clean,ret_mode);
     else if (bare==L"rm") {
         std::wstring raw_rm = raw_clean;
         { auto pos = raw_rm.find(L"@all"); while (pos != std::wstring::npos) { raw_rm.replace(pos,4,L"--all"); pos = raw_rm.find(L"@all",pos+5); } }
@@ -717,23 +740,22 @@ bool dispatch(const std::wstring& raw) {
                      has(clean_rm,L"--vid") || has(clean_rm,L"--ui") ||
                      has(clean_rm,L"@homrec") || has_sysfiles;
         if (!rm_ok) ok = false;
-        else cmd_rm(clean_rm,silent,raw_rm);
+        else ok = cmd_rm(clean_rm,silent,raw_rm,ret_mode);
     }
     else if (bare==L"clear") {
         if (has(clean, L"--app")) {
             if (!silent) wok(L"Clearing all app data...");
-            forward_to_python(raw_clean);
+            ok = forward_to_python(raw_clean, ret_mode);
         } else {
             std::wstring clear_cmd = L"clear";
-            if (!silent) winfo(L"→ Python: clear");
-            forward_to_python(clear_cmd);
+            ok = forward_to_python(clear_cmd, ret_mode);
         }
     }
     else if (bare==L"rename") {
         bool rn_ok = has(clean,L"--window") || has(clean,L"--rule") ||
                      has(clean,L"--ae") || has(clean,L"--hotkey");
         if (!rn_ok) ok = false;
-        else cmd_rename(clean,silent,raw_clean);
+        else ok = cmd_rename(clean,silent,raw_clean,ret_mode);
     }
     // New commands
     else if (bare==L"ls"      || bare==L"status"  || bare==L"info"   ||
@@ -745,12 +767,11 @@ bool dispatch(const std::wstring& raw) {
              bare==L"check.er"|| bare==L"hide"    ||
              bare==L"secui"   || bare==L"secp"    || bare==L"sec"    ||
              bare==L"do"      || bare.rfind(L"fs@", 0) == 0) {
-        if (!silent) winfo((L"→ Python: " + raw_clean).c_str());
-        forward_to_python(raw_clean);
+        ok = forward_to_python(raw_clean, ret_mode);
     }
     else {
         if (!ret_mode)
-            werr((L"Unknown command: " + cmd + L"  (try help or !help)").c_str());
+            werr((L"Not found " + cmd + L"  (try help or !help)").c_str());
         ok = false;
     }
 
