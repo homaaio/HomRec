@@ -21,7 +21,7 @@ log = logging.getLogger("homrec")
 
 
 class HomRecScreen(RecordingMixin, AudioMixin, SettingsMixin, UIMixin):
-    """ Main HomRec application window """
+    """Main HomRec window; method bodies live in the mixins (see homrec_app/README.md)."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root

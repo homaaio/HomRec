@@ -5,6 +5,8 @@ import sys
 
 
 def _compute_dirs() -> tuple[str, str]:
+    """Returns (root_dir, src_dir), walking up from this file's own location
+    (two levels deeper than the original src/homrec.py)."""
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(sys.executable)
         return exe_dir, exe_dir
