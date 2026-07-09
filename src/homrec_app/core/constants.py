@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from .profile_io import _get_root_dir
+from ._paths import SRC_DIR
 
 CURRENT_VERSION = "1.7.1"
 GITHUB_REPO = "homaaio/homrec"

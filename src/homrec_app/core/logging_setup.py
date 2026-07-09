@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import os
-import sys
 import logging
+
+from ._paths import ROOT_DIR
 
 
 def setup_logging() -> None:
-    if getattr(sys, 'frozen', False):
-        log_dir = os.path.dirname(sys.executable)
-    else:
-        _src = os.path.dirname(os.path.abspath(__file__))
-        _parent = os.path.dirname(_src)
-        log_dir = _parent if (os.path.isdir(os.path.join(_parent, "src")) or os.path.basename(_src).lower() == "src") else _src
+    log_dir = ROOT_DIR
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(message)s",
