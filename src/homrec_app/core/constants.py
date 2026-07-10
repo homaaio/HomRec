@@ -4,7 +4,7 @@ import os
 from .profile_io import _get_root_dir
 from ._paths import SRC_DIR
 
-CURRENT_VERSION = "1.7.1"
+CURRENT_VERSION = "1.7.2"
 GITHUB_REPO = "homaaio/homrec"
 
 
