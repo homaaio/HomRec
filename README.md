@@ -44,9 +44,9 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 ### Option A — .exe (recommended)
 
-**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip` or `.7z`
-**2.** Unzip anywhere you want — no installer needed
-**3.** Launch `hr.exe`
+**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip` or `.7z`         
+**2.** Unzip anywhere you want — no installer needed     
+**3.** Launch `hr.exe`     
 
 > FFmpeg is already included in the archive — no extra downloads needed.
 > **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus — the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
