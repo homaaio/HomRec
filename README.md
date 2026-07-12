@@ -1,10 +1,10 @@
 # HomRec (Hardware Optimized Mechanism Recorder)
-**Screen recorder built for weak PCs.**  
-No lags. No bloat. No GPU required.
-
 [![Version](https://img.shields.io/badge/version-1.7.2-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
 [![Discord](https://img.shields.io/badge/Discord-0047ab?style=flat-square&logo=discord)](https://discord.gg/Gv4t6Xhy7E)
 [![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
+
+**Screen recorder built for weak PCs.**  
+No lags. No bloat. No GPU required.
 
 ---
 
@@ -113,6 +113,10 @@ pip install -r requirements.txt
 > Audio capture (microphone + desktop) is handled natively via built-in WASAPI C++ libraries — no extra audio packages required.
 
 ---
+
+## Docs
+
+- **Commands** - [commands.md](https://github.com/homaaio/HomRec/blob/main/commands.md)
 
 ## Stay updated
 
