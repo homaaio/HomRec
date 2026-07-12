@@ -35,66 +35,54 @@ static constexpr int HR_DX_ERROR   = -1;
 // Dynamic loader for helper DLLs
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
+
+// ---------------------------------------------------------------------------
+// PATCHED for static linking (see INTEGRATION_NOTES.md "internal DLL
+// loading" finding): this used to LoadLibraryW/GetProcAddress
+// hr_dxgi_capture.dll / hr_encoder_helpers.dll / hr_stopwatch.dll by
+// filename at runtime. Under the C++ port those three files are compiled
+// directly into the same exe as this one (see the root Makefile), so
+// those DLLs never exist on disk and ensure_libs() would silently fail
+// (dx_create/bgra_to_yuv/etc. all null, capture never starts, no error
+// surfaced anywhere obvious). Fixed by declaring the real exported
+// functions extern "C" and pointing the same g_libs fields at them
+// directly — every call site below (g_libs.dx_create(...), g_libs.
+// bgra_to_yuv(...), etc.) is UNCHANGED, only how the fields get populated.
+// If you still want the DLL-split architecture instead, revert this hunk
+// and go back to building hr_dxgi_capture.dll/hr_encoder_helpers.dll/
+// hr_stopwatch.dll via build_native.py.
+#ifdef _WIN32
+extern "C" {
+    void *hr_dx_create(int adapter_idx, int output_idx);
+    void  hr_dx_destroy(void *handle);
+    int   hr_dx_get_size(void *handle, int *out_w, int *out_h);
+    int   hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms);
+    int   hr_dx_reset(void *handle);
+    void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
+    void *hr_sw_create();
+    void  hr_sw_destroy(void *handle);
+    void  hr_sw_start(void *handle);
+    void  hr_sw_sleep_until_ns(void *handle, int64_t target_ns);
+    int64_t hr_sw_elapsed_ns(void *handle);
+}
+
 struct LibHandles {
-    HMODULE dxgi = nullptr;
-    HMODULE enc  = nullptr;
-    HMODULE sw   = nullptr;
-
-    typedef void*   (*F_dx_create)(int, int);
-    typedef void    (*F_dx_destroy)(void*);
-    typedef int     (*F_dx_capture)(void*, uint8_t*, int);
-    typedef int     (*F_dx_get_size)(void*, int*, int*);
-    typedef int     (*F_dx_reset)(void*);
-    typedef void    (*F_bgra_to_yuv)(const uint8_t*, uint8_t*, int, int);
-    typedef void*   (*F_sw_create)();
-    typedef void    (*F_sw_destroy)(void*);
-    typedef void    (*F_sw_start)(void*);
-    typedef void    (*F_sw_sleep_until)(void*, int64_t);
-    typedef int64_t (*F_sw_elapsed_ns)(void*);
-
-    F_dx_create      dx_create      = nullptr;
-    F_dx_destroy     dx_destroy     = nullptr;
-    F_dx_capture     dx_capture     = nullptr;
-    F_dx_get_size    dx_get_size    = nullptr;
-    F_dx_reset       dx_reset       = nullptr;
-    F_bgra_to_yuv    bgra_to_yuv    = nullptr;
-    F_sw_create      sw_create      = nullptr;
-    F_sw_destroy     sw_destroy     = nullptr;
-    F_sw_start       sw_start       = nullptr;
-    F_sw_sleep_until sw_sleep_until = nullptr;
-    F_sw_elapsed_ns  sw_elapsed_ns  = nullptr;
     bool loaded = false;
 
-    bool load(const wchar_t* base_dir) {
-        auto try_load = [&](const wchar_t* name) -> HMODULE {
-            wchar_t path[MAX_PATH];
-            if (base_dir && base_dir[0])
-                swprintf_s(path, MAX_PATH, L"%s\\%s", base_dir, name);
-            else
-                wcscpy_s(path, MAX_PATH, name);
-            return LoadLibraryW(path);
-        };
+    void *(*dx_create)(int, int)                       = &hr_dx_create;
+    void  (*dx_destroy)(void*)                          = &hr_dx_destroy;
+    int   (*dx_capture)(void*, uint8_t*, int)           = &hr_dx_capture;
+    int   (*dx_get_size)(void*, int*, int*)             = &hr_dx_get_size;
+    int   (*dx_reset)(void*)                            = &hr_dx_reset;
+    void  (*bgra_to_yuv)(const uint8_t*, uint8_t*, int, int) = &hr_bgra_to_yuv420p;
+    void *(*sw_create)()                                = &hr_sw_create;
+    void  (*sw_destroy)(void*)                          = &hr_sw_destroy;
+    void  (*sw_start)(void*)                            = &hr_sw_start;
+    void  (*sw_sleep_until)(void*, int64_t)             = &hr_sw_sleep_until_ns;
+    int64_t (*sw_elapsed_ns)(void*)                     = &hr_sw_elapsed_ns;
 
-        dxgi = try_load(L"hr_dxgi_capture.dll");
-        enc  = try_load(L"hr_encoder_helpers.dll");
-        sw   = try_load(L"hr_stopwatch.dll");
-        if (!dxgi || !enc || !sw) return false;
-
-        dx_create      = (F_dx_create)     GetProcAddress(dxgi, "hr_dx_create");
-        dx_destroy     = (F_dx_destroy)    GetProcAddress(dxgi, "hr_dx_destroy");
-        dx_capture     = (F_dx_capture)    GetProcAddress(dxgi, "hr_dx_capture");
-        dx_get_size    = (F_dx_get_size)   GetProcAddress(dxgi, "hr_dx_get_size");
-        dx_reset       = (F_dx_reset)      GetProcAddress(dxgi, "hr_dx_reset");
-        bgra_to_yuv    = (F_bgra_to_yuv)   GetProcAddress(enc,  "hr_bgra_to_yuv420p");
-        sw_create      = (F_sw_create)     GetProcAddress(sw,   "hr_sw_create");
-        sw_destroy     = (F_sw_destroy)    GetProcAddress(sw,   "hr_sw_destroy");
-        sw_start       = (F_sw_start)      GetProcAddress(sw,   "hr_sw_start");
-        sw_sleep_until = (F_sw_sleep_until)GetProcAddress(sw,   "hr_sw_sleep_until_ns");
-        sw_elapsed_ns  = (F_sw_elapsed_ns) GetProcAddress(sw,   "hr_sw_elapsed_ns");
-
-        loaded = dx_create && dx_destroy && dx_capture && dx_get_size && dx_reset
-              && bgra_to_yuv
-              && sw_create && sw_destroy && sw_start && sw_sleep_until && sw_elapsed_ns;
+    bool load(const wchar_t* /*base_dir*/) {
+        loaded = true; // all statically linked — nothing can fail to "load" anymore
         return loaded;
     }
 };
@@ -107,16 +95,7 @@ static bool ensure_libs() {
     std::lock_guard<std::mutex> lk(g_libs_mutex);
     if (g_libs_done) return g_libs.loaded;
     g_libs_done = true;
-    wchar_t this_path[MAX_PATH] = {};
-    HMODULE self = nullptr;
-    GetModuleHandleExW(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&ensure_libs), &self);
-    if (self) GetModuleFileNameW(self, this_path, MAX_PATH);
-    wchar_t* sep = wcsrchr(this_path, L'\\');
-    if (sep) *sep = L'\0';
-    g_libs.load(this_path[0] ? this_path : nullptr);
+    g_libs.load(nullptr);
     return g_libs.loaded;
 }
 #endif  // _WIN32
