@@ -14,7 +14,7 @@ extern "C" {
 namespace {
 
 std::string ReadFile(const std::string &path) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(path.c_str(), std::ios::binary);
     if (!f) return {};
     std::ostringstream ss;
     ss << f.rdbuf();
@@ -192,7 +192,7 @@ void Set(const std::string &plugin_dir, const std::string &key, const std::strin
     // plugins realistically use; not built for high-frequency writes.
     std::string path = plugin_dir + "\\.store";
     std::unordered_map<std::string, std::string> kv;
-    std::ifstream in(path);
+    std::ifstream in(path.c_str());
     std::string line;
     while (std::getline(in, line)) {
         size_t tab = line.find('\t');
@@ -202,13 +202,13 @@ void Set(const std::string &plugin_dir, const std::string &key, const std::strin
     in.close();
     kv[key] = value;
 
-    std::ofstream out(path, std::ios::trunc);
+    std::ofstream out(path.c_str(), std::ios::trunc);
     for (const auto &p : kv) out << p.first << '\t' << p.second << '\n';
 }
 
 std::string Get(const std::string &plugin_dir, const std::string &key, const std::string &default_value) {
     std::string path = plugin_dir + "\\.store";
-    std::ifstream in(path);
+    std::ifstream in(path.c_str());
     std::string line;
     while (std::getline(in, line)) {
         size_t tab = line.find('\t');
