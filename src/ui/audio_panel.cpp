@@ -16,6 +16,32 @@ COLORREF U32ToColorRef(uint32_t rgb) {
     BYTE r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
     return RGB(r, g, b);
 }
+
+// FIX: mic_slider_/sys_slider_/mute buttons/level meters are children of
+// AudioPanel's own background STATIC (hwnd_), not of the main window.
+// WM_HSCROLL (trackbars), WM_COMMAND (buttons), and WM_DRAWITEM
+// (SS_OWNERDRAW meters) are only ever sent to a control's IMMEDIATE
+// parent — a plain STATIC's default window procedure doesn't relay them
+// any further, so without this they dead-ended at hwnd_ and never
+// reached HomRecMainWindow::OnHScroll/OnCommand/OnDrawItem, which is
+// clearly what the rest of this file (and main_window.cpp) expects to
+// happen. This subclasses hwnd_ to forward exactly those three messages
+// to GetParent(hwnd_) and otherwise behaves like an unmodified STATIC.
+LRESULT CALLBACK AudioPanelContainerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    WNDPROC orig = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+        case WM_HSCROLL:
+        case WM_COMMAND:
+            SendMessageW(GetParent(hwnd), msg, wParam, lParam);
+            return 0;
+        case WM_DRAWITEM:
+            SendMessageW(GetParent(hwnd), msg, wParam, lParam);
+            return TRUE; // owner-draw contract: non-zero = handled
+        default:
+            return orig ? CallWindowProcW(orig, hwnd, msg, wParam, lParam)
+                         : DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -36,7 +62,7 @@ void AudioLevelMeterCtl::SetLevel(int level_0_100) {
 }
 
 void AudioLevelMeterCtl::Draw(HDC hdc, const RECT &rect) const {
-    int w = rect.right - rect.left, h = rect.bottom - rect.top;
+    int w = rect.right - rect.left;
     HBRUSH bg = CreateSolidBrush(RGB(17, 17, 27)); // matches preview_bg dark value
     FillRect(hdc, &rect, bg);
     DeleteObject(bg);
@@ -75,6 +101,10 @@ HWND AudioPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w, int h
 
     hwnd_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
                              x, y, w, h, parent, nullptr, hInst, nullptr);
+
+    // See AudioPanelContainerProc above.
+    WNDPROC origProc = (WNDPROC)SetWindowLongPtrW(hwnd_, GWLP_WNDPROC, (LONG_PTR)AudioPanelContainerProc);
+    SetWindowLongPtrW(hwnd_, GWLP_USERDATA, (LONG_PTR)origProc);
 
     int row = 8;
     CreateWindowExW(0, L"STATIC", L"Microphone", WS_CHILD | WS_VISIBLE,
