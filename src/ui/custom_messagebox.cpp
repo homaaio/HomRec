@@ -2,7 +2,7 @@
 
 namespace {
 
-enum { IDC_YES = 8001, IDC_NO, IDC_DONTSHOW };
+enum { IDC_YES = 8001, IDC_MSGBOX_NO, IDC_DONTSHOW };
 
 struct MsgCtx {
     const ThemeColors *colors;
@@ -75,7 +75,7 @@ LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_COMMAND: {
             int id = LOWORD(wParam);
-            if (id == IDC_YES || id == IDC_NO) {
+            if (id == IDC_YES || id == IDC_MSGBOX_NO) {
                 // Capture checkbox state BEFORE destroying the window — once
                 // DestroyWindow runs, this child HWND (and its BM_GETCHECK
                 // state) is gone, so reading it afterward would silently
@@ -129,7 +129,7 @@ bool ShowCustomMessageBox(HWND parent, HINSTANCE hInst, const ThemeColors &color
     CreateWindowExW(0, L"BUTTON", L"Open Folder", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                      100, H - 90, 140, 32, hwnd, (HMENU)IDC_YES, hInst, nullptr);
     CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     260, H - 90, 140, 32, hwnd, (HMENU)IDC_NO, hInst, nullptr);
+                     260, H - 90, 140, 32, hwnd, (HMENU)IDC_MSGBOX_NO, hInst, nullptr);
 
     EnableWindow(parent, FALSE);
     ShowWindow(hwnd, SW_SHOW);

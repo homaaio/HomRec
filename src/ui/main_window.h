@@ -14,6 +14,7 @@
 #include "recording_controller.h"
 #include "audio_panel.h"
 #include "console_window.h"
+#include "overlays_dock_panel.h"
 #include "../plugins/lua_engine.h"
 
 class HomRecMainWindow {
@@ -76,6 +77,7 @@ private:
     std::unique_ptr<RecordingController> rec_;
     std::unique_ptr<AudioPanel> audio_panel_;
     std::unique_ptr<ConsoleWindow> console_;
+    std::unique_ptr<OverlaysDockPanel> overlays_panel_;
     std::unique_ptr<LuaPluginEngine> plugins_;
 
     HWND status_label_ = nullptr;
@@ -114,4 +116,8 @@ enum MenuCommandId {
     ID_TRAY_EXIT            = 1015,
     ID_START_BTN            = 1016,
     ID_PAUSE_BTN            = 1017,
+    ID_VIEW_PC_ANALYTICS    = 1018,
+    ID_VIEW_LOG             = 1019,
+    ID_FILE_SELECT_WINDOW   = 1020,
+    ID_VIEW_OVERLAYS_PANEL  = 1021,
 };

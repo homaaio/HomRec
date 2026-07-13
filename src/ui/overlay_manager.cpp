@@ -418,3 +418,7 @@ bool ShowOverlayManager(HWND parent, HINSTANCE hInst, AppState &state) {
 
     return ctx.saved;
 }
+
+void ShowOverlayDragPreview(HWND parent, HINSTANCE hInst, AppState &state) {
+    ShowDragPreview(parent, hInst, state.overlays);
+}

@@ -4,6 +4,9 @@
 #include "advanced_settings_dialog.h"
 #include "overlay_manager.h"
 #include "welcome_dialog.h"
+#include "pc_analytics_dialog.h"
+#include "log_viewer_dialog.h"
+#include "window_picker_dialog.h"
 #include <commctrl.h>
 #include <windowsx.h>
 #include <string>
@@ -39,14 +42,6 @@ constexpr wchar_t kStatusClassName[] = L"STATIC";
 // to "the" window, and this is it.
 HomRecMainWindow *g_instance = nullptr;
 
-std::string NarrowFromWide(const std::wstring &w) {
-    if (w.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string s(len, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), len, nullptr, nullptr);
-    if (!s.empty() && s.back() == '\0') s.pop_back();
-    return s;
-}
 std::wstring WideFromNarrow(const std::string &s) {
     if (s.empty()) return {};
     int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -166,6 +161,14 @@ LRESULT HomRecMainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) 
             mmi->ptMinTrackSize.y = state_.window_min_h;
             return 0;
         }
+        case WM_INITMENUPOPUP:
+            // Keeps the "Overlays Panel" checkmark honest even when the
+            // panel's own ✕ button (not this menu) is what changed
+            // state_.show_overlays_panel — see overlays_dock_panel.cpp's
+            // ClosePanel().
+            CheckMenuItem(menu_, ID_VIEW_OVERLAYS_PANEL,
+                          MF_BYCOMMAND | (state_.show_overlays_panel ? MF_CHECKED : MF_UNCHECKED));
+            return 0;
         case WM_CLOSE:
             if (state_.minimize_to_tray && tray_added_) {
                 ShowWindow(hwnd_, SW_HIDE);
@@ -202,6 +205,7 @@ void HomRecMainWindow::OnCreate() {
         state_.timestamp_enabled = hr_settings_get_flag(settings, "timestamp") != 0;
         state_.cursor_enabled = hr_settings_get_flag(settings, "cursor") != 0;
         state_.show_summary = hr_settings_get_flag(settings, "show_summary") != 0;
+        state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
     } else {
         state_.output_folder = "recordings"; // first run, no settings file yet
     }
@@ -216,6 +220,15 @@ void HomRecMainWindow::OnCreate() {
     // Real position/size set in OnSize once the client rect is known;
     // create it small here so child HWNDs exist before first layout pass.
     audio_panel_->Create(hwnd_, hInstance_, 12, 420, 900, 90);
+
+    // Fixed sidebar rect, same "doesn't reflow on WM_SIZE" limitation as
+    // AudioPanel above — see overlays_dock_panel.h's header comment.
+    // Positioned against the default 1300x750 window size (app_state.h);
+    // OnSize() shrinks preview_rect_ to leave room for it, but the panel's
+    // own HWNDs stay put if the window is resized afterward.
+    overlays_panel_ = std::make_unique<OverlaysDockPanel>(state_);
+    overlays_panel_->Create(hwnd_, hInstance_,
+                             state_.window_w - 232, 84, 220, state_.window_h - 214);
 
     status_label_ = CreateWindowExW(0, kStatusClassName, L"Ready",
                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -244,6 +257,7 @@ void HomRecMainWindow::BuildMenu() {
 
     HMENU fileMenu = CreatePopupMenu();
     AppendMenuA(fileMenu, MF_STRING, ID_FILE_OPEN_RECORDINGS, "Open Recordings Folder");
+    AppendMenuA(fileMenu, MF_STRING, ID_FILE_SELECT_WINDOW, "Select Window to Record...");
     AppendMenuA(fileMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuA(fileMenu, MF_STRING, ID_FILE_EXIT, "Exit");
     AppendMenuA(menu_, MF_POPUP, (UINT_PTR)fileMenu, "File");
@@ -251,6 +265,11 @@ void HomRecMainWindow::BuildMenu() {
     HMENU viewMenu = CreatePopupMenu();
     AppendMenuA(viewMenu, MF_STRING, ID_VIEW_ALWAYS_ON_TOP, "Always on Top");
     AppendMenuA(viewMenu, MF_STRING, ID_VIEW_FULLSCREEN, "Fullscreen\tF11");
+    AppendMenuA(viewMenu, MF_STRING | (state_.show_overlays_panel ? MF_CHECKED : MF_UNCHECKED),
+                ID_VIEW_OVERLAYS_PANEL, "Overlays Panel");
+    AppendMenuA(viewMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuA(viewMenu, MF_STRING, ID_VIEW_PC_ANALYTICS, "PC Analytics");
+    AppendMenuA(viewMenu, MF_STRING, ID_VIEW_LOG, "Show Log");
     AppendMenuA(menu_, MF_POPUP, (UINT_PTR)viewMenu, "View");
 
     HMENU themeMenu = CreatePopupMenu();
@@ -442,7 +461,12 @@ void HomRecMainWindow::OnPaint() {
 }
 
 void HomRecMainWindow::OnSize(int width, int height) {
-    RECT preview = { 12, 84, width - 12, height - 130 };
+    // Leave room for the overlays sidebar when it's visible. Its own HWND
+    // doesn't reflow (see overlays_dock_panel.h), so this only keeps the
+    // *preview* from drawing underneath it — accurate as long as the
+    // window stays near its create-time size, same caveat as AudioPanel.
+    int right_margin = state_.show_overlays_panel ? (12 + 232) : 12;
+    RECT preview = { 12, 84, width - right_margin, height - 130 };
     preview_rect_ = preview;
     if (audio_panel_) {
         // AudioPanel doesn't expose a Resize() yet (see audio_panel.h) —
@@ -513,7 +537,26 @@ void HomRecMainWindow::OnCommand(int id) {
             break;
         case ID_OVERLAYS_MANAGE:
             ShowOverlayManager(hwnd_, hInstance_, state_);
+            if (overlays_panel_) overlays_panel_->Refresh(); // manager mutates the same state_.overlays vector
             break;
+        case ID_FILE_SELECT_WINDOW:
+            ShowWindowPickerDialog(hwnd_, hInstance_, state_);
+            break;
+        case ID_VIEW_PC_ANALYTICS:
+            ShowPcAnalyticsDialog(hwnd_, hInstance_, state_.output_folder);
+            break;
+        case ID_VIEW_LOG:
+            ShowLogViewerDialog(hwnd_, hInstance_);
+            break;
+        case ID_VIEW_OVERLAYS_PANEL: {
+            state_.show_overlays_panel = !state_.show_overlays_panel;
+            if (overlays_panel_) overlays_panel_->SetVisible(state_.show_overlays_panel);
+            CheckMenuItem(menu_, ID_VIEW_OVERLAYS_PANEL,
+                          MF_BYCOMMAND | (state_.show_overlays_panel ? MF_CHECKED : MF_UNCHECKED));
+            RECT client; GetClientRect(hwnd_, &client);
+            OnSize(client.right, client.bottom); // recompute preview_rect_ for the new margin
+            break;
+        }
         case ID_HELP_CONSOLE:
             if (!console_) console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), hwnd_);
             console_->Show(hInstance_);
@@ -536,6 +579,7 @@ void HomRecMainWindow::OnCommand(int id) {
             break;
         default:
             if (audio_panel_) audio_panel_->OnCommand(id);
+            if (overlays_panel_) overlays_panel_->OnCommand(id);
             break;
     }
 }
