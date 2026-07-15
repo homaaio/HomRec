@@ -18,7 +18,7 @@ LDFLAGS  ?= -municode -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-l
 LDLIBS   := -lcomctl32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet \
             -ld3d11 -ldxgi -lpdh -lwinmm -lole32 -luuid -llua
 
-# Lua 5.4 is NOT vendored in this repo — see README_NATIVE_BUILD.md for how
+# Lua 5.4 is NOT vendored in this repo — see README_PHASE9.md for how
 # to get it (vcpkg or the amalgamation from lua.org). If it's somewhere
 # non-standard: make LUA_CFLAGS="-Ic:/lua54/include" LUA_LDFLAGS="-Lc:/lua54/lib"
 LUA_CFLAGS ?=
@@ -39,6 +39,10 @@ SRCS := \
     src/ui/welcome_dialog.cpp \
     src/ui/custom_messagebox.cpp \
     src/ui/console_window.cpp \
+    src/ui/pc_analytics_dialog.cpp \
+    src/ui/log_viewer_dialog.cpp \
+    src/ui/window_picker_dialog.cpp \
+    src/ui/overlays_dock_panel.cpp \
     src/plugins/lua_engine.cpp \
     src/plugins/lua_api.cpp \
     src/hr_display_info.cpp \
