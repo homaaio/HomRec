@@ -8,6 +8,7 @@
 
 #include <windows.h>
 #include <memory>
+#include <string>
 #include "app_state.h"
 #include "theme.h"
 #include "language.h"
@@ -33,6 +34,7 @@ private:
     bool RegisterWindowClass(HINSTANCE hInstance);
     void OnCreate();
     void OnPaint();
+    void OnEraseBkgnd(HDC hdc);
     void OnSize(int width, int height);
     void OnCommand(int id);
     void OnHScroll(HWND ctrl, int pos);
@@ -42,20 +44,31 @@ private:
     void OnDestroy();
 
     void BuildMenu();
-    void BuildToolbar();
+    void BuildLeftPanel();
+    void BuildFonts();
+    void ReleaseFonts();
     void ApplyTheme();
     void ApplyLanguage();
     void ToggleTheme();
     void ToggleAlwaysOnTop();
+    void ToggleFullscreen();
 
     void SetupTrayIcon();
     void RemoveTrayIcon();
     void SetupHotkeys();
+    void ConfigureHotkeysFromState();
 
     void DoStart();
     void DoStop();
     void DoPause();
     void RenderPreviewFrame(HDC hdc);
+    void ComputeLayout(int width, int height);
+    void DrawLeftPanel(HDC hdc);
+    void DrawPreviewChrome(HDC hdc);
+    void DrawBottomBar(HDC hdc);
+    void DrawStartButton(DRAWITEMSTRUCT *dis);
+    void DrawPauseButton(DRAWITEMSTRUCT *dis);
+    void SetStatusState(const wchar_t *text, COLORREF dotColor);
 
     // Hotkey callbacks are plain function pointers (HR_HK_CB has no
     // user-data param — see hr_hotkey.cpp) firing on a background thread,
@@ -80,10 +93,55 @@ private:
     std::unique_ptr<OverlaysDockPanel> overlays_panel_;
     std::unique_ptr<LuaPluginEngine> plugins_;
 
-    HWND status_label_ = nullptr;
     HWND start_btn_ = nullptr;
     HWND pause_btn_ = nullptr;
     RECT preview_rect_ = {};
+
+    // Left-panel / preview-chrome / bottom-bar layout, recomputed by
+    // ComputeLayout() on WM_SIZE and drawn directly with GDI in OnPaint
+    // (DrawLeftPanel/DrawPreviewChrome/DrawBottomBar) rather than as a
+    // pile of child STATIC controls — see comment above BuildLeftPanel()
+    // in main_window.cpp for why.
+    RECT left_panel_rect_ = {};
+    RECT preview_container_rect_ = {};
+    RECT preview_header_rect_ = {};
+    RECT bottom_bar_rect_ = {};
+
+    // Dynamic label text + colors, mirrors the Python widgets' .config()
+    // calls (status_label/status_icon/time_label/fps_label/res_label/
+    // file_label) since these are now just fields redrawn on InvalidateRect
+    // rather than real HWNDs.
+    std::wstring status_text_ = L"Ready";
+    COLORREF status_dot_color_ = 0;      // set from theme_.error in BuildFonts()/ApplyTheme()
+    std::wstring time_text_ = L"00:00:00";
+    std::wstring fps_text_;
+    std::wstring res_text_;
+    std::wstring file_label_text_ = L"Ready";
+    COLORREF start_btn_bg_ = 0;          // theme_.success (idle) / theme_.error (recording)
+    COLORREF pause_btn_bg_ = 0;          // theme_.warning (normal) / theme_.success (paused)
+    std::wstring start_btn_text_ = L"\u25B6 START";
+    std::wstring pause_btn_text_ = L"\u23F8 PAUSE";
+
+    HFONT font_title_ = nullptr;      // Segoe UI 22 bold — "HomRec"
+    HFONT font_version_ = nullptr;    // Segoe UI 11 — "v1.7.2"
+    HFONT font_section_ = nullptr;    // Segoe UI 11 bold — "STATUS"/"TIME"/"STATS"
+    HFONT font_body_ = nullptr;       // Segoe UI 11 — status text
+    HFONT font_dot_ = nullptr;        // Arial 18 — status dot glyph
+    HFONT font_time_ = nullptr;       // Consolas 24 bold — big timer
+    HFONT font_mono_ = nullptr;       // Consolas 11 — fps/resolution
+    HFONT font_btn_start_ = nullptr;  // Segoe UI 11 bold — START/STOP button
+    HFONT font_btn_pause_ = nullptr;  // Segoe UI 10 bold — PAUSE/RESUME button
+    HFONT font_header_ = nullptr;     // Segoe UI 9 bold — preview header
+    HFONT font_small_ = nullptr;      // Segoe UI 8 — preview fps / native indicator / version
+    HFONT font_bar_ = nullptr;        // Segoe UI 9 — bottom bar file label
+    HFONT font_bar_bold_ = nullptr;   // Segoe UI 9 bold — "made by"
+
+    // True borderless fullscreen (Python's toggle_fullscreen(), not just
+    // maximize): remembers the pre-fullscreen style/rect so it can be
+    // restored exactly, since WS_OVERLAPPEDWINDOW gets stripped.
+    bool fullscreen_ = false;
+    LONG_PTR saved_style_ = 0;
+    RECT saved_rect_ = {};
 
     NOTIFYICONDATAW tray_nid_ = {};
     bool tray_added_ = false;

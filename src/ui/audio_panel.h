@@ -52,6 +52,11 @@ public:
         return false;
     }
 
+    float mic_volume() const { return mic_vol_; }
+    float sys_volume() const { return sys_vol_; }
+    bool mic_muted() const { return mic_muted_; }
+    bool sys_muted() const { return sys_muted_; }
+
 private:
     AppState &state_;
     RecordingController &rec_;

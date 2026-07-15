@@ -70,7 +70,10 @@ extern "C" {
     void hr_audio_get_levels(int *out_mic, int *out_sys);
     void hr_audio_pause(int paused);
     int hr_audio_stop(const char *mic_wav_path, const char *sys_wav_path);
+    int hr_audio_mix_wav(const char *mic_path, const char *sys_path, const char *out_path);
 }
+
+#include <cstdio> // remove()/rename() for temp WAV cleanup in Stop()
 
 namespace {
 std::string NarrowFromWide(const std::wstring &w) {
@@ -208,7 +211,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     }
 
     if (state_.audio_out_channels > 0) {
-        hr_audio_start(1.0f, 1.0f, 0, 0);
+        hr_audio_start(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
     }
 
     hr_ctl_set_output_path(ctl_, NarrowFromWide(current_output_path_).c_str());
@@ -227,9 +230,55 @@ void RecordingController::Stop() {
     hr_ff_stop_graceful(ffproc_);
     hr_ff_wait(ffproc_, 3000);
 
-    std::string mic_wav, sys_wav;
-    int audio_result = hr_audio_stop(nullptr, nullptr); // paths TBD by settings (merged vs separate) — Phase 3.1
-    (void)audio_result;
+    // Port of audio_mixin.py's stop_audio_recording() + merge_audio_video():
+    // mic/system audio were captured into separate temp WAVs (unless
+    // muted); mix them into one file, then remux that into the finished
+    // video via hr_merge_av (the same native fast path Python's
+    // `_te.merge_av` calls when no custom bitrate/extra ffmpeg args are
+    // set). Kept 1:1 with the Python behavior including its one quirk: on
+    // a successful native merge the leftover audio WAV is *not* deleted
+    // (merge_audio_video only removes it on the ffmpeg-subprocess fallback
+    // path, not the native one) — see audio_mixin.py.
+    std::string base = NarrowFromWide(current_output_path_);
+    size_t dot = base.find_last_of('.');
+    std::string stem = (dot == std::string::npos) ? base : base.substr(0, dot);
+    std::string mic_wav = stem + "_mic_tmp.wav";
+    std::string sys_wav = stem + "_sys.wav";
+    std::string audio_wav = stem + "_audio.wav";
+
+    bool want_mic = !mic_muted_;
+    bool want_sys = !sys_muted_;
+    int audio_result = hr_audio_stop(want_mic ? mic_wav.c_str() : nullptr,
+                                      want_sys ? sys_wav.c_str() : nullptr);
+    bool mic_written = want_mic && (audio_result & 0x1) && hr_path_exists(mic_wav.c_str());
+    bool sys_written = want_sys && (audio_result & 0x2) && hr_path_exists(sys_wav.c_str());
+
+    bool have_audio_file = false;
+    if (mic_written && sys_written) {
+        if (hr_audio_mix_wav(mic_wav.c_str(), sys_wav.c_str(), audio_wav.c_str()) == 0) {
+            std::remove(mic_wav.c_str());
+            std::remove(sys_wav.c_str());
+            have_audio_file = true;
+        } else {
+            // Mixing failed — fall back to mic-only, matching the Python
+            // fallback of just using whichever single track exists.
+            std::remove(sys_wav.c_str());
+            std::rename(mic_wav.c_str(), audio_wav.c_str());
+            have_audio_file = true;
+        }
+    } else if (mic_written) {
+        std::rename(mic_wav.c_str(), audio_wav.c_str());
+        have_audio_file = true;
+    } else if (sys_written) {
+        std::rename(sys_wav.c_str(), audio_wav.c_str());
+        have_audio_file = true;
+    }
+
+    if (have_audio_file && state_.audio_out_channels > 0 && ffmpeg_found_ &&
+        hr_path_exists(base.c_str())) {
+        hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
+                    WideFromNarrow(audio_wav).c_str());
+    }
 
     hr_ctl_stop(ctl_);
 
@@ -255,6 +304,7 @@ void RecordingController::PollStats() {
     double fps = 0.0;
     if (pipeline_) hr_pl_stats(pipeline_, &frames, &drops, &fps);
     state_.frame_count = (long)frames;
+    current_fps_ = fps;
 
     double size_mb = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
     hr_ctl_update_stats(ctl_, (long long)(size_mb * 1024.0 * 1024.0));

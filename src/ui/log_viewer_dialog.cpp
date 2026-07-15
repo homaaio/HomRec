@@ -26,7 +26,7 @@ std::wstring GetBaseDir() {
 // guarantee that for non-ASCII text), fall back to the system codepage
 // rather than failing outright.
 std::wstring ReadLogFileLenient(const std::wstring &path, bool &found) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(path.c_str(), std::ios::binary);
     if (!f) { found = false; return L"Log file not found:\n" + path; }
     found = true;
 

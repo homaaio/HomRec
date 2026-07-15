@@ -379,7 +379,7 @@ void ConsoleWindow::CmdStatus(const std::wstring &) {
 void ConsoleWindow::CmdLog(const std::wstring &raw) {
     size_t sp = raw.find(L' ');
     std::wstring msg = sp == std::wstring::npos ? L"" : raw.substr(sp + 1);
-    std::wofstream f(GetBaseDir() + L"\\homrec.log", std::ios::app);
+    std::wofstream f((GetBaseDir() + L"\\homrec.log").c_str(), std::ios::app);
     f << L"[console] " << msg << L"\n";
     PrintOk(L"logged");
 }
@@ -504,7 +504,7 @@ void ConsoleWindow::ScheduleSelfDelete(const std::wstring &base) {
     // matches the process name "HomRec.exe" — if you're running this
     // straight from a debugger/different exe name, it won't detect exit
     // correctly and the loop will spin until manually killed.
-    std::wofstream f(batPath, std::ios::trunc);
+    std::wofstream f(batPath.c_str(), std::ios::trunc);
     f << L"@echo off\r\n"
       << L":wait_loop\r\n"
       << L"tasklist | findstr /i \"HomRec\" >nul 2>&1\r\n"

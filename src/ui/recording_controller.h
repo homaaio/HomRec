@@ -52,6 +52,19 @@ public:
     std::wstring elapsed_formatted() const;
     double output_size_mb() const;
     int frame_count() const;
+    int capture_width() const { return capture_w_; }
+    int capture_height() const { return capture_h_; }
+    double current_fps() const { return current_fps_; }
+
+    // Called by AudioPanel whenever a mic/system volume slider or mute
+    // checkbox changes, so Start()/Stop() know what to actually record
+    // instead of the previous hardcoded "mic+sys both on, full volume".
+    // Mirrors reading self.audio_panel.mic_vol/sys_vol/*_mute in Python's
+    // start_recording()/stop_audio_recording().
+    void SetAudioLevels(float mic_vol, float sys_vol, bool mic_muted, bool sys_muted) {
+        mic_vol_ = mic_vol; sys_vol_ = sys_vol;
+        mic_muted_ = mic_muted; sys_muted_ = sys_muted;
+    }
 
 private:
     // Builds "HomRec_{date}_{time}"-style filename from
@@ -75,4 +88,7 @@ private:
 
     int mic_level_ = 0, sys_level_ = 0;
     int capture_w_ = 0, capture_h_ = 0; // resolved from hr_di_* in Start(), was hardcoded 0,0 before
+    float mic_vol_ = 1.0f, sys_vol_ = 1.0f;
+    bool mic_muted_ = false, sys_muted_ = false;
+    double current_fps_ = 0.0;
 };

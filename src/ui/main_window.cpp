@@ -10,12 +10,15 @@
 #include <commctrl.h>
 #include <windowsx.h>
 #include <string>
+#include <algorithm>
+#include <cstdio>
 
 extern "C" {
     int hr_acquire_single_instance(const char *mutex_name); // unused here, called once in win_main.cpp
     void *hr_hk_create();
     void hr_hk_destroy(void *handle);
     void hr_hk_set_callbacks(void *handle, void (*start_stop)(), void (*pause)(), void (*fullscreen)());
+    void hr_hk_configure(void *handle, const char *start_stop_str, const char *pause_str, const char *fullscreen_str);
     int hr_hk_start(void *handle);
     void hr_hk_stop(void *handle);
 
@@ -35,7 +38,6 @@ extern "C" {
 
 namespace {
 constexpr wchar_t kWindowClassName[] = L"HomRecMainWindow";
-constexpr wchar_t kStatusClassName[] = L"STATIC";
 
 // Only one main window exists per process — hotkey callbacks (plain
 // function pointers, no user-data slot, see hr_hotkey.cpp) need a way back
@@ -50,6 +52,39 @@ std::wstring WideFromNarrow(const std::string &s) {
     if (!w.empty() && w.back() == L'\0') w.pop_back();
     return w;
 }
+
+// Left-sidebar layout, mirrors ui_mixin.py's create_widgets() stacking
+// order top-to-bottom (title -> START/PAUSE -> STATUS -> TIME -> STATS),
+// all inset by kPad from the sidebar's left/right edges (matches the
+// Python frames' padx=15). Kept as constants shared between
+// ComputeLayout() (positions the two real button HWNDs) and
+// DrawLeftPanel() (draws everything else at the same Y offsets), so they
+// can't drift apart.
+constexpr int kOuterPad     = 15;
+constexpr int kBottomBarH   = 32;
+constexpr int kLeftPanelW   = 240;
+constexpr int kPad          = 15;   // inner padx within the sidebar
+
+constexpr int kTitleY       = 20;
+constexpr int kTitleH       = 30;
+constexpr int kVersionH     = 20;
+
+constexpr int kBtnGapAbove  = 25;   // btn_frame's pady
+constexpr int kStartBtnH    = 48;
+constexpr int kBtnGapMid    = 4;
+constexpr int kPauseBtnH    = 32;
+
+constexpr int kStatusGap    = 15;   // status_frame's pady
+constexpr int kSectionLblH  = 20;
+constexpr int kStatusRowGap = 8;
+constexpr int kStatusRowH   = 26;
+
+constexpr int kTimerGap     = 15;
+constexpr int kTimeValGap   = 8;
+constexpr int kTimeValH     = 34;
+
+constexpr int kStatsGap     = 15;
+constexpr int kStatsLineH   = 24;
 } // namespace
 
 HomRecMainWindow *HomRecMainWindow::Create(HINSTANCE hInstance, int nCmdShow) {
@@ -83,6 +118,7 @@ HomRecMainWindow *HomRecMainWindow::Create(HINSTANCE hInstance, int nCmdShow) {
 
 HomRecMainWindow::~HomRecMainWindow() {
     RemoveTrayIcon();
+    ReleaseFonts();
     if (hotkey_handle_) {
         hr_hk_stop(hotkey_handle_);
         hr_hk_destroy(hotkey_handle_);
@@ -109,6 +145,20 @@ LRESULT CALLBACK HomRecMainWindow::WindowProcThunk(HWND hwnd, UINT msg, WPARAM w
         auto *cs = reinterpret_cast<CREATESTRUCTW *>(lParam);
         self = reinterpret_cast<HomRecMainWindow *>(cs->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        // FIX: hwnd_ used to only get set by Create()'s
+        // `self->hwnd_ = CreateWindowExW(...)` assignment, which can't run
+        // until CreateWindowExW returns. But WM_CREATE — which calls
+        // OnCreate(), which parents every child control (menu, status
+        // label, AudioPanel, OverlaysDockPanel, ...) to hwnd_ — is sent
+        // synchronously from *inside* that same CreateWindowExW call, so
+        // hwnd_ was still nullptr for all of OnCreate(). WS_CHILD windows
+        // require a real parent HWND, so every one of those child
+        // CreateWindowExW calls was failing outright (ERROR_INVALID_
+        // PARAMETER) — and very likely what surfaced as "Failed to create
+        // the main window" too. The real HWND already exists by
+        // WM_NCCREATE (it's right here as this function's own `hwnd`
+        // parameter); stash it immediately instead of waiting.
+        if (self) self->hwnd_ = hwnd;
     } else {
         self = reinterpret_cast<HomRecMainWindow *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
@@ -121,6 +171,9 @@ LRESULT HomRecMainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_CREATE:
             OnCreate();
             return 0;
+        case WM_ERASEBKGND:
+            OnEraseBkgnd(reinterpret_cast<HDC>(wParam));
+            return 1;
         case WM_PAINT:
             OnPaint();
             return 0;
@@ -149,11 +202,7 @@ LRESULT HomRecMainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) 
             DoPause();
             return 0;
         case kHotkeyFullscreenMsg:
-            // Fullscreen toggle: minimal version — maximize/restore. A true
-            // borderless fullscreen (matching the Python app's behavior)
-            // would also strip WS_OVERLAPPEDWINDOW; keeping this simple for
-            // now and flagging it rather than silently under-delivering.
-            ShowWindow(hwnd_, IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE);
+            ToggleFullscreen();
             return 0;
         case WM_GETMINMAXINFO: {
             auto *mmi = reinterpret_cast<MINMAXINFO *>(lParam);
@@ -216,25 +265,27 @@ void HomRecMainWindow::OnCreate() {
     rec_ = std::make_unique<RecordingController>(state_);
     rec_->Initialize();
 
+    // Right-panel content starts after the 240px left sidebar (15 outer
+    // pad + 240 sidebar + 15 gap = 270), matching Python's
+    // left_panel.pack(side="left", padx=(0, 15)) + main content layout —
+    // see BuildLeftPanel()/ComputeLayout() for the rest of this geometry.
+    const int kRightX = 15 + 240 + 15;
     audio_panel_ = std::make_unique<AudioPanel>(state_, *rec_);
-    // Real position/size set in OnSize once the client rect is known;
+    // Real position/size refined in OnSize once the client rect is known;
     // create it small here so child HWNDs exist before first layout pass.
-    audio_panel_->Create(hwnd_, hInstance_, 12, 420, 900, 90);
+    audio_panel_->Create(hwnd_, hInstance_, kRightX, 420, 900, 90);
 
     // Fixed sidebar rect, same "doesn't reflow on WM_SIZE" limitation as
     // AudioPanel above — see overlays_dock_panel.h's header comment.
-    // Positioned against the default 1300x750 window size (app_state.h);
-    // OnSize() shrinks preview_rect_ to leave room for it, but the panel's
-    // own HWNDs stay put if the window is resized afterward.
+    // Positioned against the default window size (app_state.h); OnSize()
+    // shrinks preview_rect_ to leave room for it, but the panel's own
+    // HWNDs stay put if the window is resized afterward.
     overlays_panel_ = std::make_unique<OverlaysDockPanel>(state_);
     overlays_panel_->Create(hwnd_, hInstance_,
-                             state_.window_w - 232, 84, 220, state_.window_h - 214);
+                             state_.window_w - 232, 15, 220, state_.window_h - 15 - 32 - 15 - 15);
 
-    status_label_ = CreateWindowExW(0, kStatusClassName, L"Ready",
-                                     WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                     12, 12, 400, 24, hwnd_, nullptr, hInstance_, nullptr);
-
-    BuildToolbar();
+    BuildFonts();
+    BuildLeftPanel();
     SetupTrayIcon();
     SetupHotkeys();
 
@@ -243,6 +294,9 @@ void HomRecMainWindow::OnCreate() {
     plugins_->LoadAll();
 
     ApplyLanguage();
+    status_dot_color_ = theme_.error; // idle/"Ready" dot is red — matches ui_mixin.py's status_icon default fg
+    start_btn_bg_ = theme_.success;
+    pause_btn_bg_ = theme_.warning;
 
     SetTimer(hwnd_, kPreviewTimerId, 1000 / 30, nullptr); // ~30fps preview redraw
     SetTimer(hwnd_, kStatsTimerId, 500, nullptr);          // stats/level polling, matches the Python after(500,...) cadence
@@ -292,13 +346,58 @@ void HomRecMainWindow::BuildMenu() {
     SetMenu(hwnd_, menu_);
 }
 
-void HomRecMainWindow::BuildToolbar() {
-    start_btn_ = CreateWindowExW(0, L"BUTTON", L"\u25B6 START",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  12, 44, 120, 32, hwnd_, (HMENU)ID_START_BTN, hInstance_, nullptr);
-    pause_btn_ = CreateWindowExW(0, L"BUTTON", L"\u23F8 PAUSE",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  140, 44, 120, 32, hwnd_, (HMENU)ID_PAUSE_BTN, hInstance_, nullptr);
+void HomRecMainWindow::BuildFonts() {
+    ReleaseFonts();
+    auto mk = [](int h, int weight, const wchar_t *face) {
+        return CreateFontW(-h, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
+    };
+    font_title_     = mk(22, FW_BOLD,   L"Segoe UI");
+    font_version_   = mk(11, FW_NORMAL, L"Segoe UI");
+    font_section_   = mk(11, FW_BOLD,   L"Segoe UI");
+    font_body_      = mk(11, FW_NORMAL, L"Segoe UI");
+    font_dot_       = mk(18, FW_NORMAL, L"Arial");
+    font_time_      = mk(24, FW_BOLD,   L"Consolas");
+    font_mono_      = mk(11, FW_NORMAL, L"Consolas");
+    font_btn_start_ = mk(11, FW_BOLD,   L"Segoe UI");
+    font_btn_pause_ = mk(10, FW_BOLD,   L"Segoe UI");
+    font_header_    = mk(9,  FW_BOLD,   L"Segoe UI");
+    font_small_     = mk(8,  FW_NORMAL, L"Segoe UI");
+    font_bar_       = mk(9,  FW_NORMAL, L"Segoe UI");
+    font_bar_bold_  = mk(9,  FW_BOLD,   L"Segoe UI");
+}
+
+void HomRecMainWindow::ReleaseFonts() {
+    HFONT *all[] = {&font_title_, &font_version_, &font_section_, &font_body_, &font_dot_,
+                     &font_time_, &font_mono_, &font_btn_start_, &font_btn_pause_,
+                     &font_header_, &font_small_, &font_bar_, &font_bar_bold_};
+    for (HFONT *f : all) {
+        if (*f) { DeleteObject(*f); *f = nullptr; }
+    }
+}
+
+// The Python UI (ui_mixin.py's create_widgets) builds the left sidebar out
+// of a dozen-plus tk.Frame/tk.Label widgets: title, START/PAUSE buttons,
+// a STATUS row (colored dot + text), a big TIME readout, and a STATS block
+// (FPS + resolution) — each with its own bg/fg color pulled from the theme,
+// none of which change size or position once created.
+//
+// A literal-minded port would create ~15 child HWNDs (STATIC labels +
+// BS_OWNERDRAW buttons) with WM_CTLCOLORSTATIC plumbing for each one. Doing
+// that instead: only the two real buttons (which need actual click/keyboard
+// handling) are HWNDs; everything else is plain GDI text drawn straight
+// into OnPaint by DrawLeftPanel(), using the exact same colors, fonts, and
+// stacked layout as the Python widgets. Fewer moving parts, identical
+// pixels, and dynamic values (status text, dot color, timer, fps/res) just
+// update a field + InvalidateRect instead of SetWindowTextW/.config().
+void HomRecMainWindow::BuildLeftPanel() {
+    start_btn_ = CreateWindowExW(0, L"BUTTON", start_btn_text_.c_str(),
+                                  WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                  0, 0, 10, 10, hwnd_, (HMENU)ID_START_BTN, hInstance_, nullptr);
+    pause_btn_ = CreateWindowExW(0, L"BUTTON", pause_btn_text_.c_str(),
+                                  WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                  0, 0, 10, 10, hwnd_, (HMENU)ID_PAUSE_BTN, hInstance_, nullptr);
     EnableWindow(pause_btn_, FALSE);
 }
 
@@ -347,15 +446,23 @@ void HomRecMainWindow::OnTrayMessage(LPARAM lParam) {
 void HomRecMainWindow::SetupHotkeys() {
     hotkey_handle_ = hr_hk_create();
     hr_hk_set_callbacks(hotkey_handle_, &HotkeyStartStopThunk, &HotkeyPauseThunk, &HotkeyFullscreenThunk);
+    ConfigureHotkeysFromState(); // parses state_.hotkey_start_stop/pause/fullscreen, must run before hr_hk_start()
     if (!hr_hk_start(hotkey_handle_)) {
-        OutputDebugStringA("HomRec: global hotkeys (F9/F10/F11) failed to register — another app may be using them.\n");
+        OutputDebugStringA("HomRec: global hotkeys failed to register — another app may be using them.\n");
     }
-    // KNOWN GAP (see recording_controller / advanced_settings_dialog audit
-    // notes): hr_hotkey.cpp hardcodes F9/F10/F11 — the custom key strings
-    // in AppState.hotkey_start_stop/hotkey_pause/hotkey_fullscreen (editable
-    // in Advanced Settings) aren't actually wired to anything yet. Making
-    // them real requires extending hr_hotkey.cpp to accept a configurable
-    // virtual-key instead of the fixed RegisterHotKey calls it makes today.
+}
+
+// Re-applies state_.hotkey_start_stop / hotkey_pause / hotkey_fullscreen
+// (editable in Advanced Settings, same "Control+F9"-style strings the
+// Python app's hotkey recorder produces) to the hotkey manager. Any string
+// that fails to parse silently keeps hr_hotkey.cpp's F9/F10/F11 default for
+// that action, same as a fresh install with nothing customized yet.
+void HomRecMainWindow::ConfigureHotkeysFromState() {
+    if (!hotkey_handle_) return;
+    hr_hk_configure(hotkey_handle_,
+                     state_.hotkey_start_stop.c_str(),
+                     state_.hotkey_pause.c_str(),
+                     state_.hotkey_fullscreen.c_str());
 }
 
 void HomRecMainWindow::HotkeyStartStopThunk() {
@@ -369,32 +476,75 @@ void HomRecMainWindow::HotkeyFullscreenThunk() {
 }
 
 void HomRecMainWindow::DoStart() {
+    if (audio_panel_) {
+        rec_->SetAudioLevels(audio_panel_->mic_volume(), audio_panel_->sys_volume(),
+                              audio_panel_->mic_muted(), audio_panel_->sys_muted());
+    }
     std::wstring err;
     if (!rec_->Start(err)) {
         MessageBoxW(hwnd_, err.c_str(), L"HomRec", MB_OK | MB_ICONWARNING);
         return;
     }
-    SetWindowTextW(start_btn_, L"\u25A0 STOP");
+    // Matches recording_mixin.py's start_recording(): record_btn -> STOP/error,
+    // status dot -> success (green), status text -> "Recording".
+    start_btn_text_ = L"\u25A0 STOP";
+    start_btn_bg_ = theme_.error;
+    pause_btn_bg_ = theme_.warning;
     EnableWindow(pause_btn_, TRUE);
+    SetStatusState(WideFromNarrow(lang_.Get("recording")).c_str(), theme_.success);
+    InvalidateRect(hwnd_, &left_panel_rect_, FALSE);
+    InvalidateRect(hwnd_, nullptr, FALSE); // repaint owner-drawn buttons (new bg colors)
     if (plugins_) plugins_->EmitHook("on_recording_start");
 }
 
 void HomRecMainWindow::DoStop() {
+    // Immediate "saving" feedback (matches stop_recording()'s synchronous
+    // UI update before the finalize work), even though our Stop() below
+    // runs synchronously rather than on a background thread like Python's.
+    SetStatusState(L"Saving\u2026", theme_.warning);
+    time_text_ = L"00:00:00";
+    file_label_text_ = L"Processing\u2026";
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    UpdateWindow(hwnd_);
+
     rec_->Stop();
-    SetWindowTextW(start_btn_, L"\u25B6 START");
-    SetWindowTextW(pause_btn_, L"\u23F8 PAUSE");
+
+    start_btn_text_ = L"\u25B6 START";
+    start_btn_bg_ = theme_.success;
+    pause_btn_text_ = L"\u23F8 PAUSE";
+    pause_btn_bg_ = theme_.warning;
     EnableWindow(pause_btn_, FALSE);
+    // Matches _finalize_ui(): dot back to "error" (the same red used at
+    // idle/creation — see BuildLeftPanel()'s comment / ui_mixin.py) and
+    // status text back to "Ready".
+    SetStatusState(WideFromNarrow(lang_.Get("ready")).c_str(), theme_.error);
+    file_label_text_ = WideFromNarrow(lang_.Get("ready"));
+    InvalidateRect(hwnd_, nullptr, FALSE);
     if (plugins_) plugins_->EmitHook("on_recording_stop");
     // KNOWN GAP (unchanged from Phase 3): no "recording saved, open folder?"
-    // CustomMessageBox popup wired here yet, and RecordingController::Stop()
-    // still doesn't merge separate mic/system-audio WAVs into the output —
-    // see recording_controller.cpp's Stop().
+    // CustomMessageBox popup wired here yet.
 }
 
 void HomRecMainWindow::DoPause() {
     if (!state_.recording) return;
     rec_->TogglePause();
-    SetWindowTextW(pause_btn_, state_.paused ? L"\u25B6 RESUME" : L"\u23F8 PAUSE");
+    if (state_.paused) {
+        // Matches the Python "paused" branch: pause_btn -> RESUME/success,
+        // dot -> warning, status -> "Paused".
+        pause_btn_text_ = L"\u25B6 RESUME";
+        pause_btn_bg_ = theme_.success;
+        SetStatusState(WideFromNarrow(lang_.Get("paused")).c_str(), theme_.warning);
+    } else {
+        pause_btn_text_ = L"\u23F8 PAUSE";
+        pause_btn_bg_ = theme_.warning;
+        SetStatusState(WideFromNarrow(lang_.Get("recording")).c_str(), theme_.success);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void HomRecMainWindow::SetStatusState(const wchar_t *text, COLORREF dotColor) {
+    status_text_ = text;
+    status_dot_color_ = dotColor;
 }
 
 void HomRecMainWindow::ApplyLanguage() {
@@ -421,14 +571,49 @@ void HomRecMainWindow::ToggleAlwaysOnTop() {
                  0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 }
 
+void HomRecMainWindow::ToggleFullscreen() {
+    // Matches Python's root.attributes('-fullscreen', ...): a real
+    // borderless fullscreen (no title bar/menu/border, covers the whole
+    // monitor), not just a maximize. WS_OVERLAPPEDWINDOW is what supplies
+    // the caption/border/thick-frame/menu chrome, so stripping it and
+    // resizing to the monitor's full rect reproduces that; restoring puts
+    // the saved style + rect back exactly.
+    if (!fullscreen_) {
+        saved_style_ = GetWindowLongPtrW(hwnd_, GWL_STYLE);
+        GetWindowRect(hwnd_, &saved_rect_);
+
+        HMONITOR mon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = {sizeof(mi)};
+        GetMonitorInfoW(mon, &mi);
+
+        SetWindowLongPtrW(hwnd_, GWL_STYLE,
+                          static_cast<LONG_PTR>(saved_style_) & ~(WS_CAPTION | WS_THICKFRAME));
+        SetWindowPos(hwnd_, HWND_TOP,
+                     mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        fullscreen_ = true;
+    } else {
+        SetWindowLongPtrW(hwnd_, GWL_STYLE, saved_style_);
+        SetWindowPos(hwnd_, nullptr,
+                     saved_rect_.left, saved_rect_.top,
+                     saved_rect_.right - saved_rect_.left,
+                     saved_rect_.bottom - saved_rect_.top,
+                     SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        fullscreen_ = false;
+    }
+}
+
 void HomRecMainWindow::RenderPreviewFrame(HDC hdc) {
     std::vector<uint8_t> frame;
     int w = 0, h = 0;
     if (!rec_ || !rec_->GetPreviewFrame(frame, w, h) || w <= 0 || h <= 0) {
         SetTextColor(hdc, theme_.text_secondary);
         SetBkMode(hdc, TRANSPARENT);
-        DrawTextW(hdc, state_.recording ? L"Waiting for frames..." : L"Preview (start recording to see it)",
-                  -1, &preview_rect_, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, font_body_);
+        std::wstring msg = state_.recording ? L"Waiting for frames..." : L"Preview (start recording to see it)";
+        DrawTextW(hdc, msg.c_str(), -1, &preview_rect_, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
 
@@ -447,6 +632,174 @@ void HomRecMainWindow::RenderPreviewFrame(HDC hdc) {
                   0, 0, w, h, frame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
 }
 
+// Recomputes every themed-chrome rect (left sidebar / preview container+
+// header / bottom bar) from the client size, and repositions the two real
+// button HWNDs to the same Y offsets DrawLeftPanel() draws its labels at.
+// See the kOuterPad/kLeftPanelW/... constants above for the shared layout
+// numbers, ported from ui_mixin.py's create_widgets() pack() stack.
+void HomRecMainWindow::ComputeLayout(int width, int height) {
+    left_panel_rect_ = { kOuterPad, kOuterPad,
+                          kOuterPad + kLeftPanelW, std::max(height - kBottomBarH - kOuterPad, kOuterPad + 1) };
+    bottom_bar_rect_ = { 0, height - kBottomBarH, width, height };
+
+    int right_x = left_panel_rect_.right + 15;
+    // Leaves room below the preview for AudioPanel's fixed-position mixer
+    // row, same margin the pre-theming code used (AudioPanel doesn't
+    // reflow — see audio_panel.h — so this is still an approximation, not
+    // a real docked layout).
+    int right_margin = state_.show_overlays_panel ? (232 + 15) : kOuterPad;
+    RECT container = { right_x, kOuterPad,
+                        std::max(width - right_margin, right_x + 1),
+                        std::max(height - kBottomBarH - kOuterPad - 100, kOuterPad + 1) };
+    preview_container_rect_ = container;
+    preview_header_rect_ = { container.left, container.top, container.right, container.top + 30 };
+    preview_rect_ = { container.left + 8, preview_header_rect_.bottom + 8,
+                       container.right - 8, container.bottom - 8 };
+
+    int bx = left_panel_rect_.left + kPad;
+    int bw = kLeftPanelW - 2 * kPad;
+    int by = left_panel_rect_.top + kTitleY + kTitleH + kVersionH + kBtnGapAbove;
+    if (start_btn_) MoveWindow(start_btn_, bx, by, bw, kStartBtnH, TRUE);
+    by += kStartBtnH + kBtnGapMid;
+    if (pause_btn_) MoveWindow(pause_btn_, bx, by, bw, kPauseBtnH, TRUE);
+}
+
+// Draws everything in the left sidebar except the two real buttons: title,
+// STATUS (dot + text), TIME, STATS — all GDI text at fixed Y offsets, see
+// the header comment on BuildLeftPanel() for why these aren't child HWNDs.
+void HomRecMainWindow::DrawLeftPanel(HDC hdc) {
+    FillRect(hdc, &left_panel_rect_, brushes_.surface);
+    SetBkMode(hdc, TRANSPARENT);
+    int cx = left_panel_rect_.left + kPad;
+    int cw = kLeftPanelW - 2 * kPad;
+
+    auto drawLine = [&](int y, int h, HFONT font, COLORREF color, const std::wstring &text, UINT flags = DT_LEFT) {
+        RECT r = { cx, left_panel_rect_.top + y, cx + cw, left_panel_rect_.top + y + h };
+        SelectObject(hdc, font);
+        SetTextColor(hdc, color);
+        DrawTextW(hdc, text.c_str(), -1, &r, flags | DT_VCENTER | DT_SINGLELINE);
+    };
+
+    drawLine(kTitleY, kTitleH, font_title_, theme_.accent, L"HomRec", DT_CENTER);
+    drawLine(kTitleY + kTitleH, kVersionH, font_version_,
+             theme_.text_secondary, L"v" HR_APP_VERSION_W, DT_CENTER);
+
+    int y = kTitleY + kTitleH + kVersionH + kBtnGapAbove + kStartBtnH + kBtnGapMid + kPauseBtnH;
+    y += kStatusGap;
+    drawLine(y, kSectionLblH, font_section_, theme_.accent, WideFromNarrow(lang_.Get("status")));
+    {
+        int rowY = left_panel_rect_.top + y + kSectionLblH + kStatusRowGap;
+        RECT dotR = { cx, rowY, cx + 24, rowY + kStatusRowH };
+        SelectObject(hdc, font_dot_);
+        SetTextColor(hdc, status_dot_color_);
+        DrawTextW(hdc, L"\u2B24", -1, &dotR, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        RECT textR = { cx + 26, rowY, cx + cw, rowY + kStatusRowH };
+        SelectObject(hdc, font_body_);
+        SetTextColor(hdc, theme_.text);
+        DrawTextW(hdc, status_text_.c_str(), -1, &textR, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    y += kSectionLblH + kStatusRowGap + kStatusRowH;
+
+    y += kTimerGap;
+    drawLine(y, kSectionLblH, font_section_, theme_.accent, WideFromNarrow(lang_.Get("time")));
+    drawLine(y + kSectionLblH + kTimeValGap, kTimeValH, font_time_, theme_.accent, time_text_, DT_CENTER);
+    y += kSectionLblH + kTimeValGap + kTimeValH;
+
+    y += kStatsGap;
+    drawLine(y, kSectionLblH, font_section_, theme_.accent, WideFromNarrow(lang_.Get("stats")));
+    drawLine(y + kSectionLblH, kStatsLineH, font_mono_, theme_.text, fps_text_);
+    drawLine(y + kSectionLblH + kStatsLineH, kStatsLineH, font_mono_, theme_.text, res_text_);
+}
+
+// Preview container border/header ("● Live Preview") + inner frame bg,
+// matches ui_mixin.py's preview_container/preview_header/preview_frame.
+void HomRecMainWindow::DrawPreviewChrome(HDC hdc) {
+    FillRect(hdc, &preview_container_rect_, brushes_.surface_light);
+    FillRect(hdc, &preview_header_rect_, brushes_.surface_light);
+
+    RECT headerText = preview_header_rect_;
+    headerText.left += 10;
+    SetBkMode(hdc, TRANSPARENT);
+    SelectObject(hdc, font_header_);
+    SetTextColor(hdc, theme_.accent);
+    std::wstring live = L"\u25CF " + WideFromNarrow(lang_.Get("live_preview"));
+    DrawTextW(hdc, live.c_str(), -1, &headerText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT fpsText = preview_header_rect_;
+    fpsText.right -= 10;
+    SelectObject(hdc, font_small_);
+    SetTextColor(hdc, theme_.text_secondary);
+    DrawTextW(hdc, fps_text_.c_str(), -1, &fpsText, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+    FillRect(hdc, &preview_rect_, brushes_.preview_bg);
+}
+
+// Bottom status strip: dot, file/status text (left), "made by" + version (right).
+void HomRecMainWindow::DrawBottomBar(HDC hdc) {
+    FillRect(hdc, &bottom_bar_rect_, brushes_.surface);
+    SetBkMode(hdc, TRANSPARENT);
+
+    RECT dotR = bottom_bar_rect_;
+    dotR.left += kOuterPad;
+    dotR.right = dotR.left + 20;
+    SelectObject(hdc, font_dot_);
+    SetTextColor(hdc, status_dot_color_);
+    DrawTextW(hdc, L"\u2B24", -1, &dotR, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT fileR = bottom_bar_rect_;
+    fileR.left = dotR.right + 6;
+    fileR.right -= 220;
+    SelectObject(hdc, font_bar_);
+    SetTextColor(hdc, theme_.text);
+    DrawTextW(hdc, file_label_text_.c_str(), -1, &fileR, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT verR = bottom_bar_rect_;
+    verR.right -= kOuterPad;
+    verR.left = verR.right - 60;
+    SelectObject(hdc, font_small_);
+    SetTextColor(hdc, theme_.text_secondary);
+    DrawTextW(hdc, L"v" HR_APP_VERSION_W, -1, &verR, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT madeR = bottom_bar_rect_;
+    madeR.right = verR.left - 10;
+    madeR.left = madeR.right - 160;
+    SelectObject(hdc, font_bar_bold_);
+    SetTextColor(hdc, theme_.text_secondary);
+    DrawTextW(hdc, WideFromNarrow(lang_.Get("made_by")).c_str(), -1, &madeR, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+}
+
+void HomRecMainWindow::DrawStartButton(DRAWITEMSTRUCT *dis) {
+    HBRUSH bg = CreateSolidBrush(start_btn_bg_);
+    FillRect(dis->hDC, &dis->rcItem, bg);
+    DeleteObject(bg);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SelectObject(dis->hDC, font_btn_start_);
+    // Python draws button text in the theme's "bg" color (dark text on the
+    // light success/error button), not white — see ui_mixin.py's
+    // record_btn fg=self.colors["bg"].
+    SetTextColor(dis->hDC, theme_.bg);
+    DrawTextW(dis->hDC, start_btn_text_.c_str(), -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (dis->itemState & ODS_FOCUS) DrawFocusRect(dis->hDC, &dis->rcItem);
+}
+
+void HomRecMainWindow::DrawPauseButton(DRAWITEMSTRUCT *dis) {
+    bool enabled = (dis->itemState & ODS_DISABLED) == 0 && IsWindowEnabled(pause_btn_);
+    HBRUSH bg = CreateSolidBrush(enabled ? pause_btn_bg_ : theme_.surface_light);
+    FillRect(dis->hDC, &dis->rcItem, bg);
+    DeleteObject(bg);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SelectObject(dis->hDC, font_btn_pause_);
+    SetTextColor(dis->hDC, enabled ? theme_.bg : theme_.text_secondary);
+    DrawTextW(dis->hDC, pause_btn_text_.c_str(), -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (dis->itemState & ODS_FOCUS) DrawFocusRect(dis->hDC, &dis->rcItem);
+}
+
+void HomRecMainWindow::OnEraseBkgnd(HDC /*hdc*/) {
+    // No-op: OnPaint() fills the entire client rect itself (bg + sidebar +
+    // preview chrome + bottom bar), so letting DefWindowProc's default
+    // erase run first would just cause visible flicker on resize.
+}
+
 void HomRecMainWindow::OnPaint() {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd_, &ps);
@@ -455,25 +808,16 @@ void HomRecMainWindow::OnPaint() {
     GetClientRect(hwnd_, &client);
     FillRect(hdc, &client, brushes_.bg);
 
+    DrawLeftPanel(hdc);
+    DrawPreviewChrome(hdc);
     RenderPreviewFrame(hdc);
+    DrawBottomBar(hdc);
 
     EndPaint(hwnd_, &ps);
 }
 
 void HomRecMainWindow::OnSize(int width, int height) {
-    // Leave room for the overlays sidebar when it's visible. Its own HWND
-    // doesn't reflow (see overlays_dock_panel.h), so this only keeps the
-    // *preview* from drawing underneath it — accurate as long as the
-    // window stays near its create-time size, same caveat as AudioPanel.
-    int right_margin = state_.show_overlays_panel ? (12 + 232) : 12;
-    RECT preview = { 12, 84, width - right_margin, height - 130 };
-    preview_rect_ = preview;
-    if (audio_panel_) {
-        // AudioPanel doesn't expose a Resize() yet (see audio_panel.h) —
-        // re-positioning its child controls here would need that method
-        // added; for now it stays at its create-time rect. Flagging rather
-        // than silently leaving this comment out.
-    }
+    ComputeLayout(width, height);
     InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
@@ -482,6 +826,8 @@ void HomRecMainWindow::OnHScroll(HWND ctrl, int pos) {
 }
 
 void HomRecMainWindow::OnDrawItem(DRAWITEMSTRUCT *dis) {
+    if (dis->hwndItem == start_btn_) { DrawStartButton(dis); return; }
+    if (dis->hwndItem == pause_btn_) { DrawPauseButton(dis); return; }
     if (audio_panel_) audio_panel_->HandleDrawItem(dis);
 }
 
@@ -491,15 +837,34 @@ void HomRecMainWindow::OnTimer(UINT_PTR id) {
     } else if (id == kStatsTimerId) {
         if (rec_) rec_->PollStats();
         if (audio_panel_) audio_panel_->PollLevels();
-        if (status_label_) {
-            std::wstring status = state_.recording
-                ? (state_.paused ? L"Paused — " : L"Recording — ") +
-                  (rec_ ? rec_->elapsed_formatted() : L"")
-                : L"Ready";
-            SetWindowTextW(status_label_, status.c_str());
+
+        // Matches ui_mixin.py's _update_stats(): time_label/fps_label/
+        // res_label/file_label all get re-.config()'d here; we just update
+        // the fields DrawLeftPanel()/DrawPreviewChrome()/DrawBottomBar()
+        // read, then repaint.
+        if (state_.recording) {
+            time_text_ = rec_ ? rec_->elapsed_formatted() : L"00:00:00";
+            {
+                wchar_t fpsBuf[16];
+                swprintf(fpsBuf, 16, L"%.1f", rec_ ? rec_->current_fps() : 0.0);
+                fps_text_ = WideFromNarrow(lang_.Get("fps")) + L" " + fpsBuf;
+            }
+            res_text_ = WideFromNarrow(lang_.Get("resolution")) + L" " +
+                        std::to_wstring(rec_ ? rec_->capture_width() : 0) + L"x" +
+                        std::to_wstring(rec_ ? rec_->capture_height() : 0);
+            file_label_text_ = state_.paused
+                ? (WideFromNarrow(lang_.Get("paused")) + L" \u2014 " + time_text_)
+                : (WideFromNarrow(lang_.Get("recording")) + L" \u2014 " + time_text_);
+        } else {
+            fps_text_.clear();
+            res_text_.clear();
         }
+        InvalidateRect(hwnd_, &left_panel_rect_, FALSE);
+        InvalidateRect(hwnd_, &bottom_bar_rect_, FALSE);
+        InvalidateRect(hwnd_, &preview_header_rect_, FALSE);
     }
 }
+
 
 void HomRecMainWindow::OnCommand(int id) {
     switch (id) {
@@ -517,7 +882,7 @@ void HomRecMainWindow::OnCommand(int id) {
             ToggleAlwaysOnTop();
             break;
         case ID_VIEW_FULLSCREEN:
-            ShowWindow(hwnd_, IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE);
+            ToggleFullscreen();
             break;
         case ID_THEME_DARK:
             state_.current_theme = "dark";
@@ -534,6 +899,16 @@ void HomRecMainWindow::OnCommand(int id) {
             break;
         case ID_SETTINGS_ADVANCED:
             ShowAdvancedSettingsDialog(hwnd_, hInstance_, state_);
+            // Hotkey strings may have just changed; RegisterHotKey only
+            // happens once at hr_hk_start(), so re-apply by stopping and
+            // restarting the manager rather than trying to hot-swap live
+            // (see hr_hk_configure()'s doc comment in hr_hotkey.cpp).
+            if (hotkey_handle_) {
+                hr_hk_stop(hotkey_handle_);
+                hr_hk_destroy(hotkey_handle_);
+                hotkey_handle_ = nullptr;
+            }
+            SetupHotkeys();
             break;
         case ID_OVERLAYS_MANAGE:
             ShowOverlayManager(hwnd_, hInstance_, state_);
