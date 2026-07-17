@@ -31,7 +31,14 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32
 # Static-link the MinGW runtime (same idea as build_native.py's
 # BASE_LDFLAGS) so hr.exe doesn't need libgcc_s_seh-1.dll/libstdc++-6.dll/
 # libwinpthread-1.dll present on the target machine.
-LDFLAGS  ?= -municode -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bdynamic
+# NOTE: no -municode here (unlike CXXFLAGS) — wxIMPLEMENT_APP (win_main.cpp)
+# always generates an ANSI WinMain() internally (it converts to wide args
+# itself via GetCommandLineW()), never a wWinMain(). -municode forces MinGW's
+# CRT startup stub to look for wWinMain specifically, which doesn't exist,
+# and the link fails with "undefined reference to `wWinMain'". UNICODE/
+# _UNICODE (still in CXXFLAGS) are what actually matter for wx/Win32 to use
+# the wide API — they're a compile-time macro, unrelated to this.
+LDFLAGS  ?= -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bdynamic
 LDLIBS   := -lcomctl32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet \
             -ld3d11 -ldxgi -lpdh -lwinmm -lole32 -luuid -llua
 
@@ -42,7 +49,7 @@ LDLIBS   := -lcomctl32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet \
 # harmless and keeps this Makefile simple.
 WX_CONFIG ?= wx-config
 WX_CFLAGS ?= $(shell $(WX_CONFIG) --cxxflags 2>/dev/null)
-WX_LIBS   ?= $(shell $(WX_CONFIG) --libs core,base,adv 2>/dev/null)
+WX_LIBS   ?= $(shell $(WX_CONFIG) --libs std,adv 2>/dev/null)
 CXXFLAGS  += $(WX_CFLAGS)
 LDLIBS    += $(WX_LIBS)
 
