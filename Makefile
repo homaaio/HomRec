@@ -4,19 +4,47 @@
 # This REPLACES the PyInstaller step (which packaged homrec.py into
 # hr.exe) — there is no Python involved in this build at all anymore.
 #
-# Usage:
-#   On Windows with MinGW-w64 g++ on PATH:      make
-#   Cross-compiling from Linux/macOS:            make CXX=x86_64-w64-mingw32-g++ WINDRES=x86_64-w64-mingw32-windres
+# The UI shell (src/ui/main_frame.*) is wxWidgets — a real widget toolkit
+# (comparable to Tkinter's Frame/Label/Button model), replacing the earlier
+# hand-rolled GDI version that couldn't get font sizing/DPI or the live
+# preview right. wxWidgets must be installed to build:
+#
+#   MSYS2 (native Windows build):
+#     pacman -S mingw-w64-x86_64-wxwidgets3.2-msw   (or the ucrt64 variant)
+#     make                                            # wx-config is on PATH
+#
+#   Cross-compiling from Linux/macOS with a MinGW-w64 wxWidgets build:
+#     make CXX=x86_64-w64-mingw32-g++ WINDRES=x86_64-w64-mingw32-windres \
+#          WX_CONFIG=x86_64-w64-mingw32-wx-config
+#
+#   No wx-config available (manually-built/vendored wxWidgets): skip
+#   WX_CONFIG entirely and set WX_CFLAGS/WX_LIBS yourself, e.g.:
+#     make WX_CONFIG= WX_CFLAGS="-Ic:/wx/include -Ic:/wx/lib/mswu" \
+#          WX_LIBS="-Lc:/wx/lib -lwxmsw32u_core -lwxbase32u ..."
+#   (exact library list depends on your wx build — check its
+#   build/msw/*.txt or the wx-config output from a matching build if you
+#   have one elsewhere, and copy the --libs line.)
 
 CXX      ?= g++
 CC       ?= gcc
-CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -municode -D_WIN32_WINNT=0x0601 -Isrc
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc
 # Static-link the MinGW runtime (same idea as build_native.py's
 # BASE_LDFLAGS) so hr.exe doesn't need libgcc_s_seh-1.dll/libstdc++-6.dll/
 # libwinpthread-1.dll present on the target machine.
 LDFLAGS  ?= -municode -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bdynamic
 LDLIBS   := -lcomctl32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet \
             -ld3d11 -ldxgi -lpdh -lwinmm -lole32 -luuid -llua
+
+# wxWidgets — used only by src/win_main.cpp and src/ui/main_frame.cpp.
+# Everything else (RecordingController, AudioPanel/OverlaysDockPanel's
+# native controls, the various dialogs, the engine .cpp files) is plain
+# Win32/C++ and doesn't need these flags, but adding them project-wide is
+# harmless and keeps this Makefile simple.
+WX_CONFIG ?= wx-config
+WX_CFLAGS ?= $(shell $(WX_CONFIG) --cxxflags 2>/dev/null)
+WX_LIBS   ?= $(shell $(WX_CONFIG) --libs core,base,adv 2>/dev/null)
+CXXFLAGS  += $(WX_CFLAGS)
+LDLIBS    += $(WX_LIBS)
 
 # Lua 5.4 is NOT vendored in this repo — see README_PHASE9.md for how
 # to get it (vcpkg or the amalgamation from lua.org). If it's somewhere
@@ -28,7 +56,7 @@ LDFLAGS += $(LUA_LDFLAGS)
 
 SRCS := \
     src/win_main.cpp \
-    src/ui/main_window.cpp \
+    src/ui/main_frame.cpp \
     src/ui/theme.cpp \
     src/ui/language.cpp \
     src/ui/recording_controller.cpp \

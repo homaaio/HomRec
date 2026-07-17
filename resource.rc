@@ -1,7 +1,7 @@
 // resource.rc
 //
-// Provides resource ID 1 (MAKEINTRESOURCEW(1)) used by src/ui/main_window.cpp's
-// RegisterWindowClass(). Points at the existing icons/main.ico in this
+// Provides resource ID 1 (loaded as wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE)
+// by src/ui/main_frame.cpp). Points at the existing icons/main.ico in this
 // same project folder (this file lives at the HomRec-main root now,
 // alongside icons/ and src/ — not in a separate subfolder).
 1 ICON "icons/main.ico"
