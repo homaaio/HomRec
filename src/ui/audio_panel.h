@@ -1,56 +1,43 @@
-// audio_panel.h — Phase 4
+// audio_panel.h — wxWidgets rewrite of the raw-Win32 mixer strip.
 //
-// Port of homrec_app/dialogs/audio_panel.py + audio_level_meter.py (the
-// live copies — see the corrected audit note in the migration plan; the
-// top-level files of the same name are dead code, not these). Level meter
-// coloring/peak-decay physics reuse hr_lerp_color / hr_peak_decay verbatim
-// instead of re-deriving them, since those exports already mirror
-// AudioLevelMeter._lerp_color / set_level exactly.
+// Was CreateWindowExW'd Trackbar/BUTTON/owner-drawn-STATIC controls parented
+// onto a plain STATIC container — never themed at all, which is why it sat
+// on a plain white background below a now-themed preview. Rebuilt as real
+// wx widgets (ColorSlider/ColorButton from themed_widgets.h, a wx-painted
+// level meter) so it can actually pick up the app's theme colors.
 #pragma once
 
-#include <windows.h>
+#include <wx/wx.h>
 #include "app_state.h"
+#include "theme.h"
+#include "themed_widgets.h"
 
-class RecordingController; // for hr_audio_get_levels access via the controller
+class RecordingController; // kept for interface parity; not otherwise used here
 
-class AudioLevelMeterCtl {
+// Live mic/system level meter — flat filled bar + white peak-hold line,
+// same physics as the original (hr_lerp_color/hr_peak_decay), just
+// wx-painted instead of drawn from a WM_DRAWITEM handler.
+class LevelMeterPanel : public wxPanel {
 public:
-    // Creates a child control (custom-drawn) at the given rect. `id` is the
-    // control ID used in WM_DRAWITEM/timer dispatch.
-    HWND Create(HWND parent, HINSTANCE hInst, int id, int x, int y, int w, int h);
-    void SetLevel(int level_0_100); // drives peak/decay via hr_peak_decay, then repaints
-    void Draw(HDC hdc, const RECT &rect) const;
-    HWND hwnd() const { return hwnd_; }
+    explicit LevelMeterPanel(wxWindow *parent);
+    void SetLevel(int level_0_100);
+    void SetBgColour(wxColour c) { bg_ = c; Refresh(); }
 
 private:
-    HWND hwnd_ = nullptr;
-    int level_ = 0;
-    int peak_ = 0;
-    int peak_decay_ = 0;
+    void OnPaint(wxPaintEvent &evt);
+    int level_ = 0, peak_ = 0, peak_decay_ = 0;
+    wxColour bg_ = wxColour(17, 17, 27);
 };
 
-class AudioPanel {
+class AudioPanel : public wxPanel {
 public:
-    AudioPanel(AppState &state, RecordingController &rec);
+    AudioPanel(wxWindow *parent, AppState &state, RecordingController &rec);
 
-    HWND Create(HWND parent, HINSTANCE hInst, int x, int y, int w, int h);
+    void ApplyTheme(const ThemeColors &theme);
 
     // Called on the same ~50ms timer tick the meters use (mirrors
     // `_poll_audio_levels`'s `after(50, ...)` loop).
     void PollLevels();
-
-    void OnCommand(int id);
-    void OnHScroll(HWND ctrlHwnd, int pos);
-
-    // Routes a WM_DRAWITEM (forwarded from main_window's WndProc, since
-    // owner-draw notifications go to the PARENT window, not the control
-    // itself) to whichever meter it's actually for. Returns true if this
-    // panel handled it.
-    bool HandleDrawItem(DRAWITEMSTRUCT *dis) {
-        if (dis->hwndItem == mic_meter_.hwnd()) { mic_meter_.Draw(dis->hDC, dis->rcItem); return true; }
-        if (dis->hwndItem == sys_meter_.hwnd()) { sys_meter_.Draw(dis->hDC, dis->rcItem); return true; }
-        return false;
-    }
 
     float mic_volume() const { return mic_vol_; }
     float sys_volume() const { return sys_vol_; }
@@ -58,14 +45,21 @@ public:
     bool sys_muted() const { return sys_muted_; }
 
 private:
+    void OnMicSlider(wxCommandEvent &evt);
+    void OnSysSlider(wxCommandEvent &evt);
+    void OnMicMute(wxCommandEvent &evt);
+    void OnSysMute(wxCommandEvent &evt);
+    void PushVolumes();
+
     AppState &state_;
     RecordingController &rec_;
 
-    HWND hwnd_ = nullptr;
-    HWND mic_slider_ = nullptr, sys_slider_ = nullptr;
-    HWND mic_mute_btn_ = nullptr, sys_mute_btn_ = nullptr;
-    AudioLevelMeterCtl mic_meter_, sys_meter_;
+    wxStaticText *mic_label_ = nullptr, *sys_label_ = nullptr;
+    ColorSlider *mic_slider_ = nullptr, *sys_slider_ = nullptr;
+    ColorButton *mic_mute_btn_ = nullptr, *sys_mute_btn_ = nullptr;
+    LevelMeterPanel *mic_meter_ = nullptr, *sys_meter_ = nullptr;
 
+    ThemeColors theme_;
     float mic_vol_ = 1.0f, sys_vol_ = 1.0f;
     bool mic_muted_ = false, sys_muted_ = false;
 };
