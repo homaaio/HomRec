@@ -11,13 +11,14 @@
 // StretchDIBits call, which is also what was silently failing to show any
 // preview at all.
 //
-// Scope of this pass: only the shell (menu, left sidebar, preview,
-// bottom bar) moved to wx. RecordingController/AudioPanel/
-// OverlaysDockPanel/the various dialogs (Settings, Advanced Settings,
-// Welcome, Console, Overlay Manager, Log Viewer, PC Analytics, Window
-// Picker) are untouched raw-Win32 code — a wxFrame is still a real HWND
-// under the hood on Windows (GetHandle()), so they mount onto it/get
-// launched with it as HWND parent exactly like before. Porting each of
+// Scope of this pass: the shell (menu, left sidebar, preview, bottom bar),
+// AudioPanel (mic/desktop mixer strip), and the Settings dialog are now
+// wx. RecordingController/OverlaysDockPanel/the remaining dialogs
+// (Advanced Settings, Welcome, Console, Overlay Manager, Log Viewer, PC
+// Analytics, Window Picker) are still untouched raw-Win32 code — a wxFrame
+// is still a real HWND under the hood on Windows (GetHandle()), so they
+// mount onto it/get launched with it as HWND parent exactly like before.
+// Porting each of
 // those to wx widgets too is follow-up work, not done here.
 #pragma once
 
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include "app_state.h"
 #include "theme.h"
+#include "themed_widgets.h"
 #include "language.h"
 #include "recording_controller.h"
 #include "audio_panel.h"
@@ -61,48 +63,9 @@ enum MenuCommandId {
     ID_VIEW_OVERLAYS_PANEL  = 1021,
 };
 
-wxColour FromColorref(COLORREF c);
-
-// Small colored-circle indicator, replaces the hand-drawn "⬤" glyph — one
-// widget, reused for both the sidebar STATUS row and the bottom bar dot.
-// Flat, explicitly-colored button — used instead of plain wxButton because
-// native-themed wxButton on Windows can silently ignore
-// SetBackgroundColour() depending on whether UxTheme is active, which
-// would just reproduce the "custom colors don't show up" problem this
-// whole rewrite is meant to fix. This paints itself directly, guaranteeing
-// the START(green)/STOP(red)/PAUSE(yellow)/RESUME(green) colors always
-// show, same as Tkinter's flat-relief buttons in the Python original.
-class ColorButton : public wxPanel {
-public:
-    ColorButton(wxWindow *parent, wxWindowID id, const wxString &label);
-    void SetColours(wxColour bg, wxColour fg);
-    void SetLabelText2(const wxString &label) { label_ = label; Refresh(); }
-    void Enable2(bool enabled);
-    bool IsEnabled2() const { return enabled_; }
-
-private:
-    void OnPaint(wxPaintEvent &evt);
-    void OnLeftUp(wxMouseEvent &evt);
-    void OnEnter(wxMouseEvent &evt);
-    void OnLeave(wxMouseEvent &evt);
-
-    wxString label_;
-    wxColour bg_, fg_, disabled_bg_;
-    bool enabled_ = true;
-    bool hover_ = false;
-    wxWindowID cmd_id_;
-};
-
-class StatusDot : public wxPanel {
-public:
-    StatusDot(wxWindow *parent, wxColour color, int diameter = 14);
-    void SetColor(wxColour color);
-
-private:
-    void OnPaint(wxPaintEvent &evt);
-    wxColour color_;
-    int diameter_;
-};
+// ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
+// and settings_dialog (also now wx-based) can share them instead of
+// duplicating — see that header for their docs.
 
 // Draws the live capture preview from RecordingController::GetPreviewFrame's
 // raw RGB24 buffer (converted to a wxImage/wxBitmap and scaled to fit) —
@@ -168,14 +131,10 @@ private:
     std::unique_ptr<OverlaysDockPanel> overlays_panel_;
     std::unique_ptr<LuaPluginEngine> plugins_;
 
-    // Raw-Win32 AudioPanel/OverlaysDockPanel still create raw child HWNDs
-    // (sliders, owner-drawn level meters) — they need a real HWND to
-    // parent onto and to receive WM_HSCROLL/WM_DRAWITEM, which Windows
-    // delivers to a control's *immediate* parent HWND, not the top-level
-    // frame. These wxPanels exist purely to be that immediate parent, via
-    // NativeHostPanel's MSWWindowProc override forwarding those two
-    // messages back to audio_panel_.
-    class NativeHostPanel *audio_host_ = nullptr;
+    // OverlaysDockPanel is still raw-Win32 (creates real child HWNDs —
+    // list/buttons — that need WM_DRAWITEM delivered to their immediate
+    // parent); this wx panel exists purely to be that immediate parent.
+    // AudioPanel no longer needs one of these — it's real wx widgets now.
     class NativeHostPanel *overlays_host_ = nullptr;
 
     wxPanel *left_panel_ = nullptr;

@@ -31,34 +31,21 @@ extern "C" {
     int hr_settings_get_flag(const void *h, const char *name);
 }
 
-wxColour FromColorref(COLORREF c) {
-    return wxColour(GetRValue(c), GetGValue(c), GetBValue(c));
-}
+// FromColorref/ColorButton/StatusDot moved to themed_widgets.cpp.
 
-namespace {
-// Only one main frame exists per process — the hotkey manager's callbacks
-// (hr_hotkey.cpp's HR_HK_CB is a plain no-arg function pointer, see its
-// header comment) fire on a background thread and need a way back to "the"
-// frame to wxQueueEvent() onto the UI thread; this is it.
-HomRecMainFrame *g_frame = nullptr;
-
-constexpr int kOuterPad   = 15;
-constexpr int kLeftPanelW = 240;
-
-wxDEFINE_EVENT(EVT_HOTKEY_START_STOP, wxThreadEvent);
-wxDEFINE_EVENT(EVT_HOTKEY_PAUSE, wxThreadEvent);
-wxDEFINE_EVENT(EVT_HOTKEY_FULLSCREEN, wxThreadEvent);
-
-void HotkeyStartStopThunk() { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_START_STOP)); }
-void HotkeyPauseThunk()     { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_PAUSE)); }
-void HotkeyFullscreenThunk(){ if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
-
-// Raw-Win32 AudioPanel/OverlaysDockPanel create real child HWNDs (trackbars,
+// Raw-Win32 OverlaysDockPanel creates real child HWNDs (list/buttons)
 // owner-drawn level meters) that need WM_HSCROLL/WM_DRAWITEM delivered —
 // Windows sends both to the control's *immediate parent* HWND, not the
 // top-level frame. This wxPanel subclass exists purely to be that immediate
 // parent and forward the two messages on, via MSWWindowProc (the same hook
 // wx itself uses internally for this sort of thing).
+//
+// Defined here at global/file scope (NOT inside the anonymous namespace
+// below) because main_frame.h forward-declares it at global scope too
+// (`class NativeHostPanel *overlays_host_`) — a class defined inside an
+// anonymous namespace is a different, invisible type from one of the same
+// name forward-declared at global scope, which is exactly what produced
+// the "invalid use of incomplete type" build errors.
 class NativeHostPanel : public wxPanel {
 public:
     explicit NativeHostPanel(wxWindow *parent) : wxPanel(parent) {}
@@ -79,6 +66,24 @@ protected:
     }
 };
 
+namespace {
+// Only one main frame exists per process — the hotkey manager's callbacks
+// (hr_hotkey.cpp's HR_HK_CB is a plain no-arg function pointer, see its
+// header comment) fire on a background thread and need a way back to "the"
+// frame to wxQueueEvent() onto the UI thread; this is it.
+HomRecMainFrame *g_frame = nullptr;
+
+constexpr int kOuterPad   = 15;
+constexpr int kLeftPanelW = 240;
+
+wxDEFINE_EVENT(EVT_HOTKEY_START_STOP, wxThreadEvent);
+wxDEFINE_EVENT(EVT_HOTKEY_PAUSE, wxThreadEvent);
+wxDEFINE_EVENT(EVT_HOTKEY_FULLSCREEN, wxThreadEvent);
+
+void HotkeyStartStopThunk() { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_START_STOP)); }
+void HotkeyPauseThunk()     { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_PAUSE)); }
+void HotkeyFullscreenThunk(){ if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
+
 class TrayIcon : public wxTaskBarIcon {
 public:
     explicit TrayIcon(HomRecMainFrame *frame) : frame_(frame) {}
@@ -92,85 +97,6 @@ private:
     HomRecMainFrame *frame_;
 };
 } // namespace
-
-// ---------------------------------------------------------------------------
-// ColorButton
-// ---------------------------------------------------------------------------
-ColorButton::ColorButton(wxWindow *parent, wxWindowID id, const wxString &label)
-    : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE),
-      label_(label), bg_(*wxGREEN), fg_(*wxBLACK), disabled_bg_(200, 200, 200), cmd_id_(id) {
-    SetBackgroundStyle(wxBG_STYLE_PAINT);
-    SetCursor(wxCursor(wxCURSOR_HAND));
-    Bind(wxEVT_PAINT, &ColorButton::OnPaint, this);
-    Bind(wxEVT_LEFT_UP, &ColorButton::OnLeftUp, this);
-    Bind(wxEVT_ENTER_WINDOW, &ColorButton::OnEnter, this);
-    Bind(wxEVT_LEAVE_WINDOW, &ColorButton::OnLeave, this);
-}
-
-void ColorButton::SetColours(wxColour bg, wxColour fg) {
-    bg_ = bg; fg_ = fg;
-    Refresh();
-}
-
-void ColorButton::Enable2(bool enabled) {
-    enabled_ = enabled;
-    SetCursor(wxCursor(enabled ? wxCURSOR_HAND : wxCURSOR_ARROW));
-    Refresh();
-}
-
-void ColorButton::OnEnter(wxMouseEvent &) { hover_ = true; Refresh(); }
-void ColorButton::OnLeave(wxMouseEvent &) { hover_ = false; Refresh(); }
-
-void ColorButton::OnLeftUp(wxMouseEvent &evt) {
-    if (!enabled_) return;
-    wxCommandEvent click(wxEVT_BUTTON, cmd_id_);
-    click.SetEventObject(this);
-    ProcessWindowEvent(click);
-    evt.Skip();
-}
-
-void ColorButton::OnPaint(wxPaintEvent &) {
-    wxAutoBufferedPaintDC dc(this);
-    wxColour fill = enabled_ ? bg_ : disabled_bg_;
-    if (enabled_ && hover_) {
-        // Slight darken on hover so flat buttons still give click feedback,
-        // matching Tkinter's default active-state relief change.
-        fill = wxColour(std::max(0, fill.Red() - 20), std::max(0, fill.Green() - 20), std::max(0, fill.Blue() - 20));
-    }
-    dc.SetBrush(wxBrush(fill));
-    dc.SetPen(*wxTRANSPARENT_PEN);
-    dc.DrawRectangle(GetClientRect());
-    dc.SetTextForeground(enabled_ ? fg_ : wxColour(120, 120, 120));
-    dc.SetFont(GetFont());
-    wxSize ext = dc.GetTextExtent(label_);
-    wxSize cs = GetClientSize();
-    dc.DrawText(label_, (cs.GetWidth() - ext.GetWidth()) / 2, (cs.GetHeight() - ext.GetHeight()) / 2);
-}
-
-// ---------------------------------------------------------------------------
-// StatusDot
-// ---------------------------------------------------------------------------
-StatusDot::StatusDot(wxWindow *parent, wxColour color, int diameter)
-    : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(diameter, diameter), wxBORDER_NONE),
-      color_(color), diameter_(diameter) {
-    SetBackgroundStyle(wxBG_STYLE_PAINT);
-    Bind(wxEVT_PAINT, &StatusDot::OnPaint, this);
-}
-
-void StatusDot::SetColor(wxColour color) {
-    color_ = color;
-    Refresh();
-}
-
-void StatusDot::OnPaint(wxPaintEvent &) {
-    wxAutoBufferedPaintDC dc(this);
-    wxColour parentBg = GetParent() ? GetParent()->GetBackgroundColour() : *wxWHITE;
-    dc.SetBackground(wxBrush(parentBg));
-    dc.Clear();
-    dc.SetBrush(wxBrush(color_));
-    dc.SetPen(*wxTRANSPARENT_PEN);
-    dc.DrawEllipse(0, 0, diameter_, diameter_);
-}
 
 // ---------------------------------------------------------------------------
 // PreviewPanel
@@ -444,17 +370,11 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     preview_container_->SetSizer(pcSizer);
     rightColumn->Add(preview_container_, 1, wxEXPAND);
 
-    // Audio mixer strip lives below the preview, still the raw-Win32
-    // AudioPanel (sliders + owner-drawn level meters) — see
-    // NativeHostPanel's class comment for why it needs its own host HWND.
-    audio_host_ = new NativeHostPanel(parent);
-    audio_host_->SetMinSize(wxSize(-1, 96));
-    audio_panel_ = std::make_unique<AudioPanel>(state_, *rec_);
-    HWND audioHwnd = audio_panel_->Create((HWND)audio_host_->GetHandle(), wxGetInstance(), 0, 0, 900, 90);
-    (void)audioHwnd;
-    audio_host_->on_hscroll = [this](HWND ctrl, int pos) { if (audio_panel_) audio_panel_->OnHScroll(ctrl, pos); };
-    audio_host_->on_drawitem = [this](DRAWITEMSTRUCT *dis) { if (audio_panel_) audio_panel_->HandleDrawItem(dis); };
-    rightColumn->Add(audio_host_, 0, wxEXPAND | wxTOP, 15);
+    // Audio mixer strip lives below the preview — real wx widgets now
+    // (ColorSlider/ColorButton/LevelMeterPanel from audio_panel.h), no
+    // native-HWND hosting needed the way OverlaysDockPanel below still does.
+    audio_panel_ = std::make_unique<AudioPanel>(parent, state_, *rec_);
+    rightColumn->Add(audio_panel_.get(), 0, wxEXPAND | wxTOP, 15);
 
     parentSizer->Add(rightColumn, 1, wxEXPAND);
 
@@ -544,6 +464,7 @@ void HomRecMainFrame::ApplyThemeColours() {
 
     if (start_color_btn_) start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
     if (pause_color_btn_) pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
+    if (audio_panel_) audio_panel_->ApplyTheme(theme_);
 
     Refresh(true);
 }
@@ -677,7 +598,7 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             state_.current_theme = "dark"; theme_ = GetBuiltinTheme("dark"); ApplyThemeColours(); break;
         case ID_THEME_LIGHT:
             state_.current_theme = "light"; theme_ = GetBuiltinTheme("light"); ApplyThemeColours(); break;
-        case ID_SETTINGS_OPEN: ShowSettingsDialog(GetHWND(), wxGetInstance(), state_); break;
+        case ID_SETTINGS_OPEN: ShowSettingsDialog(this, state_, theme_); break;
         case ID_SETTINGS_ADVANCED:
             ShowAdvancedSettingsDialog(GetHWND(), wxGetInstance(), state_);
             if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
