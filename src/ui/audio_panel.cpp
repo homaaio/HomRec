@@ -1,4 +1,5 @@
 #include "audio_panel.h"
+#include <wx/dcbuffer.h>
 #include <cstdint>
 #include <algorithm>
 
