@@ -34,7 +34,6 @@ static constexpr int HR_DX_ERROR   = -1;
 // ---------------------------------------------------------------------------
 // Dynamic loader for helper DLLs
 // ---------------------------------------------------------------------------
-#ifdef _WIN32
 
 // ---------------------------------------------------------------------------
 // PATCHED for static linking (see INTEGRATION_NOTES.md "internal DLL

@@ -198,7 +198,7 @@ HomRecMainFrame::HomRecMainFrame()
 
     ApplyThemeColours();
     ApplyLanguageText();
-    SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.error);
+    SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
 
     SetupTrayIcon();
     SetupHotkeys();
@@ -295,13 +295,13 @@ void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
     version_lbl_->SetFont(BodyFont());
     sizer->Add(version_lbl_, 0, wxEXPAND | wxTOP, 4);
 
-    start_color_btn_ = new ColorButton(left_panel_, ID_START_BTN, "\u25B6 START");
+    start_color_btn_ = new ColorButton(left_panel_, ID_START_BTN, wxString::FromUTF8("\u25B6 START"));
     start_color_btn_->SetFont(wxFont(wxFontInfo(11).FaceName("Segoe UI").Bold()));
     start_color_btn_->SetMinSize(wxSize(-1, 48));
     sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 25);
     Bind(wxEVT_BUTTON, &HomRecMainFrame::OnStartClicked, this, ID_START_BTN);
 
-    pause_color_btn_ = new ColorButton(left_panel_, ID_PAUSE_BTN, "\u23F8 PAUSE");
+    pause_color_btn_ = new ColorButton(left_panel_, ID_PAUSE_BTN, wxString::FromUTF8("\u23F8 PAUSE"));
     pause_color_btn_->SetFont(wxFont(wxFontInfo(10).FaceName("Segoe UI").Bold()));
     pause_color_btn_->SetMinSize(wxSize(-1, 32));
     pause_color_btn_->Enable2(false);
@@ -317,7 +317,7 @@ void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
 
     addSection(wxString::FromUTF8(lang_.Get("status")));
     auto *statusRow = new wxBoxSizer(wxHORIZONTAL);
-    status_dot_ = new StatusDot(left_panel_, FromColorref(theme_.error), 14);
+    status_dot_ = new StatusDot(left_panel_, FromColorref(theme_.text_secondary), 14);
     statusRow->Add(status_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
     status_lbl_ = new wxStaticText(left_panel_, wxID_ANY, wxString::FromUTF8(lang_.Get("ready")));
     status_lbl_->SetFont(BodyFont());
@@ -355,7 +355,7 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
 
     preview_header_ = new wxPanel(preview_container_, wxID_ANY, wxDefaultPosition, wxSize(-1, 30));
     auto *headerSizer = new wxBoxSizer(wxHORIZONTAL);
-    preview_title_lbl_ = new wxStaticText(preview_header_, wxID_ANY, "\u25CF " + wxString::FromUTF8(lang_.Get("live_preview")));
+    preview_title_lbl_ = new wxStaticText(preview_header_, wxID_ANY, wxString::FromUTF8("\u25CF ") + wxString::FromUTF8(lang_.Get("live_preview")));
     preview_title_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI").Bold()));
     headerSizer->Add(preview_title_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, 10);
     headerSizer->AddStretchSpacer(1);
@@ -398,7 +398,7 @@ void HomRecMainFrame::BuildBottomBar(wxWindow *parent, wxSizer *parentSizer) {
     bottom_bar_ = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, 32));
     auto *sizer = new wxBoxSizer(wxHORIZONTAL);
 
-    bottom_dot_ = new StatusDot(bottom_bar_, FromColorref(theme_.error), 12);
+    bottom_dot_ = new StatusDot(bottom_bar_, FromColorref(theme_.text_secondary), 12);
     sizer->Add(bottom_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT | wxRIGHT, 6);
     sizer->AddSpacer(kOuterPad - 6);
 
@@ -522,7 +522,7 @@ void HomRecMainFrame::DoStart() {
         wxMessageBox(wxString(err.c_str()), "HomRec", wxOK | wxICON_WARNING, this);
         return;
     }
-    start_color_btn_->SetLabelText2("\u25A0 STOP");
+    start_color_btn_->SetLabelText2(wxString::FromUTF8("\u25A0 STOP"));
     start_color_btn_->SetColours(FromColorref(theme_.error), FromColorref(theme_.bg));
     pause_color_btn_->Enable2(true);
     SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
@@ -530,19 +530,19 @@ void HomRecMainFrame::DoStart() {
 }
 
 void HomRecMainFrame::DoStop() {
-    SetStatusState("Saving\u2026", theme_.warning);
+    SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
-    if (file_lbl_) file_lbl_->SetLabel("Processing\u2026");
+    if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
     Update();
 
     rec_->Stop();
 
-    start_color_btn_->SetLabelText2("\u25B6 START");
+    start_color_btn_->SetLabelText2(wxString::FromUTF8("\u25B6 START"));
     start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
-    pause_color_btn_->SetLabelText2("\u23F8 PAUSE");
+    pause_color_btn_->SetLabelText2(wxString::FromUTF8("\u23F8 PAUSE"));
     pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
     pause_color_btn_->Enable2(false);
-    SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.error);
+    SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
     if (plugins_) plugins_->EmitHook("on_recording_stop");
 }
@@ -551,11 +551,11 @@ void HomRecMainFrame::DoPause() {
     if (!state_.recording) return;
     rec_->TogglePause();
     if (state_.paused) {
-        pause_color_btn_->SetLabelText2("\u25B6 RESUME");
+        pause_color_btn_->SetLabelText2(wxString::FromUTF8("\u25B6 RESUME"));
         pause_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
         SetStatusState(wxString::FromUTF8(lang_.Get("paused")), theme_.warning);
     } else {
-        pause_color_btn_->SetLabelText2("\u23F8 PAUSE");
+        pause_color_btn_->SetLabelText2(wxString::FromUTF8("\u23F8 PAUSE"));
         pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
         SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
     }
@@ -646,7 +646,7 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
         if (preview_fps_lbl_) preview_fps_lbl_->SetLabel(fps_lbl_ ? fps_lbl_->GetLabel() : wxString());
         if (file_lbl_) {
             wxString state_word = wxString::FromUTF8(lang_.Get(state_.paused ? "paused" : "recording"));
-            file_lbl_->SetLabel(state_word + " \u2014 " + t);
+            file_lbl_->SetLabel(state_word + wxString::FromUTF8(" \u2014 ") + t);
         }
     }
     left_panel_->Layout();

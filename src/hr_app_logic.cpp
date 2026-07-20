@@ -1,5 +1,5 @@
 /*
- * hr_app_logic.cpp  —  HomRec core application logic  (v1.6.2)
+ * hr_app_logic.cpp  -  HomRec core application logic  (v1.6.2)
  *
  * Содержит всю бизнес-логику, вынесенную из homrec.py:
  *   - find_ffmpeg()           поиск ffmpeg в системе
@@ -14,7 +14,7 @@
  *   - version helpers         _version_gt(), CURRENT_VERSION
  *
  * Python-сторона (homrec.py) вызывает эти функции через ctypes.
- * Все строки — UTF-8, кроме явно помеченных как Wide.
+ * Все строки - UTF-8, кроме явно помеченных как Wide.
  *
  * Build (MinGW-w64, Windows):
  *   g++ -O2 -std=c++17 -shared -static-libgcc -static-libstdc++ ^
@@ -58,9 +58,9 @@
 #include <atomic>
 #include <chrono>
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Internal helpers                                                            */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 static std::string _str(const char *s) { return s ? std::string(s) : std::string(); }
 
@@ -68,13 +68,13 @@ static std::string _str(const char *s) { return s ? std::string(s) : std::string
  * BUG FIX: run a shell command the same way system() does (blocking, returns
  * the process exit code), but without the visible cmd.exe flash that plain
  * system() causes on Windows. system() always spawns via cmd.exe, and it has
- * no way to pass CREATE_NO_WINDOW / SW_HIDE — the window is created and
+ * no way to pass CREATE_NO_WINDOW / SW_HIDE - the window is created and
  * shown by the OS before cmd.exe even gets a chance to run, so redirecting
  * the *command's* output (e.g. "... >nul 2>&1") does nothing to hide it.
  *
  * This was firing on every launch via hr_probe_gpu_encoder() (called ~3s
  * after startup to detect NVENC/AMF/QSV support), and again after any
- * recording that needed a separate audio/video merge — each one flashing a
+ * recording that needed a separate audio/video merge - each one flashing a
  * console window that had nothing to do with any of the app's own windows.
  */
 static int _run_hidden(const std::string &cmd) {
@@ -122,9 +122,9 @@ static void _scopy(char *dst, size_t dstlen, const char *src) {
     dst[dstlen - 1] = '\0';
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Version                                                                    */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 static const char CURRENT_VERSION[] = "1.6.2";
 
@@ -157,9 +157,9 @@ HR_EXPORT int hr_version_gt(const char *a, const char *b) {
     return 0;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  find_ffmpeg                                                                 */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_find_ffmpeg
@@ -221,9 +221,9 @@ HR_EXPORT int hr_find_ffmpeg(const char *exe_dir, char *out, int out_len) {
     return 0;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  optimize_for_performance                                                    */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_optimize_process
@@ -245,9 +245,9 @@ HR_EXPORT int hr_optimize_process(void) {
 #endif
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Monitor geometry  (Windows only; stubs on Linux)                           */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 struct HrMonitorInfo {
     int left, top, width, height;
@@ -317,9 +317,9 @@ HR_EXPORT int hr_monitor_count(void) {
 #endif
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Window enumeration (Windows only)                                          */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_enum_windows
@@ -366,9 +366,9 @@ HR_EXPORT int hr_enum_windows(char *buf, int buf_len) {
 #endif
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  GPU encoder probe                                                           */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_probe_gpu_encoder
@@ -417,78 +417,28 @@ HR_EXPORT int hr_probe_gpu_encoder(const char *ffmpeg_path,
     return 0;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  build_codec_args                                                            */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
- * hr_build_codec_args
- *
- * Builds the FFmpeg video codec argument string for the given parameters.
- * The resulting string is a space-separated list of FFmpeg flags (no binary).
- *
- * codec     : "libx264", "h264_nvenc", "h264_amf", "h264_qsv", "libx265", etc.
- * quality   : 0-100 (higher = better, maps to lower CRF / QP)
- * fps       : target recording framerate
- * cpu_count : number of logical CPU cores (for -threads on libx264)
- * out       : receives the argument string, UTF-8
- * out_len   : buffer size
- *
- * Mirrors Python HomRecScreen._build_codec_args().
+ * hr_build_codec_args used to be defined here too (narrow-char, void-
+ * returning, mirroring Python's HomRecScreen._build_codec_args() directly).
+ * It was DEAD CODE - the only real caller, recording_controller.cpp, has
+ * always used the wide-char, int-returning version in hr_tools.cpp instead
+ * - and being HR_EXPORT (extern "C") meant both shared one unmangled
+ * linker symbol name, which finally surfaced as a "multiple definition of
+ * `hr_build_codec_args`" link error once every source file started
+ * actually compiling clean. Removed rather than renamed: this copy also
+ * still had the QSV `-low_power 1` flag that hr_tools.cpp's version
+ * documents fixing (see the BUG FIX comment there), so keeping it around
+ * even under a new name would just reintroduce a second, worse
+ * implementation of the same thing.
  */
-HR_EXPORT void hr_build_codec_args(const char *codec, int quality,
-                                   int fps, int cpu_count,
-                                   char *out, int out_len) {
-    if (!out || out_len < 4) return;
-    out[0] = '\0';
-    if (!codec) codec = "libx264";
 
-    /* quality 0-100 → qp 34..23 (higher quality = lower qp) */
-    int qp  = 34 - (int)((quality / 100.0) * 11.0 + 0.5);
-    if (qp < 23) qp = 23;
-    if (qp > 34) qp = 34;
-    int gop = fps * 2;
-
-    bool is_nvenc = (strstr(codec, "nvenc") != nullptr);
-    bool is_qsv   = (strstr(codec, "qsv")   != nullptr);
-    bool is_amf   = (strstr(codec, "amf")   != nullptr);
-    bool is_265   = (strcmp(codec, "libx265") == 0 ||
-                     strstr(codec, "hevc") != nullptr);
-
-    char buf[1024] = {};
-
-    if (is_nvenc) {
-        snprintf(buf, sizeof(buf),
-            "-c:v %s -preset p1 -tune ull -rc constqp -qp %d -g %d",
-            codec, qp, gop);
-    } else if (is_qsv) {
-        snprintf(buf, sizeof(buf),
-            "-c:v %s -preset veryfast -look_ahead 0 -low_power 1 -qp %d -g %d",
-            codec, qp, gop);
-    } else if (is_amf) {
-        snprintf(buf, sizeof(buf),
-            "-c:v %s -quality speed -rc cqp -qp_i %d -qp_p %d -g %d",
-            codec, qp, qp, gop);
-    } else {
-        /* libx264 / libx265 */
-        int thr = (cpu_count <= 4) ? 1 : std::max(1, cpu_count / 4);
-        if (is_265) {
-            snprintf(buf, sizeof(buf),
-                "-c:v %s -preset ultrafast -tune zerolatency -crf %d -g %d "
-                "-threads %d -x265-params log-level=error",
-                codec, qp, gop, thr);
-        } else {
-            snprintf(buf, sizeof(buf),
-                "-c:v %s -preset ultrafast -tune zerolatency -crf %d -g %d -threads %d",
-                codec, qp, gop, thr);
-        }
-    }
-    _scopy(out, (size_t)out_len, buf);
-}
-
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  FFmpeg process management                                                   */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /* Opaque handle returned by hr_launch_ffmpeg */
 struct HrFfmpegProc {
@@ -694,9 +644,9 @@ HR_EXPORT int hr_ffmpeg_running(void *handle) {
 #endif
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  merge_audio_video                                                           */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_merge_audio_video
@@ -758,9 +708,9 @@ HR_EXPORT int hr_merge_audio_video(const char *ffmpeg_path,
     return 1;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Performance / timing                                                        */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_monotonic_ms
@@ -791,9 +741,9 @@ HR_EXPORT void hr_format_elapsed(double elapsed_sec, char *out, int out_len) {
     snprintf(out, (size_t)out_len, "%02d:%02d:%02d", h, m, s);
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  File type registration (Windows registry)                                  */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_register_file_types
@@ -886,9 +836,9 @@ HR_EXPORT int hr_register_file_types(const char *exe_path,
 #endif
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Single-instance mutex (Windows)                                             */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_acquire_single_instance
@@ -915,9 +865,9 @@ HR_EXPORT int hr_acquire_single_instance(const char *mutex_name) {
 #endif
 }
 
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 /*  Update check (synchronous, call from a worker thread)                      */
-/* ─────────────────────────────────────────────────────────────────────────── */
+/* --------------------------------------------------------------------------- */
 
 /*
  * hr_fetch_latest_version
@@ -939,7 +889,7 @@ HR_EXPORT int hr_fetch_latest_version(const char *repo,
     out[0] = '\0';
 
 #ifdef _WIN32
-    /* Use WinINet — available on all Windows versions, no extra DLL */
+    /* Use WinINet - available on all Windows versions, no extra DLL */
     HMODULE hWinInet = LoadLibraryA("wininet.dll");
     if (!hWinInet) return 0;
 

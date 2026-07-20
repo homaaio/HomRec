@@ -50,6 +50,7 @@ private:
     void OnMicMute(wxCommandEvent &evt);
     void OnSysMute(wxCommandEvent &evt);
     void PushVolumes();
+    void UpdateMuteButtonColours();
 
     AppState &state_;
     RecordingController &rec_;

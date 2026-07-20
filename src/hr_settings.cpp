@@ -21,8 +21,19 @@
  *     "minimize_tray":   false,
  *     "always_on_top":   false,
  *     "performance":     "turbo",
- *     "dxgi":            false
+ *     "dxgi":            false,
+ *     "show_summary":        true,
+ *     "show_overlays_panel": true
  *   }
+ *
+ * NOTE: show_summary and show_overlays_panel were added in the feature-
+ * parity pass that introduced overlays_dock_panel.cpp/pc_analytics_dialog.
+ * Before that, hr_settings_get_flag()/set_flag() silently ignored any name
+ * not in their strcmp whitelist — settings_dialog.cpp's "show recording
+ * summary" checkbox called hr_settings_set_flag(..., "show_summary", ...)
+ * and appeared to work, but the value was never actually written to the
+ * struct or the JSON file, so it reset to the compiled-in default on every
+ * relaunch. Fixed here by giving both flags real backing fields.
  *
  * Build (MinGW-w64):
  *   g++ -O2 -std=c++17 -shared -static-libgcc -static-libstdc++ ^
@@ -129,6 +140,8 @@ struct HrSettings {
     int   always_on_top;  /* bool */
     char  performance[16];/* "ultra"/"turbo"/"balanced"/"eco" */
     int   dxgi;           /* bool — use DXGI capture */
+    int   show_summary;        /* bool — "recording saved" popup, see main_window.cpp */
+    int   show_overlays_panel; /* bool — persistent overlays dock panel, see overlays_dock_panel.cpp */
 };
 
 /* Populate defaults matching Python's HomRecScreen.__init__ */
@@ -159,6 +172,8 @@ static void _defaults(HrSettings *s) {
     s->always_on_top  = 0;
     strncpy(s->performance, "turbo",  sizeof(s->performance)-1);
     s->dxgi = 0;
+    s->show_summary        = 1; // matches AppState::show_summary's default (app_state.h)
+    s->show_overlays_panel = 1; // matches AppState::show_overlays_panel's default (app_state.h)
 }
 
 /* -- Public API ------------------------------------------------------------- */
@@ -221,6 +236,8 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     if (_json_get_str(json,  "performance",  tmp, sizeof(tmp)))
         strncpy(s->performance, tmp, sizeof(s->performance)-1);
     s->dxgi = _json_get_bool(json, "dxgi", s->dxgi) ? 1 : 0;
+    s->show_summary        = _json_get_bool(json, "show_summary",        s->show_summary)        ? 1 : 0;
+    s->show_overlays_panel = _json_get_bool(json, "show_overlays_panel", s->show_overlays_panel) ? 1 : 0;
 
     return 1;
 }
@@ -253,7 +270,9 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         "  \"minimize_tray\": %s,\n"
         "  \"always_on_top\": %s,\n"
         "  \"performance\":   \"%s\",\n"
-        "  \"dxgi\":          %s\n"
+        "  \"dxgi\":          %s,\n"
+        "  \"show_summary\":        %s,\n"
+        "  \"show_overlays_panel\": %s\n"
         "}\n",
         _escape_json(s->output_folder).c_str(),
         s->quality, s->fps, s->monitor,
@@ -268,7 +287,9 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         s->minimize_tray  ? "true" : "false",
         s->always_on_top  ? "true" : "false",
         _escape_json(s->performance).c_str(),
-        s->dxgi ? "true" : "false"
+        s->dxgi ? "true" : "false",
+        s->show_summary        ? "true" : "false",
+        s->show_overlays_panel ? "true" : "false"
     );
 
     FILE *f = fopen(path, "wb");
@@ -364,6 +385,8 @@ HR_EXPORT int hr_settings_get_flag(const void *h, const char *name) {
     if (strcmp(name, "notification") == 0) return s->notification;
     if (strcmp(name, "minimize_tray")== 0) return s->minimize_tray;
     if (strcmp(name, "always_on_top")== 0) return s->always_on_top;
+    if (strcmp(name, "show_summary")        == 0) return s->show_summary;
+    if (strcmp(name, "show_overlays_panel") == 0) return s->show_overlays_panel;
     return 0;
 }
 HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
@@ -376,4 +399,6 @@ HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
     if (strcmp(name, "notification") == 0) { s->notification = val; return; }
     if (strcmp(name, "minimize_tray")== 0) { s->minimize_tray= val; return; }
     if (strcmp(name, "always_on_top")== 0) { s->always_on_top= val; return; }
+    if (strcmp(name, "show_summary")        == 0) { s->show_summary        = val; return; }
+    if (strcmp(name, "show_overlays_panel") == 0) { s->show_overlays_panel = val; return; }
 }

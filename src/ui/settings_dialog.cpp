@@ -1,6 +1,7 @@
 #include "settings_dialog.h"
-#include <commctrl.h>
-#include <shlobj.h>
+#include "themed_widgets.h"
+#include <wx/spinctrl.h>
+#include <wx/dirdlg.h>
 #include <string>
 
 extern "C" {
@@ -16,198 +17,146 @@ extern "C" {
 }
 
 namespace {
-constexpr wchar_t kSettingsPath[] = L"homrec_settings.json"; // relative to app root, same as SETTINGS_PATH in constants.py
+constexpr char kSettingsPath[] = "homrec_settings.json"; // relative to app root, matches constants.py's SETTINGS_PATH
 
-struct DialogCtx {
-    AppState *state;
-    void *settings;
-    HWND quality_slider, fps_edit, monitor_edit, folder_edit;
-    HWND countdown_chk, timestamp_chk, cursor_chk, notify_chk;
-    bool saved = false;
-};
+enum { IDC_QUALITY = 3001, IDC_BROWSE = 3002, IDC_SAVE = 3003, IDC_CANCEL = 3004 };
 
-std::string NarrowFromWide(const std::wstring &w) {
-    if (w.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string s(len, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), len, nullptr, nullptr);
-    if (!s.empty() && s.back() == '\0') s.pop_back();
-    return s;
-}
-std::wstring WideFromNarrow(const std::string &s) {
-    if (s.empty()) return {};
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring w(len, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
-    if (!w.empty() && w.back() == L'\0') w.pop_back();
-    return w;
-}
+class SettingsDialog : public wxDialog {
+public:
+    SettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme)
+        : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(460, 460)),
+          state_(state), theme_(theme) {
+        settings_ = hr_settings_create();
+        hr_settings_load(settings_, kSettingsPath);
 
-enum {
-    IDC_QUALITY = 3001, IDC_FPS, IDC_MONITOR, IDC_FOLDER, IDC_BROWSE,
-    IDC_COUNTDOWN, IDC_TIMESTAMP, IDC_CURSOR, IDC_NOTIFY,
-    IDC_SAVE, IDC_CANCEL,
-};
+        wxColour bg = FromColorref(theme_.bg);
+        wxColour surface = FromColorref(theme_.surface);
+        wxColour text = FromColorref(theme_.text);
+        wxColour accent = FromColorref(theme_.accent);
+        SetBackgroundColour(bg);
 
-LRESULT CALLBACK DlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    auto *ctx = reinterpret_cast<DialogCtx *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    switch (msg) {
-        case WM_NCCREATE: {
-            auto *cs = reinterpret_cast<CREATESTRUCTW *>(lParam);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
-        }
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
-            return 0;
-        case WM_DESTROY:
-            // NOTE: deliberately NOT calling PostQuitMessage here. This is a
-            // nested modal loop sharing the same thread's message queue as
-            // the main window's WinMain loop — posting WM_QUIT here would
-            // leak into that outer loop and quit the whole app the moment
-            // Settings is closed. The `while (IsWindow(hwnd) && ...)` loop
-            // below exits on its own once the window is gone.
-            return 0;
-        case WM_COMMAND: {
-            int id = LOWORD(wParam);
-            if (id == IDC_BROWSE) {
-                wchar_t path[MAX_PATH] = {};
-                BROWSEINFOW bi = {};
-                bi.hwndOwner = hwnd;
-                bi.lpszTitle = L"Select output folder";
-                bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-                LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-                if (pidl) {
-                    SHGetPathFromIDListW(pidl, path);
-                    SetWindowTextW(ctx->folder_edit, path);
-                    CoTaskMemFree(pidl);
-                }
-            } else if (id == IDC_SAVE) {
-                wchar_t buf[512] = {};
-                GetWindowTextW(ctx->folder_edit, buf, 512);
-                ctx->state->output_folder = NarrowFromWide(buf);
-                hr_settings_set_output_folder(ctx->settings, ctx->state->output_folder.c_str());
+        auto *root = new wxBoxSizer(wxVERTICAL);
+        auto *grid = new wxFlexGridSizer(2, 10, 10);
+        grid->AddGrowableCol(1, 1);
 
-                ctx->state->quality = (int)SendMessageW(ctx->quality_slider, TBM_GETPOS, 0, 0);
-                hr_settings_set_quality(ctx->settings, ctx->state->quality);
+        auto addLabel = [&](const wxString &s) {
+            auto *lbl = new wxStaticText(this, wxID_ANY, s);
+            lbl->SetForegroundColour(text);
+            lbl->SetBackgroundColour(bg);
+            grid->Add(lbl, 0, wxALIGN_CENTRE_VERTICAL);
+        };
 
-                GetWindowTextW(ctx->fps_edit, buf, 512);
-                ctx->state->target_fps = _wtoi(buf);
-                hr_settings_set_fps(ctx->settings, ctx->state->target_fps);
+        addLabel("Quality:");
+        quality_slider_ = new ColorSlider(this, IDC_QUALITY, state_.quality, 0, 100);
+        quality_slider_->SetTheme(surface, accent, text);
+        grid->Add(quality_slider_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
 
-                GetWindowTextW(ctx->monitor_edit, buf, 512);
-                ctx->state->monitor_id = _wtoi(buf);
-                hr_settings_set_monitor(ctx->settings, ctx->state->monitor_id);
+        addLabel("Target FPS:");
+        fps_spin_ = new wxSpinCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                    wxSP_ARROW_KEYS, 1, 240, state_.target_fps);
+        grid->Add(fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
 
-                ctx->state->countdown_enabled = (SendMessageW(ctx->countdown_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                ctx->state->timestamp_enabled = (SendMessageW(ctx->timestamp_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                ctx->state->cursor_enabled    = (SendMessageW(ctx->cursor_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                ctx->state->show_summary      = (SendMessageW(ctx->notify_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                hr_settings_set_flag(ctx->settings, "countdown", ctx->state->countdown_enabled ? 1 : 0);
-                hr_settings_set_flag(ctx->settings, "timestamp", ctx->state->timestamp_enabled ? 1 : 0);
-                hr_settings_set_flag(ctx->settings, "cursor", ctx->state->cursor_enabled ? 1 : 0);
-                hr_settings_set_flag(ctx->settings, "show_summary", ctx->state->show_summary ? 1 : 0);
+        addLabel("Monitor:");
+        monitor_spin_ = new wxSpinCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                        wxSP_ARROW_KEYS, 0, 15, state_.monitor_id);
+        grid->Add(monitor_spin_, 0, wxALIGN_CENTRE_VERTICAL);
 
-                hr_settings_save(ctx->settings, NarrowFromWide(kSettingsPath).c_str());
-                ctx->saved = true;
-                DestroyWindow(hwnd);
-            } else if (id == IDC_CANCEL) {
-                DestroyWindow(hwnd);
-            }
-            return 0;
-        }
-        default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        root->Add(grid, 0, wxEXPAND | wxALL, 16);
+
+        auto *folderLbl = new wxStaticText(this, wxID_ANY, "Output folder:");
+        folderLbl->SetForegroundColour(text);
+        folderLbl->SetBackgroundColour(bg);
+        root->Add(folderLbl, 0, wxLEFT | wxRIGHT, 16);
+
+        auto *folderRow = new wxBoxSizer(wxHORIZONTAL);
+        folder_edit_ = new wxTextCtrl(this, wxID_ANY, wxString::FromUTF8(state_.output_folder));
+        folderRow->Add(folder_edit_, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+        auto *browseBtn = new ColorButton(this, IDC_BROWSE, "Browse");
+        browseBtn->SetMinSize(wxSize(70, 26));
+        browseBtn->SetColours(surface, text);
+        folderRow->Add(browseBtn, 0);
+        root->Add(folderRow, 0, wxEXPAND | wxALL, 16);
+
+        auto addCheck = [&](const wxString &label, bool value) {
+            auto *chk = new wxCheckBox(this, wxID_ANY, label);
+            chk->SetValue(value);
+            chk->SetForegroundColour(text);
+            chk->SetBackgroundColour(bg);
+            root->Add(chk, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+            return chk;
+        };
+        countdown_chk_ = addCheck("Countdown (3s)", state_.countdown_enabled);
+        timestamp_chk_ = addCheck("Timestamp", state_.timestamp_enabled);
+        cursor_chk_    = addCheck("Cursor", state_.cursor_enabled);
+        notify_chk_    = addCheck("Show summary", state_.show_summary);
+
+        root->AddStretchSpacer(1);
+
+        auto *btnRow = new wxBoxSizer(wxHORIZONTAL);
+        btnRow->AddStretchSpacer(1);
+        auto *saveBtn = new ColorButton(this, IDC_SAVE, "Save");
+        saveBtn->SetMinSize(wxSize(80, 28));
+        saveBtn->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
+        btnRow->Add(saveBtn, 0, wxRIGHT, 8);
+        auto *cancelBtn = new ColorButton(this, IDC_CANCEL, "Cancel");
+        cancelBtn->SetMinSize(wxSize(80, 28));
+        cancelBtn->SetColours(surface, text);
+        btnRow->Add(cancelBtn, 0);
+        root->Add(btnRow, 0, wxEXPAND | wxALL, 16);
+
+        SetSizer(root);
+
+        Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowse, this, IDC_BROWSE);
+        Bind(wxEVT_BUTTON, &SettingsDialog::OnSave, this, IDC_SAVE);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_CANCEL); }, IDC_CANCEL);
     }
-}
 
+    ~SettingsDialog() override { hr_settings_destroy(settings_); }
+
+private:
+    void OnBrowse(wxCommandEvent &) {
+        wxDirDialog dlg(this, "Select output folder", folder_edit_->GetValue());
+        if (dlg.ShowModal() == wxID_OK) folder_edit_->SetValue(dlg.GetPath());
+    }
+
+    void OnSave(wxCommandEvent &) {
+        state_.output_folder = folder_edit_->GetValue().ToUTF8().data();
+        hr_settings_set_output_folder(settings_, state_.output_folder.c_str());
+
+        state_.quality = quality_slider_->GetValue();
+        hr_settings_set_quality(settings_, state_.quality);
+
+        state_.target_fps = fps_spin_->GetValue();
+        hr_settings_set_fps(settings_, state_.target_fps);
+
+        state_.monitor_id = monitor_spin_->GetValue();
+        hr_settings_set_monitor(settings_, state_.monitor_id);
+
+        state_.countdown_enabled = countdown_chk_->GetValue();
+        state_.timestamp_enabled = timestamp_chk_->GetValue();
+        state_.cursor_enabled = cursor_chk_->GetValue();
+        state_.show_summary = notify_chk_->GetValue();
+        hr_settings_set_flag(settings_, "countdown", state_.countdown_enabled ? 1 : 0);
+        hr_settings_set_flag(settings_, "timestamp", state_.timestamp_enabled ? 1 : 0);
+        hr_settings_set_flag(settings_, "cursor", state_.cursor_enabled ? 1 : 0);
+        hr_settings_set_flag(settings_, "show_summary", state_.show_summary ? 1 : 0);
+
+        hr_settings_save(settings_, kSettingsPath);
+        EndModal(wxID_OK);
+    }
+
+    AppState &state_;
+    ThemeColors theme_;
+    void *settings_ = nullptr;
+
+    ColorSlider *quality_slider_ = nullptr;
+    wxSpinCtrl *fps_spin_ = nullptr, *monitor_spin_ = nullptr;
+    wxTextCtrl *folder_edit_ = nullptr;
+    wxCheckBox *countdown_chk_ = nullptr, *timestamp_chk_ = nullptr, *cursor_chk_ = nullptr, *notify_chk_ = nullptr;
+};
 } // namespace
 
-bool ShowSettingsDialog(HWND parent, HINSTANCE hInst, AppState &state) {
-    static const wchar_t kClassName[] = L"HomRecSettingsDialog";
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = DlgProc;
-    wc.hInstance = hInst;
-    wc.lpszClassName = kClassName;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    RegisterClassW(&wc); // fine to call repeatedly; ERROR_CLASS_ALREADY_EXISTS is harmless here
-
-    DialogCtx ctx = {};
-    ctx.state = &state;
-    ctx.settings = hr_settings_create();
-    hr_settings_load(ctx.settings, NarrowFromWide(kSettingsPath).c_str());
-
-    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, L"Settings",
-                                 WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 420, 360,
-                                 parent, nullptr, hInst, &ctx);
-
-    int y = 16;
-    CreateWindowExW(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 16, y, 80, 20, hwnd, nullptr, hInst, nullptr);
-    ctx.quality_slider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_HORZ,
-                                          100, y, 280, 24, hwnd, (HMENU)IDC_QUALITY, hInst, nullptr);
-    SendMessageW(ctx.quality_slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
-    SendMessageW(ctx.quality_slider, TBM_SETPOS, TRUE, state.quality);
-
-    y += 36;
-    CreateWindowExW(0, L"STATIC", L"Target FPS:", WS_CHILD | WS_VISIBLE, 16, y, 80, 20, hwnd, nullptr, hInst, nullptr);
-    ctx.fps_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(state.target_fps).c_str(),
-                                    WS_CHILD | WS_VISIBLE, 100, y, 60, 22, hwnd, (HMENU)IDC_FPS, hInst, nullptr);
-
-    y += 34;
-    CreateWindowExW(0, L"STATIC", L"Monitor:", WS_CHILD | WS_VISIBLE, 16, y, 80, 20, hwnd, nullptr, hInst, nullptr);
-    ctx.monitor_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(state.monitor_id).c_str(),
-                                        WS_CHILD | WS_VISIBLE, 100, y, 60, 22, hwnd, (HMENU)IDC_MONITOR, hInst, nullptr);
-
-    y += 34;
-    CreateWindowExW(0, L"STATIC", L"Output folder:", WS_CHILD | WS_VISIBLE, 16, y, 90, 20, hwnd, nullptr, hInst, nullptr);
-    ctx.folder_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", WideFromNarrow(state.output_folder).c_str(),
-                                       WS_CHILD | WS_VISIBLE, 16, y + 22, 300, 22, hwnd, nullptr, hInst, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    322, y + 22, 60, 22, hwnd, (HMENU)IDC_BROWSE, hInst, nullptr);
-
-    y += 60;
-    ctx.countdown_chk = CreateWindowExW(0, L"BUTTON", L"Countdown (3s)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                         16, y, 180, 22, hwnd, (HMENU)IDC_COUNTDOWN, hInst, nullptr);
-    SendMessageW(ctx.countdown_chk, BM_SETCHECK, state.countdown_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-
-    y += 26;
-    ctx.timestamp_chk = CreateWindowExW(0, L"BUTTON", L"Timestamp", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                         16, y, 180, 22, hwnd, (HMENU)IDC_TIMESTAMP, hInst, nullptr);
-    SendMessageW(ctx.timestamp_chk, BM_SETCHECK, state.timestamp_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-
-    y += 26;
-    ctx.cursor_chk = CreateWindowExW(0, L"BUTTON", L"Cursor", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                      16, y, 180, 22, hwnd, (HMENU)IDC_CURSOR, hInst, nullptr);
-    SendMessageW(ctx.cursor_chk, BM_SETCHECK, state.cursor_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
-
-    y += 26;
-    ctx.notify_chk = CreateWindowExW(0, L"BUTTON", L"Show summary", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                      16, y, 180, 22, hwnd, (HMENU)IDC_NOTIFY, hInst, nullptr);
-    SendMessageW(ctx.notify_chk, BM_SETCHECK, state.show_summary ? BST_CHECKED : BST_UNCHECKED, 0);
-
-    y += 36;
-    CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                     220, y, 80, 26, hwnd, (HMENU)IDC_SAVE, hInst, nullptr);
-    CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     310, y, 80, 26, hwnd, (HMENU)IDC_CANCEL, hInst, nullptr);
-
-    EnableWindow(parent, FALSE);
-    ShowWindow(hwnd, SW_SHOW);
-
-    MSG msg;
-    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(hwnd, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        if (!IsWindow(hwnd)) break;
-    }
-    EnableWindow(parent, TRUE);
-    SetForegroundWindow(parent);
-
-    bool saved = ctx.saved;
-    hr_settings_destroy(ctx.settings);
-    return saved;
+bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme) {
+    SettingsDialog dlg(parent, state, theme);
+    return dlg.ShowModal() == wxID_OK;
 }

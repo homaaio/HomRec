@@ -64,6 +64,7 @@ LDFLAGS += $(LUA_LDFLAGS)
 SRCS := \
     src/win_main.cpp \
     src/ui/main_frame.cpp \
+    src/ui/themed_widgets.cpp \
     src/ui/theme.cpp \
     src/ui/language.cpp \
     src/ui/recording_controller.cpp \

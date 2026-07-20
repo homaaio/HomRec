@@ -45,13 +45,19 @@ void ColorButton::OnLeftUp(wxMouseEvent &evt) {
 
 void ColorButton::OnPaint(wxPaintEvent &) {
     wxAutoBufferedPaintDC dc(this);
+    wxColour parentBg = GetParent() ? GetParent()->GetBackgroundColour() : *wxWHITE;
+    dc.SetBackground(wxBrush(parentBg));
+    dc.Clear();
+
     wxColour fill = enabled_ ? bg_ : disabled_bg_;
     if (enabled_ && hover_) {
         fill = wxColour(std::max(0, fill.Red() - 20), std::max(0, fill.Green() - 20), std::max(0, fill.Blue() - 20));
     }
+    wxSize cs0 = GetClientSize();
+    double radius = std::min(8.0, std::min(cs0.GetWidth(), cs0.GetHeight()) / 2.0);
     dc.SetBrush(wxBrush(fill));
     dc.SetPen(*wxTRANSPARENT_PEN);
-    dc.DrawRectangle(GetClientRect());
+    dc.DrawRoundedRectangle(GetClientRect(), radius);
     dc.SetTextForeground(enabled_ ? fg_ : wxColour(120, 120, 120));
     dc.SetFont(GetFont());
     wxSize ext = dc.GetTextExtent(label_);

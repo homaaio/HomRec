@@ -109,12 +109,24 @@ void AudioPanel::ApplyTheme(const ThemeColors &theme) {
     for (ColorSlider *s : {mic_slider_, sys_slider_}) {
         if (s) s->SetTheme(trackCol, FromColorref(theme.accent), FromColorref(theme.text));
     }
-    if (mic_mute_btn_) mic_mute_btn_->SetColours(FromColorref(theme.error), FromColorref(theme.bg));
-    if (sys_mute_btn_) sys_mute_btn_->SetColours(FromColorref(theme.error), FromColorref(theme.bg));
+    UpdateMuteButtonColours();
     for (LevelMeterPanel *m : {mic_meter_, sys_meter_}) {
         if (m) m->SetBgColour(meterBg);
     }
     Refresh(true);
+}
+
+// Mute is a toggle, not a permanent warning, so it shouldn't sit in the
+// error/red color all the time regardless of state — that reads as "this is
+// broken" rather than "this is off". Neutral surface color when live audio
+// is flowing, warning color only once the channel is actually muted.
+void AudioPanel::UpdateMuteButtonColours() {
+    wxColour neutralBg = FromColorref(theme_.surface_light);
+    wxColour neutralFg = FromColorref(theme_.text);
+    wxColour mutedBg = FromColorref(theme_.warning);
+    wxColour mutedFg = FromColorref(theme_.bg);
+    if (mic_mute_btn_) mic_mute_btn_->SetColours(mic_muted_ ? mutedBg : neutralBg, mic_muted_ ? mutedFg : neutralFg);
+    if (sys_mute_btn_) sys_mute_btn_->SetColours(sys_muted_ ? mutedBg : neutralBg, sys_muted_ ? mutedFg : neutralFg);
 }
 
 void AudioPanel::PollLevels() {
@@ -141,11 +153,13 @@ void AudioPanel::OnSysSlider(wxCommandEvent &evt) {
 void AudioPanel::OnMicMute(wxCommandEvent &) {
     mic_muted_ = !mic_muted_;
     mic_mute_btn_->SetLabelText2(mic_muted_ ? "Unmute" : "Mute");
+    UpdateMuteButtonColours();
     PushVolumes();
 }
 
 void AudioPanel::OnSysMute(wxCommandEvent &) {
     sys_muted_ = !sys_muted_;
     sys_mute_btn_->SetLabelText2(sys_muted_ ? "Unmute" : "Mute");
+    UpdateMuteButtonColours();
     PushVolumes();
 }

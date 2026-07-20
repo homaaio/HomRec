@@ -25,14 +25,17 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
+#include <cctype>
+#include <string>
 #include <atomic>
 #include <thread>
 #include <mutex>
 
 /* -- Hotkey IDs ------------------------------------------------------------ */
-static constexpr int HK_START_STOP  = 1;   /* F9  */
-static constexpr int HK_PAUSE       = 2;   /* F10 */
-static constexpr int HK_FULLSCREEN  = 3;   /* F11 */
+static constexpr int HK_START_STOP  = 1;   /* default F9  */
+static constexpr int HK_PAUSE       = 2;   /* default F10 */
+static constexpr int HK_FULLSCREEN  = 3;   /* default F11 */
 
 /* -- Callback types -------------------------------------------------------- */
 typedef void (*HR_HK_CB)();  /* no-arg callback for each hotkey action */
@@ -44,6 +47,14 @@ struct HotkeyCtx {
     HR_HK_CB cb_fullscreen{nullptr};
 
     std::atomic<bool> running{false};
+
+    /* Configurable key bindings — set via hr_hk_configure() *before*
+       hr_hk_start(), since RegisterHotKey happens once at thread start.
+       Defaults match the historical hardcoded F9/F10/F11 so callers that
+       never configure anything keep working exactly as before. */
+    UINT mod_start_stop{0}, vk_start_stop{0x78 /* VK_F9 */};
+    UINT mod_pause{0},      vk_pause{0x79 /* VK_F10 */};
+    UINT mod_fullscreen{0}, vk_fullscreen{0x7A /* VK_F11 */};
 
 #ifdef _WIN32
     HWND   hwnd{nullptr};
@@ -89,10 +100,10 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     if (!ctx->hwnd) return 1;
     SetWindowLongPtrW(ctx->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
 
-    /* Register hotkeys */
-    RegisterHotKey(ctx->hwnd, HK_START_STOP, 0, VK_F9);
-    RegisterHotKey(ctx->hwnd, HK_PAUSE,      0, VK_F10);
-    RegisterHotKey(ctx->hwnd, HK_FULLSCREEN, 0, VK_F11);
+    /* Register hotkeys (configurable — see hr_hk_configure()) */
+    RegisterHotKey(ctx->hwnd, HK_START_STOP, ctx->mod_start_stop, ctx->vk_start_stop);
+    RegisterHotKey(ctx->hwnd, HK_PAUSE,      ctx->mod_pause,      ctx->vk_pause);
+    RegisterHotKey(ctx->hwnd, HK_FULLSCREEN, ctx->mod_fullscreen, ctx->vk_fullscreen);
 
     /* Signal ready */
     ctx->running = true;
@@ -143,6 +154,104 @@ HR_EXPORT void hr_hk_set_callbacks(void *handle,
     ctx->cb_start_stop = start_stop;
     ctx->cb_pause      = pause;
     ctx->cb_fullscreen = fullscreen;
+}
+
+/*
+ * hr_hk_parse_keystring
+ * Parses a Tk-keysym-style binding string, matching the format the Python
+ * app stores/captures in advanced_settings_dialog.py's hotkey recorder,
+ * e.g. "F9", "Control+F9", "Shift+Control+Escape", "a".
+ * Returns 1 and fills *mod_out/*vk_out on success, 0 (leaving them
+ * untouched) if the string is empty or unrecognized.
+ */
+HR_EXPORT int hr_hk_parse_keystring(const char *s, unsigned int *mod_out, unsigned int *vk_out) {
+    if (!s || !*s) return 0;
+#ifdef _WIN32
+    std::string str(s);
+    UINT mods = 0;
+    size_t start = 0;
+    std::string last_token;
+    while (start <= str.size()) {
+        size_t plus = str.find('+', start);
+        std::string token = (plus == std::string::npos) ? str.substr(start)
+                                                          : str.substr(start, plus - start);
+        if (plus == std::string::npos) { last_token = token; break; }
+        /* lowercase compare for modifier names */
+        std::string lower = token;
+        for (auto &c : lower) c = static_cast<char>(::tolower((unsigned char)c));
+        if (lower == "control" || lower == "ctrl")      mods |= MOD_CONTROL;
+        else if (lower == "shift")                       mods |= MOD_SHIFT;
+        else if (lower == "alt")                         mods |= MOD_ALT;
+        else if (lower == "win" || lower == "super")      mods |= MOD_WIN;
+        /* anything else in a middle position is ignored (unknown modifier) */
+        start = plus + 1;
+    }
+    if (last_token.empty()) return 0;
+
+    std::string key = last_token;
+    std::string keyLower = key;
+    for (auto &c : keyLower) c = static_cast<char>(::tolower((unsigned char)c));
+
+    UINT vk = 0;
+    if (keyLower.size() >= 2 && keyLower[0] == 'f' &&
+        ::isdigit((unsigned char)keyLower[1])) {
+        int n = std::atoi(keyLower.c_str() + 1);
+        if (n >= 1 && n <= 24) vk = static_cast<UINT>(VK_F1 + (n - 1));
+    } else if (keyLower == "escape") vk = VK_ESCAPE;
+    else if (keyLower == "space")           vk = VK_SPACE;
+    else if (keyLower == "return" || keyLower == "enter") vk = VK_RETURN;
+    else if (keyLower == "tab")             vk = VK_TAB;
+    else if (keyLower == "backspace")       vk = VK_BACK;
+    else if (keyLower == "delete")          vk = VK_DELETE;
+    else if (keyLower == "insert")          vk = VK_INSERT;
+    else if (keyLower == "home")            vk = VK_HOME;
+    else if (keyLower == "end")             vk = VK_END;
+    else if (keyLower == "prior" || keyLower == "pageup")   vk = VK_PRIOR;
+    else if (keyLower == "next"  || keyLower == "pagedown") vk = VK_NEXT;
+    else if (keyLower == "up")    vk = VK_UP;
+    else if (keyLower == "down")  vk = VK_DOWN;
+    else if (keyLower == "left")  vk = VK_LEFT;
+    else if (keyLower == "right") vk = VK_RIGHT;
+    else if (key.size() == 1) {
+        unsigned char c = static_cast<unsigned char>(::toupper((unsigned char)key[0]));
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) vk = c;
+    }
+    if (vk == 0) return 0;
+    if (mod_out) *mod_out = mods;
+    if (vk_out)  *vk_out  = vk;
+    return 1;
+#else
+    (void)mod_out; (void)vk_out;
+    return 0;
+#endif
+}
+
+/*
+ * hr_hk_configure
+ * Sets the key bindings to register on the next hr_hk_start(). Must be
+ * called *before* hr_hk_start() (RegisterHotKey happens once, at thread
+ * start, to keep the "which thread owns the WM_HOTKEY queue" rule simple —
+ * callers that change a hotkey while already running should hr_hk_stop(),
+ * hr_hk_configure(), then hr_hk_start() again).
+ * Any string that fails to parse leaves that action's existing/default
+ * binding untouched (so a bad user-typed hotkey doesn't kill the others).
+ */
+HR_EXPORT void hr_hk_configure(void *handle,
+                                const char *start_stop_str,
+                                const char *pause_str,
+                                const char *fullscreen_str) {
+    if (!handle) return;
+    auto *ctx = static_cast<HotkeyCtx *>(handle);
+    UINT mod, vk;
+    if (hr_hk_parse_keystring(start_stop_str, &mod, &vk)) {
+        ctx->mod_start_stop = mod; ctx->vk_start_stop = vk;
+    }
+    if (hr_hk_parse_keystring(pause_str, &mod, &vk)) {
+        ctx->mod_pause = mod; ctx->vk_pause = vk;
+    }
+    if (hr_hk_parse_keystring(fullscreen_str, &mod, &vk)) {
+        ctx->mod_fullscreen = mod; ctx->vk_fullscreen = vk;
+    }
 }
 
 /*
