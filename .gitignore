@@ -290,3 +290,7 @@ vcpkg_installed/
 Testing/
 .cache/
 create/
+
+# Plugins
+
+plugins/
