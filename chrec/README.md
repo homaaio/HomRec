@@ -1,1 +1,3 @@
-In process...
+# CHREC - READDE.md
+
+## What is "Chrec"?
