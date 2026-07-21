@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Email Support
+    url: mailto:homa4ella@gmail.com
+    about: For private or security-related inquiries, email us directly.
+  - name: Wiki
+    url: https://github.com/homaaio/HomRec/wiki
+    about: Check the Wiki for setup guides, system requirements, and FAQs.
