@@ -1,4 +1,5 @@
 #include "recording_controller.h"
+#include "../hr_log.h"
 #include <vector>
 #include <thread>
 
@@ -144,11 +145,13 @@ bool RecordingController::Start(std::wstring &error_out) {
     if (!hr_path_exists(state_.output_folder.c_str())) {
         if (!hr_make_output_dir(state_.output_folder.c_str())) {
             error_out = L"Output folder doesn't exist and couldn't be created.";
+            HrLog::Error("Start failed: output folder missing/uncreatable: " + state_.output_folder);
             return false;
         }
     }
     if (!ffmpeg_found_) {
         error_out = L"FFmpeg not found.";
+        HrLog::Error("Start failed: ffmpeg not found");
         return false;
     }
 
@@ -191,6 +194,7 @@ bool RecordingController::Start(std::wstring &error_out) {
 
     if (!hr_ff_start(ffproc_)) {
         error_out = L"Failed to start the ffmpeg process.";
+        HrLog::Error("Start failed: ffmpeg process didn't start");
         hr_ff_destroy(ffproc_);
         ffproc_ = nullptr;
         return false;
@@ -203,6 +207,7 @@ bool RecordingController::Start(std::wstring &error_out) {
                              state_.preview_width, state_.preview_height);
     if (!pipeline_ || !hr_pl_start(pipeline_)) {
         error_out = L"Failed to start the capture pipeline.";
+        HrLog::Error("Start failed: capture pipeline didn't start");
         hr_ff_kill(ffproc_);
         hr_ff_destroy(ffproc_);
         ffproc_ = nullptr;
@@ -220,6 +225,9 @@ bool RecordingController::Start(std::wstring &error_out) {
     state_.recording = true;
     state_.paused = false;
     state_.frame_count = 0;
+    HrLog::Info("Recording started -> " + NarrowFromWide(current_output_path_) +
+                " (" + std::to_string(capture_w_) + "x" + std::to_string(capture_h_) +
+                " @ " + std::to_string(state_.target_fps) + "fps)");
     return true;
 }
 
@@ -289,6 +297,7 @@ void RecordingController::Stop() {
 
     state_.recording = false;
     state_.paused = false;
+    HrLog::Info("Recording stopped -> " + base);
 }
 
 void RecordingController::TogglePause() {
@@ -296,6 +305,7 @@ void RecordingController::TogglePause() {
     int new_state = hr_ctl_pause_toggle(ctl_);
     state_.paused = (new_state == 2 /* HR_STATE_PAUSED */);
     if (pipeline_) hr_pl_pause(pipeline_, state_.paused ? 1 : 0);
+    HrLog::Info(state_.paused ? "Recording paused" : "Recording resumed");
 }
 
 void RecordingController::PollStats() {

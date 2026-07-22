@@ -1,4 +1,5 @@
 #include "log_viewer_dialog.h"
+#include "win32_theme.h"
 #include <windowsx.h>
 #include <string>
 #include <vector>
@@ -111,6 +112,10 @@ LRESULT CALLBACK LogViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             delete logPath;
             logPath = nullptr;
             return 0;
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
+        case WM_CTLCOLOREDIT:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -123,7 +128,7 @@ void ShowLogViewerDialog(HWND parent, HINSTANCE hInst) {
     wc.lpfnWndProc = LogViewerProc;
     wc.hInstance = hInst;
     wc.lpszClassName = kClassName;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = HrWin32Theme::BgBrush();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
 
@@ -134,6 +139,7 @@ void ShowLogViewerDialog(HWND parent, HINSTANCE hInst) {
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
                                  (sw - W) / 2, (sh - H) / 2, W, H,
                                  parent, nullptr, hInst, nullptr);
+    HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
     EnableWindow(parent, FALSE);
     ShowWindow(hwnd, SW_SHOW);

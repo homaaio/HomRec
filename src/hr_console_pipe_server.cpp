@@ -35,7 +35,7 @@
 #define PIPE_BUF     4096
 #define MAX_CLIENTS  8
 
-/* ── Объявляем функции из основного hr_console.cpp ─────────────────────── */
+/* -- Объявляем функции из основного hr_console.cpp ----------------------- */
 /* write_line(text, tag) — уже определена там; мы только добавляем broadcast */
 extern void write_line(const wchar_t* text, int tag);
 
@@ -43,13 +43,13 @@ extern void write_line(const wchar_t* text, int tag);
 /* Из Python-бриджа или напрямую — определена в hr_console.cpp       */
 extern bool dispatch(const std::wstring& raw);
 
-/* ── Список активных клиентских HANDLE ─────────────────────────────────── */
+/* -- Список активных клиентских HANDLE ----------------------------------- */
 static std::mutex           g_clients_mx;
 static std::vector<HANDLE>  g_clients;   /* pipe-хэндлы клиентов */
 static std::atomic<bool>    g_server_running{false};
 static HANDLE               g_server_thread = nullptr;
 
-/* ── Broadcast: отправить строку всем клиентам ──────────────────────────── */
+/* -- Broadcast: отправить строку всем клиентам ---------------------------- */
 /*
  * Вызывается из write_line() (патч в hr_console.cpp — см. ниже).
  * Формат: "TAG:текст\n"
@@ -82,7 +82,7 @@ static void pipe_broadcast(const wchar_t* text, int tag)
     }
 }
 
-/* ── Поток обслуживания одного клиента ──────────────────────────────────── */
+/* -- Поток обслуживания одного клиента ------------------------------------ */
 struct ClientCtx { HANDLE pipe; };
 
 static DWORD WINAPI client_thread(LPVOID param)
@@ -135,7 +135,7 @@ static DWORD WINAPI client_thread(LPVOID param)
     return 0;
 }
 
-/* ── Главный серверный поток: ждёт подключений ───────────────────────────── */
+/* -- Главный серверный поток: ждёт подключений ----------------------------- */
 static DWORD WINAPI server_thread(LPVOID)
 {
     while (g_server_running.load()) {

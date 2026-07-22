@@ -1,12 +1,12 @@
 #include "main_frame.h"
 #include "version.h"
 #include "settings_dialog.h"
-#include "advanced_settings_dialog.h"
 #include "overlay_manager.h"
 #include "welcome_dialog.h"
 #include "pc_analytics_dialog.h"
 #include "log_viewer_dialog.h"
 #include "window_picker_dialog.h"
+#include "../hr_log.h"
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
 #include <functional>
@@ -199,6 +199,7 @@ HomRecMainFrame::HomRecMainFrame()
     ApplyThemeColours();
     ApplyLanguageText();
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
+    HrLog::Info("HomRec " HR_APP_VERSION " started");
 
     SetupTrayIcon();
     SetupHotkeys();
@@ -600,7 +601,7 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             state_.current_theme = "light"; theme_ = GetBuiltinTheme("light"); ApplyThemeColours(); break;
         case ID_SETTINGS_OPEN: ShowSettingsDialog(this, state_, theme_); break;
         case ID_SETTINGS_ADVANCED:
-            ShowAdvancedSettingsDialog(GetHWND(), wxGetInstance(), state_);
+            ShowSettingsDialogTab(this, state_, theme_, 1 /* Video / Codec */);
             if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
             SetupHotkeys();
             break;
@@ -659,6 +660,7 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
         return;
     }
     if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
+    HrLog::Info("HomRec closing");
     Destroy();
 }
 

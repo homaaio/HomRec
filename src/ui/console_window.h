@@ -52,7 +52,7 @@ public:
 
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND, UINT, WPARAM, LPARAM);
-    LRESULT HandleMessage(UINT, WPARAM, LPARAM);
+    LRESULT HandleMessage(HWND, UINT, WPARAM, LPARAM);
 
     void OnCreate(HINSTANCE hInst);
     void OnCommand(int id, int notifyCode, HWND ctrl);

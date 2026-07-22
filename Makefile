@@ -40,7 +40,7 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32
 # the wide API — they're a compile-time macro, unrelated to this.
 LDFLAGS  ?= -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bdynamic
 LDLIBS   := -lcomctl32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet \
-            -ld3d11 -ldxgi -lpdh -lwinmm -lole32 -luuid -llua
+            -ld3d11 -ldxgi -lpdh -lwinmm -lole32 -luuid -llua -ldwmapi
 
 # wxWidgets — used only by src/win_main.cpp and src/ui/main_frame.cpp.
 # Everything else (RecordingController, AudioPanel/OverlaysDockPanel's
@@ -70,7 +70,7 @@ SRCS := \
     src/ui/recording_controller.cpp \
     src/ui/audio_panel.cpp \
     src/ui/settings_dialog.cpp \
-    src/ui/advanced_settings_dialog.cpp \
+    src/ui/win32_theme.cpp \
     src/ui/overlay_manager.cpp \
     src/ui/welcome_dialog.cpp \
     src/ui/custom_messagebox.cpp \
@@ -79,6 +79,7 @@ SRCS := \
     src/ui/log_viewer_dialog.cpp \
     src/ui/window_picker_dialog.cpp \
     src/ui/overlays_dock_panel.cpp \
+    src/hr_log.cpp \
     src/plugins/lua_engine.cpp \
     src/plugins/lua_api.cpp \
     src/hr_display_info.cpp \

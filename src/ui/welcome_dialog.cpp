@@ -1,5 +1,6 @@
 #include "welcome_dialog.h"
 #include "version.h"
+#include "win32_theme.h"
 #include <string>
 
 namespace {
@@ -158,6 +159,7 @@ void ShowWelcomeDialog(HWND parent, HINSTANCE hInst) {
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
                                  (sw - W) / 2, (sh - H) / 2, W, H,
                                  parent, nullptr, hInst, &ctx);
+    HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
     CreateWindowExW(0, L"BUTTON", L"Changelog", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                      24, H - 76, 100, 30, hwnd, (HMENU)IDC_CHANGELOG, hInst, nullptr);

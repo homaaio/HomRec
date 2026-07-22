@@ -38,13 +38,13 @@
 #include <sstream>
 #include <mutex>
 
-/* ── Return codes ────────────────────────────────────────────────────────── */
+/* -- Return codes ---------------------------------------------------------- */
 static constexpr int HR_FF_OK       =  0;
 static constexpr int HR_FF_RUNNING  =  1;
 static constexpr int HR_FF_STOPPED  =  2;
 static constexpr int HR_FF_ERROR    = -1;
 
-/* ── Process context ─────────────────────────────────────────────────────── */
+/* -- Process context ------------------------------------------------------- */
 struct FfmpegCtx {
     std::string ffmpeg_path;
     std::string output_path;
@@ -69,7 +69,7 @@ struct FfmpegCtx {
     bool pipe_input{false};  /* true → read raw BGRA from stdin */
 };
 
-/* ── Helpers ──────────────────────────────────────────────────────────────── */
+/* -- Helpers ---------------------------------------------------------------- */
 
 static int64_t _file_size(const char *path) {
 #ifdef _WIN32
@@ -82,7 +82,7 @@ static int64_t _file_size(const char *path) {
 #endif
 }
 
-/* ── Process launch helpers ───────────────────────────────────────────────── */
+/* -- Process launch helpers ------------------------------------------------- */
 
 #ifdef _WIN32
 static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
@@ -126,7 +126,7 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
 }
 #endif
 
-/* ── Build ffmpeg command line ───────────────────────────────────────────── */
+/* -- Build ffmpeg command line --------------------------------------------- */
 
 /*
  * Builds the complete ffmpeg argument list for screen recording.
@@ -168,7 +168,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     return ss.str();
 }
 
-/* ── Public API ───────────────────────────────────────────────────────────── */
+/* -- Public API ------------------------------------------------------------- */
 
 HR_EXPORT void *hr_ff_create() {
     return new(std::nothrow) FfmpegCtx{};

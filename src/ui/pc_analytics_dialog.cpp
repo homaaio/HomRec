@@ -1,4 +1,5 @@
 #include "pc_analytics_dialog.h"
+#include "win32_theme.h"
 #include <cstdint>
 #include <cstring>
 #include <sstream>
@@ -122,6 +123,8 @@ LRESULT CALLBACK AnalyticsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             return 0;
         case WM_DESTROY:
             return 0;
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -134,7 +137,7 @@ void ShowPcAnalyticsDialog(HWND parent, HINSTANCE hInst, const std::string &disk
     wc.lpfnWndProc = AnalyticsProc;
     wc.hInstance = hInst;
     wc.lpszClassName = kClassName;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = HrWin32Theme::BgBrush();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
 
@@ -148,6 +151,7 @@ void ShowPcAnalyticsDialog(HWND parent, HINSTANCE hInst, const std::string &disk
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
                                  (sw - W) / 2, (sh - H) / 2, W, H,
                                  parent, nullptr, hInst, &ctx);
+    HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
     EnableWindow(parent, FALSE);
     ShowWindow(hwnd, SW_SHOW);

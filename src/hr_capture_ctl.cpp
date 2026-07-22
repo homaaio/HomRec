@@ -32,20 +32,20 @@
 #include <mutex>
 #include <string>
 
-/* ── Recording states ────────────────────────────────────────────────────── */
+/* -- Recording states ------------------------------------------------------ */
 enum HrState : int {
     HR_STATE_IDLE      = 0,
     HR_STATE_RECORDING = 1,
     HR_STATE_PAUSED    = 2,
 };
 
-/* ── Callbacks supplied by Python ────────────────────────────────────────── */
+/* -- Callbacks supplied by Python ------------------------------------------ */
 typedef void (*HR_STATE_CB)(int state);          /* called on state change    */
 typedef void (*HR_STATS_CB)(double elapsed_sec,  /* called every ~500 ms      */
                              double file_size_mb,
                              int    frame_count);
 
-/* ── Session context ─────────────────────────────────────────────────────── */
+/* -- Session context ------------------------------------------------------- */
 struct CaptureSession {
     std::atomic<HrState>  state{HR_STATE_IDLE};
 
@@ -67,7 +67,7 @@ struct CaptureSession {
 
     std::mutex mu;
 
-    /* ── helpers ── */
+    /* -- helpers -- */
     int64_t _now_ns() const {
 #ifdef _WIN32
         LARGE_INTEGER cnt, freq;
@@ -92,7 +92,7 @@ struct CaptureSession {
     }
 };
 
-/* ── Public API ───────────────────────────────────────────────────────────── */
+/* -- Public API ------------------------------------------------------------- */
 
 HR_EXPORT void *hr_ctl_create() {
     return new(std::nothrow) CaptureSession{};

@@ -1,6 +1,7 @@
 #include "console_window.h"
 #include "version.h"
 #include "recording_controller.h"
+#include "win32_theme.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -133,11 +134,11 @@ LRESULT CALLBACK ConsoleWindow::WindowProcThunk(HWND hwnd, UINT msg, WPARAM wPar
     } else {
         self = reinterpret_cast<ConsoleWindow *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
-    if (self) return self->HandleMessage(msg, wParam, lParam);
+    if (self) return self->HandleMessage(hwnd, msg, wParam, lParam);
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-LRESULT ConsoleWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT ConsoleWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_SIZE:
             OnSize(LOWORD(lParam), HIWORD(lParam));
@@ -146,10 +147,14 @@ LRESULT ConsoleWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             OnCommand(LOWORD(wParam), HIWORD(wParam), (HWND)lParam);
             return 0;
         case WM_CLOSE:
-            ShowWindow(hwnd_, SW_HIDE); // console is a tool window, not app-exiting — matches Ctrl+Shift+T toggle behavior
+            ShowWindow(hwnd, SW_HIDE); // console is a tool window, not app-exiting — matches Ctrl+Shift+T toggle behavior
             return 0;
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
+        case WM_CTLCOLOREDIT:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
         default:
-            return DefWindowProcW(hwnd_, msg, wParam, lParam);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 }
 
@@ -168,6 +173,7 @@ void ConsoleWindow::Show(HINSTANCE hInst) {
                                  WS_OVERLAPPEDWINDOW,
                                  CW_USEDEFAULT, CW_USEDEFAULT, 760, 480,
                                  main_window_, nullptr, hInst, this);
+        HrWin32Theme::ApplyDarkTitleBar(hwnd_);
         OnCreate(hInst);
     }
     ShowWindow(hwnd_, SW_SHOW);

@@ -1,4 +1,5 @@
 #include "overlay_manager.h"
+#include "win32_theme.h"
 #include <commctrl.h>
 #include <windowsx.h>
 #include <string>
@@ -67,6 +68,12 @@ LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_DESTROY:
             return 0; // nested modal loop — see settings_dialog.cpp for why no PostQuitMessage here
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
+        case WM_CTLCOLOREDIT:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
+        case WM_CTLCOLORLISTBOX:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             if (id == IDC_ED_OK) {
@@ -99,7 +106,7 @@ bool EditOverlayDialog(HWND parent, HINSTANCE hInst, OverlayDef &ov) {
     wc.lpfnWndProc = EditorProc;
     wc.hInstance = hInst;
     wc.lpszClassName = kClass;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = HrWin32Theme::BgBrush();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
 
@@ -110,6 +117,7 @@ bool EditOverlayDialog(HWND parent, HINSTANCE hInst, OverlayDef &ov) {
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
                                  CW_USEDEFAULT, CW_USEDEFAULT, 340, 320,
                                  parent, nullptr, hInst, &ctx);
+    HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
     auto label = [&](const wchar_t *t, int y) {
         CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE, 12, y, 80, 20, hwnd, nullptr, hInst, nullptr);
@@ -330,6 +338,10 @@ LRESULT CALLBACK ManagerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         case WM_DESTROY:
             return 0;
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
+        case WM_CTLCOLORLISTBOX:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             int sel = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
@@ -374,7 +386,7 @@ bool ShowOverlayManager(HWND parent, HINSTANCE hInst, AppState &state) {
     wc.lpfnWndProc = ManagerProc;
     wc.hInstance = hInst;
     wc.lpszClassName = kClass;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = HrWin32Theme::BgBrush();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
 
@@ -385,6 +397,7 @@ bool ShowOverlayManager(HWND parent, HINSTANCE hInst, AppState &state) {
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
                                  CW_USEDEFAULT, CW_USEDEFAULT, 420, 360,
                                  parent, nullptr, hInst, &ctx);
+    HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
     ctx.list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                                 WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL,

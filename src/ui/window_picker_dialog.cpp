@@ -1,4 +1,5 @@
 #include "window_picker_dialog.h"
+#include "win32_theme.h"
 #include <string>
 #include <vector>
 
@@ -91,6 +92,10 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case WM_DESTROY:
             return 0;
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
+        case WM_CTLCOLORLISTBOX:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -109,7 +114,7 @@ void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state) {
     wc.lpfnWndProc = PickerProc;
     wc.hInstance = hInst;
     wc.lpszClassName = kClassName;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = HrWin32Theme::BgBrush();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
 
@@ -124,6 +129,7 @@ void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state) {
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
                                  (sw - W) / 2, (sh - H) / 2, W, H,
                                  parent, nullptr, hInst, &ctx);
+    HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
     std::wstring countLabel = std::to_wstring(windows.size()) + L" windows found";
     CreateWindowExW(0, L"STATIC", countLabel.c_str(), WS_CHILD | WS_VISIBLE,
