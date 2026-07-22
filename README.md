@@ -28,7 +28,6 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 | **Multi-monitor** | Select which monitor to record |
 | **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
 | **Custom languages** | Drop a `.hrl` file in Advanced Settings to add any language instantly |
-| **Themes** | Dark and Light built-in; custom `.hrt` theme files supported |
 | **Overlays** | Add and position text/image/webcam overlays on your recording |
 | **Custom output folder** | Choose where recordings are saved |
 | **Recording stats** | Live FPS, duration, frame count in status bar |
@@ -59,7 +58,7 @@ HomRec is a native C++/C project — building it means compiling, not installing
 
 **1. Clone the repo**
 ```bash
-git clone https://github.com/homaaio/homrec.git
+git clone https://github.com/homaaio/HomRec.git
 cd homrec
 ```
 
