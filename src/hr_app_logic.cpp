@@ -1,5 +1,5 @@
 /*
- * hr_app_logic.cpp  -  HomRec core application logic  (v1.6.2)
+ * hr_app_logic.cpp  —  HomRec core application logic  (v1.6.2)
  *
  * Содержит всю бизнес-логику, вынесенную из homrec.py:
  *   - find_ffmpeg()           поиск ffmpeg в системе
@@ -14,7 +14,7 @@
  *   - version helpers         _version_gt(), CURRENT_VERSION
  *
  * Python-сторона (homrec.py) вызывает эти функции через ctypes.
- * Все строки - UTF-8, кроме явно помеченных как Wide.
+ * Все строки — UTF-8, кроме явно помеченных как Wide.
  *
  * Build (MinGW-w64, Windows):
  *   g++ -O2 -std=c++17 -shared -static-libgcc -static-libstdc++ ^
@@ -68,13 +68,13 @@ static std::string _str(const char *s) { return s ? std::string(s) : std::string
  * BUG FIX: run a shell command the same way system() does (blocking, returns
  * the process exit code), but without the visible cmd.exe flash that plain
  * system() causes on Windows. system() always spawns via cmd.exe, and it has
- * no way to pass CREATE_NO_WINDOW / SW_HIDE - the window is created and
+ * no way to pass CREATE_NO_WINDOW / SW_HIDE — the window is created and
  * shown by the OS before cmd.exe even gets a chance to run, so redirecting
  * the *command's* output (e.g. "... >nul 2>&1") does nothing to hide it.
  *
  * This was firing on every launch via hr_probe_gpu_encoder() (called ~3s
  * after startup to detect NVENC/AMF/QSV support), and again after any
- * recording that needed a separate audio/video merge - each one flashing a
+ * recording that needed a separate audio/video merge — each one flashing a
  * console window that had nothing to do with any of the app's own windows.
  */
 static int _run_hidden(const std::string &cmd) {
@@ -417,16 +417,12 @@ HR_EXPORT int hr_probe_gpu_encoder(const char *ffmpeg_path,
     return 0;
 }
 
-/* --------------------------------------------------------------------------- */
-/*  build_codec_args                                                            */
-/* --------------------------------------------------------------------------- */
-
 /*
  * hr_build_codec_args used to be defined here too (narrow-char, void-
  * returning, mirroring Python's HomRecScreen._build_codec_args() directly).
- * It was DEAD CODE - the only real caller, recording_controller.cpp, has
+ * It was DEAD CODE — the only real caller, recording_controller.cpp, has
  * always used the wide-char, int-returning version in hr_tools.cpp instead
- * - and being HR_EXPORT (extern "C") meant both shared one unmangled
+ * — and being HR_EXPORT (extern "C") meant both shared one unmangled
  * linker symbol name, which finally surfaced as a "multiple definition of
  * `hr_build_codec_args`" link error once every source file started
  * actually compiling clean. Removed rather than renamed: this copy also
@@ -889,7 +885,7 @@ HR_EXPORT int hr_fetch_latest_version(const char *repo,
     out[0] = '\0';
 
 #ifdef _WIN32
-    /* Use WinINet - available on all Windows versions, no extra DLL */
+    /* Use WinINet — available on all Windows versions, no extra DLL */
     HMODULE hWinInet = LoadLibraryA("wininet.dll");
     if (!hWinInet) return 0;
 
