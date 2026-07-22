@@ -10,3 +10,22 @@ src/win_main.cpp linguist-generated=true
 # src/homrec_app/mixins/settings_mixin.py linguist-generated=true
 # src/homrec_app/mixins/ui_mixin.py linguist-generated=true
 # src/homrec_native.py linguist-generated=true
+
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Specific file types
+*.cpp text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+
+# Binary files
+*.exe binary
+*.dll binary
+*.o binary
+*.obj binary
+*.png binary
+*.jpg binary
