@@ -292,6 +292,10 @@ Testing/
 .cache/
 create/
 
-# Plugins
+# HomRec files
 
+*.hrc
+*.hrp
+recordings/
 plugins/
+create/
