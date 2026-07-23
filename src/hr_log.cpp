@@ -31,7 +31,7 @@ namespace HrLog {
 void Write(const char *level, const std::string &message) {
     std::lock_guard<std::mutex> lock(LogMutex());
 
-    std::ofstream f(LogPath(), std::ios::app | std::ios::binary);
+    std::ofstream f(LogPath().c_str(), std::ios::app | std::ios::binary);
     if (!f) return;
 
     time_t t = time(nullptr);
