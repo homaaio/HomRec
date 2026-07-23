@@ -219,6 +219,7 @@ hr.exe
 !hr.exe
 homrec_settings.json
 *.bat
+docs/index.html
 
 # C++ part
 
