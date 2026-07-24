@@ -2,6 +2,7 @@
 #include "version.h"
 #include "recording_controller.h"
 #include "win32_theme.h"
+#include "hrc_config.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -169,9 +170,11 @@ void ConsoleWindow::Show(HINSTANCE hInst) {
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         RegisterClassW(&wc);
 
+        int x, y, w, h;
+        HrWin32Theme::CenteredWindowRect(760, 480, WS_OVERLAPPEDWINDOW, x, y, w, h);
         hwnd_ = CreateWindowExW(0, kClass, L"HomRec Console",
                                  WS_OVERLAPPEDWINDOW,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 760, 480,
+                                 x, y, w, h,
                                  main_window_, nullptr, hInst, this);
         HrWin32Theme::ApplyDarkTitleBar(hwnd_);
         OnCreate(hInst);
@@ -284,6 +287,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     else if (cmd == L"sec") CmdSec(raw);
     else if (cmd == L"secui") CmdSecUi(raw);
     else if (cmd == L"secp") CmdSecP(raw);
+    else if (cmd == L"hrc") CmdHrc(raw);
     else if (cmd == L"rm") {
         // Route the two ported $rm forms; anything else under $rm
         // (--ui, @ts, bare $rm_vid, etc.) is deferred — see README_PHASE8.md.
@@ -393,6 +397,25 @@ void ConsoleWindow::CmdLog(const std::wstring &raw) {
 void ConsoleWindow::CmdHide(const std::wstring &) {
     if (main_window_) ShowWindow(main_window_, SW_HIDE);
     PrintOk(L"main window hidden — use the tray icon to restore it");
+}
+
+void ConsoleWindow::CmdHrc(const std::wstring &raw) {
+    std::wistringstream iss(raw);
+    std::wstring cmd, sub, path;
+    iss >> cmd >> sub;
+    std::getline(iss, path);
+    path = Trim(path);
+    if (path.empty()) path = GetBaseDir() + L"\\homrec_config.hrc";
+
+    if (sub == L"save") {
+        if (HrcConfig::Save(state_, path)) PrintOk(L"saved settings to " + path);
+        else PrintErr(L"couldn't write " + path);
+    } else if (sub == L"load") {
+        if (HrcConfig::Load(state_, path)) PrintOk(L"loaded settings from " + path + L" (restart may be needed for some fields to take effect)");
+        else PrintErr(L"couldn't read " + path);
+    } else {
+        PrintWarn(L"usage: $hrc save [path] | $hrc load [path]  (default path: homrec_config.hrc next to the exe)");
+    }
 }
 
 void ConsoleWindow::CmdSec(const std::wstring &raw) {

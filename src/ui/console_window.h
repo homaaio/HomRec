@@ -82,6 +82,7 @@ private:
     void CmdSecP(const std::wstring &raw);
     void CmdRmSystemFiles(const std::wstring &raw);
     void CmdRmSelfApp(const std::wstring &raw);
+    void CmdHrc(const std::wstring &raw);
     void ScheduleSelfDelete(const std::wstring &base_dir);
 
     bool CoreUnlocked() const { return !sec_core_; }
