@@ -133,11 +133,12 @@ void ShowLogViewerDialog(HWND parent, HINSTANCE hInst) {
     RegisterClassW(&wc);
 
     const int W = 700, H = 480;
-    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
 
+    int lx, ly, lw, lh;
+    HrWin32Theme::CenteredWindowRect(W, H, WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, lx, ly, lw, lh);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, L"HomRec Log",
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
-                                 (sw - W) / 2, (sh - H) / 2, W, H,
+                                 lx, ly, lw, lh,
                                  parent, nullptr, hInst, nullptr);
     HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
