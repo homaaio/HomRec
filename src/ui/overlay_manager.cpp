@@ -113,9 +113,11 @@ bool EditOverlayDialog(HWND parent, HINSTANCE hInst, OverlayDef &ov) {
     EditorCtx ctx = {};
     ctx.ov = &ov;
 
+    int ex, ey, ew, eh;
+    HrWin32Theme::CenteredWindowRect(340, 320, WS_POPUP | WS_CAPTION | WS_SYSMENU, ex, ey, ew, eh);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, L"Edit Overlay",
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 340, 320,
+                                 ex, ey, ew, eh,
                                  parent, nullptr, hInst, &ctx);
     HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
@@ -393,9 +395,11 @@ bool ShowOverlayManager(HWND parent, HINSTANCE hInst, AppState &state) {
     ManagerCtx ctx = {};
     ctx.state = &state;
 
+    int mx, my, mw, mh;
+    HrWin32Theme::CenteredWindowRect(420, 360, WS_POPUP | WS_CAPTION | WS_SYSMENU, mx, my, mw, mh);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, L"Overlays",
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 420, 360,
+                                 mx, my, mw, mh,
                                  parent, nullptr, hInst, &ctx);
     HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
