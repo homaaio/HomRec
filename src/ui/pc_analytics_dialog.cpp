@@ -142,14 +142,15 @@ void ShowPcAnalyticsDialog(HWND parent, HINSTANCE hInst, const std::string &disk
     RegisterClassW(&wc);
 
     const int W = 260, H = 360;
-    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
 
     AnalyticsCtx ctx;
     ctx.disk_path = disk_path;
 
+    int px, py, pw, ph;
+    HrWin32Theme::CenteredWindowRect(W, H, WS_POPUP | WS_CAPTION | WS_SYSMENU, px, py, pw, ph);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, L"PC Analytics",
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                                 (sw - W) / 2, (sh - H) / 2, W, H,
+                                 px, py, pw, ph,
                                  parent, nullptr, hInst, &ctx);
     HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
