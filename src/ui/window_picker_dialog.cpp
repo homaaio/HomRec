@@ -119,15 +119,16 @@ void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state) {
     RegisterClassW(&wc);
 
     const int W = 520, H = 420;
-    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
 
     PickerCtx ctx;
     ctx.state = &state;
     ctx.windows = &windows;
 
+    int wx, wy, ww, wh;
+    HrWin32Theme::CenteredWindowRect(W, H, WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, wx, wy, ww, wh);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, L"Select Window to Record",
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
-                                 (sw - W) / 2, (sh - H) / 2, W, H,
+                                 wx, wy, ww, wh,
                                  parent, nullptr, hInst, &ctx);
     HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
