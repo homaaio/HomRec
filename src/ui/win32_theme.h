@@ -43,4 +43,13 @@ LRESULT ColorStatic(HDC hdc);
 // Call from WM_CTLCOLOREDIT / WM_CTLCOLORLISTBOX:
 LRESULT ColorEdit(HDC hdc);
 
+// Computes an outer window x/y/w/h that will produce the given CLIENT
+// area for the given style, centered on the primary monitor. Use this
+// instead of passing a desired client size straight to CreateWindowExW
+// (which silently clips whatever control sits nearest the bottom/right --
+// worse at higher display scaling) and instead of CW_USEDEFAULT for
+// WS_POPUP windows (Windows collapses position *and* size to zero for
+// CW_USEDEFAULT on anything that isn't WS_OVERLAPPED).
+void CenteredWindowRect(int clientW, int clientH, DWORD style, int &x, int &y, int &w, int &h);
+
 } // namespace HrWin32Theme
