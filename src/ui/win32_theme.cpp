@@ -40,4 +40,14 @@ LRESULT ColorEdit(HDC hdc) {
     return (LRESULT)SurfaceBrush();
 }
 
+void CenteredWindowRect(int clientW, int clientH, DWORD style, int &x, int &y, int &w, int &h) {
+    RECT r = {0, 0, clientW, clientH};
+    AdjustWindowRectEx(&r, style, FALSE, 0);
+    w = r.right - r.left;
+    h = r.bottom - r.top;
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    x = (sw - w) / 2;
+    y = (sh - h) / 2;
+}
+
 } // namespace HrWin32Theme
