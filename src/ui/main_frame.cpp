@@ -6,9 +6,12 @@
 #include "pc_analytics_dialog.h"
 #include "log_viewer_dialog.h"
 #include "window_picker_dialog.h"
+#include "hrc_config.h"
 #include "../hr_log.h"
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
+#include <wx/filedlg.h>
+#include <wx/msgdlg.h>
 #include <functional>
 #include <algorithm>
 #include <string>
@@ -213,7 +216,7 @@ HomRecMainFrame::HomRecMainFrame()
     preview_timer_.Start(1000 / 30);
     stats_timer_.Start(500);
 
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_VIEW_OVERLAYS_PANEL);
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_IMPORT_HRC);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
     Bind(EVT_HOTKEY_START_STOP, &HomRecMainFrame::OnHotkeyEvent, this);
@@ -244,6 +247,9 @@ void HomRecMainFrame::BuildMenuBar() {
     auto *fileMenu = new wxMenu();
     fileMenu->Append(ID_FILE_OPEN_RECORDINGS, "Open Recordings Folder");
     fileMenu->Append(ID_FILE_SELECT_WINDOW, "Select Window to Record...");
+    fileMenu->AppendSeparator();
+    fileMenu->Append(ID_FILE_EXPORT_HRC, "Export Settings (.hrc)...");
+    fileMenu->Append(ID_FILE_IMPORT_HRC, "Import Settings (.hrc)...");
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXIT, "Exit");
     menuBar->Append(fileMenu, "File");
@@ -580,6 +586,41 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         case ID_FILE_SELECT_WINDOW:
             ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
             break;
+        case ID_FILE_EXPORT_HRC: {
+            wxFileDialog dlg(this, "Export Settings", wxEmptyString, "homrec_config.hrc",
+                              "HomRec Config (*.hrc)|*.hrc", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+            if (dlg.ShowModal() == wxID_OK) {
+                std::wstring wpath = dlg.GetPath().ToStdWstring();
+                std::string logPath = dlg.GetPath().ToUTF8().data();
+                if (HrcConfig::Save(state_, wpath)) {
+                    HrLog::Info("Exported settings to " + logPath);
+                } else {
+                    HrLog::Error("Failed to export settings to " + logPath);
+                    wxMessageBox("Couldn't write that file.", "Export Settings", wxOK | wxICON_ERROR, this);
+                }
+            }
+            break;
+        }
+        case ID_FILE_IMPORT_HRC: {
+            wxFileDialog dlg(this, "Import Settings", wxEmptyString, wxEmptyString,
+                              "HomRec Config (*.hrc)|*.hrc|All files (*.*)|*.*", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+            if (dlg.ShowModal() == wxID_OK) {
+                std::wstring wpath = dlg.GetPath().ToStdWstring();
+                std::string logPath = dlg.GetPath().ToUTF8().data();
+                if (HrcConfig::Load(state_, wpath)) {
+                    HrLog::Info("Imported settings from " + logPath);
+                    ApplyThemeColours();
+                    ApplyLanguageText();
+                    if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
+                    SetupHotkeys();
+                    wxMessageBox("Settings imported.", "Import Settings", wxOK | wxICON_INFORMATION, this);
+                } else {
+                    HrLog::Error("Failed to import settings from " + logPath);
+                    wxMessageBox("Couldn't read that file.", "Import Settings", wxOK | wxICON_ERROR, this);
+                }
+            }
+            break;
+        }
         case ID_VIEW_ALWAYS_ON_TOP: {
             long style = GetWindowStyleFlag();
             SetWindowStyleFlag(style ^ wxSTAY_ON_TOP);
