@@ -296,6 +296,8 @@ create/
 
 *.hrc
 *.hrp
+*.hrl
 recordings/
 plugins/
 create/
+icons/
