@@ -25,6 +25,8 @@
 #include <algorithm>
 #include <queue>
 #include <condition_variable>
+#include <string>
+#include "hr_log.h"
 
 static constexpr int HR_DX_OK      =  0;
 static constexpr int HR_DX_TIMEOUT =  1;
@@ -172,6 +174,7 @@ struct Pipeline {
     std::thread       capture_thread;
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
+    bool logged_lost_ = false; // edge-trigger for the DX_LOST diagnostic below
 
     std::atomic<int64_t> frames_captured{0};
     std::atomic<int64_t> frames_dropped{0};
@@ -388,12 +391,18 @@ struct Pipeline {
                 continue;
             }
             if (ret == HR_DX_LOST) {
+                if (!logged_lost_) {
+                    HrLog::Warn("DXGI capture lost (display mode change, UAC prompt, or GPU reset) -- resetting");
+                    logged_lost_ = true;
+                }
 #ifdef _WIN32
                 if (g_libs.dx_reset) g_libs.dx_reset(dx_ctx);
 #endif
                 continue;
             }
+            logged_lost_ = false;
             if (ret != HR_DX_OK) {
+                HrLog::Error("Capture pipeline stopped: dx_capture() returned a fatal error (ret=" + std::to_string(ret) + ")");
                 running.store(false);
                 break;
             }
@@ -504,10 +513,18 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     pl->recording   = (pipe_fd != 0 && pipe_fd != -1);
 
     pl->dx_ctx = g_libs.dx_create(0, 0);
-    if (!pl->dx_ctx) { delete pl; return nullptr; }
+    if (!pl->dx_ctx) {
+        HrLog::Error("Pipeline create failed: dx_create() returned null (DXGI desktop duplication init failed -- "
+                     "common causes: running over RDP/a virtual display, a just-changed display mode, or "
+                     "insufficient permissions)");
+        delete pl; return nullptr;
+    }
 
     pl->sw_ctx = g_libs.sw_create();
-    if (!pl->sw_ctx) { g_libs.dx_destroy(pl->dx_ctx); delete pl; return nullptr; }
+    if (!pl->sw_ctx) {
+        HrLog::Error("Pipeline create failed: sw_create() (frame pacing/stopwatch) returned null");
+        g_libs.dx_destroy(pl->dx_ctx); delete pl; return nullptr;
+    }
 
     return pl;
 #endif
