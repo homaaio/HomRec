@@ -152,12 +152,13 @@ void ShowWelcomeDialog(HWND parent, HINSTANCE hInst) {
     RegisterClassW(&wc);
 
     const int W = 580, H = 440;
-    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
 
     WelcomeCtx ctx;
+    int wx, wy, ww, wh;
+    HrWin32Theme::CenteredWindowRect(W, H, WS_POPUP | WS_CAPTION | WS_SYSMENU, wx, wy, ww, wh);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, L"Welcome to HomRec",
                                  WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                                 (sw - W) / 2, (sh - H) / 2, W, H,
+                                 wx, wy, ww, wh,
                                  parent, nullptr, hInst, &ctx);
     HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
