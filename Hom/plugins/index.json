@@ -1,0 +1,11 @@
+{
+    "_comment": "Human/tooling-facing listing of what's in Hom/plugins/. hom.exe itself doesn't read this file -- 'hom install <name>' just requests plugins/<name>.hrp directly -- this is here so people browsing the repo (or a future 'hom search') can see what's available.",
+    "plugins": [
+        {
+            "name": "input-overlay",
+            "file": "input-overlay.hrp",
+            "description": "Keyboard / mouse / gamepad input overlay presets (WASD, QWERTY, mouse, gamepad).",
+            "version": "1.0.0"
+        }
+    ]
+}

@@ -1,0 +1,6 @@
+{
+    "id": "input_overlay_presets",
+    "name": "Input Overlay Presets",
+    "version": "1.0.0",
+    "entry": "entry.lua"
+}

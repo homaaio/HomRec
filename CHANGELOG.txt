@@ -1,0 +1,508 @@
+welcome to changelog :D
+
+[Unreleased] - 2026-08-07
+
+=== Fixed ===
+
+- Version string was inconsistent between files: hr_version.cpp's
+  k_ver_homrec (and the "!homrec --version" banner) still said "1.7.0"
+  while README/version.h already said "1.7.2". Bumped to match. Note:
+  hr_version.cpp currently isn't in the Makefile's SRCS list, so this
+  export isn't linked into hr.exe yet either way - fixed for whenever it
+  is, so it doesn't carry the stale string forward.
+- src/ui/language.cpp hardcoded the title-bar string as the literal
+  "HomRec v1.7.1", duplicating (and drifting from) the real version
+  constant in version.h - a leftover flagged by an audit note already
+  sitting in that header. Now builds "app_title" from HR_APP_VERSION
+  directly, so there's exactly one place to bump on release. Removed the
+  now-resolved audit note from version.h.
+- hr_framequeue.cpp: hr_fq_push() silently dropped the oldest frame's
+  pointer when the queue was full, with no way for the caller to free
+  whatever it had allocated for that frame - a real leak under sustained
+  backpressure. hr_fq_push() now takes an out_dropped parameter so the
+  evicted pointer is handed back instead of discarded. (Also currently
+  unlinked/unused - same as above, fixed for future wiring-in.)
+- hr_pipeline.cpp: hr_pl_destroy() waits up to 1s for the writer/capture
+  threads to exit, then force-detaches them if they're stuck - but both
+  threads capture the raw Pipeline* and keep running after being
+  detached. The function then deleted the Pipeline object anyway,
+  meaning a still-running zombie thread could touch freed memory on its
+  next iteration (heap-use-after-free / possible crash or corruption).
+  Now skips the delete (and the resource teardown that a zombie thread
+  might also touch) if either thread had to be force-detached, and logs
+  an error - a deliberate small leak in that rare case beats a heap
+  corruption.
+- hr_ffmpeg_runner.cpp: corrected a stale comment claiming raw BGRA
+  frames are piped to ffmpeg's stdin - the pipeline actually converts
+  each frame to planar YUV420P first (matching the "-pixel_format
+  yuv420p" flag already being passed), so this was a documentation-only
+  fix, not a functional bug.
+
+=== Changed (optimizations) ===
+
+- hr_overlay_render.cpp: GetOrRenderText()/GetOrRenderImage() were
+  rebuilding a cache-key std::string (several std::to_string() calls +
+  concatenation, at least one heap allocation) on every single captured
+  frame for every visible text/image overlay, purely to compare it
+  against the previous key and detect "nothing changed." For a static
+  overlay - the overwhelming common case - that's wasted allocation
+  churn on the capture thread, every frame, for as long as the overlay
+  is on screen. Added a cheap field-by-field comparison (ints/bytes,
+  bounded strncmp against the fixed-size text/path buffers, plus the
+  overlay's type, to correctly invalidate the fast path if an overlay's
+  type is changed at runtime while keeping the same list index) that
+  short-circuits before any string work happens when nothing changed.
+  The original string-key path is kept as-is as the correctness
+  fallback for whenever something actually did change.
+
+[Version 1.7.2] - 2026-07-09
+
+=== Changed ===
+
+- UI Console
+- homrec.py divided into modules
+- minor bugs has been fixed
+
+=== Fixed ===
+
+- Path bugs (in src\homrec_app)
+
+[Version 1.7.1] - 2026-07-07
+
+=== Added ===
+- `rm --vid` terminal commands - delete recordings straight from the console:
+  - `rm --vid #name="..."` - delete one recording by name (extension optional; its companion separate-audio `.mp3` export, if any, is deleted too)
+  - `rm --vid @all` - delete every recording in the output folder
+  - `rm --vid @last` - delete only the most recently recorded file
+  - All support `-q` / `-y` to skip the confirmation prompt. The file currently being recorded is never deleted, even by `@all`.
+- `rm @homrec` (uninstall HomRec) now asks "are you sure?" before doing anything - pass `-q` / `-y` to skip the prompt for scripted use. Previously it ran with no confirmation at all.
+- The `!` and `$` command prefixes are now **optional** everywhere in the console. `rm --vid @last` works exactly like `$rm --vid @last`; `create --window ...` works exactly like `!create --window ...`. Old prefixed commands, aliases, rules, and hotkeys keep working unchanged - the prefix is just no longer required.
+
+=== Fixed ===
+- Bug 9 (continued) - found the actual remaining source of the CMD flash after confirming it still happened even with `--windowed` set at the PyInstaller level (which rules out the app's own subsystem console - that part was already correct). The real cause: `hr_app_logic.cpp`'s GPU-encoder probe (`hr_probe_gpu_encoder`, run automatically ~3s after every launch to detect NVENC/AMF/QSV support) and its audio/video merge helper (`merge_audio_video`) both used plain `system()` to run ffmpeg. On Windows, `system()` always spawns via a new `cmd.exe`, and unlike `CreateProcess` it has no way to pass `CREATE_NO_WINDOW`/`SW_HIDE` - redirecting the command's own output (`>nul 2>&1`) does nothing to hide the window `system()` itself creates. Replaced both call sites with a hidden `CreateProcess`-based helper (matching the pattern already used correctly elsewhere in the same file, e.g. `hr_launch_ffmpeg`). Requires rebuilding `hr_app_logic.dll`.
+- Version number was inconsistent across the app: `homrec.py` still reported `v1.7.0` in five places (title bar, About label, startup log line, taskbar app ID, `CURRENT_VERSION`) despite this actually being `1.7.1`, and the README badge still said `1.6.4`. All bumped to `1.7.1`.
+- Removed dead code: `homrec.py`'s preview capture loop tried to import a `CppPipeline` class from `homrec_native.py` for a DXGI fast-path that was never actually implemented there - the import always failed and it silently fell back to the normal path every time anyway. Removed the broken import/init code and the now-fully-unreachable `_capture_loop_cpp` method rather than leave code referencing a class that doesn't exist.
+- `$do --ui@homrec 1` (re-download/reinstall `homrec.py` from GitHub) used to write the downloaded file straight over the running app's source with no integrity check at all. It now verifies the download's SHA-256 against a `homrec.py.sha256` published alongside it before writing anything, and aborts (nothing on disk touched) if that checksum is missing or doesn't match - pass `--force` to skip verification if you understand the risk.
+- Bug 9 - a CMD/console window could flash up when launching HomRec (double-clicking the .exe, a shortcut, `python homrec.py` with no parent terminal, etc). This was the app's own auto-created console, not one of the ffmpeg/helper subprocesses (those were already silenced - see Bug 2 in 1.7.0). HomRec now detects and hides that auto-created console on startup, while leaving a developer's own already-open terminal alone if they're running it from source to watch log output. Set `HOMREC_SHOW_CONSOLE=1` to opt out.
+  - Follow-up fix: the first version of this checked how many processes were attached to the console and only hid it if exactly one was - which broke for PyInstaller builds of `hr.exe`, since a PyInstaller onefile .exe's bootloader stub and the actual unpacked program both attach to the *same* auto-created console, so the count was always 2+ and it never got hidden (this is what people were still seeing after building with PyInstaller). Now checks the actual name of the immediate parent process instead, and only leaves the console alone if it's a real interactive shell (cmd.exe / powershell.exe / pwsh.exe / Windows Terminal).
+- Bug 6 - webcam overlay never showed up, in Settings or in the recorded video: the DirectShow device-name probe filtered for the text `(video)`, which never actually appears in FFmpeg's real device listing, so it always fell back to the fake name `"Integrated Webcam"` - a name that doesn't match most people's actual camera, so FFmpeg silently failed to grab it. The probe now correctly parses FFmpeg's `-list_devices` output.
+- Bug 7 - webcam overlay preview was always a static placeholder box, both in the Overlays settings editor and in the live preview while recording: it never actually grabbed a frame from the camera. It now shows a real, live feed from the selected camera (falling back to a "no signal" placeholder only if the camera can't be opened).
+- Bug 8 - screen preview freezes while recording: the recording-preview path called `resize_nearest_np`, a method that didn't exist anywhere in `homrec_native.py` (only `resize_bilinear_np` did). Every throttled preview update during recording silently threw `AttributeError`, so the preview queue never refilled and the on-screen preview froze on the last frame for the rest of the recording. Added the missing method.
+- `requirements.txt` had a leftover, unresolved merge-conflict marker (`=======`) that broke `pip install -r requirements.txt`; cleaned up and de-duplicated (also added `opencv-python` / `numpy`, which the code already depends on but which were missing from the top of the file).
+
+[Version 1.7.0] - 2026-07-04
+
+=== Added ===
+- Video format selector - choose .mp4 or .mkv in Settings → Video
+- Separate audio export - Advanced Settings → Audio → "Save audio as separate .mp3"
+- Overlays system - Advanced Settings → Overlays tab:
+  - Text overlays (rendered live via FFmpeg drawtext filter)
+  - Webcam overlay (cam index selector)
+  - Image overlay (browse for .png/.jpg/.bmp)
+  - Per-overlay: opacity slider, X/Y position (%), W/H size (%)
+  - **Preview window** - OBS-style drag-to-position: live screen grab + draggable handles
+- `!check.er` terminal command - interactive integrity scanner:
+  - `!check.er 1` - scan most recent video file
+  - `!check.er 2` - scan all videos in output folder
+  - `!check.er 3` - HomRec self-diagnostics (FFmpeg, DLL, ddagrab, audio, overlays)
+  - `!check.er scan #file="path"` - scan a specific file
+
+=== Fixed ===
+- Bug 1 - Minecraft/game capture single frame: Added DXGI Desktop Duplication (ddagrab) support. HomRec now auto-detects if your FFmpeg supports ddagrab and uses it instead of GDI. Works with fullscreen D3D11/D3D12/Vulkan games.
+- Bug 2 - CMD windows on startup: All subprocess calls now use CREATE_NO_WINDOW on Windows. No more flashing black console windows.
+- Bug 3 - terminal.exe freezes on connect: Added pipe keepalive heartbeat thread (2s NUL ping). Terminal's ReadFile no longer blocks indefinitely.
+- Bug 4 - `-ret` incorrect behavior: `-ret` / `-return` now wraps execution and prints `(1)` on success or `(0)` on failure in the console.
+- Bug 5 - ddagrab + scaling filter conflict: Fixed FFmpeg error "Simple and complex filtering cannot be used together" when recording with ddagrab at non-standard resolutions (e.g., 1200x674). The -vf filter is no longer applied when -filter_complex (scaling) is active, preventing the incompatible filter mix.
+
+=== Changed ===
+- All UI strings and terminal output translated to English (Russian locale strings preserved in the `"ru"` language dict)
+- Welcome dialog simplified - no more redundant tips block
+- `.mkv` output fully supported: filenames, audio merge temp files all use correct extension
+- Overlay VF chain merges cleanly with existing scale/crop filters
+- Removed RU language, only EN now (but you still can add your language from .hrl)
+
+[Version 1.6.4] - 2026-06-09
+
+=== Added ===
+
+!start --terminal as @terminal command - launches hr_terminal.exe as an
+  external terminal window directly from the console. The command is handled
+  natively in hr_console.cpp (ShellExecuteExW next to the DLL) and mirrored
+  in hr_console_bridge.py (subprocess.Popen next to the script).
+  Appears in !help output under the !start group.
+
+=== Fixed ===
+
+Version bumped to 1.6.4
+Console version bumped to 1.2.2
+Minor bugs has been fixed (Tray bugs, icons bugs etc.)
+
+
+[Version 1.6.4] - 2026-06-09
+
+=== Added ===
+
+!start --terminal as @terminal command - launches hr_terminal.exe as an
+  external terminal window directly from the console. The command is handled
+  natively in hr_console.cpp (ShellExecuteExW next to the DLL) and mirrored
+  in hr_console_bridge.py (subprocess.Popen next to the script).
+  Appears in !help output under the !start group.
+
+=== Fixed ===
+
+Version bumped to 1.6.4
+Console version bumped to 1.2.2
+Minor bugs has been fixed (Tray bugs, icons bugs etc.)
+
+
+[Version 1.6.3] - 2026-06-07
+
+=== Added ===
+
+hr_terminal.exe - standalone external terminal window for HomRec console.
+  Runs as a separate process with its own Win32 window (Rich Edit output,
+  Unicode input field, Catppuccin Mocha color scheme matching the DLL console).
+  Multiple instances supported simultaneously (up to 8 concurrent connections).
+
+=== Fixed ===
+
+Minor bugs has been fixed
+Version bumped to 1.6.3
+
+
+[Version 1.6.2] - 2026-06-06
+
+=== Added ===
+
+In the View menu, there is a new item Show Log (appears before the Theme submenu)
+
+=== Fixed ====
+
+Version bumped to 1.6.2
+
+
+[Version 1.6.1] - 2026-06-05
+
+=== Added ===
+
+More C++ scripts
+Command "!homrec --version"
+
+=== Fixed ===
+
+Version bumped to 1.6.1
+Console version bumped to 1.2.0
+Core version bumped to 1.4.3
+
+[Version 1.6.0] - 2026-06-04
+
+=== Added ===
+
+Console. You can check https://github.com/homaaio/HomRec/blob/main/commands.md for more about it
+
+[Version 1.5.0] - 2026-05-29
+
+=== Added ===
+
+Native C/C++ performance extensions (homrec_core, hr_encoder_helpers,
+hr_preview, hr_ringbuf, hr_framequeue, hr_stopwatch, hr_display_info,
+hr_dxgi_capture, hr_pipeline) - compiled as .dll/.so, loaded at runtime
+via ctypes. Auto-discovered next to homrec.py - no config needed.
+Graceful fallback to pure Python if any module is missing.
+
+hr_pipeline: unified C++ capture thread - DXGI Desktop Duplication →
+BGRA→YUV420p → named pipe (FFmpeg reads) + preview thumbnail.
+Eliminates Python-side mss.grab() loop entirely on Windows.
+
+hr_stopwatch: sub-millisecond frame-pacing timer using
+QueryPerformanceCounter (Windows) / clock_gettime CLOCK_MONOTONIC (POSIX).
+Fixes the 15 ms sleep granularity jitter on Windows that caused frame drops.
+
+hr_dxgi_capture: GPU-accelerated screen capture via DXGI Desktop
+Duplication API. Captures frames the moment the compositor presents them
+(~1 display cycle latency vs 1-2 frame lag with GDI/BitBlt).
+
+hr_display_info: fast monitor enumeration with per-monitor DPI via
+GetDpiForMonitor (Windows) / xrandr (Linux).
+
+homrec_native.py: Python ctypes wrapper for all native libraries with
+full Python fallbacks for every function.
+
+"Disable Preview" option in Settings → Advanced → Performance.
+Shows a placeholder screen instead of live preview - saves CPU during
+recording on low-end hardware.
+
+"Update" button appears in corner when new version is detected
+Welcome window shown on first launch
+
+=== Changed ===
+
+Capture loop: preview thread now skips mss.grab() entirely during
+recording - no GDI bandwidth competition with FFmpeg.
+
+Codec pipeline: QP range clamped (min qp=23) to prevent near-lossless
+encoding (~150 Mbit/s) that saturated weak GPU encoders.
+
+QSV encoder: removed -async_depth 1 which blocked the capture thread
+waiting for GPU acknowledgement on each frame, halving FPS on i3/i5.
+
+QSV encoder on UHD Graphics: added -low_power 1 (VDENC fixed-function
+path, 2-3× faster than shader PAK) and -look_ahead 0 (removes CPU-side
+lookahead overhead).
+
+CPU encoder (libx264): thread count now set to 1 on systems with ≤4
+logical cores, avoiding competition with FFmpeg for CPU time.
+
+GIL switch interval raised from 5 ms to 20 ms - reduces GIL contention
+between capture, audio and UI threads on weak CPUs. One GIL switch per
+frame at 60 FPS instead of three.
+
+OpenCV thread count set to 1 on systems with ≤4 logical cores - preview
+resize does not need multiple threads.
+
+gdigrab input: thread_queue_size reduced from 512 to 128, added
+-rtbufsize 16M to limit memory pressure on systems with shared CPU+GPU RAM.
+
+Preview update interval during recording raised from 1000 ms to 2000 ms -
+capture thread sleeps 500 ms anyway so polling faster was pointless.
+
+Audio recording stop: non-blocking teardown - streams closed before
+joining threads so read() unblocks immediately. Eliminates the previous
+30-second hang on stop.
+
+=== Fixed ===
+
+hr_audio_rms: int32_t accumulator replaced with int64_t - prevented
+integer overflow on buffers larger than ~2M samples.
+
+hr_blend_rgba: alpha compositing rounding bias corrected from +127 to
++128, fixing a systematic 1-LSB error in badge/watermark blending.
+
+hr_framequeue: push() race condition - slot is now written before head
+is advanced so the consumer can never observe a null pointer.
+
+hr_framequeue: size() used mismatched memory orders (acquire/relaxed),
+now both acquire for correct cross-thread visibility.
+
+hr_ringbuf: wrap-around memcpy off-by-one at exact power-of-2 boundaries
+fixed by computing `first` from mask(h) rather than raw cursor.
+
+hr_ringbuf: reset() now zeroes buffer contents - prevents stale PCM data
+from a previous recording being read after reset.
+
+hr_display_info: missing #include <algorithm> caused std::stable_sort
+to be invisible under MinGW, producing a build error.
+
+hr_encoder_helpers: hr_memcpy_nt now uses _mm_stream_si128 (real NT
+stores) instead of _mm_storeu_si128 (cached stores) - the function
+previously claimed to be non-temporal but was not.
+
+hr_encoder_helpers: BGRA→YUV420p and RGB→YUV420p chroma now averages
+all four luma pixels in each 2×2 block instead of sampling only the
+top-left pixel - visibly reduces chroma blur on fine detail.
+
+hr_preview: `restrict` keyword replaced with HR_RESTRICT macro - `restrict`
+is C99-only and caused a cascade of "not declared in this scope" errors
+when compiled as C++ under MinGW g++.
+
+homrec_native.py: duplicate _DxgiCaptureAPI singleton at module level
+removed - dxcap was created twice, second instance silently overwrote
+the first.
+
+homrec_native.py: preview thumbnail now uses ctypes data_as() instead
+of .tobytes() - eliminates a full buffer copy on every preview frame.
+
+Quality loaded from old settings.json is now clamped to 50–100% to
+prevent a saved value of 95–100 (quality=100 → qp=18 → ~150 Mbit/s)
+from saturating the encoder on first launch after upgrade.
+
+Application freeze after stopping recording
+General optimization improvements
+Tray icon logo visibility improved on dark/light taskbars
+
+=== Performance ===
+
+BGRX→RGB (1080p):       ~6 ms  →  ~1.2 ms   (5× faster)
+Bilinear preview resize: ~4 ms  →  ~0.8 ms   (5× faster)
+Audio RMS per chunk:    ~0.15 ms → ~0.04 ms  (3.5× faster)
+Badge blend (RGBA):     ~1.2 ms  → ~0.25 ms  (5× faster)
+Capture loop latency:   ~30 ms  →  ~12 ms    (2.5× faster)
+UI thread block time:   ~20 ms  →   ~3 ms    (7× faster)
+Preview thumbnail:      no intermediate RGB copy (BGRA→thumb direct)
+
+
+[Version 1.4.4] - 2026-05-15
+
+=== Changed ===
+
+Added new application icons
+
+[Version 1.4.3] - 2026-05-04
+
+=== Fixed ===
+
+Minor interface errors corrected
+Version bumped to 1.4.3
+
+[Version 1.4.2] - 2026-05-03
+
+=== Fixed ===
+
+Duplicate tray icon on second launch - added Windows single-instance
+mutex (CreateMutexW). If HomRec is already running, second launch exits
+immediately instead of creating another tray icon.
+
+Microphone [Errno -9999] Unanticipated host error - now retries with
+multiple channel/sample rate combinations (stereo/mono × 44100/48000/22050)
+before giving up. Handles devices that only support specific configurations.
+
+System audio [Errno -9999] - same retry logic applied to Stereo Mix device
+open attempts.
+
+Settings window not closing after Save - messagebox was shown after
+dialog.destroy(), causing the window to become unresponsive. Fixed order:
+show message first, then destroy.
+
+Advanced Settings window blocking Settings from closing - added
+grab_release() before destroy() so the parent window regains focus.
+
+Version bumped to 1.4.2
+
+[Version 1.4.0] - 2026-04-30
+
+=== Added ===
+
+Help menu in the top menu bar:
+- Check for Updates - checks GitHub and shows result in a dialog
+- Report Issue - opens GitHub Issues page in the browser
+
+Desktop audio (system sound) capture. Capture chain tries in order:
+1. WASAPI loopback (requires pyaudio-wasapi)
+2. PyAudio direct open of Stereo Mix device
+3. ffmpeg dshow as last resort
+
+Option to disable "minimize to tray on close" in Settings menu
+
+Advanced Settings window (Settings → ⚙ Advanced → Open Advanced Settings)
+for power users - codec, HW accel, CRF, preset, pixel format, audio
+bitrate, theme, UI scale, font, file template, auto-stop, replay buffer
+
+Custom hotkeys - reassign F9/F10/F11 to any key in Advanced Settings
+
+Auto-save settings profile on exit
+
+Notifications - sound and flash on recording start/stop
+
+Drag-and-drop support - drop .hrc, .hrl or .hrt onto the app window
+to instantly import a profile, language or theme
+
+Binary file formats with magic headers and gzip compression:
+  .hrc (HRC + 0x01) - settings profile
+  .hrl (HRL + 0x01) - custom language
+  .hrt (HRT + 0x01) - custom theme
+
+Built-in Language Editor (Advanced Settings → Interface → Language Editor)
+
+Built-in Theme Editor with live color pickers (Advanced Settings → Interface → Theme Editor)
+
+Delete theme/language buttons in Advanced Settings
+
+App icon on all dialog windows
+
+=== Changed ===
+
+PC Analytics is now a single combined window (CPU + RAM + Disk + Refresh)
+
+Start/Stop merged into one toggle button
+
+Codec and HW Accel moved from Video tab to Advanced Settings
+
+System audio capture now uses PyAudio directly (same path as microphone)
+instead of spawning a separate ffmpeg process
+
+=== Fixed ===
+
+Stereo Mix not detected on Russian Windows - UTF-8/cp1251 encoding fix
+
+System audio WAV not closed - ffmpeg dshow missing newline after stop signal
+
+WAV written with wrong channel count for mono devices
+
+Fallback to devices[0] removed - was recording mic twice
+
+check_updates missing from English language dict - KeyError on startup
+
+Volume condition vol != 2.0 → vol != 1.0
+
+stop_audio_recording returned None in mic-only mode - merge was skipped
+
+merge_audio_video swallowed all exceptions silently
+
+Codec duplicated in Video tab and Advanced Settings
+
+PC Analytics missing app icon
+
+[Version 1.3.2] - 2026-04-23
+
+=== Added ===
+
+System tray - minimises to tray on close
+Start/stop from tray menu
+Window capture (Settings → Capture Source → Select Window)
+Auto update check on startup
+
+=== Fixed ===
+
+Microphone stops after first recording
+2nd+ recordings corrupted
+Video faster than real time
+Audio desync on long recordings and after pause
+FFmpeg not found when running as .exe
+
+=== Performance ===
+
+~30% less CPU during capture
+Preview uses fast resampling while recording
+
+[Version 1.3.1] - 2026-04-23
+
+=== Changed ===
+
+Updated app icons
+Reduced .exe size by ~2x
+
+[Version 1.3.0] - 2026-04-22
+
+=== Added ===
+
+Logging system - events written to homrec.log
+
+=== Fixed ===
+
+FFmpeg not found in .exe builds
+
+[Version 1.2.0] - 2026-03-21
+
+=== Added ===
+
+Separate volume controls for mic and desktop audio
+PC Analytics (requires psutil)
+Multi-language support (English + Russian)
+Always on top, Fullscreen F11
+Monitor selection, custom output folder
+Hotkeys F9 / F10 / F11
+
+=== Changed ===
+
+Complete UI redesign (Catppuccin-inspired)
+Tabbed settings dialog
+Rewritten audio recording system
+
+=== Fixed ===
+
+Audio desync, frame drops, settings not saving, crash without mic,
+memory leaks, pause issues, thread safety
+
+=== Performance ===
+
+~30% less CPU, stable FPS, throttled preview, precise timing
