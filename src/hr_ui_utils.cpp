@@ -692,3 +692,138 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
     result += expanded + ".mp4";
     snprintf(out, (size_t)out_len, "%s", result.c_str());
 }
+
+/* -------------------------------------------------------------------------
+ * Cursor compositing ("Cursor" setting)
+ *
+ * Draws the real system cursor (whatever it currently is - arrow, I-beam,
+ * a custom app cursor, etc.) directly into a captured BGRA frame buffer,
+ * the same way the overlay compositor bakes overlays in -- so what's in
+ * the recording matches what's actually on screen instead of always
+ * showing a bare desktop with no pointer.
+ *
+ * Approach: GetCursorInfo()+DrawIconEx() into an off-screen 32bpp DIB,
+ * rather than reading DXGI's own pointer-shape stream. DXGI's pointer
+ * data comes in three different formats (color/masked-color/monochrome
+ * XOR+AND masks) that need separate blending math to render correctly;
+ * DrawIconEx already handles all of that correctly for us since it's the
+ * same code path Windows itself uses to draw the cursor, so this reuses
+ * that instead of re-implementing cursor mask blending here.
+ *
+ * Since DrawIconEx doesn't paint into a DIB with real alpha (only true
+ * ARGB cursors would produce a real alpha channel; classic B&W cursors
+ * are drawn via AND/XOR raster ops with no alpha at all), this fills the
+ * DIB with a fixed chroma-key colour first and treats any pixel that
+ * still exactly matches that colour afterward as "the cursor didn't
+ * paint anything here" (transparent). Known limitation: a custom cursor
+ * that happens to contain that exact colour would get a see-through
+ * patch where it does -- acceptable for the standard system cursors and
+ * the vast majority of custom ones, not worth a full alpha-aware
+ * per-pixel-format cursor renderer for this.
+ * ---------------------------------------------------------------------- */
+#ifdef _WIN32
+namespace {
+constexpr COLORREF kCursorChromaKey = RGB(255, 0, 255); // magenta
+}
+
+/*
+ * hr_composite_cursor
+ *
+ * bgra          : capture buffer, width*height*4 bytes, BGRA, row-major,
+ *                 no padding (row pitch == width*4) -- matches
+ *                 hr_dx_capture()'s output that this is always called on.
+ * origin_x/y    : the top-left corner of this buffer in *virtual desktop*
+ *                 screen coordinates (i.e. the captured monitor's
+ *                 DesktopCoordinates.left/top from hr_dx_output_desc) --
+ *                 needed because GetCursorInfo() reports the cursor's
+ *                 position in those same virtual-desktop coordinates, not
+ *                 relative to whichever monitor is being captured.
+ */
+HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
+                                    int origin_x, int origin_y) {
+    if (!bgra || width <= 0 || height <= 0) return;
+
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
+
+    ICONINFO ii{};
+    if (!GetIconInfo(ci.hCursor, &ii)) return;
+
+    BITMAP bmMask{};
+    GetObject(ii.hbmMask, sizeof(bmMask), &bmMask);
+    int cw = bmMask.bmWidth;
+    // Monochrome cursors pack the AND mask (top half) and XOR mask
+    // (bottom half) into one double-height hbmMask bitmap and have no
+    // hbmColor at all; colour cursors have a real hbmColor the same
+    // height as hbmMask.
+    int ch = ii.hbmColor ? bmMask.bmHeight : bmMask.bmHeight / 2;
+    if (cw <= 0 || ch <= 0 || cw > 512 || ch > 512) { // sanity clamp
+        if (ii.hbmMask)  DeleteObject(ii.hbmMask);
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        return;
+    }
+
+    int lx = ci.ptScreenPos.x - origin_x - (int)ii.xHotspot;
+    int ly = ci.ptScreenPos.y - origin_y - (int)ii.yHotspot;
+
+    // Entirely off-buffer -- nothing to do (still have to free the icon
+    // bitmaps below, so fall through to cleanup rather than early-return).
+    bool on_screen = (lx + cw > 0 && ly + ch > 0 && lx < width && ly < height);
+
+    if (on_screen) {
+        HDC screenDC = GetDC(nullptr);
+        HDC memDC = CreateCompatibleDC(screenDC);
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = cw;
+        bmi.bmiHeader.biHeight = -ch; // negative = top-down DIB
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void *dibPixels = nullptr;
+        HBITMAP dib = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, &dibPixels, nullptr, 0);
+        if (dib && dibPixels) {
+            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, dib);
+
+            HBRUSH keyBrush = CreateSolidBrush(kCursorChromaKey);
+            RECT full{0, 0, cw, ch};
+            FillRect(memDC, &full, keyBrush);
+            DeleteObject(keyBrush);
+
+            DrawIconEx(memDC, 0, 0, ci.hCursor, cw, ch, 0, nullptr, DI_NORMAL);
+            GdiFlush();
+
+            const uint8_t keyB = GetBValue(kCursorChromaKey);
+            const uint8_t keyG = GetGValue(kCursorChromaKey);
+            const uint8_t keyR = GetRValue(kCursorChromaKey);
+            const uint8_t *src = static_cast<const uint8_t *>(dibPixels); // BGRX, top-down
+            for (int y = 0; y < ch; ++y) {
+                int dy = ly + y;
+                if (dy < 0 || dy >= height) { src += (size_t)cw * 4; continue; }
+                for (int x = 0; x < cw; ++x) {
+                    int dx = lx + x;
+                    const uint8_t *sp = src + (size_t)x * 4;
+                    if (dx < 0 || dx >= width) continue;
+                    if (sp[0] == keyB && sp[1] == keyG && sp[2] == keyR) continue; // chroma key -> transparent
+                    uint8_t *dp = bgra + ((size_t)dy * width + dx) * 4;
+                    dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
+                }
+                src += (size_t)cw * 4;
+            }
+
+            SelectObject(memDC, oldBmp);
+            DeleteObject(dib);
+        }
+        DeleteDC(memDC);
+        ReleaseDC(nullptr, screenDC);
+    }
+
+    if (ii.hbmMask)  DeleteObject(ii.hbmMask);
+    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+}
+#else
+HR_EXPORT void hr_composite_cursor(uint8_t *, int, int, int, int) {}
+#endif
