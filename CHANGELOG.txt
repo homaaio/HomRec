@@ -1,5 +1,93 @@
 welcome to changelog :D
 
+[Unreleased] - 2026-08-08
+
+=== Added ===
+
+- Countdown (3s), Cursor, and Show summary settings are now actually
+  wired up. All three were previously loaded from settings.json,
+  editable in the Settings dialog, and persisted correctly - but nothing
+  in main_frame.cpp (the live UI) ever read state_.countdown_enabled /
+  cursor_enabled / show_summary to change behavior at Start/Stop time.
+  - Countdown: HomRecMainFrame::RequestStart() shows a cancellable 3-2-1
+    in the status bar (click Start again to cancel) before calling
+    DoStart(); both the Start button and the global hotkey route
+    through it now.
+  - Cursor: added hr_composite_cursor() (hr_ui_utils.cpp) - draws the
+    live system cursor into each captured frame via
+    GetCursorInfo()+DrawIconEx() into a chroma-keyed off-screen DIB,
+    reusing Windows' own cursor rendering instead of re-implementing
+    DXGI pointer-shape mask blending. Wired through a new
+    hr_pl_set_include_cursor() pipeline export, applied every preview
+    tick via RecordingController::SyncOverlays().
+  - Show summary: DoStop() now shows the already-written (just never
+    called) ShowCustomMessageBox "recording saved, open folder?" popup.
+- Idle/AFK CPU fix: the preview-only capture pipeline (a real DXGI
+  capture thread) used to run continuously at 20fps from app launch
+  onward, regardless of whether the window was visible. Added
+  RecordingController::SetPreviewVisible(), called from a new
+  HomRecMainFrame::OnShowEvent() (wxEVT_SHOW) and an extended
+  OnIconize(), so the pipeline pauses while minimized (to tray or just
+  to the taskbar) and resumes when shown again. Never touches the
+  pipeline while actually recording.
+- Plugin command-registration API: previously a Lua plugin had no way
+  to add a console command at all (only toasts/storage/HTTP/theme
+  colors/input-overlay registration). Added
+  homrec.register_command(name, description, fn) and homrec.print(text)
+  to lua_api.cpp, a command registry + DispatchCommand() to
+  LuaPluginEngine, and wired console_window.cpp's unknown-command
+  fallback to check it before giving up. Commands are unregistered
+  cleanly on plugin unload.
+- plugin.json gets a new optional "author" field, parsed into
+  PluginManifest::author. Exposed to Lua via a new
+  homrec.plugin_info() (id/name/version/author for the calling plugin)
+  since there's no plugin-manager UI screen yet to surface it visually.
+- hom.exe (tools/hom/hom.cpp): added `hom ping` (repo connectivity
+  check with round-trip time) and `hom install update-hrp` (re-installs
+  every already-installed .hrp plugin in .\plugins).
+- console_window.cpp's existing `$log` command gained `log clear`
+  (truncates homrec.log) and `log open` (opens it in the default
+  editor) subcommands, alongside its original "log <message>" append
+  behaviour.
+- New plugin: plugins/bter/ (by HomRec) - 27 console commands added via
+  the new register_command API: an `inwid` settings-admin prefix
+  (stores afk-mode/perver/ffmpeg settings in the plugin's own store -
+  see plugins/bter/entry.lua and commands.md Section 19 for the honest
+  caveat that these are recorded but not yet wired to real engine
+  behaviour, since HomRec doesn't expose hooks for any of the three
+  yet), plus bping/ffpath/theme/remember/recall/forget/broadcast/toast,
+  OS-info wrappers (whoami/hostname/ipconfig/sysinfo/tasks/netinfo/
+  diskfree/pinghost/myip), and pure-Lua utilities (clock/calc/coinflip/
+  roll/b64encode/b64decode/revtext/wordcount). Verified by actually
+  executing the plugin's Lua against a stub homrec.* API (real Lua 5.4,
+  not just eyeballed) - caught and fixed two real bugs this way: a
+  content-search bug in argument parsing that broke if an argument's
+  text happened to be a substring of an earlier word (e.g. "recall re"
+  where "re" is also inside "remember"), and a spurious blank line
+  printed after any OS-wrapper command whose output already ended in a
+  newline (the normal case).
+- commands.md: flagged that most of the existing document describes an
+  older, pre-C++-port command language console_window.cpp doesn't
+  actually implement (rule engine, AE objects, DLL<->Python bridge,
+  flag-based log/ping syntax) rather than leaving it looking
+  authoritative; added an accurate Section 19 for everything above.
+
+=== Investigated, not fixed (flagged for visibility) ===
+
+- hr_pipeline.cpp's capture always hardcodes hr_dx_create(0, 0) - the
+  "monitor" setting is persisted and shown in the UI but never actually
+  used to pick which display gets captured. Found while wiring up
+  cursor compositing (needed the capture origin for coordinate
+  translation); out of scope for this pass, not touched.
+- plugins/input_overlay_presets/assets/mouse/mouse.json: the smb1/smb2
+  (side mouse button) sprite mapping rectangles are within 1px of each
+  other (near-duplicate crop region). Could be a copy-paste bug, or
+  could be intentional shared iconography (common in these community
+  overlay presets) - left untouched without visual confirmation either
+  way rather than guess wrong on a bundled asset.
+
+welcome to changelog :D
+
 [Unreleased] - 2026-08-07
 
 === Fixed ===
