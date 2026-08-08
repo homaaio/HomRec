@@ -7,6 +7,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cstring>
+#include <cctype>
 
 extern "C" {
     #include "lua.h"
@@ -102,6 +103,7 @@ bool LuaPluginEngine::LoadPlugin(const std::string &plugin_dir_path) {
     manifest.id = ExtractJsonString(manifest_json, "id");
     manifest.name = ExtractJsonString(manifest_json, "name");
     manifest.version = ExtractJsonString(manifest_json, "version");
+    manifest.author = ExtractJsonString(manifest_json, "author");
     std::string entry = ExtractJsonString(manifest_json, "entry");
     if (!entry.empty()) manifest.entry = entry;
 
@@ -180,6 +182,14 @@ void LuaPluginEngine::UnloadPlugin(const std::string &id) {
         lua_pcall(it->second->L, 0, 0, 0); // best-effort; a misbehaving plugin shouldn't block unload
     }
 
+    // Drop any console commands this plugin registered - otherwise
+    // DispatchCommand() could look up a lua_ref into a lua_State we're
+    // about to lua_close() right below.
+    for (auto cit = commands_.begin(); cit != commands_.end(); ) {
+        if (cit->second.plugin_id == id) cit = commands_.erase(cit);
+        else ++cit;
+    }
+
     lua_close(it->second->L);
     LuaApi::Uninstall(it->second->api_handle);
     plugins_.erase(it);
@@ -236,6 +246,47 @@ void LuaPluginEngine::EmitCustomEvent(const std::string &from_plugin_id, const s
 const PluginManifest *LuaPluginEngine::GetManifest(const std::string &id) const {
     auto it = plugins_.find(id);
     return it != plugins_.end() ? &it->second->manifest : nullptr;
+}
+
+namespace {
+std::string ToLowerAscii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+}
+
+void LuaPluginEngine::RegisterCommand(const std::string &plugin_id, const std::string &name,
+                                       const std::string &description, int lua_ref) {
+    std::string key = ToLowerAscii(name);
+    if (key.empty()) return;
+    // Last plugin to register a given name wins (and its predecessor's ref
+    // just leaks in that plugin's own lua_State until that plugin unloads
+    // - not worth the complexity of unref'ing a ref that belongs to
+    // whichever plugin registered it first, for what should be a rare
+    // collision between two plugins in practice).
+    commands_[key] = RegisteredCommand{plugin_id, description, lua_ref};
+}
+
+bool LuaPluginEngine::DispatchCommand(const std::string &name, const std::string &raw_line,
+                                      std::vector<std::string> &out_lines) {
+    auto cit = commands_.find(ToLowerAscii(name));
+    if (cit == commands_.end()) return false;
+
+    auto pit = plugins_.find(cit->second.plugin_id);
+    if (pit == plugins_.end()) return false; // owning plugin unloaded out from under its own command
+    lua_State *L = pit->second->L;
+
+    print_sink = &out_lines;
+    lua_rawgeti(L, LUA_REGISTRYINDEX, cit->second.lua_ref);
+    lua_pushstring(L, raw_line.c_str());
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        out_lines.push_back(std::string("plugin command error: ") + (err ? err : "?"));
+        lua_pop(L, 1);
+    }
+    print_sink = nullptr;
+    return true;
 }
 
 namespace PluginStore {

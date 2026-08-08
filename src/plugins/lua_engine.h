@@ -36,6 +36,7 @@ struct PluginManifest {
     std::string id;
     std::string name;
     std::string version;
+    std::string author;    // optional; shown in the plugin list UI as "by <author>"
     std::string entry = "main.lua";
 };
 
@@ -84,6 +85,42 @@ public:
     // store_set/store_get instead).
     void EmitCustomEvent(const std::string &from_plugin_id, const std::string &event, const std::string &arg);
 
+    // --- Plugin-registered console commands -----------------------------
+    // A plugin calls homrec.register_command(name, description, fn) from
+    // on_load(); this is the C++ side of that (see lua_api.cpp's
+    // L_register_command). `fn` is stashed as a Lua registry reference in
+    // the OWNING plugin's own lua_State - DispatchCommand() below looks
+    // that state back up by plugin id when the command actually runs, so
+    // this doesn't need to know anything Lua-specific itself.
+    struct RegisteredCommand {
+        std::string plugin_id;
+        std::string description;
+        int lua_ref = -1; // LUA_REGISTRYINDEX ref in that plugin's own lua_State
+    };
+    void RegisterCommand(const std::string &plugin_id, const std::string &name,
+                          const std::string &description, int lua_ref);
+
+    // Looked up case-insensitively. Returns true if some plugin had this
+    // command registered (and ran it) - false means "not a plugin command,
+    // fall through to your own unknown-command handling", NOT "the plugin
+    // command failed" (a Lua-side error still counts as "handled", with
+    // the error text delivered as an output line, same as e.g. a bad
+    // argument would be - the caller just wanted a console command that
+    // did *something*, not a Lua stack trace dumped over their prompt).
+    bool DispatchCommand(const std::string &name, const std::string &raw_line,
+                         std::vector<std::string> &out_lines);
+
+    // homrec.print()'s destination while a command set up via
+    // DispatchCommand() is running; nullptr the rest of the time (calling
+    // homrec.print() from on_load()/a hook instead of a command handler is
+    // simply a no-op, not an error, since there's no console output
+    // stream running that isn't a scrollback the plugin can't reach).
+    std::vector<std::string> *print_sink = nullptr;
+
+    // All registered commands, for a `help`/`commands` listing -
+    // name -> (owning plugin id, description).
+    const std::unordered_map<std::string, RegisteredCommand> &commands() const { return commands_; }
+
     const std::vector<std::string> &loaded_ids() const { return loaded_ids_; }
     const PluginManifest *GetManifest(const std::string &id) const;
 
@@ -100,6 +137,7 @@ private:
     std::string plugins_dir_;
     std::unordered_map<std::string, std::unique_ptr<LoadedPlugin>> plugins_;
     std::vector<std::string> loaded_ids_;
+    std::unordered_map<std::string, RegisteredCommand> commands_; // key: lowercased command name
 
     RecordingController *rec_ = nullptr;
     const ThemeColors *colors_ = nullptr;
