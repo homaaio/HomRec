@@ -62,6 +62,9 @@ extern "C" {
     int   hr_dx_get_size(void *handle, int *out_w, int *out_h);
     int   hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms);
     int   hr_dx_reset(void *handle);
+    int   hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y,
+                             int *out_w, int *out_h, char *name_buf, int name_buf_len);
+    void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void *hr_sw_create();
     void  hr_sw_destroy(void *handle);
@@ -165,6 +168,14 @@ struct Pipeline {
 
     void* dx_ctx = nullptr;
     void* sw_ctx = nullptr;
+
+    // "Cursor" setting: whether to draw the live system cursor into each
+    // captured frame (see hr_composite_cursor() in hr_ui_utils.cpp).
+    // cap_origin_x/y is the captured output's virtual-desktop offset
+    // (from hr_dx_output_desc), needed to translate GetCursorInfo()'s
+    // virtual-desktop coordinates into this buffer's local coordinates.
+    std::atomic<bool> include_cursor{false};
+    int cap_origin_x = 0, cap_origin_y = 0;
 
     std::vector<uint8_t> bgra_buf;  // src_w * src_h * 4
 
@@ -578,6 +589,15 @@ struct Pipeline {
                 }
             }
 
+            // ====== CURSOR COMPOSITING ("Cursor" setting) ======
+            // Drawn after overlays so the pointer stays visually on top,
+            // matching what a viewer would actually see on the real
+            // screen. See hr_composite_cursor()'s own comment
+            // (hr_ui_utils.cpp) for how/why.
+            if (include_cursor.load(std::memory_order_relaxed)) {
+                hr_composite_cursor(bgra_buf.data(), src_w, src_h, cap_origin_x, cap_origin_y);
+            }
+
             // ====== YUV CONVERSION ======
             // A frame is only dropped when the queue is genuinely full (the
             // writer really is behind), matching the MAX_QUEUE_SIZE
@@ -691,6 +711,22 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
                      "common causes: running over RDP/a virtual display, a just-changed display mode, or "
                      "insufficient permissions)");
         delete pl; return nullptr;
+    }
+    // Matches the hardcoded dx_create(0, 0) above -- needed so
+    // hr_composite_cursor() can translate GetCursorInfo()'s virtual-
+    // desktop coordinates into this capture buffer's local coordinates.
+    // Defaults to (0,0) (i.e. "assume the captured output starts at the
+    // desktop origin") if the lookup fails for some reason, which is
+    // right for the common single/primary-monitor case and only wrong
+    // for a secondary monitor positioned elsewhere - same blind spot as
+    // dx_create(0, 0) itself always capturing output 0 regardless of the
+    // "monitor" setting.
+    {
+        int ox = 0, oy = 0, ow = 0, oh = 0;
+        if (hr_dx_output_desc(0, 0, &ox, &oy, &ow, &oh, nullptr, 0)) {
+            pl->cap_origin_x = ox;
+            pl->cap_origin_y = oy;
+        }
     }
 
     pl->sw_ctx = g_libs.sw_create();
@@ -851,6 +887,16 @@ HR_EXPORT void hr_pl_pause(void* handle, int flag) {
     if (!handle) return;
 #ifdef _WIN32
     static_cast<Pipeline*>(handle)->paused.store(flag != 0, std::memory_order_relaxed);
+#endif
+}
+
+// "Cursor" setting - see hr_composite_cursor()'s comment for what this
+// actually does. Safe to flip at any time (preview or recording); takes
+// effect on the next captured frame.
+HR_EXPORT void hr_pl_set_include_cursor(void* handle, int flag) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->include_cursor.store(flag != 0, std::memory_order_relaxed);
 #endif
 }
 
