@@ -68,6 +68,16 @@ public:
     // otherwise pick up on its own. No-ops while actually recording
     // (that pipeline is owned by the recording until Stop()).
     void RefreshPreviewSettings();
+    // "AFK/idle CPU" fix: the preview-only capture pipeline (a real DXGI
+    // capture thread) used to run continuously from app launch onward
+    // regardless of whether anything was actually visible to show it to
+    // - main_frame.cpp now calls this on wxEVT_SHOW (covers minimize-to-
+    // tray, tray double-click restore, and the tray menu's Restore item
+    // alike, since all three ultimately go through Show()/Hide()) so the
+    // pipeline pauses while the window is hidden and picks back up when
+    // it's shown again. No-ops while actually recording - same "the
+    // recording owns the pipeline until Stop()" rule as TeardownPreview().
+    void SetPreviewVisible(bool visible);
 
     bool recording() const { return state_.recording; }
     bool paused() const { return state_.paused; }

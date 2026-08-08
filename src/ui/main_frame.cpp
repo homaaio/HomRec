@@ -6,6 +6,7 @@
 #include "pc_analytics_dialog.h"
 #include "log_viewer_dialog.h"
 #include "window_picker_dialog.h"
+#include "custom_messagebox.h"
 #include "hrc_config.h"
 #include "win32_theme.h"
 #include "../hr_log.h"
@@ -85,6 +86,17 @@ protected:
 };
 
 namespace {
+// UTF-8 -> UTF-16, for handing lang_.Get()'s narrow strings and
+// state_.output_folder to the raw-Win32 dialogs in this file (custom
+// messagebox, etc.) that take std::wstring.
+std::wstring WideFromNarrow(const std::string &s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(len > 0 ? len - 1 : 0, L'\0');
+    if (len > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
+    return w;
+}
+
 // Only one main frame exists per process - the hotkey manager's callbacks
 // (hr_hotkey.cpp's HR_HK_CB is a plain no-arg function pointer, see its
 // header comment) fire on a background thread and need a way back to "the"
@@ -428,12 +440,14 @@ HomRecMainFrame::HomRecMainFrame()
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnPreviewTimer, this, preview_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnStatsTimer, this, stats_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnRestoreTopmostTimer, this, restore_topmost_timer_.GetId());
+    Bind(wxEVT_TIMER, &HomRecMainFrame::OnCountdownTimer, this, countdown_timer_.GetId());
     preview_timer_.Start(1000 / 20);
     stats_timer_.Start(500);
 
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_VIEW_AUDIO_PANEL);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
+    Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
     Bind(EVT_HOTKEY_START_STOP, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOTKEY_PAUSE, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOTKEY_FULLSCREEN, &HomRecMainFrame::OnHotkeyEvent, this);
@@ -757,6 +771,42 @@ void HomRecMainFrame::SetStatusState(const wxString &text, COLORREF dotColor) {
     if (left_panel_) left_panel_->Layout();
 }
 
+void HomRecMainFrame::RequestStart() {
+    if (state_.recording) return;
+
+    if (countdown_timer_.IsRunning()) {
+        // Clicking Start again mid-countdown cancels it, rather than
+        // stacking a second countdown or being ignored silently.
+        countdown_timer_.Stop();
+        SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
+        if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
+        return;
+    }
+
+    if (!state_.countdown_enabled) {
+        DoStart();
+        return;
+    }
+
+    countdown_remaining_ = 3;
+    wxString msg = wxString::Format("Starting in %d\u2026", countdown_remaining_);
+    SetStatusState(msg, theme_.warning);
+    if (file_lbl_) file_lbl_->SetLabel(msg);
+    countdown_timer_.Start(1000);
+}
+
+void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
+    --countdown_remaining_;
+    if (countdown_remaining_ <= 0) {
+        countdown_timer_.Stop();
+        DoStart();
+        return;
+    }
+    wxString msg = wxString::Format("Starting in %d\u2026", countdown_remaining_);
+    SetStatusState(msg, theme_.warning);
+    if (file_lbl_) file_lbl_->SetLabel(msg);
+}
+
 void HomRecMainFrame::DoStart() {
     if (audio_panel_) {
         rec_->SetAudioLevels(audio_panel_->mic_volume(), audio_panel_->sys_volume(),
@@ -790,6 +840,25 @@ void HomRecMainFrame::DoStop() {
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
     if (plugins_) plugins_->EmitHook("on_recording_stop");
+
+    // "Show summary" setting: the "recording saved, open folder?" popup.
+    // Ported from custom_messagebox.h (already used elsewhere in this
+    // file, e.g. ShowWelcomeDialog) - this was the one consumer that had
+    // never actually been wired up (state_.show_summary loaded from
+    // settings and shown as a checkbox, but nothing read it at Stop()
+    // time). Skipped if the setting is off, if the user checked "Don't
+    // show again" earlier this session, or if there's nowhere to open
+    // (empty output_folder).
+    if (state_.show_summary && !summary_dont_show_again_ && !state_.output_folder.empty()) {
+        bool dont_show = summary_dont_show_again_;
+        bool open_folder = ShowCustomMessageBox(
+            GetHWND(), wxGetInstance(), theme_,
+            WideFromNarrow(lang_.Get("recording_saved")),
+            WideFromNarrow(lang_.Get("recording_saved")),
+            WideFromNarrow(state_.output_folder), dont_show);
+        summary_dont_show_again_ = dont_show;
+        if (open_folder) OpenRecordingsFolder();
+    }
 }
 
 void HomRecMainFrame::DoPause() {
@@ -848,7 +917,7 @@ void HomRecMainFrame::OnRestoreTopmostTimer(wxTimerEvent &) {
     }
 }
 
-void HomRecMainFrame::OnStartClicked(wxCommandEvent &) { if (state_.recording) DoStop(); else DoStart(); }
+void HomRecMainFrame::OnStartClicked(wxCommandEvent &) { if (state_.recording) DoStop(); else RequestStart(); }
 void HomRecMainFrame::OnPauseClicked(wxCommandEvent &) { DoPause(); }
 
 void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
@@ -933,7 +1002,7 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         // ID_OVERLAYS_MANAGE removed along with overlay_manager.cpp's
         // ShowOverlayManager() -- see overlays_dock_panel.h.
         case ID_HELP_CONSOLE:
-            if (!console_) console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), GetHWND());
+            if (!console_) console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), GetHWND(), plugins_.get());
             console_->Show(wxGetInstance());
             break;
         case ID_HELP_WELCOME: ShowWelcomeDialog(GetHWND(), wxGetInstance()); break;
@@ -990,11 +1059,18 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
 
 void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
     if (evt.IsIconized() && state_.minimize_to_tray) Show(false);
+    if (rec_) rec_->SetPreviewVisible(!evt.IsIconized());
+    evt.Skip();
+}
+
+void HomRecMainFrame::OnShowEvent(wxShowEvent &evt) {
+    if (rec_) rec_->SetPreviewVisible(evt.IsShown());
+    evt.Skip();
 }
 
 void HomRecMainFrame::OnHotkeyEvent(wxThreadEvent &evt) {
     wxEventType t = evt.GetEventType();
-    if (t == EVT_HOTKEY_START_STOP) { if (state_.recording) DoStop(); else DoStart(); }
+    if (t == EVT_HOTKEY_START_STOP) { if (state_.recording) DoStop(); else RequestStart(); }
     else if (t == EVT_HOTKEY_PAUSE) { DoPause(); }
     else if (t == EVT_HOTKEY_FULLSCREEN) { ToggleFullscreenNative(); }
 }

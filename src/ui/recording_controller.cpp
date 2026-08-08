@@ -54,6 +54,7 @@ extern "C" {
     void hr_pl_set_recording(void *handle, int active, intptr_t pipe_fd);
     void hr_pl_stats(void *handle, long long *out_frames, long long *out_drops, double *out_fps);
     void hr_pl_set_overlays(void *handle, const HrOverlayDesc *items, int count);
+    void hr_pl_set_include_cursor(void *handle, int flag);
 
     // hr_ffmpeg_runner.cpp
     void *hr_ff_create();
@@ -532,6 +533,12 @@ void RecordingController::PollStats() {
 void RecordingController::SyncOverlays() {
     if (!pipeline_) return;
 
+    // "Cursor" setting - cheap atomic store, fine to re-apply every tick
+    // rather than needing its own change-tracking like the overlay list
+    // below (which is expensive enough per-tick to be worth skipping when
+    // unchanged).
+    hr_pl_set_include_cursor(pipeline_, state_.cursor_enabled ? 1 : 0);
+
     // "#RRGGBB" -> (r,g,b); falls back to white on anything malformed
     // (missing '#', wrong length, non-hex digits) so a bad/empty value never
     // renders invisible black-on-black text.
@@ -641,6 +648,12 @@ void RecordingController::RefreshPreviewSettings() {
                         WideFromNarrow(state_.mic_device_id).c_str());
         applied_mic_device_id_ = state_.mic_device_id;
     }
+}
+
+void RecordingController::SetPreviewVisible(bool visible) {
+    if (state_.recording) return; // recording owns the pipeline until Stop()
+    if (visible) EnsurePreview();
+    else         TeardownPreview();
 }
 
 double RecordingController::elapsed_seconds() const {

@@ -149,6 +149,21 @@ private:
     void DoStart();
     void DoStop();
     void DoPause();
+    // Wraps DoStart() with the "Countdown (3s)" setting: if
+    // state_.countdown_enabled is on, shows a 3-2-1 countdown in the
+    // status label (cancellable by clicking Start again) before actually
+    // calling DoStart(); otherwise starts immediately, same as before.
+    // Both places that used to call DoStart() directly for a fresh start
+    // (the Start button and the global hotkey) now go through this.
+    void RequestStart();
+    void OnCountdownTimer(wxTimerEvent &evt);
+    wxTimer countdown_timer_;
+    int countdown_remaining_ = 0;
+    // Session-only (not persisted to settings.json) - resets each launch,
+    // same lifetime as the Python original's in-memory dont_show_again
+    // this ports from. state_.show_summary (the actual settings toggle)
+    // is what's persisted.
+    bool summary_dont_show_again_ = false;
     void SetStatusState(const wxString &text, COLORREF dotColor);
     void ToggleFullscreenNative();
     // Opens state_.output_folder in Explorer and makes sure it actually
@@ -166,6 +181,7 @@ private:
     void OnStatsTimer(wxTimerEvent &evt);
     void OnClose(wxCloseEvent &evt);
     void OnIconize(wxIconizeEvent &evt);
+    void OnShowEvent(wxShowEvent &evt);
     void OnHotkeyEvent(wxThreadEvent &evt); // posted from hr_hotkey.cpp's background thread
 
     AppState state_;
