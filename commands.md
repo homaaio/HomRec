@@ -3,6 +3,8 @@
 > **Open console:** `Ctrl+Shift+T` · **Close:** `Esc` or × button  
 > **Quick help inside the console:** `help`
 
+> **⚠ Pre-existing note, not introduced by this update:** most of this document (Windows, Rules, AE Objects, Connect/Disconnect, Hotkeys, Timers & Watchers, and the flag-based `log --clear`/`ping` "DLL ↔ Python bridge" syntax below) describes an older command language from before the Python→C++ port. The current `console_window.cpp` doesn't implement that syntax - its real built-ins are the much simpler `version`, `ping`, `echo`, `clear`, `env`, `alias`, `history`, `info`, `status`, `log`, `hide`, `sec`/`secui`/`secp`, `hrc`, `clip`, `repeat`, `batch`, `ls`, `rm`, plus (new) `inwid` and anything a loaded plugin registers. Reconciling the rest of this document with the current console is a separate, larger job than what's covered here - flagging it rather than leaving it looking authoritative. **Section 19 below is accurate as of this update.**
+
 ---
 
 ## Table of Contents
@@ -723,6 +725,16 @@ env --unset #name="mode"
 
 ## 15. Log
 
+> **The commands actually implemented today** (`console_window.cpp`'s real `CmdLog`): `log clear`, `log open`, and `log <message>` (appends `message` to `homrec.log`). The flag-based `log --tail`/`--search`/`--since`/`open --log`/`connect --log` forms documented below are the older, unimplemented syntax noted at the top of this file.
+
+```
+log clear     # truncates homrec.log
+log open      # opens homrec.log in the default editor
+log something happened   # appends "[console] something happened" to homrec.log
+```
+
+---
+
 ### `log` - view and filter `homrec.log`
 
 ```
@@ -966,3 +978,64 @@ connect --function tr to ctrl+shift+space #name="toggle-rec"
 ```
 
 Now `Ctrl+Shift+Space` starts or stops recording from anywhere.
+
+---
+
+## 19. `hom.exe`, `inwid`, and the `bter` plugin (this update)
+
+Everything in this section is real, checked against the current source, and reflects a plugin command-registration API (`homrec.register_command()`) added in this update - previously a HomRec plugin had no way to add a console command at all.
+
+### `hom.exe` - the standalone plugin package manager
+
+Not part of the in-app `$console` - a separate command-line tool (`tools/hom/`), run from a regular shell (cmd/PowerShell), same as `pip`/`npm`.
+
+```
+hom --version
+hom update                   # updates hom.exe itself
+hom ping                     # checks connectivity to the plugin repo, with round-trip time
+hom install <plugin-name>    # downloads/installs a single plugin
+hom install update-hrp       # updates every already-installed .hrp plugin in .\plugins
+hom remove <plugin-name>
+```
+
+### `log clear` / `log open` (core console addition)
+
+Added directly to the console's existing `$log` built-in rather than through a plugin, since `log` was already a taken command name a plugin can't shadow. See the updated Section 15 above.
+
+### `inwid` (bter plugin, in-console)
+
+"i know what i'll do" - a settings/admin prefix for the `bter` plugin's own settings, stored in the plugin's own persistent store (`plugins/bter/.store`), not HomRec's core settings.
+
+```
+inwid                                                  # usage
+inwid status                                           # shows current inwid-managed settings
+inwid settings afk-mode timeset <seconds> fpset <fps>  # recorded; see note below
+inwid settings perver <true|false>                     # recorded; see note below
+inwid settings ffmpeg <arg string>                     # recorded; see note below
+```
+
+**Honest limitation:** all three `inwid settings` forms *save* their value (and `inwid status` reads it back correctly), but none of them currently *changes real HomRec behaviour* - HomRec doesn't expose an idle-detection hook, an updater-pause hook, or an ffmpeg-argument hook to plugins yet, so there's nothing for `bter` to actually call. Each command says this explicitly when you run it. Storage is real and ready for whenever those hooks exist.
+
+### `bter` plugin - full command list
+
+Run `bter` in the console for this same list read live from the plugin (includes the plugin's name/version/author from `plugin.json`'s new `author` field).
+
+| Command | What it does |
+|---|---|
+| `bter` | About this plugin, lists every command below |
+| `bping` | HTTP reachability check against the plugin repo |
+| `ffpath` | Prints the resolved ffmpeg path |
+| `theme` | Prints the current theme's colours |
+| `remember <key> <value>` / `recall <key>` / `forget <key>` | Simple persistent notes, via the plugin's own store |
+| `broadcast <message>` | Emits a custom event other plugins can listen for |
+| `toast <message>` | Shows a corner popup |
+| `whoami`, `hostname`, `ipconfig`, `sysinfo`, `tasks`, `netinfo`, `diskfree` | Wrap the equivalent Windows CLI tool and print its output |
+| `pinghost <host>` | Real ICMP ping via `ping.exe` (host is restricted to letters/digits/`.`/`-` only, to rule out shell injection) |
+| `myip` | Public IP via an external echo service |
+| `clock` | Current local date/time |
+| `calc <expression>` | Arithmetic only (`+ - * / ( )`, no functions or variables - by design, so it can't be turned into a Lua sandbox escape) |
+| `coinflip`, `roll <NdM>` | Simple RNG utilities |
+| `b64encode <text>` / `b64decode <base64>` | Base64 codec (hand-written, checked against a known `"Man"` → `"TWFu"` test vector) |
+| `revtext <text>`, `wordcount <text>` | Text utilities |
+
+27 commands total. Not the "60+" originally asked for - see the chat for why (kept to what's genuinely functional rather than padding the count with commands that don't do anything real). The `reg(name, description, fn)` pattern at the top of `plugins/bter/entry.lua` makes adding more straightforward if there's a specific list wanted next.
