@@ -144,6 +144,26 @@ int L_get_colors(lua_State *L) {
     return 1;
 }
 
+// homrec.plugin_info() -- returns {id=, name=, version=, author=} for the
+// calling plugin itself, i.e. whatever plugin.json says. Added so a
+// plugin can display its own "by <author>" without HomRec needing a
+// dedicated plugin-manager UI screen to surface plugin.json's (also new)
+// "author" field anywhere else yet - see bter's "bter" command.
+int L_plugin_info(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    const PluginManifest *m = uv->engine->GetManifest(uv->plugin_id);
+    lua_newtable(L);
+    auto setField = [&](const char *name, const std::string &v) {
+        lua_pushstring(L, v.c_str());
+        lua_setfield(L, -2, name);
+    };
+    if (m) {
+        setField("id", m->id); setField("name", m->name);
+        setField("version", m->version); setField("author", m->author);
+    }
+    return 1;
+}
+
 int L_get_ffmpeg(lua_State *L) {
     auto *uv = GetUpvalues(L);
     RecordingController *rec = uv->engine->recording_controller();
@@ -257,6 +277,42 @@ int L_register_input_overlay(lua_State *L) {
     return 0;
 }
 
+// --- homrec.register_command(name, description, fn) -----------------------
+// Adds a new console command ($<name> in the in-app console window).
+// fn is called as fn(raw_line) whenever the command runs, where raw_line
+// is the full text the user typed (including the command word itself, so
+// the plugin can parse its own subcommands/arguments - same convention
+// the built-in Cmd* handlers in console_window.cpp use). Anything the
+// handler wants printed to the console goes through homrec.print()
+// instead of a return value, since a command conceptually prints
+// multiple lines (progress, then a result), not just one.
+//
+// Only takes effect for the lifetime of this plugin - if a later-loaded
+// plugin registers the same name, that one wins for as long as both are
+// loaded (see LuaPluginEngine::RegisterCommand's comment for why this
+// isn't treated as an error).
+int L_register_command(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    const char *name = luaL_checkstring(L, 1);
+    const char *description = luaL_checkstring(L, 2);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    lua_pushvalue(L, 3);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    uv->engine->RegisterCommand(uv->plugin_id, name, description, ref);
+    return 0;
+}
+
+// --- homrec.print(text) -----------------------------------------------
+// Appends a line to the current command's console output. No-op (not an
+// error) outside of a command handler - see print_sink's comment in
+// lua_engine.h for why.
+int L_print(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    const char *text = luaL_checkstring(L, 1);
+    if (uv->engine->print_sink) uv->engine->print_sink->push_back(text);
+    return 0;
+}
+
 } // namespace
 
 namespace LuaApi {
@@ -277,10 +333,13 @@ void *Install(lua_State *L, LuaPluginEngine *engine, const std::string &plugin_i
     registerFn("store_get", L_store_get);
     registerFn("get_colors", L_get_colors);
     registerFn("get_ffmpeg", L_get_ffmpeg);
+    registerFn("plugin_info", L_plugin_info);
     registerFn("emit", L_emit);
     registerFn("http_get", L_http_get);
     registerFn("http_post", L_http_post);
     registerFn("register_input_overlay", L_register_input_overlay);
+    registerFn("register_command", L_register_command);
+    registerFn("print", L_print);
 
     lua_setglobal(L, "homrec");
     return uv;
