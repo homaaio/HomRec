@@ -95,10 +95,13 @@ void PrintUsage() {
         "Usage:\n"
         "  hom --version              Show the hom version\n"
         "  hom update                 Update hom itself from the repo\n"
+        "  hom ping                   Check connectivity to the plugin repo\n"
         "  hom install <plugin-name>  Download and install a plugin\n"
+        "  hom install update-hrp     Update every already-installed .hrp plugin\n"
         "  hom remove <plugin-name>   Remove an installed plugin\n\n"
         "Examples:\n"
         "  hom install input-overlay\n"
+        "  hom install update-hrp\n"
         "  hom remove input-overlay\n",
         k_hom_version);
 }
@@ -292,6 +295,38 @@ int CmdVersion() {
     return 0;
 }
 
+// `hom ping` -- a quick "is the package repo reachable and responding"
+// check, the same way `ping` on a shell checks basic connectivity, but
+// against the one thing hom actually depends on (raw.githubusercontent.com)
+// rather than an arbitrary host. Reuses FetchFromRepo() against
+// version.txt (small, always present, no side effects) and reports
+// round-trip time + HTTP status, so "reachable but repo is having a bad
+// day" (non-200) reads differently from "no network at all" (ok=false).
+int CmdPing() {
+    std::printf("Pinging %ls...\n", k_raw_host);
+    LARGE_INTEGER freq, t0, t1;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+
+    FetchResult res = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"version.txt");
+
+    QueryPerformanceCounter(&t1);
+    double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
+
+    if (!res.ok) {
+        std::fprintf(stderr, "hom: no response (%.0f ms) -- check your connection.\n", ms);
+        return 1;
+    }
+    if (res.status != 200) {
+        std::printf("hom: reached the host but got HTTP %d (%.0f ms) -- repo may be misconfigured or moved.\n",
+                    res.status, ms);
+        return 1;
+    }
+    std::printf("hom: OK -- %ls responded in %.0f ms (repo version.txt = %s)\n",
+                k_raw_host, ms, Trim(res.body).c_str());
+    return 0;
+}
+
 // `hom update` -- checks Hom/version.txt in the repo; if it's newer than
 // the version compiled into this binary, downloads Hom/hom.exe and swaps
 // it in for the currently-running one.
@@ -412,6 +447,41 @@ int CmdInstall(const std::string &name) {
     return 0;
 }
 
+// `hom install update-hrp` -- special-cased plugin name meaning "update
+// every already-installed .hrp plugin", not a literal plugin called
+// "update-hrp". Scans plugins\*.hrp (top-level only -- .installed\ is
+// lua_engine.cpp's own extraction cache, not something to iterate here)
+// and re-runs CmdInstall() for each, which already overwrites+reports
+// "Updated" vs "Installed" for a name that's already on disk.
+int CmdUpdateAllPlugins() {
+    std::vector<std::string> names;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA("plugins\\*.hrp", &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::string name = fd.cFileName;
+            size_t dot = name.find_last_of('.');
+            if (dot != std::string::npos) name = name.substr(0, dot);
+            if (!name.empty()) names.push_back(name);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+
+    if (names.empty()) {
+        std::printf("hom: no installed .hrp plugins found in .\\plugins -- nothing to update.\n");
+        return 0;
+    }
+
+    std::printf("Updating %zu installed plugin(s)...\n", names.size());
+    size_t failures = 0;
+    for (const auto &name : names) {
+        if (CmdInstall(name) != 0) ++failures;
+    }
+    std::printf("Done: %zu updated, %zu failed.\n", names.size() - failures, failures);
+    return failures ? 1 : 0;
+}
+
 // `hom remove <name>` -- deletes plugins/<name>.hrp and, if HomRec has
 // already extracted it, plugins/.installed/<name>/ too.
 int CmdRemove(const std::string &name) {
@@ -467,10 +537,13 @@ int main(int argc, char **argv) {
 
     if (cmd == "--version" || cmd == "-v" || cmd == "-V") return CmdVersion();
     if (cmd == "update")  return CmdUpdate();
+    if (cmd == "ping")    return CmdPing();
 
     if (cmd == "install") {
         if (argc < 3) { std::fprintf(stderr, "hom: missing plugin name.\n\n"); PrintUsage(); return 1; }
-        return CmdInstall(argv[2]);
+        std::string arg2 = argv[2];
+        if (arg2 == "update-hrp") return CmdUpdateAllPlugins();
+        return CmdInstall(arg2);
     }
     if (cmd == "remove" || cmd == "uninstall") {
         if (argc < 3) { std::fprintf(stderr, "hom: missing plugin name.\n\n"); PrintUsage(); return 1; }
