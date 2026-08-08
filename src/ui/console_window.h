@@ -34,10 +34,12 @@
 #include "app_state.h"
 
 class RecordingController;
+class LuaPluginEngine;
 
 class ConsoleWindow {
 public:
-    ConsoleWindow(AppState &state, RecordingController *rec, HWND main_window);
+    ConsoleWindow(AppState &state, RecordingController *rec, HWND main_window,
+                  LuaPluginEngine *plugins = nullptr);
     ~ConsoleWindow();
 
     void Show(HINSTANCE hInst);
@@ -93,6 +95,7 @@ private:
     AppState &state_;
     RecordingController *rec_;
     HWND main_window_;
+    LuaPluginEngine *plugins_;
 
     HWND hwnd_ = nullptr;
     HWND output_ = nullptr;

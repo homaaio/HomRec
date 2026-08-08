@@ -3,6 +3,7 @@
 #include "recording_controller.h"
 #include "win32_theme.h"
 #include "hrc_config.h"
+#include "../plugins/lua_engine.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -27,6 +28,25 @@ std::wstring Trim(const std::wstring &s) {
     if (a == std::wstring::npos) return L"";
     size_t b = s.find_last_not_of(L" \t\r\n");
     return s.substr(a, b - a + 1);
+}
+
+// UTF-16 -> UTF-8, for handing command text to the Lua plugin layer
+// (DispatchCommand()/homrec.register_command()), which speaks narrow
+// UTF-8 strings throughout, same as the rest of the Lua API.
+std::string NarrowFromWide(const std::wstring &w) {
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(len > 0 ? len - 1 : 0, '\0');
+    if (len > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), len, nullptr, nullptr);
+    return s;
+}
+
+std::wstring WideFromNarrow(const std::string &s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(len > 0 ? len - 1 : 0, L'\0');
+    if (len > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
+    return w;
 }
 
 std::wstring GetBaseDir() {
@@ -130,8 +150,9 @@ std::set<std::wstring> ParseFlags(const std::wstring &raw) {
 // ConsoleWindow
 // ---------------------------------------------------------------------------
 
-ConsoleWindow::ConsoleWindow(AppState &state, RecordingController *rec, HWND main_window)
-    : state_(state), rec_(rec), main_window_(main_window) {}
+ConsoleWindow::ConsoleWindow(AppState &state, RecordingController *rec, HWND main_window,
+                             LuaPluginEngine *plugins)
+    : state_(state), rec_(rec), main_window_(main_window), plugins_(plugins) {}
 
 ConsoleWindow::~ConsoleWindow() {
     if (hwnd_) DestroyWindow(hwnd_);
@@ -418,7 +439,14 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
         else if (raw.find(L"@homrec") != std::wstring::npos) CmdRmSelfApp(raw);
         else PrintWarn(L"$rm: this form isn't supported yet.");
     } else {
-        PrintWarn(L"Unknown command: " + cmd + L" (try help or !help)");
+        // Not a built-in - see if a loaded plugin registered this name via
+        // homrec.register_command() before giving up on it.
+        std::vector<std::string> plugin_cmd_lines;
+        if (plugins_ && plugins_->DispatchCommand(NarrowFromWide(cmd), NarrowFromWide(raw), plugin_cmd_lines)) {
+            for (const auto &line : plugin_cmd_lines) PrintInfo(WideFromNarrow(line));
+        } else {
+            PrintWarn(L"Unknown command: " + cmd + L" (try help or !help)");
+        }
     }
 }
 
@@ -525,10 +553,33 @@ void ConsoleWindow::CmdStatus(const std::wstring &) {
 }
 
 void ConsoleWindow::CmdLog(const std::wstring &raw) {
+    std::wstring log_path = GetBaseDir() + L"\\homrec.log";
+
     size_t sp = raw.find(L' ');
-    std::wstring msg = sp == std::wstring::npos ? L"" : raw.substr(sp + 1);
-    std::wofstream f((GetBaseDir() + L"\\homrec.log").c_str(), std::ios::app);
-    f << L"[console] " << msg << L"\n";
+    std::wstring rest = sp == std::wstring::npos ? L"" : Trim(raw.substr(sp + 1));
+    std::wstring first_word = rest;
+    size_t sp2 = rest.find(L' ');
+    if (sp2 != std::wstring::npos) first_word = rest.substr(0, sp2);
+
+    if (first_word == L"clear") {
+        // Truncate rather than delete -- matches $rm's convention of being
+        // the only command family that actually removes files; "clear"
+        // reads as "empty it out", not "get rid of the log file itself".
+        std::wofstream f(log_path.c_str(), std::ios::trunc);
+        if (f) PrintOk(L"log cleared (" + log_path + L")");
+        else   PrintErr(L"couldn't open " + log_path + L" for writing");
+        return;
+    }
+    if (first_word == L"open") {
+        HINSTANCE r = ShellExecuteW(main_window_, L"open", log_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if ((INT_PTR)r > 32) PrintOk(L"opened " + log_path);
+        else PrintErr(L"couldn't open " + log_path + L" (no default text editor associated with .log?)");
+        return;
+    }
+
+    // Anything else: the original behaviour, log `rest` as a message.
+    std::wofstream f(log_path.c_str(), std::ios::app);
+    f << L"[console] " << rest << L"\n";
     PrintOk(L"logged");
 }
 
