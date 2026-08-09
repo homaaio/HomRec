@@ -233,7 +233,7 @@ LabeledSlider::LabeledSlider(wxWindow *parent, wxWindowID id, int value, int min
     auto *sizer = new wxBoxSizer(wxHORIZONTAL);
 
     slider_ = new ColorSlider(this, wxID_ANY, value, minVal, maxVal);
-    sizer->Add(slider_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+    sizer->Add(slider_, 1, wxEXPAND | wxRIGHT, 8);
 
     spin_ = new wxSpinCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(64, -1),
                             wxSP_ARROW_KEYS, minVal, maxVal, value);
