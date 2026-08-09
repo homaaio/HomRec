@@ -861,13 +861,6 @@ void HomRecMainFrame::DoStop() {
     // show again" earlier, or if there's nowhere to open (empty
     // output_folder).
     if (state_.show_summary && !summary_dont_show_again_ && !state_.output_folder.empty()) {
-        // BUGFIX: this used to pass lang_.Get("recording_saved") as *both*
-        // the title and the headline, and just the bare output folder as
-        // the body - so the popup never actually said anything about the
-        // recording that just finished (no filename, duration, resolution,
-        // or size), which read as "no information about the entry". Build
-        // a real summary instead, from the last-* snapshot RecordingController
-        // takes in Stop() (the live accessors are already zeroed by now).
         std::wstring path = rec_->last_output_path();
         std::wstring filename = path;
         size_t slash = filename.find_last_of(L"\\/");
@@ -891,14 +884,6 @@ void HomRecMainFrame::DoStop() {
             filename,
             info, dont_show);
         summary_dont_show_again_ = dont_show;
-
-        // BUGFIX: checking "Don't show again" only ever set the in-memory
-        // summary_dont_show_again_ flag above, which suppresses the popup
-        // for the rest of this run but is gone the moment the app is
-        // relaunched - from the user's side that reads as the checkbox
-        // "doing nothing". Make it actually stick: turn the real
-        // show_summary setting off and persist that, same as unchecking
-        // "Show summary" in Settings would.
         if (dont_show) {
             state_.show_summary = false;
             void *settings = hr_settings_create();
