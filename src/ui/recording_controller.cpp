@@ -486,7 +486,19 @@ void RecordingController::Stop() {
         }
     }
 
-    hr_ctl_stop(ctl_);
+    // BUGFIX: hr_ctl_stop()'s return value is "elapsed seconds for final
+    // summary" per its own doc comment, but this used to be called as a
+    // bare statement that threw the result away. hr_ctl_stop() also flips
+    // the session to HR_STATE_IDLE, at which point elapsed_seconds()/
+    // elapsed_formatted() (both read the *live* session) start returning
+    // 0.0 / "00:00:00" -- so anything built after this line that wanted to
+    // show "you just recorded N seconds" got nothing. Snapshot it (plus the
+    // output path/size, which have the same "still fine right now, gone a
+    // few lines down" problem once ffproc_ is destroyed below) into
+    // last_*_ members that stay valid until the next Start().
+    last_duration_sec_ = hr_ctl_stop(ctl_);
+    last_output_path_ = current_output_path_;
+    last_output_size_mb_ = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
 
     // Previously this destroyed the pipeline outright, which is exactly
     // why preview only ever worked *during* a recording - once Stop() ran
@@ -668,6 +680,16 @@ std::wstring RecordingController::elapsed_formatted() const {
 
 double RecordingController::output_size_mb() const {
     return ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
+}
+
+std::wstring RecordingController::last_duration_formatted() const {
+    int total = (int)last_duration_sec_;
+    int h = total / 3600;
+    int m = (total % 3600) / 60;
+    int s = total % 60;
+    wchar_t buf[16];
+    swprintf(buf, 16, L"%02d:%02d:%02d", h, m, s);
+    return std::wstring(buf);
 }
 
 int RecordingController::frame_count() const {

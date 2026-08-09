@@ -85,6 +85,16 @@ public:
     std::wstring elapsed_formatted() const;
     double output_size_mb() const;
     int frame_count() const;
+
+    // Snapshot of the recording that just finished, taken at the moment
+    // Stop() runs (before ctl_/ffproc_ are torn down / reset to IDLE, at
+    // which point elapsed_seconds()/output_size_mb() would report 0 -- see
+    // Stop()'s use of hr_ctl_stop()'s return value). Valid until the next
+    // Start(); this is what the post-recording summary popup should read
+    // instead of the live accessors above.
+    const std::wstring &last_output_path() const { return last_output_path_; }
+    std::wstring last_duration_formatted() const;
+    double last_output_size_mb() const { return last_output_size_mb_; }
     int capture_width() const { return capture_w_; }
     int capture_height() const { return capture_h_; }
     // The actual resolution the video ends up at (after Settings >
@@ -128,6 +138,13 @@ private:
     std::wstring ffmpeg_path_;
     std::wstring hw_encoder_;    // empty if no GPU encoder available -> software fallback
     std::wstring current_output_path_;
+
+    // See last_output_path()/last_duration_formatted()/last_output_size_mb()
+    // above - populated by Stop() right before the values they snapshot
+    // become unavailable/zeroed.
+    std::wstring last_output_path_;
+    double last_duration_sec_ = 0.0;
+    double last_output_size_mb_ = 0.0;
 
     // Mic device id actually applied to the currently-running continuous
     // audio capture (see Init()'s hr_audio_start() and
