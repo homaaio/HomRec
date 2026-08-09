@@ -37,6 +37,8 @@ extern "C" {
     int hr_settings_get_monitor(const void *h);
     int hr_settings_get_resolution_pct(const void *h);
     int hr_settings_get_flag(const void *h, const char *name);
+    void hr_settings_set_flag(void *h, const char *name, int v);
+    int hr_settings_save(const void *handle, const char *path);
 }
 
 // FromColorref/ColorButton/StatusDot moved to themed_widgets.cpp.
@@ -75,6 +77,15 @@ protected:
             on_command(LOWORD(wParam));
             return 0;
         }
+        // BUGFIX: the overlay dock's raw HWNDs (the STATIC "panel"
+        // background and the LISTBOX row list -- the two "+"/"x" buttons
+        // already theme themselves via HrWin32Theme::ThemeButton()) send
+        // WM_CTLCOLORSTATIC/WM_CTLCOLORLISTBOX here, to their *immediate*
+        // parent, same as WM_HSCROLL/WM_DRAWITEM above. Nothing answered
+        // them, so they fell through to wxPanel's default handling and
+        // came back as plain system white/gray instead of the app's dark
+        // theme -- the same fix every other raw-Win32 dialog in this app
+        // already applies (see e.g. window_picker_dialog.cpp).
         if (nMsg == WM_CTLCOLORSTATIC) {
             return HrWin32Theme::ColorStatic(reinterpret_cast<HDC>(wParam));
         }
@@ -789,7 +800,7 @@ void HomRecMainFrame::RequestStart() {
     }
 
     countdown_remaining_ = 3;
-    wxString msg = wxString::Format("Starting in %d\u2026", countdown_remaining_);
+    wxString msg = wxString::Format(wxString::FromUTF8("Starting in %d\u2026"), countdown_remaining_);
     SetStatusState(msg, theme_.warning);
     if (file_lbl_) file_lbl_->SetLabel(msg);
     countdown_timer_.Start(1000);
@@ -802,7 +813,7 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
         DoStart();
         return;
     }
-    wxString msg = wxString::Format("Starting in %d\u2026", countdown_remaining_);
+    wxString msg = wxString::Format(wxString::FromUTF8("Starting in %d\u2026"), countdown_remaining_);
     SetStatusState(msg, theme_.warning);
     if (file_lbl_) file_lbl_->SetLabel(msg);
 }
@@ -847,16 +858,56 @@ void HomRecMainFrame::DoStop() {
     // never actually been wired up (state_.show_summary loaded from
     // settings and shown as a checkbox, but nothing read it at Stop()
     // time). Skipped if the setting is off, if the user checked "Don't
-    // show again" earlier this session, or if there's nowhere to open
-    // (empty output_folder).
+    // show again" earlier, or if there's nowhere to open (empty
+    // output_folder).
     if (state_.show_summary && !summary_dont_show_again_ && !state_.output_folder.empty()) {
+        // BUGFIX: this used to pass lang_.Get("recording_saved") as *both*
+        // the title and the headline, and just the bare output folder as
+        // the body - so the popup never actually said anything about the
+        // recording that just finished (no filename, duration, resolution,
+        // or size), which read as "no information about the entry". Build
+        // a real summary instead, from the last-* snapshot RecordingController
+        // takes in Stop() (the live accessors are already zeroed by now).
+        std::wstring path = rec_->last_output_path();
+        std::wstring filename = path;
+        size_t slash = filename.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) filename = filename.substr(slash + 1);
+        if (filename.empty()) filename = L"(unknown file)";
+
+        wchar_t sizebuf[32];
+        swprintf(sizebuf, 32, L"%.1f MB", rec_->last_output_size_mb());
+
+        std::wstring info = filename + L"\r\n\r\n" +
+            L"Duration: " + rec_->last_duration_formatted() + L"\r\n" +
+            L"Resolution: " + std::to_wstring(rec_->output_width()) + L"x" +
+                std::to_wstring(rec_->output_height()) + L"\r\n" +
+            L"Size: " + sizebuf + L"\r\n" +
+            L"Saved to: " + WideFromNarrow(state_.output_folder);
+
         bool dont_show = summary_dont_show_again_;
         bool open_folder = ShowCustomMessageBox(
             GetHWND(), wxGetInstance(), theme_,
             WideFromNarrow(lang_.Get("recording_saved")),
-            WideFromNarrow(lang_.Get("recording_saved")),
-            WideFromNarrow(state_.output_folder), dont_show);
+            filename,
+            info, dont_show);
         summary_dont_show_again_ = dont_show;
+
+        // BUGFIX: checking "Don't show again" only ever set the in-memory
+        // summary_dont_show_again_ flag above, which suppresses the popup
+        // for the rest of this run but is gone the moment the app is
+        // relaunched - from the user's side that reads as the checkbox
+        // "doing nothing". Make it actually stick: turn the real
+        // show_summary setting off and persist that, same as unchecking
+        // "Show summary" in Settings would.
+        if (dont_show) {
+            state_.show_summary = false;
+            void *settings = hr_settings_create();
+            hr_settings_load(settings, "homrec_settings.json");
+            hr_settings_set_flag(settings, "show_summary", 0);
+            hr_settings_save(settings, "homrec_settings.json");
+            hr_settings_destroy(settings);
+        }
+
         if (open_folder) OpenRecordingsFolder();
     }
 }
@@ -1059,11 +1110,24 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
 
 void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
     if (evt.IsIconized() && state_.minimize_to_tray) Show(false);
+    // Plain minimize (not minimize-to-tray) doesn't Hide() the window, so
+    // it never reaches OnShowEvent below - the window is still
+    // "shown" as far as wx is concerned, just iconized in the taskbar.
+    // Gate the preview pipeline on that too: nothing is visible to show
+    // the live thumbnail to either way.
     if (rec_) rec_->SetPreviewVisible(!evt.IsIconized());
     evt.Skip();
 }
 
 void HomRecMainFrame::OnShowEvent(wxShowEvent &evt) {
+    // Pauses/resumes the preview-only capture pipeline based on whether
+    // the window is actually visible - see SetPreviewVisible()'s comment
+    // in recording_controller.h for why (this is the idle-CPU fix: the
+    // pipeline used to run unconditionally the whole time the app was
+    // open, minimized-to-tray or not). Covers minimize-to-tray, both
+    // tray-restore paths (double-click and the menu item), and a plain
+    // taskbar minimize/restore alike, since they all route through
+    // Show()/Hide() one way or another.
     if (rec_) rec_->SetPreviewVisible(evt.IsShown());
     evt.Skip();
 }
