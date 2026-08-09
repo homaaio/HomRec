@@ -9,16 +9,17 @@
 #include <cstddef>
 #include <cstring>
 #include <cwchar>
+#include "ui/version.h"
 
 /* -- Version strings ------------------------------------------------------- */
 
-static constexpr wchar_t k_ver_homrec[]  = L"1.7.2";
+static constexpr wchar_t k_ver_homrec[]  = HR_APP_VERSION_W;
 static constexpr wchar_t k_ver_core[]    = L"1.5.0";
 static constexpr wchar_t k_ver_console[] = L"1.3.0";
 
 /* Full banner printed by !homrec --version */
 static constexpr wchar_t k_ver_banner[] =
-    L"Version HomRec - 1.7.2, Core version - 1.5.0, Console version 1.3.0";
+    L"Version HomRec - " HR_APP_VERSION_W L", Core version - 1.5.0, Console version 1.3.0";
 
 /* -- Exports --------------------------------------------------------------- */
 
