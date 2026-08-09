@@ -1,6 +1,6 @@
 welcome to changelog :D
 
-[Unreleased] - 2026-08-08
+[Version 2.0] - 2026-08-08
 
 === Added ===
 
@@ -71,6 +71,56 @@ welcome to changelog :D
   actually implement (rule engine, AE objects, DLL<->Python bridge,
   flag-based log/ping syntax) rather than leaving it looking
   authoritative; added an accurate Section 19 for everything above.
+
+=== Fixed ===
+
+- Countdown status text ("Starting in 3...") rendered as "3" followed by
+  mojibake instead of the ellipsis, because the two wxString::Format()
+  call sites in HomRecMainFrame::RequestStart()/OnCountdownTimer built the
+  string from a raw narrow-char literal containing a UTF-8 ellipsis
+  instead of wrapping it in wxString::FromUTF8() (every other special
+  character in main_frame.cpp already did this correctly - these two were
+  the exception).
+- "Show summary" popup (DoStop()) passed the same localized string as
+  both title and headline, and just the bare output folder as the body -
+  no filename, duration, resolution, or file size, i.e. no actual
+  information about the recording that just finished. Root cause:
+  RecordingController::Stop() called hr_ctl_stop(ctl_) as a bare
+  statement and threw away its return value, even though hr_ctl_stop()'s
+  own doc comment says that return is "elapsed seconds for final summary"
+  - and hr_ctl_stop() also flips the session to IDLE, so by the time the
+  popup was built, elapsed_seconds()/elapsed_formatted() were already
+  reporting 0. Added RecordingController::last_output_path()/
+  last_duration_formatted()/last_output_size_mb(), snapshotted in Stop()
+  before that data goes stale, and rebuilt the popup body around them.
+- "Don't show again" checkbox on that same popup only set an in-memory
+  flag for the rest of the current run - never persisted, so it reset on
+  every relaunch. Checking it now also turns the real show_summary
+  setting off and saves homrec_settings.json, same as unchecking "Show
+  summary" in Settings would.
+- AFK/idle memory growth (and a chunk of the idle CPU usage): mic_buf/
+  sys_buf in hr_audio.cpp were appended to unconditionally by
+  mic_worker()/sys_worker() every ~10ms for as long as the app was open -
+  including all the time spent NOT recording, since those capture threads
+  run continuously from startup so the live level meters keep working.
+  Nothing drained that idle-time audio (hr_audio_reset_buffers()/
+  hr_audio_capture_to_wav() only ever ran at actual Start()/Stop()), so
+  raw 44.1kHz stereo PCM from both streams just accumulated in memory for
+  as long as the app sat idle - unbounded the longer it was left running,
+  which is where the "50MB in AFK mode" was going. Added an
+  AudioState::buffering flag that gates the buffer *writes* only (level
+  metering still reads each read()'s fresh chunk regardless, so the
+  meters keep working exactly as before); Start() turns it on, Stop()
+  turns it off.
+
+=== Changed ===
+
+- Version bumped to 2.0 (src/ui/version.h - the single HR_APP_VERSION/
+  HR_APP_VERSION_W macro everything else builds off). Also wired
+  hr_version.cpp's k_ver_homrec/k_ver_banner to actually include
+  version.h and use that macro - the file's own comment already claimed
+  this was the case, but hr_version.cpp never included version.h and had
+  its own separately-hardcoded "1.7.2" that just happened to still match.
 
 === Investigated, not fixed (flagged for visibility) ===
 
