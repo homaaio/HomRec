@@ -330,6 +330,22 @@ struct AudioState {
     std::atomic<bool>   running{false};
     std::atomic<bool>   paused{false};
 
+    // BUGFIX (AFK memory growth): mic_buf/sys_buf below used to be
+    // appended to unconditionally, every ~10ms, for as long as the app
+    // was open - including all the time spent NOT recording, since the
+    // capture threads run continuously from startup so the live level
+    // meters keep working. Nothing ever drained that idle-time audio
+    // (hr_audio_reset_buffers()/hr_audio_capture_to_wav() only run at
+    // actual Start()/Stop()), so it just accumulated raw 44.1kHz stereo
+    // PCM from both streams for as long as the app sat idle - tens of MB
+    // after a few minutes AFK, unbounded the longer it was left running.
+    // This flag gates the buffer *writes* only; level metering below
+    // reads straight from each read()'s fresh chunk regardless of it, so
+    // the meters keep working while idle exactly as before. Set true by
+    // hr_audio_reset_buffers() (Start()), false by
+    // hr_audio_capture_to_wav()/hr_audio_stop() (Stop()/app exit).
+    std::atomic<bool>   buffering{false};
+
     // Volume/mute (written from the UI thread, read from the audio threads)
     std::atomic<float>  mic_vol{1.0f};
     std::atomic<float>  sys_vol{1.0f};
@@ -366,8 +382,10 @@ static void mic_worker(AudioState* st)
                 }
             }
             st->mic_level.store(mute ? 0 : calc_rms(tmp.data(), tmp.size()));
-            std::lock_guard<std::mutex> lk(st->mic_mutex);
-            st->mic_buf.insert(st->mic_buf.end(), tmp.begin(), tmp.end());
+            if (st->buffering.load()) {
+                std::lock_guard<std::mutex> lk(st->mic_mutex);
+                st->mic_buf.insert(st->mic_buf.end(), tmp.begin(), tmp.end());
+            }
         }
         Sleep(SLEEP_MS);
     }
@@ -396,8 +414,10 @@ static void sys_worker(AudioState* st)
                 }
             }
             st->sys_level.store(mute ? 0 : calc_rms(tmp.data(), tmp.size()));
-            std::lock_guard<std::mutex> lk(st->sys_mutex);
-            st->sys_buf.insert(st->sys_buf.end(), tmp.begin(), tmp.end());
+            if (st->buffering.load()) {
+                std::lock_guard<std::mutex> lk(st->sys_mutex);
+                st->sys_buf.insert(st->sys_buf.end(), tmp.begin(), tmp.end());
+            }
         }
         Sleep(SLEEP_MS);
     }
@@ -577,6 +597,9 @@ HR_EXPORT void hr_audio_reset_buffers()
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
         g_state->sys_buf.clear();
     }
+    // Start buffering PCM again now that an actual recording is underway
+    // - see AudioState::buffering's comment for why this was off.
+    g_state->buffering.store(true);
 }
 
 /*  hr_audio_capture_to_wav(mic_wav_path, sys_wav_path)
@@ -594,6 +617,12 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
 {
     if (!g_state) return 0;
     int result = 0;
+
+    // Stop buffering PCM until the next recording starts - see
+    // AudioState::buffering's comment. Set before the writes below so
+    // there's no window where a worker thread could sneak in one more
+    // insert() between the wav_write() and clear() for its stream.
+    g_state->buffering.store(false);
 
     {
         std::lock_guard<std::mutex> lk(g_state->mic_mutex);
