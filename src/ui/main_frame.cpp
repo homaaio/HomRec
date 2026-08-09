@@ -36,6 +36,9 @@ extern "C" {
     int hr_settings_get_fps(const void *h);
     int hr_settings_get_monitor(const void *h);
     int hr_settings_get_resolution_pct(const void *h);
+    const char *hr_settings_get_codec(const void *h);
+    const char *hr_settings_get_theme(const void *h);
+    void hr_settings_set_theme(void *h, const char *v);
     int hr_settings_get_flag(const void *h, const char *name);
     void hr_settings_set_flag(void *h, const char *name, int v);
     int hr_settings_save(const void *handle, const char *path);
@@ -384,12 +387,10 @@ void PreviewPanel::OnCaptureLost(wxMouseCaptureLostEvent &) {
 // ---------------------------------------------------------------------------
 HomRecMainFrame::HomRecMainFrame()
     : wxFrame(nullptr, wxID_ANY, "HomRec", wxDefaultPosition, wxSize(1300, 750)),
+      countdown_timer_(this),
       preview_timer_(this), stats_timer_(this), restore_topmost_timer_(this) {
     g_frame = this;
     SetIcon(wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE));
-
-    lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
-    theme_ = GetBuiltinTheme(state_.current_theme);
 
     // Load whatever Settings previously saved - see main_window.cpp's
     // original OnCreate() comment; unchanged behavior, just moved here.
@@ -407,10 +408,17 @@ HomRecMainFrame::HomRecMainFrame()
         state_.show_summary = hr_settings_get_flag(settings, "show_summary") != 0;
         state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
         state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
+        const char *codec = hr_settings_get_codec(settings);
+        if (codec && codec[0]) state_.video_codec = codec;
+        const char *theme = hr_settings_get_theme(settings);
+        if (theme && theme[0]) state_.current_theme = theme;
     } else {
         state_.output_folder = "recordings";
     }
     hr_settings_destroy(settings);
+
+    lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
+    theme_ = GetBuiltinTheme(state_.current_theme);
 
     SetMinSize(wxSize(state_.window_min_w, state_.window_min_h));
 
@@ -1022,9 +1030,25 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         case ID_VIEW_PC_ANALYTICS: ShowPcAnalyticsDialog(GetHWND(), wxGetInstance(), state_.output_folder); break;
         case ID_VIEW_LOG: ShowLogViewerDialog(GetHWND(), wxGetInstance()); break;
         case ID_THEME_DARK:
-            state_.current_theme = "dark"; theme_ = GetBuiltinTheme("dark"); ApplyThemeColours(); break;
+            state_.current_theme = "dark"; theme_ = GetBuiltinTheme("dark"); ApplyThemeColours();
+            {
+                void *s = hr_settings_create();
+                hr_settings_load(s, "homrec_settings.json");
+                hr_settings_set_theme(s, "dark");
+                hr_settings_save(s, "homrec_settings.json");
+                hr_settings_destroy(s);
+            }
+            break;
         case ID_THEME_LIGHT:
-            state_.current_theme = "light"; theme_ = GetBuiltinTheme("light"); ApplyThemeColours(); break;
+            state_.current_theme = "light"; theme_ = GetBuiltinTheme("light"); ApplyThemeColours();
+            {
+                void *s = hr_settings_create();
+                hr_settings_load(s, "homrec_settings.json");
+                hr_settings_set_theme(s, "light");
+                hr_settings_save(s, "homrec_settings.json");
+                hr_settings_destroy(s);
+            }
+            break;
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_) && rec_raw_) {
                 rec_raw_->RefreshPreviewSettings();
