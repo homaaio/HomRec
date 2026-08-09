@@ -123,7 +123,7 @@ private:
     std::wstring pause_btn_text_ = L"\u23F8 PAUSE";
 
     HFONT font_title_ = nullptr;      // Segoe UI 22 bold - "HomRec"
-    HFONT font_version_ = nullptr;    // Segoe UI 11 - "v1.7.2"
+    HFONT font_version_ = nullptr;    // Segoe UI 11 - "v" + HR_APP_VERSION
     HFONT font_section_ = nullptr;    // Segoe UI 11 bold - "STATUS"/"TIME"/"STATS"
     HFONT font_body_ = nullptr;       // Segoe UI 11 - status text
     HFONT font_dot_ = nullptr;        // Arial 18 - status dot glyph
