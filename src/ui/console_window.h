@@ -59,11 +59,34 @@ private:
     void RefreshPrompt();
 
     void RunCommand(const std::wstring &raw);
-    void Print(const std::wstring &line);
-    void PrintOk(const std::wstring &s)   { Print(L"  \u2714  " + s); }
-    void PrintInfo(const std::wstring &s) { Print(L"  \u00b7  " + s); }
-    void PrintWarn(const std::wstring &s) { Print(L"  \u26a0  " + s); }
-    void PrintErr(const std::wstring &s)  { Print(L"  \u2716  " + s); }
+    // color is a COLORREF; only meaningful when the output control is a
+    // RichEdit (rich_edit_ == true) -- see the color constants and the
+    // OPT comment above OnCreate()'s control creation in the .cpp for why.
+    // Plain-EDIT fallback ignores it (ES_READONLY EDIT can't do per-run
+    // color at all -- everything in the box is one uniform color) and the
+    // leading glyph below is still what carries the distinction there.
+    void Print(const std::wstring &line, COLORREF color = kColText);
+    void PrintOk(const std::wstring &s)   { Print(L"  \u2714  " + s, kColOk); }
+    void PrintInfo(const std::wstring &s) { Print(L"  \u00b7  " + s, kColInfo); }
+    void PrintWarn(const std::wstring &s) { Print(L"  \u26a0  " + s, kColWarn); }
+    void PrintErr(const std::wstring &s)  { Print(L"  \u2716  " + s, kColErr); }
+
+    // Terminal-style palette (roughly matching common ANSI green/yellow/
+    // red conventions, e.g. `journalctl`/`git status` coloring) so
+    // errors/warnings actually stand out from normal output instead of
+    // everything being the same green with only a leading glyph to tell
+    // them apart.
+    static constexpr COLORREF kColOk   = RGB(80, 220, 120);   // green  - success
+    static constexpr COLORREF kColInfo = RGB(150, 200, 220);  // pale cyan - neutral log
+    static constexpr COLORREF kColWarn = RGB(230, 200, 90);   // amber  - warning
+    static constexpr COLORREF kColErr  = RGB(235, 100, 100);  // red    - error
+    static constexpr COLORREF kColPrompt = RGB(120, 220, 255);
+    // Default for plain Print() calls with no explicit level (echoed
+    // input, $echo, $history listing, clipboard paste) - a neutral
+    // near-white so it reads as "plain terminal text", distinct from any
+    // of the four status colors above, and never silently reuses
+    // whatever color happened to be set by the previous line.
+    static constexpr COLORREF kColText = RGB(225, 225, 225);
 
     // --- ported commands ---
     void CmdVersion(const std::wstring &raw);
@@ -102,6 +125,12 @@ private:
     HWND input_ = nullptr;
     HWND prompt_ = nullptr;
     HFONT mono_font_ = nullptr;
+    // True once output_ was successfully created as a RichEdit control
+    // (Msftedit.dll loaded OK). Falls back to a plain read-only EDIT
+    // control -- still fully usable, just single-colored -- if that load
+    // ever fails, which is why every richedit-only call below is gated on
+    // this instead of assumed.
+    bool rich_edit_ = false;
     // Actual pixel width the prompt text needs (recomputed by
     // RefreshPrompt() from the real string, e.g. "3840x2160@144fps # " is
     // noticeably wider than "1920x1080@60fps # "). OnSize() uses this

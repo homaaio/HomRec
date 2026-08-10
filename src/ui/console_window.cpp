@@ -11,6 +11,8 @@
 #include <vector>
 #include <cmath>
 #include <cwchar>
+#include <richedit.h>   // CHARFORMAT2W / EM_SETCHARFORMAT / EM_SETBKGNDCOLOR
+#include <uxtheme.h>    // SetWindowTheme (dark scrollbars, Win10 1809+)
 
 extern "C" {
     void *hr_di_create();
@@ -189,14 +191,14 @@ LRESULT ConsoleWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             // Prompt text is the brightest thing in the window - the part
             // of a shell prompt you'd normally see colored - everything
             // else (log output) is plain terminal green.
-            SetTextColor(hdc, (HWND)lParam == prompt_ ? RGB(120, 220, 255) : RGB(80, 220, 120));
+            SetTextColor(hdc, (HWND)lParam == prompt_ ? kColPrompt : kColOk);
             return (LRESULT)blackBrush;
         }
         case WM_CTLCOLOREDIT: {
             HDC hdc = (HDC)wParam;
             static HBRUSH blackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
             SetBkColor(hdc, RGB(0, 0, 0));
-            SetTextColor(hdc, RGB(80, 220, 120));
+            SetTextColor(hdc, kColOk);
             return (LRESULT)blackBrush;
         }
         default:
@@ -285,9 +287,38 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
     // No WS_EX_CLIENTEDGE here - that's the Win32 sunken-3D-bevel look,
     // which is the opposite of what "make it look Linux-terminal-like"
     // means. Flat, flush-with-the-window edges instead.
-    output_ = CreateWindowExW(0, L"EDIT", L"",
-                               WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL,
+    //
+    // OPT/UI: plain EDIT controls can only show ONE text color for their
+    // entire contents (WM_CTLCOLORSTATIC sets it once, globally), so
+    // Ok/Info/Warn/Err lines used to differ only by a leading glyph, not
+    // color - which is the opposite of what any real terminal (or
+    // journalctl/git status, etc.) looks like. RichEdit is a standard,
+    // already-on-every-Windows-install common control (Msftedit.dll,
+    // shipped since XP) that supports per-run color via
+    // EM_SETCHARFORMAT while remaining just as lightweight as EDIT for
+    // this use case - it's still one native control doing its own
+    // rendering, not a custom owner-draw box, so this adds real color
+    // without adding any per-frame CPU cost. Falls back to plain EDIT
+    // (still fully functional, just single-color) if the library can't
+    // be loaded for some reason.
+    static HMODULE richedit_lib = LoadLibraryW(L"Msftedit.dll");
+    rich_edit_ = (richedit_lib != nullptr);
+    const wchar_t *outputClass = rich_edit_ ? MSFTEDIT_CLASS : L"EDIT";
+    DWORD outputStyle = WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL;
+    output_ = CreateWindowExW(0, outputClass, L"",
+                               outputStyle,
                                8, 8, 740, 380, hwnd_, (HMENU)IDC_CONSOLE_OUTPUT, hInst, nullptr);
+    if (rich_edit_) {
+        // RichEdit doesn't route through WM_CTLCOLOREDIT/STATIC at all -
+        // background is set directly, once, via its own message.
+        SendMessageW(output_, EM_SETBKGNDCOLOR, 0, (LPARAM)RGB(0, 0, 0));
+        // Dark-mode scrollbar to match the black background - the default
+        // light-gray Win32 scrollbar next to a black terminal box was one
+        // of the more jarring "this looks bad" details. No-op on pre-1809
+        // Windows builds, safe to call unconditionally.
+        SetWindowTheme(output_, L"DarkMode_Explorer", nullptr);
+    }
+
     HFONT monoFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Consolas");
@@ -384,10 +415,24 @@ void ConsoleWindow::OnSize(int w, int h) {
 
 void ConsoleWindow::OnCommand(int, int, HWND) {}
 
-void ConsoleWindow::Print(const std::wstring &line) {
+void ConsoleWindow::Print(const std::wstring &line, COLORREF color) {
     int len = GetWindowTextLengthW(output_);
     SendMessageW(output_, EM_SETSEL, (WPARAM)len, (LPARAM)len);
     std::wstring toAppend = (len > 0 ? L"\r\n" : L"") + line;
+
+    if (rich_edit_) {
+        // Set the color that new typed/inserted text will use *before*
+        // inserting it (EM_SETCHARFORMAT with SCF_SELECTION applies to
+        // the zero-length selection at the caret we just set above, i.e.
+        // "what comes next"), then insert. This is what actually makes
+        // errors show red and warnings amber instead of the single
+        // uniform green plain EDIT was stuck with.
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof(cf);
+        cf.dwMask = CFM_COLOR;
+        cf.crTextColor = color;
+        SendMessageW(output_, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    }
     SendMessageW(output_, EM_REPLACESEL, FALSE, (LPARAM)toAppend.c_str());
 }
 
