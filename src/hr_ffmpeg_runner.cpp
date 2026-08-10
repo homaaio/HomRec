@@ -49,6 +49,7 @@ struct FfmpegCtx {
     std::string ffmpeg_path;
     std::string output_path;
     std::string audio_path;
+    std::string input_path;  /* only used when pipe_input == false, see below */
     std::string codec_args;  /* space-separated ffmpeg codec flags */
 
     /* process */
@@ -161,6 +162,9 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
            << L" -video_size " << ctx->width << L"x" << ctx->height
            << L" -framerate " << ctx->fps
            << L" -i pipe:0";
+    } else {
+        ss << L" -framerate " << ctx->fps
+           << L" -i " << Q(ctx->input_path);
     }
 
     /* Codec args (already formatted, e.g. "-c:v libx264 -preset ultrafast …") */
@@ -220,6 +224,17 @@ HR_EXPORT void hr_ff_set_ffmpeg_path(void *h, const char *path) {
 HR_EXPORT void hr_ff_set_output_path(void *h, const char *path) {
     if (!h || !path) return;
     static_cast<FfmpegCtx *>(h)->output_path = path;
+}
+
+/*
+ * hr_ff_set_input_path
+ * Only meaningful when pipe_input is disabled (hr_ff_set_pipe_input(h, 0)):
+ * the file ffmpeg should read frames from, in place of "-i pipe:0". Unused
+ * (and unnecessary) in the normal/default pipe_input=1 mode.
+ */
+HR_EXPORT void hr_ff_set_input_path(void *h, const char *path) {
+    if (!h || !path) return;
+    static_cast<FfmpegCtx *>(h)->input_path = path;
 }
 
 HR_EXPORT void hr_ff_set_codec_args(void *h, const char *args) {
@@ -282,6 +297,7 @@ HR_EXPORT int hr_ff_start(void *handle) {
     auto *ctx = static_cast<FfmpegCtx *>(handle);
     if (ctx->running) return HR_FF_RUNNING;
     if (ctx->ffmpeg_path.empty() || ctx->output_path.empty()) return HR_FF_ERROR;
+    if (!ctx->pipe_input && ctx->input_path.empty()) return HR_FF_ERROR;
 
     std::wstring cmdline = _build_cmdline(ctx);
 
