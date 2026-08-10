@@ -417,28 +417,6 @@ HR_EXPORT int hr_probe_gpu_encoder(const char *ffmpeg_path,
 /*  FFmpeg process management                                                   */
 /* --------------------------------------------------------------------------- */
 
-/*
- * REMOVED (dead code): this section used to contain a full second,
- * independent ffmpeg-process-management implementation - HrFfmpegProc,
- * hr_launch_ffmpeg(), hr_stop_ffmpeg(), hr_free_ffmpeg(),
- * hr_ffmpeg_running(), and hr_merge_audio_video() - roughly 270 lines
- * duplicating exactly what hr_ffmpeg_runner.cpp's hr_ff_create()/
- * hr_ff_start()/hr_ff_stop_graceful()/hr_ff_wait()/hr_ff_is_running()/
- * hr_ff_kill() already do, and what hr_tools.cpp's hr_merge_av() already
- * does for audio/video muxing. Confirmed via a full-tree grep that
- * recording_controller.cpp (the only caller of either API) exclusively
- * uses the hr_ff_* / hr_merge_av() versions, and nothing anywhere else
- * in the codebase (including the plugin/Lua layer) referenced any of
- * these five names, by direct call or by GetProcAddress/dlsym string
- * lookup. So this was pure unreferenced legacy code, left over from an
- * earlier iteration of the process-management design - the kind of
- * thing that's easy to accidentally call by mistake later (exactly
- * what happened with hr_ff_start()'s own pipe_input=0 fallback, see the
- * BUGFIX in hr_ffmpeg_runner.cpp / this file's CHANGELOG entry), so it
- * was deleted rather than left in place as a trap. If ffmpeg process
- * management ever needs to change, hr_ffmpeg_runner.cpp is the one and
- * only place to change it.
- */
 
 /* --------------------------------------------------------------------------- */
 /*  Performance / timing                                                        */
