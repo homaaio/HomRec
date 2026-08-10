@@ -215,14 +215,17 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
         return HR_DX_ERROR;
     }
 
-    /* Copy row-by-row: D3D textures may have row padding (RowPitch != width*4) */
     const int row_bytes  = ctx->width * 4;
     const uint8_t *src   = reinterpret_cast<const uint8_t *>(mapped.pData);
     uint8_t       *dst   = out_bgra;
-    for (int y = 0; y < ctx->height; ++y) {
-        memcpy(dst, src, (size_t)row_bytes);
-        src += mapped.RowPitch;
-        dst += row_bytes;
+    if ((int)mapped.RowPitch == row_bytes) {
+        memcpy(dst, src, (size_t)row_bytes * (size_t)ctx->height);
+    } else {
+        for (int y = 0; y < ctx->height; ++y) {
+            memcpy(dst, src, (size_t)row_bytes);
+            src += mapped.RowPitch;
+            dst += row_bytes;
+        }
     }
 
     ctx->context->Unmap(ctx->staging.Get(), 0);
