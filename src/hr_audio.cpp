@@ -137,6 +137,7 @@ struct WasapiStream {
     bool                  loopback    = false;
     uint16_t              channels    = 2;
     uint32_t              rate        = 44100;
+    HANDLE                data_event  = nullptr;
 
     bool open(bool is_loopback, IMMDevice* dev)
     {
@@ -155,9 +156,15 @@ struct WasapiStream {
         rate     = mix_fmt->nSamplesPerSec;
 
         AUDCLNT_SHAREMODE mode = AUDCLNT_SHAREMODE_SHARED;
-        DWORD flags = is_loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
+        DWORD flags = (is_loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0)
+                      | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
         hr = client->Initialize(mode, flags,
                                 2000000LL, 0, mix_fmt, nullptr);
+        if (FAILED(hr)) return false;
+
+        data_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!data_event) return false;
+        hr = client->SetEventHandle(data_event);
         if (FAILED(hr)) return false;
 
         hr = client->GetService(__uuidof(IAudioCaptureClient),
@@ -228,6 +235,7 @@ struct WasapiStream {
         if (device)   { device->Release();   device   = nullptr; }
         if (mix_fmt)  { CoTaskMemFree(mix_fmt); mix_fmt = nullptr; }
         if (enumerator) { enumerator->Release(); enumerator = nullptr; }
+        if (data_event) { CloseHandle(data_event); data_event = nullptr; }
     }
 };
 
@@ -360,13 +368,16 @@ static AudioState* g_state = nullptr;
 // ---------------------------------------------------------------------------
 static void mic_worker(AudioState* st)
 {
-    // Sleep interval: ~10ms for smooth read
     const int SLEEP_MS = 10;
     while (st->running.load()) {
         if (st->paused.load()) {
             Sleep(SLEEP_MS);
             continue;
         }
+        if (st->mic_stream.data_event)
+            WaitForSingleObject(st->mic_stream.data_event, SLEEP_MS);
+        else
+            Sleep(SLEEP_MS);  // fallback poll if event setup failed
         std::vector<int16_t> tmp;
         st->mic_stream.read(tmp);
 
@@ -387,7 +398,9 @@ static void mic_worker(AudioState* st)
                 st->mic_buf.insert(st->mic_buf.end(), tmp.begin(), tmp.end());
             }
         }
-        Sleep(SLEEP_MS);
+        // No trailing Sleep here anymore -- the wait at the top of the loop
+        // (event or fallback poll) already paces this thread; sleeping again
+        // here would just add a second, redundant delay on top of it.
     }
 }
 
@@ -399,6 +412,10 @@ static void sys_worker(AudioState* st)
             Sleep(SLEEP_MS);
             continue;
         }
+        if (st->sys_stream.data_event)
+            WaitForSingleObject(st->sys_stream.data_event, SLEEP_MS);
+        else
+            Sleep(SLEEP_MS);  // fallback poll if event setup failed
         std::vector<int16_t> tmp;
         st->sys_stream.read(tmp);
 
@@ -419,7 +436,7 @@ static void sys_worker(AudioState* st)
                 st->sys_buf.insert(st->sys_buf.end(), tmp.begin(), tmp.end());
             }
         }
-        Sleep(SLEEP_MS);
+        // See matching comment in mic_worker() above.
     }
 }
 
