@@ -394,11 +394,7 @@ HomRecMainFrame::HomRecMainFrame()
 
     // Load whatever Settings previously saved - see main_window.cpp's
     // original OnCreate() comment; unchanged behavior, just moved here.
-    // BUGFIX: this used to run *after* lang_/theme_ were already
-    // initialized from state_'s compiled-in defaults below, so even the
-    // fields this loop did restore into state_ (theme included, now that
-    // it's restored here too) had no effect on the actual language table
-    // or theme used for the rest of this constructor - moved above both.
+    
     void *settings = hr_settings_create();
     if (hr_settings_load(settings, "homrec_settings.json")) {
         const char *folder = hr_settings_get_output_folder(settings);
@@ -413,17 +409,8 @@ HomRecMainFrame::HomRecMainFrame()
         state_.show_summary = hr_settings_get_flag(settings, "show_summary") != 0;
         state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
         state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
-        // BUGFIX: video_codec was already being written to
-        // homrec_settings.json by SettingsDialog::OnSave() (hr_settings_
-        // set_codec), but nothing ever read it back on startup - picking
-        // a non-default codec in Settings silently reverted to the
-        // compiled-in default the next time the app was launched.
         const char *codec = hr_settings_get_codec(settings);
         if (codec && codec[0]) state_.video_codec = codec;
-        // BUGFIX: same story for theme, except it was never even saved -
-        // switching Dark/Light from the View menu only changed it in
-        // memory for the rest of this run (see the ID_THEME_DARK/LIGHT
-        // handlers below, which now persist it immediately on change).
         const char *theme = hr_settings_get_theme(settings);
         if (theme && theme[0]) state_.current_theme = theme;
     } else {
@@ -889,13 +876,6 @@ void HomRecMainFrame::DoStop() {
     // show again" earlier, or if there's nowhere to open (empty
     // output_folder).
     if (state_.show_summary && !summary_dont_show_again_ && !state_.output_folder.empty()) {
-        // BUGFIX: this used to pass lang_.Get("recording_saved") as *both*
-        // the title and the headline, and just the bare output folder as
-        // the body - so the popup never actually said anything about the
-        // recording that just finished (no filename, duration, resolution,
-        // or size), which read as "no information about the entry". Build
-        // a real summary instead, from the last-* snapshot RecordingController
-        // takes in Stop() (the live accessors are already zeroed by now).
         std::wstring path = rec_->last_output_path();
         std::wstring filename = path;
         size_t slash = filename.find_last_of(L"\\/");
@@ -919,14 +899,6 @@ void HomRecMainFrame::DoStop() {
             filename,
             info, dont_show);
         summary_dont_show_again_ = dont_show;
-
-        // BUGFIX: checking "Don't show again" only ever set the in-memory
-        // summary_dont_show_again_ flag above, which suppresses the popup
-        // for the rest of this run but is gone the moment the app is
-        // relaunched - from the user's side that reads as the checkbox
-        // "doing nothing". Make it actually stick: turn the real
-        // show_summary setting off and persist that, same as unchecking
-        // "Show summary" in Settings would.
         if (dont_show) {
             state_.show_summary = false;
             void *settings = hr_settings_create();
