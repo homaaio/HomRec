@@ -166,6 +166,9 @@ private:
     bool summary_dont_show_again_ = false;
     void SetStatusState(const wxString &text, COLORREF dotColor);
     void ToggleFullscreenNative();
+    // Un-minimizes + un-hides the window from the tray, in that order -
+    // see SetupTrayIcon()'s comment for why both steps are needed.
+    void RestoreFromTray();
     // Opens state_.output_folder in Explorer and makes sure it actually
     // ends up in front of HomRec instead of silently behind it - see the
     // comment at its definition for why that isn't automatic.
