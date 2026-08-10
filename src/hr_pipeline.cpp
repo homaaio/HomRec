@@ -203,6 +203,7 @@ struct Pipeline {
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
     bool logged_lost_ = false; // edge-trigger for the DX_LOST diagnostic below
+    std::chrono::steady_clock::time_point next_reset_attempt_{};
 
     std::atomic<int64_t> frames_captured{0};
     std::atomic<int64_t> frames_dropped{0};
@@ -530,9 +531,25 @@ struct Pipeline {
                     logged_lost_ = true;
                 }
 #ifdef _WIN32
-                if (g_libs.dx_reset) g_libs.dx_reset(dx_ctx);
+                auto now = std::chrono::steady_clock::now();
+                if (g_libs.dx_reset && now >= next_reset_attempt_) {
+                    g_libs.dx_reset(dx_ctx);
+                    // Whether or not that succeeded, don't try again for a
+                    // full second - if it failed because something (e.g. a
+                    // game) still holds exclusive fullscreen, back-to-back
+                    // retries just burn GPU/driver time neither of us can
+                    // spare. A successful reset also isn't free to redo
+                    // constantly, and the very next AcquireNextFrame() will
+                    // tell us immediately if it actually worked anyway.
+                    next_reset_attempt_ = now + std::chrono::seconds(1);
+                }
 #endif
-                continue;
+                // Same reasoning as the HR_DX_TIMEOUT branch above: fall
+                // through and re-encode whatever's still in bgra_buf from
+                // the last real frame rather than skipping this slot
+                // entirely, so the output timeline doesn't fall behind
+                // wall-clock time for however long capture stays lost.
+                frames_dropped.fetch_add(1, std::memory_order_relaxed);
             } else if (ret != HR_DX_OK) {
                 HrLog::Error("Capture pipeline stopped: dx_capture() returned a fatal error (ret=" + std::to_string(ret) + ")");
                 running.store(false);
