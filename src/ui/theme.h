@@ -5,10 +5,10 @@
 // values, just materialized as GDI COLORREFs instead of Tk hex strings so
 // paint code doesn't re-parse a string every frame.
 //
-// Custom themes: the README says "plugin system coming soon" for themes;
-// the .hrt (gzip+JSON) container and `hr_theme_get_color()` reader already
-// exist in hr_profile_io.cpp, so LoadCustomTheme() below is wired up now
-// even though no UI to install one exists yet.
+// Custom .hrt themes were removed - that support is discontinued (there
+// was never any UI to install one anyway; LoadCustomTheme() used to be
+// wired up to a gzip+JSON .hrt reader in hr_profile_io.cpp but nothing
+// called it). Only the two built-in themes below remain.
 #pragma once
 
 #include <windows.h>
@@ -31,11 +31,6 @@ struct ThemeColors {
 // Returns the "dark" or "light" built-in palette. Any unrecognized name
 // falls back to "dark".
 const ThemeColors &GetBuiltinTheme(const std::string &name);
-
-// Loads a color table out of a gzip+JSON `.hrt` file written by
-// hr_hrc_write(..., file_type=2). Falls back to the "dark" built-in on any
-// read/parse failure. Returns true if the file loaded cleanly.
-bool LoadCustomTheme(const std::string &path, ThemeColors &out);
 
 // Cached solid brushes for the current theme, rebuilt on ApplyTheme().
 // Owned globally (single top-level window app) and released on rebuild.

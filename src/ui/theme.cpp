@@ -1,14 +1,6 @@
 #include "theme.h"
 #include <cstdlib>
 #include <cstring>
-#include <vector>
-
-// Exported from hr_profile_io.cpp (linked directly now - no ctypes/DLL
-// boundary needed since UI and core are one binary).
-extern "C" {
-    int hr_hrc_read(const char *path, int expected_type, char *out_json, int out_len);
-    int hr_theme_get_color(const char *json_body, const char *key, char *out_color, int out_len);
-}
 
 namespace {
 
@@ -66,36 +58,6 @@ const ThemeColors &GetBuiltinTheme(const std::string &name) {
     return kDark; // default
 }
 
-bool LoadCustomTheme(const std::string &path, ThemeColors &out) {
-    out = kDark;
-
-    // file_type 2 == HRT per hr_hrc_write's convention (0=hrc,1=hrl,2=hrt).
-    int needed = hr_hrc_read(path.c_str(), /*expected_type=*/2, nullptr, 0);
-    if (needed >= 0) return false; // 0 = not found/bad magic; no positive-without-buffer case
-    std::vector<char> json(-needed);
-    if (hr_hrc_read(path.c_str(), 2, json.data(), (int)json.size()) <= 0) return false;
-
-    auto readColor = [&](const char *key, COLORREF fallback) -> COLORREF {
-        char buf[16] = {};
-        if (hr_theme_get_color(json.data(), key, buf, sizeof(buf)) == 1) {
-            return HexToColorRef(buf);
-        }
-        return fallback;
-    };
-
-    out.bg             = readColor("bg", kDark.bg);
-    out.fg             = readColor("fg", kDark.fg);
-    out.accent         = readColor("accent", kDark.accent);
-    out.success        = readColor("success", kDark.success);
-    out.warning        = readColor("warning", kDark.warning);
-    out.error          = readColor("error", kDark.error);
-    out.surface        = readColor("surface", kDark.surface);
-    out.surface_light  = readColor("surface_light", kDark.surface_light);
-    out.preview_bg     = readColor("preview_bg", kDark.preview_bg);
-    out.text           = readColor("text", kDark.text);
-    out.text_secondary = readColor("text_secondary", kDark.text_secondary);
-    return true;
-}
 
 void ThemeBrushes::Rebuild(const ThemeColors &c) {
     Release();
