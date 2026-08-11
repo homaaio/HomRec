@@ -41,6 +41,84 @@ std::string NarrowFromWide(const std::wstring &w) {
     return s;
 }
 
+std::wstring WideFromNarrow(const std::string &s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    return w;
+}
+
+// True for the same "actually a capturable top-level window" candidates
+// ShowWindowPickerDialog()'s list uses - kept as one shared check so
+// HR_ResolveCaptureWindow() below can't resolve a title to some window
+// the picker itself would never have shown as an option.
+bool IsCapturableWindow(HWND hwnd) {
+    if (!IsWindowVisible(hwnd)) return false;
+    if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
+
+    LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if ((exStyle & WS_EX_TOOLWINDOW) && !(exStyle & WS_EX_APPWINDOW)) return false;
+
+    DWORD cloaked = 0;
+    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+    if (cloaked) return false;
+
+    return true;
+}
+
+} // namespace
+
+bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out_rect) {
+    if (title.empty()) return false;
+    std::wstring wtitle = WideFromNarrow(title);
+
+    struct Ctx {
+        const std::wstring *wanted;
+        HWND found = nullptr;
+    };
+    Ctx ctx{&wtitle};
+
+    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+        auto *c = reinterpret_cast<Ctx *>(lp);
+        if (!IsCapturableWindow(hwnd)) return TRUE;
+
+        int len = GetWindowTextLengthW(hwnd);
+        if (len <= 0) return TRUE;
+        std::wstring t(static_cast<size_t>(len) + 1, L'\0');
+        GetWindowTextW(hwnd, t.data(), len + 1);
+        t.resize(wcslen(t.c_str()));
+
+        if (t == *c->wanted) {
+            c->found = hwnd;
+            return FALSE;  // exact match, stop enumerating
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&ctx));
+
+    if (!ctx.found) return false;
+
+    // DWMWA_EXTENDED_FRAME_BOUNDS, not GetWindowRect(): on Win10/11,
+    // GetWindowRect() includes several pixels of invisible resize-grip
+    // margin around most app windows (part of how the new-style thin
+    // borders are implemented) - cropping DXGI's frame to *that* rect
+    // would capture a sliver of desktop wallpaper around three edges of
+    // the window instead of the window itself. The DWM attribute gives
+    // the actual visible bounds, matching what the user sees on screen.
+    RECT r{};
+    if (FAILED(DwmGetWindowAttribute(ctx.found, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))) {
+        if (!GetWindowRect(ctx.found, &r)) return false;  // last-resort fallback
+    }
+    if (r.right <= r.left || r.bottom <= r.top) return false;  // minimized or degenerate
+
+    out_hwnd = ctx.found;
+    out_rect = r;
+    return true;
+}
+
+namespace {
+
 struct WindowEntry {
     HWND hwnd = nullptr;
     std::wstring title;
