@@ -1,11 +1,12 @@
 #include "main_frame.h"
 #include "version.h"
 #include "settings_dialog.h"
-// (overlay_manager.h removed -- see overlays_dock_panel.h)
+// (overlay_manager.h removed - see overlays_dock_panel.h)
 #include "welcome_dialog.h"
 #include "pc_analytics_dialog.h"
 #include "log_viewer_dialog.h"
 #include "window_picker_dialog.h"
+#include "hide_window_dialog.h"
 #include "custom_messagebox.h"
 #include "hrc_config.h"
 #include "win32_theme.h"
@@ -394,7 +395,6 @@ HomRecMainFrame::HomRecMainFrame()
 
     // Load whatever Settings previously saved - see main_window.cpp's
     // original OnCreate() comment; unchanged behavior, just moved here.
-    
     void *settings = hr_settings_create();
     if (hr_settings_load(settings, "homrec_settings.json")) {
         const char *folder = hr_settings_get_output_folder(settings);
@@ -457,6 +457,19 @@ HomRecMainFrame::HomRecMainFrame()
     plugins_->SetContext(rec_.get(), &theme_);
     plugins_->LoadAll();
 
+    // ====== cfg/autoexec.cfg ======
+    // Console is normally created lazily, the first time someone opens it
+    // (Help > Console / Ctrl+Shift+T) - EnsureCreated() here builds the
+    // window (and its output_ control) up front instead, WITHOUT showing
+    // it, purely so RunCfgFile() below has somewhere for its output to
+    // go. Must come after plugins_->LoadAll() above, not before - a
+    // plugin's homrec.register_command() calls need to have already run
+    // for an autoexec.cfg line to be able to invoke one (e.g. a command
+    // the Bter plugin registers).
+    console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), GetHWND(), plugins_.get());
+    console_->EnsureCreated(wxGetInstance());
+    console_->RunCfgFile(L"autoexec");
+
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnPreviewTimer, this, preview_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnStatsTimer, this, stats_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnRestoreTopmostTimer, this, restore_topmost_timer_.GetId());
@@ -464,7 +477,11 @@ HomRecMainFrame::HomRecMainFrame()
     preview_timer_.Start(1000 / 20);
     stats_timer_.Start(500);
 
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_VIEW_AUDIO_PANEL);
+    // Upper bound extended to ID_FILE_HIDE_WINDOW (1025) - it's the
+    // newest menu ID and this Bind() is an inclusive ID *range*, so
+    // adding an ID after ID_VIEW_AUDIO_PANEL without updating this bound
+    // would silently leave its menu item's clicks unhandled.
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_HIDE_WINDOW);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
     Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
@@ -479,6 +496,17 @@ HomRecMainFrame::HomRecMainFrame()
 
 HomRecMainFrame::~HomRecMainFrame() {
     if (state_.recording && rec_) rec_->Stop();
+    // MUST run on every exit path, not just a clean menu-driven Exit -
+    // SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) persists on a
+    // window until explicitly cleared, independent of HomRec's own
+    // lifetime, and affects every capture tool system-wide (not just
+    // this app). Without this, closing HomRec (including via the X
+    // button, Alt+F4, or a crash reaching this destructor via a
+    // higher-level handler) could leave some other window permanently
+    // invisible to screen-sharing/capture tools with no obvious reason
+    // why, long after HomRec itself is gone. See the comment on
+    // AppState::hidden_capture_windows for the full explanation.
+    ClearAllHiddenCaptureWindows(state_);
     if (hotkey_handle_) {
         hr_hk_stop(hotkey_handle_);
         hr_hk_destroy(hotkey_handle_);
@@ -496,6 +524,7 @@ void HomRecMainFrame::BuildMenuBar() {
     auto *fileMenu = new wxMenu();
     fileMenu->Append(ID_FILE_OPEN_RECORDINGS, "Open Recordings Folder");
     fileMenu->Append(ID_FILE_SELECT_WINDOW, "Select Window to Record...");
+    fileMenu->Append(ID_FILE_HIDE_WINDOW, "Hide Windows From Recording...");
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXPORT_HRC, "Export Settings (.hrc)...");
     fileMenu->Append(ID_FILE_IMPORT_HRC, "Import Settings (.hrc)...");
@@ -848,6 +877,13 @@ void HomRecMainFrame::DoStart() {
     pause_color_btn_->Enable2(true);
     SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
     if (plugins_) plugins_->EmitHook("on_recording_start");
+    // cfg/startrec.cfg: same RunCfgFile() autoexec.cfg already uses at
+    // startup, just re-triggered on every new recording instead of once
+    // at launch. Runs after the plugin hook above so a startrec.cfg line
+    // can rely on plugin-registered commands having already reacted to
+    // on_recording_start if it needs to. Missing file = silent no-op,
+    // same as autoexec.
+    if (console_) console_->RunCfgFile(L"startrec");
 }
 
 void HomRecMainFrame::DoStop() {
@@ -876,6 +912,13 @@ void HomRecMainFrame::DoStop() {
     // show again" earlier, or if there's nowhere to open (empty
     // output_folder).
     if (state_.show_summary && !summary_dont_show_again_ && !state_.output_folder.empty()) {
+        // BUGFIX: this used to pass lang_.Get("recording_saved") as *both*
+        // the title and the headline, and just the bare output folder as
+        // the body - so the popup never actually said anything about the
+        // recording that just finished (no filename, duration, resolution,
+        // or size), which read as "no information about the entry". Build
+        // a real summary instead, from the last-* snapshot RecordingController
+        // takes in Stop() (the live accessors are already zeroed by now).
         std::wstring path = rec_->last_output_path();
         std::wstring filename = path;
         size_t slash = filename.find_last_of(L"\\/");
@@ -899,6 +942,14 @@ void HomRecMainFrame::DoStop() {
             filename,
             info, dont_show);
         summary_dont_show_again_ = dont_show;
+
+        // BUGFIX: checking "Don't show again" only ever set the in-memory
+        // summary_dont_show_again_ flag above, which suppresses the popup
+        // for the rest of this run but is gone the moment the app is
+        // relaunched - from the user's side that reads as the checkbox
+        // "doing nothing". Make it actually stick: turn the real
+        // show_summary setting off and persist that, same as unchecking
+        // "Show summary" in Settings would.
         if (dont_show) {
             state_.show_summary = false;
             void *settings = hr_settings_create();
@@ -979,6 +1030,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         case ID_FILE_SELECT_WINDOW:
             ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
+            break;
+        case ID_FILE_HIDE_WINDOW:
+            ShowHideWindowDialog(GetHWND(), wxGetInstance(), state_);
             break;
         case ID_FILE_EXPORT_HRC: {
             wxFileDialog dlg(this, "Export Settings", wxEmptyString, "homrec_config.hrc",
@@ -1069,6 +1123,10 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         // ID_OVERLAYS_MANAGE removed along with overlay_manager.cpp's
         // ShowOverlayManager() -- see overlays_dock_panel.h.
         case ID_HELP_CONSOLE:
+            // console_ is always non-null by this point now (constructed
+            // at startup so cfg/autoexec.cfg has somewhere to print to -
+            // see plugins_->LoadAll() above) - this null-check is just
+            // defensive leftover from when construction was fully lazy.
             if (!console_) console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), GetHWND(), plugins_.get());
             console_->Show(wxGetInstance());
             break;
@@ -1108,6 +1166,15 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
         if (file_lbl_) {
             wxString state_word = wxString::FromUTF8(lang_.Get(state_.paused ? "paused" : "recording"));
             file_lbl_->SetLabel(state_word + wxString::FromUTF8(" \u2014 ") + t);
+        }
+        // Overload warning: rec_->overloaded() only turns on after a
+        // sustained streak of real frame drops (see PollStats()), so this
+        // isn't fighting the normal "recording"/"paused" status text for
+        // attention on every tick - just while the pipeline is actually
+        // behind.
+        if (rec_ && rec_->overloaded()) {
+            SetStatusState(wxString::FromUTF8("\u26A0 System overloaded \u2014 dropping frames"),
+                            theme_.warning);
         }
     }
     left_panel_->Layout();

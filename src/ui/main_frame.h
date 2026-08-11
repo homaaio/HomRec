@@ -64,6 +64,7 @@ enum MenuCommandId {
     ID_FILE_EXPORT_HRC      = 1022,
     ID_FILE_IMPORT_HRC      = 1023,
     ID_VIEW_AUDIO_PANEL     = 1024,
+    ID_FILE_HIDE_WINDOW     = 1025,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
