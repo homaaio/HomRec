@@ -116,6 +116,7 @@ struct AppState {
     int          monitor_top   = 0;
     CaptureMode  capture_mode  = CaptureMode::Desktop;
     std::string  capture_window_title;
+    std::vector<HWND> hidden_capture_windows;
 
     // -- preview ------------------------------------------------------------
     int preview_width  = 900;
