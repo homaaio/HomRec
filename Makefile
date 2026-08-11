@@ -80,8 +80,10 @@ SRCS := \
     src/ui/pc_analytics_dialog.cpp \
     src/ui/log_viewer_dialog.cpp \
     src/ui/window_picker_dialog.cpp \
+    src/ui/hide_window_dialog.cpp \
     src/ui/overlays_dock_panel.cpp \
     src/hr_log.cpp \
+    src/hr_crash_handler.cpp \
     src/hr_archive.cpp \
     src/hr_input_overlay.cpp \
     src/hr_input_overlay_registry.cpp \
