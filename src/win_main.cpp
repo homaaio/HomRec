@@ -9,12 +9,15 @@
 #include <wx/wx.h>
 #include "ui/main_frame.h"
 #include "ui/version.h"
+#include "hr_crash_handler.h"
 
 extern "C" int hr_acquire_single_instance(const char *mutex_name);
 
 class HomRecApp : public wxApp {
 public:
     bool OnInit() override {
+        HrCrashHandler::Install();
+
         if (!wxApp::OnInit()) return false;
 
         if (!hr_acquire_single_instance(HR_SINGLE_INSTANCE_MUTEX_NAME)) {
