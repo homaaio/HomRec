@@ -43,7 +43,19 @@ public:
     ~ConsoleWindow();
 
     void Show(HINSTANCE hInst);
+    void EnsureCreated(HINSTANCE hInst);
     HWND hwnd() const { return hwnd_; }
+
+    // Reads cfg/<name>.cfg (relative to the app's own folder, via
+    // GetBaseDir()) and feeds each non-blank, non-comment line through
+    // RunCommand() as if typed directly - including any command a plugin
+    // (e.g. Bter, via homrec.register_command()) has registered, since
+    // this goes through the exact same dispatcher. Comment lines start
+    // with "//" or "#" (leading whitespace allowed). Missing file is not
+    // an error - this is opt-in by simply dropping the file in, matching
+    // e.g. Source engine's autoexec.cfg convention. Returns the number of
+    // commands actually run (0 if the file doesn't exist or is empty).
+    int RunCfgFile(const std::wstring &name);
 
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND, UINT, WPARAM, LPARAM);
