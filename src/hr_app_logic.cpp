@@ -216,19 +216,9 @@ HR_EXPORT int hr_find_ffmpeg(const char *exe_dir, char *out, int out_len) {
 /*  optimize_for_performance                                                    */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_optimize_process
- *
- * Tunes process/thread priority for smoother capture:
- *   - Raises the process priority to HIGH on Windows / nice -10 on Linux.
- *   - On Windows also raises the current thread's priority.
- *
- * Call once at startup.  Returns 1 on success, 0 if permission denied.
- */
 HR_EXPORT int hr_optimize_process(void) {
 #ifdef _WIN32
-    BOOL ok = SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    BOOL ok = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     return ok ? 1 : 0;
 #else
     int r = nice(-10);
@@ -458,10 +448,10 @@ HR_EXPORT void hr_format_elapsed(double elapsed_sec, char *out, int out_len) {
 /*
  * hr_register_file_types
  *
- * Registers .hrc / .hrl / .hrt file associations in HKCU (no admin needed).
+ * Registers .hrc / .hrl file associations in HKCU (no admin needed).
  *
  * exe_path : full path to the executable that opens these files (UTF-8).
- * icons_dir: directory containing hrc.ico / hrl.ico / hrt.ico (UTF-8).
+ * icons_dir: directory containing hrc.ico / hrl.ico (UTF-8).
  * Returns 1 on success, 0 on error.
  */
 HR_EXPORT int hr_register_file_types(const char *exe_path,
@@ -478,7 +468,6 @@ HR_EXPORT int hr_register_file_types(const char *exe_path,
     static const TypeDef types[] = {
         {".hrc", "HomRec.Profile",  "HomRec Profile",  "hrc.ico"},
         {".hrl", "HomRec.Language", "HomRec Language", "hrl.ico"},
-        {".hrt", "HomRec.Theme",    "HomRec Theme",    "hrt.ico"},
         {nullptr, nullptr, nullptr, nullptr}
     };
 
