@@ -206,26 +206,32 @@ LRESULT ConsoleWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
 }
 
-void ConsoleWindow::Show(HINSTANCE hInst) {
-    if (!hwnd_) {
-        static const wchar_t kClass[] = L"HomRecConsoleWindow";
-        WNDCLASSW wc = {};
-        wc.lpfnWndProc = WindowProcThunk;
-        wc.hInstance = hInst;
-        wc.lpszClassName = kClass;
-        wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        RegisterClassW(&wc);
+void ConsoleWindow::EnsureCreated(HINSTANCE hInst) {
+    if (hwnd_) return;
+    static const wchar_t kClass[] = L"HomRecConsoleWindow";
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = WindowProcThunk;
+    wc.hInstance = hInst;
+    wc.lpszClassName = kClass;
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    RegisterClassW(&wc);
 
-        int x, y, w, h;
-        HrWin32Theme::CenteredWindowRect(760, 480, WS_OVERLAPPEDWINDOW, x, y, w, h);
-        hwnd_ = CreateWindowExW(0, kClass, L"HomRec Console",
-                                 WS_OVERLAPPEDWINDOW,
-                                 x, y, w, h,
-                                 main_window_, nullptr, hInst, this);
-        HrWin32Theme::ApplyDarkTitleBar(hwnd_);
-        OnCreate(hInst);
-    }
+    int x, y, w, h;
+    HrWin32Theme::CenteredWindowRect(760, 480, WS_OVERLAPPEDWINDOW, x, y, w, h);
+    hwnd_ = CreateWindowExW(0, kClass, L"HomRec Console",
+                             WS_OVERLAPPEDWINDOW,
+                             x, y, w, h,
+                             main_window_, nullptr, hInst, this);
+    // Deliberately no ShowWindow() here - CreateWindowExW() without
+    // WS_VISIBLE already leaves it hidden, which is the whole point (see
+    // this function's header comment).
+    HrWin32Theme::ApplyDarkTitleBar(hwnd_);
+    OnCreate(hInst);
+}
+
+void ConsoleWindow::Show(HINSTANCE hInst) {
+    EnsureCreated(hInst);
     ShowWindow(hwnd_, SW_SHOW);
     SetForegroundWindow(hwnd_);
     RefreshPrompt();
@@ -493,6 +499,60 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
             PrintWarn(L"Unknown command: " + cmd + L" (try help or !help)");
         }
     }
+}
+
+int ConsoleWindow::RunCfgFile(const std::wstring &name) {
+    std::wstring cfg_dir = GetBaseDir() + L"\\cfg";
+    // Auto-create cfg/ (harmless no-op if it already exists) purely for
+    // discoverability - so there's an obvious, visible folder right next
+    // to the exe for someone to drop autoexec.cfg into, the same way
+    // LuaPluginEngine's constructor auto-creates plugins/ for the same
+    // reason. Doesn't affect whether the file itself is found below.
+    CreateDirectoryW(cfg_dir.c_str(), nullptr);
+
+    std::wstring path = cfg_dir + L"\\" + name + L".cfg";
+    std::ifstream f(path.c_str(), std::ios::binary);
+    if (!f) return 0;  // not present -- opt-in feature, not an error
+
+    // Lenient decode, same reasoning/fallback as log_viewer_dialog.cpp's
+    // ReadLogFileLenient(): a .cfg file is something a person hand-edits
+    // in whatever text editor they've got, which on Windows still quite
+    // often means "ANSI", not UTF-8.
+    std::vector<char> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (bytes.empty()) return 0;
+
+    std::wstring text;
+    int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), (int)bytes.size(), nullptr, 0);
+    if (needed <= 0) needed = MultiByteToWideChar(CP_ACP, 0, bytes.data(), (int)bytes.size(), nullptr, 0);
+    if (needed <= 0) {
+        PrintErr(L"cfg/" + name + L".cfg: unable to decode file, skipped.");
+        return 0;
+    }
+    text.resize(needed);
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), (int)bytes.size(), text.data(), needed) <= 0) {
+        MultiByteToWideChar(CP_ACP, 0, bytes.data(), (int)bytes.size(), text.data(), needed);
+    }
+
+    int ran = 0;
+    std::wistringstream stream(text);
+    std::wstring line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();  // CRLF
+        std::wstring trimmed = Trim(line);
+        if (trimmed.empty()) continue;
+        // "//" (Source/Quake-style cfg convention) and "#" (shell-style,
+        // since $/! command prefixes already make this feel shell-ish)
+        // both work as comment markers, so people can use whichever
+        // they're already used to.
+        if (trimmed.compare(0, 2, L"//") == 0 || trimmed[0] == L'#') continue;
+
+        RunCommand(trimmed);
+        ++ran;
+    }
+
+    PrintInfo(L"cfg/" + name + L".cfg: ran " + std::to_wstring(ran) +
+              (ran == 1 ? L" command." : L" commands."));
+    return ran;
 }
 
 // --- commands ---------------------------------------------------------------
