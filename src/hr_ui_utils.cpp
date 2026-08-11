@@ -332,6 +332,37 @@ struct HrSysStats {
  * Fills HrSysStats.  disk_path is the recordings folder (used for disk stats).
  * Returns 1 on success, 0 if not supported.
  */
+/*
+ * hr_get_free_disk_mb
+ *
+ * Fast, disk-only free-space check (megabytes) for `path`'s volume.
+ * Deliberately separate from hr_get_sys_stats() below - that one does a
+ * blocking 100ms CPU-usage sample every call (fine for an on-demand
+ * analytics dialog, not something you want on the hot path of "the user
+ * just clicked Record and is waiting for it to start"). This is just the
+ * one disk-free syscall, safe to call right before starting a recording.
+ *
+ * Returns 1 on success (out_free_mb filled), 0 if the query failed (e.g.
+ * bad path) - callers should treat 0 as "couldn't determine, don't block
+ * on it" rather than "definitely out of space".
+ */
+HR_EXPORT int hr_get_free_disk_mb(const char *path, uint64_t *out_free_mb) {
+    if (!path || !path[0] || !out_free_mb) return 0;
+#ifdef _WIN32
+    ULARGE_INTEGER free_bytes, total_bytes, free_caller;
+    if (!GetDiskFreeSpaceExA(path, &free_caller, &total_bytes, &free_bytes)) return 0;
+    *out_free_mb = free_bytes.QuadPart / (1024ULL * 1024);
+    return 1;
+#elif defined(__linux__)
+    struct statvfs st;
+    if (statvfs(path, &st) != 0) return 0;
+    *out_free_mb = (uint64_t)st.f_bavail * (uint64_t)st.f_frsize / (1024ULL * 1024);
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 HR_EXPORT int hr_get_sys_stats(const char *disk_path, HrSysStats *out) {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
