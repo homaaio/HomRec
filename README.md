@@ -127,6 +127,12 @@ Plugins get full filesystem and network access (`io`, `os`, and `homrec.http_get
 
 ---
 
+## Console startup scripts
+
+Drop an `autoexec.cfg` in `cfg/` (next to `hr.exe`, auto-created on first run) and it'll run on every launch - one console command per line, `//` or `#` for comments. A `startrec.cfg` in the same folder runs at the start of every new recording instead. Both are entirely optional. See `cfg/README.md` for the format and a couple of example files to copy from.
+
+---
+
 ## Build dependencies
 
 ```
