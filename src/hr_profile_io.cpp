@@ -17,7 +17,7 @@
 #include <vector>
 #include <algorithm>
 /* -- zlib / gzip ------------------------------------------------------------
- * hr_profile_io uses gzip to wrap JSON in .hrc/.hrl/.hrt files.
+ * hr_profile_io uses gzip to wrap JSON in .hrc/.hrl files.
  *
  * On Windows, zlib is loaded at runtime from zlib1.dll rather than linked
  * at compile time, so the build doesn't need the zlib headers/lib (no -I
@@ -166,7 +166,6 @@ static int _zlib_inflateEnd(z_stream *s) {
 
 static const uint8_t MAGIC_HRC[4] = {'H','R','C',0x01};
 static const uint8_t MAGIC_HRL[4] = {'H','R','L',0x01};
-static const uint8_t MAGIC_HRT[4] = {'H','R','T',0x01};
 
 /* --------------------------------------------------------------------------- */
 /*  Internal helpers                                                            */
@@ -306,10 +305,10 @@ static std::vector<uint8_t> _gz_decompress(const uint8_t *data, size_t sz) {
  */
 HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
                            int file_type) {
-    /* file_type: 0=hrc, 1=hrl, 2=hrt */
+    /* file_type: 0=hrc, 1=hrl. (2=hrt/theme was removed - .hrt support
+       was discontinued; this function no longer writes that format.) */
     if (!path || !json_body) return 0;
-    const uint8_t *magic = (file_type == 1) ? MAGIC_HRL :
-                           (file_type == 2) ? MAGIC_HRT : MAGIC_HRC;
+    const uint8_t *magic = (file_type == 1) ? MAGIC_HRL : MAGIC_HRC;
 
     std::vector<uint8_t> body(_gz_compress(
         (const uint8_t *)json_body, strlen(json_body)));
@@ -338,8 +337,9 @@ HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
 HR_EXPORT int hr_hrc_read(const char *path, int expected_type,
                           char *out_json, int out_len) {
     if (!path) return 0;
-    const uint8_t *expected_magic = (expected_type == 1) ? MAGIC_HRL :
-                                    (expected_type == 2) ? MAGIC_HRT : MAGIC_HRC;
+    // expected_type: 0=hrc, 1=hrl. (2=hrt was removed along with theme
+    // file support - callers should no longer pass it.)
+    const uint8_t *expected_magic = (expected_type == 1) ? MAGIC_HRL : MAGIC_HRC;
 
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -374,7 +374,9 @@ HR_EXPORT int hr_hrc_read(const char *path, int expected_type,
  * hr_hrc_detect
  *
  * Reads 4 bytes from path and returns the file type:
- *   0 = HRC (profile), 1 = HRL (language), 2 = HRT (theme), -1 = unknown
+ *   0 = HRC (profile), 1 = HRL (language), -1 = unknown
+ * (Used to return 2 for HRT/theme files - .hrt support was discontinued,
+ * so that magic is no longer recognized and now falls through to -1.)
  */
 HR_EXPORT int hr_hrc_detect(const char *path) {
     if (!path) return -1;
@@ -386,7 +388,6 @@ HR_EXPORT int hr_hrc_detect(const char *path) {
     if (r < 4) return -1;
     if (memcmp(magic, MAGIC_HRC, 4) == 0) return 0;
     if (memcmp(magic, MAGIC_HRL, 4) == 0) return 1;
-    if (memcmp(magic, MAGIC_HRT, 4) == 0) return 2;
     return -1;
 }
 
@@ -813,18 +814,19 @@ HR_EXPORT void hr_profile_set_double(void *h, const char *field, double val) {
 }
 
 /* --------------------------------------------------------------------------- */
-/*  Directory scanning (Themes / Languages)                                     */
+/*  Directory scanning (Languages)                                              */
 /* --------------------------------------------------------------------------- */
 
 /*
  * hr_scan_dir_ext
  *
- * Lists all files in `dir_path` with the given extension (e.g. ".hrt").
+ * Lists all files in `dir_path` with the given extension (e.g. ".hrl").
  * Results are written to out_names as a null-separated, double-null-terminated list.
  * Returns the count of files found, or -1 on error.
  *
- * Used to list custom themes/languages the user has dropped into the
- * corresponding folder.
+ * Used to list custom languages the user has dropped into the
+ * corresponding folder. (Previously also used for custom theme (.hrt)
+ * discovery - removed along with the rest of .hrt support.)
  */
 HR_EXPORT int hr_scan_dir_ext(const char *dir_path, const char *ext,
                               char *out_names, int out_len) {
@@ -873,24 +875,6 @@ HR_EXPORT int hr_scan_dir_ext(const char *dir_path, const char *ext,
     closedir(d);
 #endif
     return count;
-}
-
-/* --------------------------------------------------------------------------- */
-/*  Theme JSON extraction helper                                                */
-/* --------------------------------------------------------------------------- */
-
-/*
- * hr_theme_get_color
- *
- * Reads a color value (e.g. "#89b4fa") from an .hrt JSON body.
- * key : one of "bg"|"surface"|"accent"|"text"|"text_secondary"|
- *              "success"|"warning"|"error"|"preview_bg"|"surface_light"|"fg"
- * out_color : at least 10 bytes
- * Returns 1 on success.
- */
-HR_EXPORT int hr_theme_get_color(const char *json_body, const char *key,
-                                 char *out_color, int out_len) {
-    return _jget_str(json_body, key, out_color, out_len);
 }
 
 /* --------------------------------------------------------------------------- */
