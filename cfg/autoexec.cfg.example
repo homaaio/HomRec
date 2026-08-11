@@ -1,0 +1,9 @@
+// autoexec.cfg - runs once, when HomRec starts.
+// Copy this file to autoexec.cfg (same folder) to enable it.
+
+echo Welcome back!
+
+// alias <name> <existing command> - "status" and "info" are two of the
+// built-in commands you can alias or call directly; see the dispatch
+// table in src/ui/console_window.cpp (RunCommand) for the full list.
+alias v version

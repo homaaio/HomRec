@@ -1,0 +1,6 @@
+// startrec.cfg - runs every time a new recording starts (after
+// on_recording_start plugin hooks have already fired).
+// Copy this file to startrec.cfg (same folder) to enable it.
+
+echo Recording started
+status
