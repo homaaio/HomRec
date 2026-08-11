@@ -166,6 +166,30 @@ struct Pipeline {
     intptr_t pipe_handle = 0;
     bool recording = false;   // pipe open → encode YUV; false → preview only
 
+    // ====== WINDOW CAPTURE (crop rect) ======
+    // src_w/src_h above MUST stay the full monitor's native resolution --
+    // that's what DXGI Desktop Duplication actually hands back per frame
+    // into bgra_buf, independent of what we do with it afterward (see the
+    // big comment on this in RecordingController::ResolveCaptureSize()).
+    // "Record just this window" is implemented as a crop applied AFTER
+    // capture, not by trying to make DXGI itself capture a smaller area
+    // (it can't). crop_w == 0 means "no crop" -- the original/default
+    // full-desktop behavior, at zero extra cost per frame. Set via
+    // hr_pl_set_capture_rect(); resolved once from the target window's
+    // screen rect by RecordingController at Start()/EnsurePreview() time,
+    // not re-resolved live if the window moves mid-recording (a known,
+    // documented limitation -- see recording_controller.cpp).
+    int crop_x = 0, crop_y = 0, crop_w = 0, crop_h = 0;
+
+    // "Effective" frame dimensions for THIS frame: src_w/src_h when
+    // crop_w==0, or crop_w/crop_h when a crop rect is active. Every
+    // downstream step (overlay/cursor compositing, YUV conversion, the
+    // live preview) reads eff_w/eff_h instead of src_w/src_h directly, so
+    // window-capture mode doesn't need every one of those call sites to
+    // separately know about cropping. Set once per captured frame, right
+    // after the crop step in capture_loop() below.
+    int eff_w = 0, eff_h = 0;
+
     void* dx_ctx = nullptr;
     void* sw_ctx = nullptr;
 
@@ -203,6 +227,16 @@ struct Pipeline {
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
     bool logged_lost_ = false; // edge-trigger for the DX_LOST diagnostic below
+    // BUGFIX (game-launch FPS drop): see the HR_DX_LOST handling below -
+    // reset() does a full DuplicateOutput() re-acquisition, which is a
+    // genuinely expensive driver-level call. Desktop Duplication is
+    // fundamentally unavailable for as long as *any* app has an exclusive
+    // fullscreen surface up (a Windows limitation, not something this code
+    // can work around) - so launching a game that goes exclusive-fullscreen
+    // used to make this loop call reset() every single frame tick (30-60x/
+    // sec) for as long as the game held it, each one contending with the
+    // game itself for the same GPU/driver resources. Backed off to at most
+    // once/sec while repeatedly failing.
     std::chrono::steady_clock::time_point next_reset_attempt_{};
 
     std::atomic<int64_t> frames_captured{0};
@@ -362,8 +396,8 @@ struct Pipeline {
     // -------------------------------------------------------------------------
     void update_preview() {
         int tw = pv_w, th = pv_h;
-        if (src_w > 0 && src_h > 0) {
-            float ar = (float)src_w / (float)src_h;
+        if (eff_w > 0 && eff_h > 0) {
+            float ar = (float)eff_w / (float)eff_h;
             if (tw > (int)(th * ar)) tw = (int)(th * ar);
             else                      th = (int)(tw / ar);
         }
@@ -374,7 +408,7 @@ struct Pipeline {
         std::lock_guard<std::mutex> lock(pv_mtx);
         if (pv_buf.size() != pv_sz) pv_buf.resize(pv_sz);
 
-        bgra_to_thumb(bgra_buf.data(), pv_buf.data(), src_w, src_h, tw, th);
+        bgra_to_thumb(bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
         pv_actual_w = tw;
         pv_actual_h = th;
         pv_ready    = true;
@@ -558,6 +592,33 @@ struct Pipeline {
                 logged_lost_ = false;
             }
 
+            // ====== WINDOW CROP (optional) ======
+            // See the crop_x/crop_w/eff_w comments on the Pipeline struct.
+            // Compacts just the target window's sub-rectangle of the full
+            // monitor frame down to a tightly-packed buffer at bgra_buf's
+            // start, in place, and points eff_w/eff_h at ITS dimensions --
+            // every step below (overlays, cursor, YUV conversion, preview)
+            // reads eff_w/eff_h, not src_w/src_h, so this one spot is the
+            // only place that needs to know about cropping. Zero-cost
+            // no-op when crop_w==0 (the default, full-desktop case).
+            if (crop_w > 0 && crop_h > 0) {
+                eff_w = crop_w;
+                eff_h = crop_h;
+                uint8_t* buf = bgra_buf.data();
+                // memmove, not memcpy: source and destination rows can
+                // overlap (e.g. crop_x==0 && crop_y==0 makes row 0
+                // identical), and memmove is the one of the two that's
+                // defined to handle that correctly.
+                for (int y = 0; y < crop_h; ++y) {
+                    const uint8_t* srow = buf + ((size_t)(crop_y + y) * src_w + crop_x) * 4;
+                    uint8_t*       drow = buf + (size_t)y * crop_w * 4;
+                    std::memmove(drow, srow, (size_t)crop_w * 4);
+                }
+            } else {
+                eff_w = src_w;
+                eff_h = src_h;
+            }
+
             // ====== OVERLAY COMPOSITING ======
             // Bakes any configured text/image/input overlays directly into
             // bgra_buf, in place, before it's used for either the preview
@@ -595,7 +656,7 @@ struct Pipeline {
                     // even a future change to this call site can't silently
                     // reopen that hole.
                     try {
-                        overlay_compositor.Apply(bgra_buf.data(), src_w, src_h, src_w * 4, overlays_snapshot);
+                        overlay_compositor.Apply(bgra_buf.data(), eff_w, eff_h, eff_w * 4, overlays_snapshot);
                     } catch (const std::exception &e) {
                         HrLog::Error(std::string("Overlay compositing threw (") + e.what() +
                                      ") -- this frame's overlays were skipped, recording continues.");
@@ -610,9 +671,13 @@ struct Pipeline {
             // Drawn after overlays so the pointer stays visually on top,
             // matching what a viewer would actually see on the real
             // screen. See hr_composite_cursor()'s own comment
-            // (hr_ui_utils.cpp) for how/why.
+            // (hr_ui_utils.cpp) for how/why. Origin is offset by
+            // crop_x/crop_y (both 0 when not cropping) since cap_origin_x/y
+            // is the *monitor's* virtual-desktop offset, but bgra_buf now
+            // holds just the cropped window sub-rectangle of it.
             if (include_cursor.load(std::memory_order_relaxed)) {
-                hr_composite_cursor(bgra_buf.data(), src_w, src_h, cap_origin_x, cap_origin_y);
+                hr_composite_cursor(bgra_buf.data(), eff_w, eff_h,
+                                     cap_origin_x + crop_x, cap_origin_y + crop_y);
             }
 
             // ====== YUV CONVERSION ======
@@ -641,10 +706,10 @@ struct Pipeline {
                     }
                 }
 
-                const size_t needed = (size_t)src_w * src_h * 3 / 2;
+                const size_t needed = (size_t)eff_w * eff_h * 3 / 2;
                 if (yuv_frame.size() != needed) yuv_frame.resize(needed);
 
-                g_libs.bgra_to_yuv(bgra_buf.data(), yuv_frame.data(), src_w, src_h);
+                g_libs.bgra_to_yuv(bgra_buf.data(), yuv_frame.data(), eff_w, eff_h);
 
                 std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
                 {
@@ -716,6 +781,8 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     auto* pl = new Pipeline();
     pl->src_w       = w;
     pl->src_h       = h;
+    pl->eff_w       = w;   // no crop yet -- see hr_pl_set_capture_rect()
+    pl->eff_h       = h;
     pl->fps         = fps;
     pl->pv_w        = pv_w;
     pl->pv_h        = pv_h;
@@ -914,6 +981,45 @@ HR_EXPORT void hr_pl_set_include_cursor(void* handle, int flag) {
     if (!handle) return;
 #ifdef _WIN32
     static_cast<Pipeline*>(handle)->include_cursor.store(flag != 0, std::memory_order_relaxed);
+#endif
+}
+
+// Window-capture crop rect, in pixels relative to the captured monitor's
+// own frame (i.e. window's screen rect minus the monitor's origin - the
+// caller, RecordingController, already has both). w<=0 or h<=0 clears
+// the crop (back to full-desktop). See the Pipeline::crop_x/crop_w
+// comment for the full explanation.
+//
+// Safe to call at any time (including while the pipeline is already
+// running, e.g. RecordingController re-resolving it on every Start()
+// call even when reusing an existing preview pipeline) - same caveat as
+// hr_pl_set_recording()'s plain fields elsewhere in this file: not
+// synchronized against the capture thread, so a change can take a frame
+// or two to visibly land rather than being atomic with the very next
+// frame, which is fine for a rect that only changes when the user picks
+// a different window, not every frame.
+HR_EXPORT void hr_pl_set_capture_rect(void* handle, int x, int y, int w, int h) {
+    if (!handle) return;
+#ifdef _WIN32
+    auto* pl = static_cast<Pipeline*>(handle);
+    if (w <= 0 || h <= 0) {
+        pl->crop_x = pl->crop_y = pl->crop_w = pl->crop_h = 0;
+        return;
+    }
+    // Clamp to the monitor frame - a window that's partially off-screen
+    // (dragged half onto another monitor, etc.) must not make the crop
+    // step below read outside bgra_buf.
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > pl->src_w) w = pl->src_w - x;
+    if (y + h > pl->src_h) h = pl->src_h - y;
+    if (w <= 0 || h <= 0) {
+        pl->crop_x = pl->crop_y = pl->crop_w = pl->crop_h = 0;
+        return;
+    }
+    if (w % 2) w--;  // keep it even, same reasoning as capture_w_/h_ elsewhere (YUV420 needs even dims)
+    if (h % 2) h--;
+    pl->crop_x = x; pl->crop_y = y; pl->crop_w = w; pl->crop_h = h;
 #endif
 }
 
