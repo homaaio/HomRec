@@ -1,4 +1,5 @@
 #include "recording_controller.h"
+#include "window_picker_dialog.h"  // HR_ResolveCaptureWindow()
 #include "../hr_log.h"
 #include "../hr_overlay_render.h"
 #include <vector>
@@ -22,6 +23,7 @@ extern "C" {
     int hr_make_output_dir(const char *path);
     int hr_path_exists(const char *path);
     float hr_file_size_mb(const char *path);
+    int hr_get_free_disk_mb(const char *path, uint64_t *out_free_mb);
 
     // hr_display_info.cpp
     void *hr_di_create();
@@ -55,6 +57,7 @@ extern "C" {
     void hr_pl_stats(void *handle, long long *out_frames, long long *out_drops, double *out_fps);
     void hr_pl_set_overlays(void *handle, const HrOverlayDesc *items, int count);
     void hr_pl_set_include_cursor(void *handle, int flag);
+    void hr_pl_set_capture_rect(void *handle, int x, int y, int w, int h);
 
     // hr_ffmpeg_runner.cpp
     void *hr_ff_create();
@@ -89,6 +92,12 @@ extern "C" {
 #include <cstdio> // remove()/rename() for temp WAV cleanup in Stop()
 
 namespace {
+// Below this, Start() refuses to begin a new recording rather than let it
+// run for a few seconds and then die mid-file when ffmpeg can't write any
+// more - 200MB is comfortably more than a couple of encoded frames need
+// but small enough not to nag on a nearly-full-but-still-usable drive.
+constexpr uint64_t kMinFreeDiskMb = 200;
+
 std::string NarrowFromWide(const std::wstring &w) {
     if (w.empty()) return {};
     int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
@@ -231,6 +240,51 @@ void RecordingController::ResolveCaptureSize() {
     output_h_ = (int)(mh * state_.scale_factor);
     if (output_w_ % 2) output_w_--;
     if (output_h_ % 2) output_h_--;
+
+    // ====== WINDOW CAPTURE ======
+
+    crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
+    if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
+        HWND hwnd = nullptr;
+        RECT r{};
+        if (HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r)) {
+            // Window rect is in virtual-desktop coordinates; crop_x_/y_
+            // need to be relative to the captured monitor's own frame
+            // (monitor_left/top, set above), matching what bgra_buf
+            // actually holds.
+            int wx = r.left - mx, wy = r.top - my;
+            int ww = r.right - r.left, wh = r.bottom - r.top;
+            // Clamp to the monitor bounds - hr_pl_set_capture_rect() also
+            // clamps defensively, but doing it here too means output_w_/
+            // output_h_ (computed from ww/wh below) reflect the actual
+            // clamped crop size, not the pre-clamp one.
+            if (wx < 0) { ww += wx; wx = 0; }
+            if (wy < 0) { wh += wy; wy = 0; }
+            if (wx + ww > capture_w_) ww = capture_w_ - wx;
+            if (wy + wh > capture_h_) wh = capture_h_ - wy;
+            if (ww % 2) ww--;
+            if (wh % 2) wh--;
+
+            if (ww > 0 && wh > 0) {
+                crop_x_ = wx; crop_y_ = wy; crop_w_ = ww; crop_h_ = wh;
+                output_w_ = (int)(ww * state_.scale_factor);
+                output_h_ = (int)(wh * state_.scale_factor);
+                if (output_w_ % 2) output_w_--;
+                if (output_h_ % 2) output_h_--;
+            } else {
+                HrLog::Warn("Window capture: '" + state_.capture_window_title +
+                            "' is entirely off the selected monitor - falling back to full desktop.");
+            }
+        } else {
+            // Window was closed/renamed since being picked, or isn't on
+            // screen anymore. Fall back to full-desktop capture rather
+            // than starting a recording of nothing/garbage - crop_*_ are
+            // already 0 from the reset above, so capture_w_/h_/output_w_/
+            // h_ (monitor-sized, set earlier in this function) stand as-is.
+            HrLog::Warn("Window capture: couldn't find a window titled '" +
+                        state_.capture_window_title + "' - falling back to full desktop.");
+        }
+    }
 }
 
 bool RecordingController::Start(std::wstring &error_out) {
@@ -246,6 +300,21 @@ bool RecordingController::Start(std::wstring &error_out) {
     if (!ffmpeg_found_) {
         error_out = L"FFmpeg not found.";
         HrLog::Error("Start failed: ffmpeg not found");
+        return false;
+    }
+
+    // hr_get_free_disk_mb() (hr_ui_utils.cpp) existed already but nothing
+    // ever called it - a recording would happily start on an almost-full
+    // drive and just die (ffmpeg write failure) partway through instead of
+    // being refused up front. A 0 return (query failed, e.g. odd path) is
+    // treated as "couldn't determine" and doesn't block Start(), same as
+    // the helper's own doc comment says callers should treat it.
+    uint64_t free_mb = 0;
+    if (hr_get_free_disk_mb(state_.output_folder.c_str(), &free_mb) && free_mb < kMinFreeDiskMb) {
+        error_out = L"Not enough free disk space on the output drive (" +
+                    std::to_wstring(free_mb) + L" MB free, need at least " +
+                    std::to_wstring(kMinFreeDiskMb) + L" MB).";
+        HrLog::Error("Start failed: low disk space (" + std::to_string(free_mb) + " MB free)");
         return false;
     }
 
@@ -267,7 +336,17 @@ bool RecordingController::Start(std::wstring &error_out) {
     hr_ff_set_ffmpeg_path(ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
     hr_ff_set_output_path(ffproc_, NarrowFromWide(current_output_path_).c_str());
     hr_ff_set_codec_args(ffproc_, NarrowFromWide(codec_args).c_str());
-    hr_ff_set_video_params(ffproc_, capture_w_, capture_h_, state_.target_fps);
+    // Video params tell ffmpeg's rawvideo demuxer the size of the frames
+    // that will actually arrive on the pipe - that's the CROPPED size in
+    // window-capture mode (crop_w_/crop_h_ > 0), not the monitor's native
+    // capture_w_/capture_h_, since hr_pl_set_capture_rect() below makes
+    // the pipeline crop before writing to the pipe. Getting this wrong is
+    // exactly the "garbled/green/tiled recording" failure mode the big
+    // comment in ResolveCaptureSize() warns about, just triggered from
+    // window-capture mode instead of a stale scale_factor.
+    int pipe_w = crop_w_ > 0 ? crop_w_ : capture_w_;
+    int pipe_h = crop_h_ > 0 ? crop_h_ : capture_h_;
+    hr_ff_set_video_params(ffproc_, pipe_w, pipe_h, state_.target_fps);
     hr_ff_set_output_size(ffproc_, output_w_, output_h_);
     hr_ff_set_pipe_input(ffproc_, 1);
 
@@ -310,6 +389,11 @@ bool RecordingController::Start(std::wstring &error_out) {
         pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
                                  state_.preview_width, state_.preview_height);
     }
+    // Always (re-)apply the crop rect, whether the pipeline is fresh or
+    // reused - ResolveCaptureSize() above just recomputed crop_x_/y_/w_/
+    // h_ from the current window-picker selection, which may have
+    // changed since a reused preview pipeline was originally created.
+    if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     if (!pipeline_ || (!reused_preview_pipeline && !hr_pl_start(pipeline_))) {
         error_out = L"Failed to start the capture pipeline.";
         HrLog::Error("Start failed: capture pipeline didn't start");
@@ -344,6 +428,9 @@ bool RecordingController::Start(std::wstring &error_out) {
     state_.recording = true;
     state_.paused = false;
     state_.frame_count = 0;
+    last_drops_seen_ = 0;
+    overload_streak_ = 0;
+    overloaded_ = false;
     HrLog::Info("Recording started -> " + NarrowFromWide(current_output_path_) +
                 " (" + std::to_string(output_w_) + "x" + std::to_string(output_h_) +
                 " @ " + std::to_string(state_.target_fps) + "fps, captured at " +
@@ -517,6 +604,8 @@ void RecordingController::Stop() {
 
     state_.recording = false;
     state_.paused = false;
+    overloaded_ = false;
+    overload_streak_ = 0;
     HrLog::Info("Recording stopped -> " + base);
 }
 
@@ -535,6 +624,26 @@ void RecordingController::PollStats() {
     if (pipeline_) hr_pl_stats(pipeline_, &frames, &drops, &fps);
     state_.frame_count = (long)frames;
     current_fps_ = fps;
+
+    // Overload warning: a few consecutive ticks of new drops while
+    // actually recording (not paused) means the capture/encode pipeline
+    // can't keep up in real time, as opposed to one stray drop under a
+    // momentary hiccup. Streak resets the instant a tick comes back clean.
+    long long drops_delta = drops - last_drops_seen_;
+    last_drops_seen_ = drops;
+    if (!state_.paused && drops_delta > 0) {
+        if (overload_streak_ < 3) ++overload_streak_;
+    } else {
+        overload_streak_ = 0;
+    }
+    bool now_overloaded = overload_streak_ >= 3;
+    if (now_overloaded != overloaded_) {
+        overloaded_ = now_overloaded;
+        if (overloaded_) {
+            HrLog::Warn("Recording overloaded: dropping frames -- system can't keep up "
+                        "with capture/encode in real time.");
+        }
+    }
 
     double size_mb = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
     hr_ctl_update_stats(ctl_, (long long)(size_mb * 1024.0 * 1024.0));
@@ -622,6 +731,11 @@ void RecordingController::EnsurePreview() {
     // hr_pl_set_recording() instead of replacing it, when the size matches.
     pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
                              state_.preview_width, state_.preview_height);
+    // Same crop rect ResolveCaptureSize() above just resolved for Start()
+    // to reuse - without this, the live preview panel would keep showing
+    // the full desktop even when a window is selected, only "correcting"
+    // itself once Start() reuses this pipeline and re-applies the crop.
+    if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     if (pipeline_ && !hr_pl_start(pipeline_)) {
         hr_pl_destroy(pipeline_);
         pipeline_ = nullptr;

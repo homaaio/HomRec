@@ -86,6 +86,13 @@ public:
     double output_size_mb() const;
     int frame_count() const;
 
+    // True once PollStats() has seen several consecutive ticks (~1.5s) of
+    // real frame drops while actively recording. Meant for a UI warning
+    // ("system can't keep up"), not a hard error - the recording keeps
+    // going either way. Clears itself as soon as drops stop, no separate
+    // reset call needed.
+    bool overloaded() const { return overloaded_; }
+
     // Snapshot of the recording that just finished, taken at the moment
     // Stop() runs (before ctl_/ffproc_ are torn down / reset to IDLE, at
     // which point elapsed_seconds()/output_size_mb() would report 0 -- see
@@ -164,7 +171,22 @@ private:
     int mic_level_ = 0, sys_level_ = 0;
     int capture_w_ = 0, capture_h_ = 0; // native monitor resolution - MUST match what DXGI actually captures
     int output_w_ = 0, output_h_ = 0;   // final encoded size after Settings > Resolution scaling (0 = same as capture)
+    // Window-capture crop rect, monitor-relative pixels; crop_w_==0 means
+    // "no crop" (full desktop). Resolved once per ResolveCaptureSize()
+    // call from state_.capture_window_title when capture_mode is Window -
+    // see the .cpp for the full explanation and hr_pl_set_capture_rect()
+    // in hr_pipeline.cpp for how it's actually applied to captured frames.
+    int crop_x_ = 0, crop_y_ = 0, crop_w_ = 0, crop_h_ = 0;
     float mic_vol_ = 1.0f, sys_vol_ = 1.0f;
     bool mic_muted_ = false, sys_muted_ = false;
     double current_fps_ = 0.0;
+
+    // Overload detection (see overloaded() above) - drops_delta is checked
+    // every PollStats() tick (main_frame's stats_timer_, ~500ms) rather
+    // than compared against a wall-clock rate, so the "3 ticks" streak
+    // below is roughly 1.5s of sustained drops regardless of exact timer
+    // interval.
+    long long last_drops_seen_ = 0;
+    int overload_streak_ = 0;
+    bool overloaded_ = false;
 };
