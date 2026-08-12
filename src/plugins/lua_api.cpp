@@ -278,7 +278,7 @@ int L_register_input_overlay(lua_State *L) {
 }
 
 // --- homrec.register_command(name, description, fn) -----------------------
-// Adds a new console command ($<name> in the in-app console window).
+// Adds a new console command (<name> in the in-app console window).
 // fn is called as fn(raw_line) whenever the command runs, where raw_line
 // is the full text the user typed (including the command word itself, so
 // the plugin can parse its own subcommands/arguments - same convention
