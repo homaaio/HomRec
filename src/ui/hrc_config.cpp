@@ -78,6 +78,7 @@ bool Save(const AppState &state, const std::wstring &path) {
       << "output_folder=" << state.output_folder << "\n"
       << "quality=" << state.quality << "\n"
       << "target_fps=" << state.target_fps << "\n"
+      << "scale_factor=" << state.scale_factor << "\n"
       << "recording_mode=" << RecordingModeToStr(state.recording_mode) << "\n"
       << "show_summary=" << FromBool(state.show_summary) << "\n"
       << "monitor_id=" << state.monitor_id << "\n"
@@ -187,6 +188,7 @@ bool Load(AppState &state, const std::wstring &path) {
     if (has("output_folder")) state.output_folder = get("output_folder");
     if (has("quality")) state.quality = atoi(get("quality").c_str());
     if (has("target_fps")) state.target_fps = atoi(get("target_fps").c_str());
+    if (has("scale_factor")) state.scale_factor = atof(get("scale_factor").c_str());
     if (has("recording_mode")) state.recording_mode = RecordingModeFromStr(get("recording_mode"));
     if (has("show_summary")) state.show_summary = ToBool(get("show_summary"));
     if (has("monitor_id")) state.monitor_id = atoi(get("monitor_id").c_str());
