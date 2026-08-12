@@ -242,7 +242,6 @@ void RecordingController::ResolveCaptureSize() {
     if (output_h_ % 2) output_h_--;
 
     // ====== WINDOW CAPTURE ======
-
     crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
     if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
         HWND hwnd = nullptr;
@@ -389,12 +388,10 @@ bool RecordingController::Start(std::wstring &error_out) {
         pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
                                  state_.preview_width, state_.preview_height);
     }
-    // Always (re-)apply the crop rect, whether the pipeline is fresh or
-    // reused - ResolveCaptureSize() above just recomputed crop_x_/y_/w_/
-    // h_ from the current window-picker selection, which may have
-    // changed since a reused preview pipeline was originally created.
+    bool pipeline_started = reused_preview_pipeline;
+    if (pipeline_ && !reused_preview_pipeline) pipeline_started = hr_pl_start(pipeline_) != 0;
     if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
-    if (!pipeline_ || (!reused_preview_pipeline && !hr_pl_start(pipeline_))) {
+    if (!pipeline_ || !pipeline_started) {
         error_out = L"Failed to start the capture pipeline.";
         HrLog::Error("Start failed: capture pipeline didn't start");
         hr_ff_kill(ffproc_);
@@ -731,15 +728,16 @@ void RecordingController::EnsurePreview() {
     // hr_pl_set_recording() instead of replacing it, when the size matches.
     pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
                              state_.preview_width, state_.preview_height);
+    if (pipeline_ && !hr_pl_start(pipeline_)) {
+        hr_pl_destroy(pipeline_);
+        pipeline_ = nullptr;
+        return;
+    }
     // Same crop rect ResolveCaptureSize() above just resolved for Start()
     // to reuse - without this, the live preview panel would keep showing
     // the full desktop even when a window is selected, only "correcting"
     // itself once Start() reuses this pipeline and re-applies the crop.
     if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
-    if (pipeline_ && !hr_pl_start(pipeline_)) {
-        hr_pl_destroy(pipeline_);
-        pipeline_ = nullptr;
-    }
 }
 
 void RecordingController::TeardownPreview() {
