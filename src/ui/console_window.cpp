@@ -100,27 +100,27 @@ enum { IDC_CONSOLE_INPUT = 9001, IDC_CONSOLE_OUTPUT };
 namespace ConsoleParse {
 
 std::wstring ParseNamed(const std::wstring &raw, const std::wstring &key) {
-    std::wstring needleQ = L"#" + key + L"=\"";
+    std::wstring needleQ = L"--" + key + L"=\"";
     size_t pos = raw.find(needleQ);
     if (pos != std::wstring::npos) {
         size_t start = pos + needleQ.size();
         size_t end = raw.find(L'"', start);
         if (end != std::wstring::npos) return raw.substr(start, end - start);
     }
-    std::wstring needleApos = L"#" + key + L"='";
+    std::wstring needleApos = L"--" + key + L"='";
     pos = raw.find(needleApos);
     if (pos != std::wstring::npos) {
         size_t start = pos + needleApos.size();
         size_t end = raw.find(L'\'', start);
         if (end != std::wstring::npos) return raw.substr(start, end - start);
     }
-    std::wstring needle = L"#" + key + L"=";
+    std::wstring needle = L"--" + key + L"=";
     pos = raw.find(needle);
     if (pos != std::wstring::npos) {
         size_t start = pos + needle.size();
         size_t end = start;
         while (end < raw.size() && raw[end] != L' ' && raw[end] != L'\t' &&
-               raw[end] != L'#' && raw[end] != L'"' && raw[end] != L'\'') {
+               raw[end] != L'"' && raw[end] != L'\'') {
             ++end;
         }
         if (end > start) return raw.substr(start, end - start);
@@ -345,7 +345,6 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
     SendMessageW(input_, WM_SETFONT, (WPARAM)monoFont, TRUE);
 
     RefreshPrompt();
-    PrintInfo(L"HomRec Console - try $version, $status, $info, $env, $sec.");
 
     // Subclass the input box so Enter runs the command and Up/Down walk
     // history - done via a simple WNDPROC swap rather than a separate
@@ -448,16 +447,6 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     iss >> cmd;
     if (cmd.empty()) return;
 
-    // both "$" and "!" prefixes are documented (see CHANGELOG.txt
-    // 1.7.1: "The ! and $ command prefixes are now optional everywhere...
-    // create --window ... works exactly like !create --window ...") as
-    // optional/equivalent -- but this only ever stripped "$". Anyone typing
-    // commands with a leading "!" (the older, still-documented style) had
-    // every single command miss the dispatch table below (e.g. "!info"
-    // never matches "info") and fall through to "Unknown or not-yet-ported
-    // command" every time -- indistinguishable from the console not
-    // accepting any input at all.
-    if (cmd[0] == L'$' || cmd[0] == L'!') cmd = cmd.substr(1);
     std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::towlower);
 
     // Alias expansion (simple one-level substitution of the command word).
@@ -465,6 +454,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     if (aliasIt != aliases_.end()) cmd = aliasIt->second;
 
     if (cmd == L"version") CmdVersion(raw);
+    else if (cmd == L"ver") CmdVer(raw);
     else if (cmd == L"ping") CmdPing(raw);
     else if (cmd == L"echo") CmdEcho(raw);
     else if (cmd == L"clear") CmdClear(raw);
@@ -484,11 +474,11 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     else if (cmd == L"batch") CmdBatch(raw);
     else if (cmd == L"ls") CmdLs(raw);
     else if (cmd == L"rm") {
-        // Route the two ported $rm forms; anything else under $rm
-        // (--ui, @ts, bare $rm_vid, etc.) isn't implemented yet.
+        // Route the two ported rm forms; anything else under rm (--ui,
+        // @ts, bare rm_vid, etc.) isn't implemented yet.
         if (raw.find(L"--system@homrec.files") != std::wstring::npos) CmdRmSystemFiles(raw);
         else if (raw.find(L"@homrec") != std::wstring::npos) CmdRmSelfApp(raw);
-        else PrintWarn(L"$rm: this form isn't supported yet.");
+        else PrintWarn(L"rm: this form isn't supported yet.");
     } else {
         // Not a built-in - see if a loaded plugin registered this name via
         // homrec.register_command() before giving up on it.
@@ -496,7 +486,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
         if (plugins_ && plugins_->DispatchCommand(NarrowFromWide(cmd), NarrowFromWide(raw), plugin_cmd_lines)) {
             for (const auto &line : plugin_cmd_lines) PrintInfo(WideFromNarrow(line));
         } else {
-            PrintWarn(L"Unknown command: " + cmd + L" (try help or !help)");
+            PrintWarn(L"Unknown command: " + cmd);
         }
     }
 }
@@ -540,10 +530,9 @@ int ConsoleWindow::RunCfgFile(const std::wstring &name) {
         if (!line.empty() && line.back() == L'\r') line.pop_back();  // CRLF
         std::wstring trimmed = Trim(line);
         if (trimmed.empty()) continue;
-        // "//" (Source/Quake-style cfg convention) and "#" (shell-style,
-        // since $/! command prefixes already make this feel shell-ish)
-        // both work as comment markers, so people can use whichever
-        // they're already used to.
+        // "//" (Source/Quake-style cfg convention) and "#" (real Linux
+        // shell script comment convention) both work as comment markers,
+        // so people can use whichever they're already used to.
         if (trimmed.compare(0, 2, L"//") == 0 || trimmed[0] == L'#') continue;
 
         RunCommand(trimmed);
@@ -559,6 +548,14 @@ int ConsoleWindow::RunCfgFile(const std::wstring &name) {
 
 void ConsoleWindow::CmdVersion(const std::wstring &) {
     PrintInfo(L"HomRec v" HR_APP_VERSION_W L" (developer console)");
+}
+
+// Bare version number, no "HomRec v"/"(developer console)" decoration -
+// for scripting/copy-pasting the number itself (e.g. a batch.cfg line
+// that wants to log just "2.0" somewhere) without having to parse it back
+// out of CmdVersion()'s human-readable line above.
+void ConsoleWindow::CmdVer(const std::wstring &) {
+    PrintInfo(HR_APP_VERSION_W);
 }
 
 void ConsoleWindow::CmdPing(const std::wstring &) {
@@ -623,7 +620,7 @@ void ConsoleWindow::CmdAlias(const std::wstring &raw) {
         return;
     }
     size_t eq = rest.find(L'=');
-    if (eq == std::wstring::npos) { PrintWarn(L"$alias: usage is `alias name=target`"); return; }
+    if (eq == std::wstring::npos) { PrintWarn(L"alias: usage is `alias name=target`"); return; }
     std::wstring name = Trim(rest.substr(0, eq)), target = Trim(rest.substr(eq + 1));
     std::transform(name.begin(), name.end(), name.begin(), ::towlower);
     aliases_[name] = target;
@@ -645,6 +642,18 @@ void ConsoleWindow::CmdInfo(const std::wstring &) {
     PrintInfo(L"RAM: " + std::to_wstring(ms.ullTotalPhys / (1024 * 1024)) + L" MB total, " +
               std::to_wstring(ms.dwMemoryLoad) + L"% used");
     PrintInfo(L"FFmpeg: " + std::wstring(rec_ && rec_->ffmpeg_found() ? L"found" : L"NOT found"));
+    // The single biggest lever on recording CPU load: whether a GPU
+    // encoder (h264_qsv/nvenc/amf) actually got picked up at startup, or
+    // it's silently falling back to software libx264 - same info that's
+    // already in homrec.log's startup lines, just somewhere a user
+    // actually looking for "why is this eating my CPU" would check first.
+    if (rec_) {
+        const std::wstring &hw = rec_->resolved_hw_encoder();
+        PrintInfo(hw.empty()
+            ? L"Encoder: software (libx264) - no GPU encoder found. Heaviest on CPU; "
+              L"see homrec.log's startup lines for why the GPU probe failed."
+            : L"Encoder: hardware (" + hw + L") - GPU-accelerated, light on CPU.");
+    }
 }
 
 void ConsoleWindow::CmdStatus(const std::wstring &) {
@@ -667,7 +676,7 @@ void ConsoleWindow::CmdLog(const std::wstring &raw) {
     if (sp2 != std::wstring::npos) first_word = rest.substr(0, sp2);
 
     if (first_word == L"clear") {
-        // Truncate rather than delete -- matches $rm's convention of being
+        // Truncate rather than delete -- matches rm's convention of being
         // the only command family that actually removes files; "clear"
         // reads as "empty it out", not "get rid of the log file itself".
         std::wofstream f(log_path.c_str(), std::ios::trunc);
@@ -708,7 +717,7 @@ void ConsoleWindow::CmdHrc(const std::wstring &raw) {
         if (HrcConfig::Load(state_, path)) PrintOk(L"loaded settings from " + path + L" (restart may be needed for some fields to take effect)");
         else PrintErr(L"couldn't read " + path);
     } else {
-        PrintWarn(L"usage: $hrc save [path] | $hrc load [path]  (default path: homrec_config.hrc next to the exe)");
+        PrintWarn(L"usage: hrc save [path] | hrc load [path]  (default path: homrec_config.hrc next to the exe)");
     }
 }
 
@@ -765,14 +774,14 @@ void ConsoleWindow::CmdRepeat(const std::wstring &raw) {
     std::getline(iss, rest);
     rest = Trim(rest);
     int count = count_str.empty() ? 0 : _wtoi(count_str.c_str());
-    // Strip the "#count=N" token itself out of the command to run.
-    size_t hashPos = rest.find(L"#count=");
+    // Strip the "--count=N" token itself out of the command to run.
+    size_t hashPos = rest.find(L"--count=");
     if (hashPos != std::wstring::npos) {
         size_t end = rest.find(L' ', hashPos);
         rest = Trim(rest.substr(0, hashPos) + (end == std::wstring::npos ? L"" : rest.substr(end)));
     }
     if (count <= 0 || rest.empty()) {
-        PrintWarn(L"usage: repeat #count=N <command>");
+        PrintWarn(L"usage: repeat --count=N <command>");
         return;
     }
     if (count > 1000) {
@@ -839,7 +848,7 @@ void ConsoleWindow::CmdSec(const std::wstring &raw) {
     iss >> cmd >> val;
     if (val.empty()) { PrintInfo(sec_core_ ? L"1 (protected)" : L"0 (ALL protections disabled)"); return; }
     sec_core_ = !(val == L"0" || val == L"off" || val == L"false");
-    PrintWarn(L"$sec " + val + L": MASTER fuse " + (sec_core_ ? L"ENABLED" : L"DISABLED (everything unlocked)"));
+    PrintWarn(L"sec " + val + L": MASTER fuse " + (sec_core_ ? L"ENABLED" : L"DISABLED (everything unlocked)"));
 }
 
 void ConsoleWindow::CmdSecUi(const std::wstring &raw) {
@@ -848,7 +857,7 @@ void ConsoleWindow::CmdSecUi(const std::wstring &raw) {
     iss >> cmd >> val;
     if (val.empty()) { PrintInfo(sec_ui_ ? L"1 (protected)" : L"0 (UI protection disabled)"); return; }
     sec_ui_ = !(val == L"0" || val == L"off" || val == L"false");
-    PrintWarn(L"$secui " + val + L": UI protection " + (sec_ui_ ? L"ENABLED" : L"DISABLED"));
+    PrintWarn(L"secui " + val + L": UI protection " + (sec_ui_ ? L"ENABLED" : L"DISABLED"));
 }
 
 void ConsoleWindow::CmdSecP(const std::wstring &raw) {
@@ -857,22 +866,22 @@ void ConsoleWindow::CmdSecP(const std::wstring &raw) {
     iss >> cmd >> val;
     if (val.empty()) { PrintInfo(sec_plugin_ ? L"1 (protected)" : L"0 (plugin checks disabled)"); return; }
     sec_plugin_ = !(val == L"0" || val == L"off" || val == L"false");
-    PrintWarn(L"$secp " + val + L": plugin version-check / RAM watchdog " + (sec_plugin_ ? L"ENABLED" : L"DISABLED"));
+    PrintWarn(L"secp " + val + L": plugin version-check / RAM watchdog " + (sec_plugin_ ? L"ENABLED" : L"DISABLED"));
 }
 
 void ConsoleWindow::CmdRmSystemFiles(const std::wstring &raw) {
     std::wstring perm = ConsoleParse::ParseNamed(raw, L"permission");
-    if (perm != L"core") { PrintWarn(L"$rm --system@homrec.files: requires #permission=core"); return; }
+    if (perm != L"core") { PrintWarn(L"rm --system@homrec.files: requires --permission=core"); return; }
     if (!CoreUnlocked()) {
-        PrintWarn(L"$rm --system@homrec.files: blocked - core protection is ON. Run `$sec 0` first.");
+        PrintWarn(L"rm --system@homrec.files: blocked - core protection is ON. Run `sec 0` first.");
         return;
     }
 
-    size_t typePos = raw.find(L"#type={");
-    if (typePos == std::wstring::npos) { PrintWarn(L"$rm --system@homrec.files: #type={...} not specified"); return; }
+    size_t typePos = raw.find(L"--type={");
+    if (typePos == std::wstring::npos) { PrintWarn(L"rm --system@homrec.files: --type={...} not specified"); return; }
     size_t typeEnd = raw.find(L'}', typePos);
-    if (typeEnd == std::wstring::npos) { PrintWarn(L"$rm --system@homrec.files: malformed #type={...}"); return; }
-    std::wstring typesRaw = raw.substr(typePos + 7, typeEnd - typePos - 7);
+    if (typeEnd == std::wstring::npos) { PrintWarn(L"rm --system@homrec.files: malformed --type={...}"); return; }
+    std::wstring typesRaw = raw.substr(typePos + 8, typeEnd - typePos - 8);
 
     std::vector<std::wstring> types;
     std::wistringstream tss(typesRaw);
@@ -903,18 +912,18 @@ void ConsoleWindow::CmdRmSystemFiles(const std::wstring &raw) {
             if (DirExists(pluginTemp)) RemoveDirRecursive(pluginTemp);
             cleared.push_back(type);
         } else {
-            PrintWarn(L"$rm --system@homrec.files: unknown #type entry '" + type + L"'");
+            PrintWarn(L"rm --system@homrec.files: unknown --type entry '" + type + L"'");
         }
     }
 
     std::wstring clearedStr;
     for (size_t i = 0; i < cleared.size(); ++i) clearedStr += (i ? L", " : L"") + cleared[i];
-    PrintWarn(L"$rm --system@homrec.files: done. Cleared: " + (clearedStr.empty() ? L"(nothing found)" : clearedStr));
+    PrintWarn(L"rm --system@homrec.files: done. Cleared: " + (clearedStr.empty() ? L"(nothing found)" : clearedStr));
 }
 
 void ConsoleWindow::CmdRmSelfApp(const std::wstring &raw) {
     if (!CoreUnlocked()) {
-        PrintWarn(L"$rm @homrec: blocked - core protection is ON. Run `$sec 0` first.");
+        PrintWarn(L"rm @homrec: blocked - core protection is ON. Run `sec 0` first.");
         return;
     }
     auto flags = ConsoleParse::ParseFlags(raw);
@@ -926,12 +935,12 @@ void ConsoleWindow::CmdRmSelfApp(const std::wstring &raw) {
             L"This cannot be undone.\n\nAre you sure you want to continue?",
             L"Uninstall HomRec", MB_YESNO | MB_ICONWARNING);
         if (result != IDYES) {
-            PrintInfo(L"$rm @homrec: cancelled");
+            PrintInfo(L"rm @homrec: cancelled");
             return;
         }
     }
 
-    PrintWarn(L"$rm @homrec: HomRec will delete itself once this process exits.");
+    PrintWarn(L"rm @homrec: HomRec will delete itself once this process exits.");
     ScheduleSelfDelete(GetBaseDir());
 
     if (main_window_) {
@@ -969,8 +978,8 @@ void ConsoleWindow::ScheduleSelfDelete(const std::wstring &base) {
                         CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        PrintOk(L"$rm @homrec: uninstall script scheduled at " + batPath);
+        PrintOk(L"rm @homrec: uninstall script scheduled at " + batPath);
     } else {
-        PrintErr(L"$rm @homrec: failed to schedule self-delete (CreateProcess failed)");
+        PrintErr(L"rm @homrec: failed to schedule self-delete (CreateProcess failed)");
     }
 }

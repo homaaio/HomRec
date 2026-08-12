@@ -2,25 +2,28 @@
 //
 // The HomRec developer console: a scrollable output log + input line with
 // command history (Up/Down arrows), plus a small built-in command set.
+// Bare command names only (Linux-shell style) - "rm", not "$rm" or "!rm".
+// Options are passed the same way a real shell CLI would: "--flag" /
+// "--key=value" tokens, not the old "#key=value" named-parameter syntax.
 //
 // Supported commands:
-//   - Command parsing: ParseNamed (#key="value"/#key=value), ParseFlags
-//     (-flag tokens, excluding -return/-ret).
-//   - The three-tier security fuse ($sec/$secui/$secp) - core/UI/plugin
+//   - Command parsing: ParseNamed ("--key=\"value\""/"--key=value"),
+//     ParseFlags (-flag tokens, excluding -return/-ret).
+//   - The three-tier security fuse (sec/secui/secp) - core/UI/plugin
 //     lock state and the associated unlock-gating logic.
-//   - $version, $ping, $echo, clear/$clear, $env, $alias, $history, $info,
-//     $status, $log, $hide.
-//   - $rm --system@homrec.files (clears recordings/plugins/logs/cache,
-//     gated by $sec 0) and $rm @homrec (schedules self-uninstall via a
-//     generated .bat, gated by $sec 0 + interactive confirmation) - these
+//   - version, ping, echo, clear, env, alias, history, info, status, log,
+//     hide.
+//   - rm --system@homrec.files (clears recordings/plugins/logs/cache,
+//     gated by sec 0) and rm @homrec (schedules self-uninstall via a
+//     generated .bat, gated by sec 0 + interactive confirmation) - these
 //     two are the most consequential commands in the file, so treat any
 //     change to them carefully.
 //
 // Not yet implemented:
-//   $rule, $connect, $disconnect, $start --window, $rename, $create, $edit,
-//   $ls, $watch, $batch, $run, $repeat, $timer, $clip, $check_er, $homrec,
-//   generic $rm/$rm_vid/$rm_ui/$rm_ui_self, $fs@plugins, $fs@settings, $do
-//   (self-update), $edit_terminal.
+//   rule, connect, disconnect, start --window, rename, create, edit, ls,
+//   watch, batch, run, repeat, timer, clip, check_er, homrec, generic
+//   rm/rm_vid/rm_ui/rm_ui_self, fs@plugins, fs@settings, do (self-update),
+//   edit_terminal.
 // Most of these depend on a "created window / rule" registry that doesn't
 // exist anywhere else yet - implementing them needs that subsystem
 // designed first, rather than guessing at it inside this file.
@@ -43,19 +46,17 @@ public:
     ~ConsoleWindow();
 
     void Show(HINSTANCE hInst);
+    // Creates the underlying window (and runs OnCreate(), including the
+    // controls Print()/RunCommand() need) WITHOUT making it visible - the
+    // part of Show() before its trailing ShowWindow(SW_SHOW). Called at
+    // app startup so cfg/autoexec.cfg (see RunCfgFile()) has somewhere to
+    // print its output to, without flashing the console open every time
+    // the app launches. Show() itself now just calls this, then makes it
+    // visible - safe/idempotent to call either one first. A window
+    // created this way stays hidden until Show() (or a real toggle -
+    // Ctrl+Shift+T, the Help menu) is used for the first time.
     void EnsureCreated(HINSTANCE hInst);
     HWND hwnd() const { return hwnd_; }
-
-    // Reads cfg/<name>.cfg (relative to the app's own folder, via
-    // GetBaseDir()) and feeds each non-blank, non-comment line through
-    // RunCommand() as if typed directly - including any command a plugin
-    // (e.g. Bter, via homrec.register_command()) has registered, since
-    // this goes through the exact same dispatcher. Comment lines start
-    // with "//" or "#" (leading whitespace allowed). Missing file is not
-    // an error - this is opt-in by simply dropping the file in, matching
-    // e.g. Source engine's autoexec.cfg convention. Returns the number of
-    // commands actually run (0 if the file doesn't exist or is empty).
-    int RunCfgFile(const std::wstring &name);
 
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND, UINT, WPARAM, LPARAM);
@@ -71,6 +72,16 @@ private:
     void RefreshPrompt();
 
     void RunCommand(const std::wstring &raw);
+    // Reads cfg/<name>.cfg (relative to the app's own folder, via
+    // GetBaseDir()) and feeds each non-blank, non-comment line through
+    // RunCommand() as if typed directly - including any command a plugin
+    // (e.g. Bter, via homrec.register_command()) has registered, since
+    // this goes through the exact same dispatcher. Comment lines start
+    // with "//" or "#" (leading whitespace allowed). Missing file is not
+    // an error - this is opt-in by simply dropping the file in, matching
+    // e.g. Source engine's autoexec.cfg convention. Returns the number of
+    // commands actually run (0 if the file doesn't exist or is empty).
+    int RunCfgFile(const std::wstring &name);
     // color is a COLORREF; only meaningful when the output control is a
     // RichEdit (rich_edit_ == true) -- see the color constants and the
     // OPT comment above OnCreate()'s control creation in the .cpp for why.
@@ -94,7 +105,7 @@ private:
     static constexpr COLORREF kColErr  = RGB(235, 100, 100);  // red    - error
     static constexpr COLORREF kColPrompt = RGB(120, 220, 255);
     // Default for plain Print() calls with no explicit level (echoed
-    // input, $echo, $history listing, clipboard paste) - a neutral
+    // input, echo, history listing, clipboard paste) - a neutral
     // near-white so it reads as "plain terminal text", distinct from any
     // of the four status colors above, and never silently reuses
     // whatever color happened to be set by the previous line.
@@ -102,6 +113,7 @@ private:
 
     // --- ported commands ---
     void CmdVersion(const std::wstring &raw);
+    void CmdVer(const std::wstring &raw);
     void CmdPing(const std::wstring &raw);
     void CmdEcho(const std::wstring &raw);
     void CmdClear(const std::wstring &raw);
@@ -155,15 +167,16 @@ private:
     std::unordered_map<std::wstring, std::wstring> aliases_;
     std::unordered_map<std::wstring, std::wstring> env_vars_; // session-scoped, NOT the OS environment
 
-    bool sec_core_ = true;   // $sec    - master fuse, protected by default
-    bool sec_ui_ = true;     // $secui  - UI-removal protection
-    bool sec_plugin_ = true; // $secp   - plugin version-check / RAM watchdog
+    bool sec_core_ = true;   // sec    - master fuse, protected by default
+    bool sec_ui_ = true;     // secui  - UI-removal protection
+    bool sec_plugin_ = true; // secp   - plugin version-check / RAM watchdog
 };
 
 // Parsing helpers - direct ports of _parse_named/_parse_flags, exposed so
 // they can be unit-exercised or reused if more commands get added later.
 namespace ConsoleParse {
-    // #key="value" | #key='value' | #key=value  →  value, or empty if absent.
+    // --key="value" | --key='value' | --key=value  ->  value, or empty if
+    // absent (shell-style long option, not the old "#key=value" form).
     std::wstring ParseNamed(const std::wstring &raw, const std::wstring &key);
     // All "-flag" tokens in raw, except -return/-ret (matches _parse_flags).
     std::set<std::wstring> ParseFlags(const std::wstring &raw);
