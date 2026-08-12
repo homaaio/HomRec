@@ -58,6 +58,17 @@ public:
     void EnsureCreated(HINSTANCE hInst);
     HWND hwnd() const { return hwnd_; }
 
+    // Reads cfg/<name>.cfg (relative to the app's own folder, via
+    // GetBaseDir()) and feeds each non-blank, non-comment line through
+    // RunCommand() as if typed directly - including any command a plugin
+    // (e.g. Bter, via homrec.register_command()) has registered, since
+    // this goes through the exact same dispatcher. Comment lines start
+    // with "//" or "#" (leading whitespace allowed). Missing file is not
+    // an error - this is opt-in by simply dropping the file in, matching
+    // e.g. Source engine's autoexec.cfg convention. Returns the number of
+    // commands actually run (0 if the file doesn't exist or is empty).
+    int RunCfgFile(const std::wstring &name);
+
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandleMessage(HWND, UINT, WPARAM, LPARAM);
@@ -72,16 +83,6 @@ private:
     void RefreshPrompt();
 
     void RunCommand(const std::wstring &raw);
-    // Reads cfg/<name>.cfg (relative to the app's own folder, via
-    // GetBaseDir()) and feeds each non-blank, non-comment line through
-    // RunCommand() as if typed directly - including any command a plugin
-    // (e.g. Bter, via homrec.register_command()) has registered, since
-    // this goes through the exact same dispatcher. Comment lines start
-    // with "//" or "#" (leading whitespace allowed). Missing file is not
-    // an error - this is opt-in by simply dropping the file in, matching
-    // e.g. Source engine's autoexec.cfg convention. Returns the number of
-    // commands actually run (0 if the file doesn't exist or is empty).
-    int RunCfgFile(const std::wstring &name);
     // color is a COLORREF; only meaningful when the output control is a
     // RichEdit (rich_edit_ == true) -- see the color constants and the
     // OPT comment above OnCreate()'s control creation in the .cpp for why.
