@@ -1,7 +1,7 @@
 // hr_log.h - app-wide file logger.
 //
 // Before this, the only thing that ever wrote to homrec.log was the
-// console's manual "$log <message>" command - nothing in the app logged
+// console's manual "log <message>" command - nothing in the app logged
 // automatically, so Help > Log was always empty unless a user typed a
 // console command first. This gives every part of the app a one-line call
 // to record real events (recording start/stop/errors, settings saves,

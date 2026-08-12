@@ -8,7 +8,7 @@
 // of AppState, including everything the Settings dialog's Video/Codec,
 // Audio, Hotkeys, and Advanced tabs expose that homrec_settings.json
 // doesn't persist yet. Two uses: sharing a known-good config between
-// machines/installs, and the console's "$hrc save <path>" / "$hrc load
+// machines/installs, and the console's "hrc save <path>" / "hrc load
 // <path>" commands.
 #pragma once
 
