@@ -58,6 +58,8 @@ extern "C" {
     void hr_pl_set_overlays(void *handle, const HrOverlayDesc *items, int count);
     void hr_pl_set_include_cursor(void *handle, int flag);
     void hr_pl_set_capture_rect(void *handle, int x, int y, int w, int h);
+    void hr_pl_set_output_size(void *handle, int w, int h);
+    void hr_pl_set_preview_fps(void *handle, int fps);
 
     // hr_ffmpeg_runner.cpp
     void *hr_ff_create();
@@ -200,6 +202,41 @@ std::wstring RecordingController::BuildOutputPath() {
     return WideFromNarrow(buf);
 }
 
+void RecordingController::ScaledPreviewSize(int &out_w, int &out_h) const {
+    int pct = state_.preview_quality_pct;
+    if (pct < 10) pct = 10;
+    if (pct > 100) pct = 100;
+    out_w = (state_.preview_width * pct) / 100;
+    out_h = (state_.preview_height * pct) / 100;
+    if (out_w < 2) out_w = 2;
+    if (out_h < 2) out_h = 2;
+}
+
+// Settings > Resolution: turns a source size (the full monitor, or the
+// cropped window rect in window-capture mode) into the desired *output*
+// size, honoring ResolutionMode::Percent (scale_factor, e.g. 75% of
+// src_w/src_h) or ResolutionMode::Absolute (an exact resolution_w x
+// resolution_h target, e.g. "1280x720" for an old/low-power playback
+// device). Absolute mode never upscales past src_w/src_h - there's no
+// extra detail to gain from it, only extra bytes to capture/encode - and
+// always leaves at least a 2x2 output so a bad/zero setting can't produce
+// a degenerate 0x0 pipe.
+void RecordingController::ComputeOutputDims(int src_w, int src_h, int &out_w, int &out_h) const {
+    if (state_.resolution_mode == ResolutionMode::Absolute) {
+        out_w = state_.resolution_w;
+        out_h = state_.resolution_h;
+        if (out_w > src_w) out_w = src_w;
+        if (out_h > src_h) out_h = src_h;
+        if (out_w < 2) out_w = 2;
+        if (out_h < 2) out_h = 2;
+    } else {
+        out_w = (int)(src_w * state_.scale_factor);
+        out_h = (int)(src_h * state_.scale_factor);
+    }
+    if (out_w % 2) out_w--;
+    if (out_h % 2) out_h--;
+}
+
 void RecordingController::ResolveCaptureSize() {
     // Resolve real capture resolution from the selected monitor.
     // state_.monitor_id is 1-based (matches the Settings dialog's
@@ -232,14 +269,12 @@ void RecordingController::ResolveCaptureSize() {
     if (capture_w_ % 2) capture_w_--;
     if (capture_h_ % 2) capture_h_--;
 
-    // Settings > Resolution (scale_factor) instead becomes the desired
-    // *output* size - applied as an encode-time scale filter (see
-    // hr_ff_set_output_size()/hr_ffmpeg_runner.cpp), not by changing what
-    // gets captured.
-    output_w_ = (int)(mw * state_.scale_factor);
-    output_h_ = (int)(mh * state_.scale_factor);
-    if (output_w_ % 2) output_w_--;
-    if (output_h_ % 2) output_h_--;
+    // Settings > Resolution (scale_factor / resolution_w+h, depending on
+    // resolution_mode) instead becomes the desired *output* size - applied
+    // as a capture-side downscale before encoding (see
+    // hr_pl_set_output_size()/hr_pipeline.cpp), not by changing what DXGI
+    // itself captures.
+    ComputeOutputDims(mw, mh, output_w_, output_h_);
 
     // ====== WINDOW CAPTURE ======
     crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
@@ -266,10 +301,7 @@ void RecordingController::ResolveCaptureSize() {
 
             if (ww > 0 && wh > 0) {
                 crop_x_ = wx; crop_y_ = wy; crop_w_ = ww; crop_h_ = wh;
-                output_w_ = (int)(ww * state_.scale_factor);
-                output_h_ = (int)(wh * state_.scale_factor);
-                if (output_w_ % 2) output_w_--;
-                if (output_h_ % 2) output_h_--;
+                ComputeOutputDims(ww, wh, output_w_, output_h_);
             } else {
                 HrLog::Warn("Window capture: '" + state_.capture_window_title +
                             "' is entirely off the selected monitor - falling back to full desktop.");
@@ -343,10 +375,10 @@ bool RecordingController::Start(std::wstring &error_out) {
     // exactly the "garbled/green/tiled recording" failure mode the big
     // comment in ResolveCaptureSize() warns about, just triggered from
     // window-capture mode instead of a stale scale_factor.
-    int pipe_w = crop_w_ > 0 ? crop_w_ : capture_w_;
-    int pipe_h = crop_h_ > 0 ? crop_h_ : capture_h_;
+    int pipe_w = output_w_;
+    int pipe_h = output_h_;
     hr_ff_set_video_params(ffproc_, pipe_w, pipe_h, state_.target_fps);
-    hr_ff_set_output_size(ffproc_, output_w_, output_h_);
+    hr_ff_set_output_size(ffproc_, pipe_w, pipe_h);
     hr_ff_set_pipe_input(ffproc_, 1);
 
     if (hr_ff_start(ffproc_) != 0) {
@@ -385,12 +417,19 @@ bool RecordingController::Start(std::wstring &error_out) {
         reused_preview_pipeline = true;
     } else {
         if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+        int pvw = 0, pvh = 0;
+        ScaledPreviewSize(pvw, pvh);
         pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
-                                 state_.preview_width, state_.preview_height);
+                                 pvw, pvh);
     }
     bool pipeline_started = reused_preview_pipeline;
     if (pipeline_ && !reused_preview_pipeline) pipeline_started = hr_pl_start(pipeline_) != 0;
     if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+    // Capture-side downscale to the resolved output size - see the big
+    // comment above pipe_w/pipe_h's assignment for why this has to stay
+    // in lockstep with what hr_ff_set_video_params() just told ffmpeg.
+    if (pipeline_) hr_pl_set_output_size(pipeline_, output_w_, output_h_);
+    if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
     if (!pipeline_ || !pipeline_started) {
         error_out = L"Failed to start the capture pipeline.";
         HrLog::Error("Start failed: capture pipeline didn't start");
@@ -726,8 +765,10 @@ void RecordingController::EnsurePreview() {
     // its "false -> preview only" comment in hr_pipeline.cpp. Start()
     // later flips this same pipeline into recording mode via
     // hr_pl_set_recording() instead of replacing it, when the size matches.
+    int pvw = 0, pvh = 0;
+    ScaledPreviewSize(pvw, pvh);
     pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
-                             state_.preview_width, state_.preview_height);
+                             pvw, pvh);
     if (pipeline_ && !hr_pl_start(pipeline_)) {
         hr_pl_destroy(pipeline_);
         pipeline_ = nullptr;
@@ -738,6 +779,7 @@ void RecordingController::EnsurePreview() {
     // the full desktop even when a window is selected, only "correcting"
     // itself once Start() reuses this pipeline and re-applies the crop.
     if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+    if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
 }
 
 void RecordingController::TeardownPreview() {

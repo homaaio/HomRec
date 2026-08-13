@@ -134,6 +134,17 @@ private:
     // factor (was inline in Start() only; EnsurePreview() needs the same
     // logic to size its preview-only pipeline).
     void ResolveCaptureSize();
+    // Applies Settings > General's "Preview quality" (preview_quality_pct)
+    // to the preview panel's pixel size before it's handed to the
+    // pipeline as its thumbnail render target - the pipeline (and the GPU/
+    // CPU time it spends compositing overlays/cursor into the thumbnail
+    // and box-filtering it down) only ever sees the *scaled* size, so a
+    // lower quality setting genuinely saves work, not just visual detail.
+    void ScaledPreviewSize(int &out_w, int &out_h) const;
+    // Settings > Resolution: src_w/src_h (native monitor or cropped window
+    // rect) -> desired output size, honoring Percent vs Absolute mode. See
+    // the .cpp for the no-upscale/even-dimensions rules.
+    void ComputeOutputDims(int src_w, int src_h, int &out_w, int &out_h) const;
 
     AppState &state_;
 

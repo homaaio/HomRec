@@ -40,6 +40,11 @@ extern "C" {
     void hr_settings_set_fps(void *h, int v);
     void hr_settings_set_monitor(void *h, int v);
     void hr_settings_set_resolution_pct(void *h, int v);
+    void hr_settings_set_resolution_mode(void *h, int v);
+    void hr_settings_set_resolution_w(void *h, int v);
+    void hr_settings_set_resolution_h(void *h, int v);
+    void hr_settings_set_preview_quality_pct(void *h, int v);
+    void hr_settings_set_preview_fps(void *h, int v);
     void hr_settings_set_codec(void *h, const char *v);
     void hr_settings_set_flag(void *h, const char *name, int v);
 
@@ -199,7 +204,22 @@ private:
         // knob; "Encoding quality" above only affects the encoder's CRF and
         // was never a resolution setting despite being the only slider in
         // this tab, which is what made it look like the wrong/missing control.
+        // Resolution mode: "Percent" keeps the original 25/50/75/100%-of-
+        // native dropdown; "Custom" lets the user type an exact target
+        // width/height (e.g. 1280x720) instead - useful when the recording
+        // needs to match a specific size (an old/low-power target device,
+        // a video platform's preferred resolution, etc.) rather than
+        // whatever percentage happens to land near it.
+        AddLabel(page, grid, text, bg, "Resolution mode:");
+        resolution_mode_choice_ = new wxChoice(page, wxID_ANY);
+        resolution_mode_choice_->Append("Percent of native");
+        resolution_mode_choice_->Append("Custom (width x height)");
+        resolution_mode_choice_->SetSelection(
+            state_.resolution_mode == ResolutionMode::Absolute ? 1 : 0);
+        grid->Add(resolution_mode_choice_, 0, wxALIGN_CENTRE_VERTICAL);
+
         AddLabel(page, grid, text, bg, "Resolution:");
+        auto *resRow = new wxBoxSizer(wxHORIZONTAL);
         resolution_choice_ = new wxChoice(page, wxID_ANY);
         resolution_choice_->Append("Full screen (Native, 100%)");
         resolution_choice_->Append("75%");
@@ -214,7 +234,35 @@ private:
             else sel = 3;
             resolution_choice_->SetSelection(sel);
         }
-        grid->Add(resolution_choice_, 0, wxALIGN_CENTRE_VERTICAL);
+        resRow->Add(resolution_choice_, 0, wxALIGN_CENTRE_VERTICAL);
+
+        resolution_w_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                             wxSize(80, -1), wxSP_ARROW_KEYS, 2, 7680,
+                                             state_.resolution_w);
+        resRow->Add(resolution_w_spin_, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, 6);
+        auto *xLbl = new wxStaticText(page, wxID_ANY, "x");
+        xLbl->SetForegroundColour(text);
+        xLbl->SetBackgroundColour(bg);
+        resRow->Add(xLbl, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT | wxRIGHT, 4);
+        resolution_h_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                             wxSize(80, -1), wxSP_ARROW_KEYS, 2, 4320,
+                                             state_.resolution_h);
+        resRow->Add(resolution_h_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+        grid->Add(resRow, 0, wxALIGN_CENTRE_VERTICAL);
+
+        // Only one of the two resolution controls is meaningful at a time -
+        // enable/disable (rather than hide) so the layout doesn't jump
+        // around when switching modes.
+        auto updateResEnabled = [this]() {
+            bool custom = resolution_mode_choice_->GetSelection() == 1;
+            resolution_choice_->Enable(!custom);
+            resolution_w_spin_->Enable(custom);
+            resolution_h_spin_->Enable(custom);
+        };
+        updateResEnabled();
+        resolution_mode_choice_->Bind(wxEVT_CHOICE, [updateResEnabled](wxCommandEvent &) {
+            updateResEnabled();
+        });
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
@@ -239,6 +287,52 @@ private:
         disable_preview_chk_ = AddCheck(page, pageRoot, text, bg,
                                          "Disable live preview (for performance)",
                                          state_.disable_preview);
+
+        // Preview quality/FPS: the live preview thumbnail shown in the app
+        // costs real CPU/GPU time (capture + overlay/cursor compositing +
+        // downscale) on top of whatever's actually being recorded - these
+        // two knobs let that cost be turned down independently, which
+        // matters most on older/weaker machines. Grouped under the
+        // "Disable live preview" checkbox since they're meaningless once
+        // it's off.
+        auto *previewRow = new wxBoxSizer(wxHORIZONTAL);
+        auto *pqLbl = new wxStaticText(page, wxID_ANY, "Preview quality:");
+        pqLbl->SetForegroundColour(text);
+        pqLbl->SetBackgroundColour(bg);
+        previewRow->Add(pqLbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
+
+        preview_quality_choice_ = new wxChoice(page, wxID_ANY);
+        preview_quality_choice_->Append("Low (50%)");
+        preview_quality_choice_->Append("Medium (75%)");
+        preview_quality_choice_->Append("High (100%)");
+        {
+            int pct = state_.preview_quality_pct;
+            int sel = 2;
+            if (pct <= 50) sel = 0;
+            else if (pct <= 75) sel = 1;
+            preview_quality_choice_->SetSelection(sel);
+        }
+        previewRow->Add(preview_quality_choice_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 16);
+
+        auto *pfLbl = new wxStaticText(page, wxID_ANY, "Preview FPS:");
+        pfLbl->SetForegroundColour(text);
+        pfLbl->SetBackgroundColour(bg);
+        previewRow->Add(pfLbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
+        preview_fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                            wxSize(70, -1), wxSP_ARROW_KEYS, 1, 60,
+                                            state_.preview_fps);
+        previewRow->Add(preview_fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+        pageRoot->Add(previewRow, 0, wxALL, 16);
+
+        auto updatePreviewControlsEnabled = [this]() {
+            bool enabled = !disable_preview_chk_->GetValue();
+            preview_quality_choice_->Enable(enabled);
+            preview_fps_spin_->Enable(enabled);
+        };
+        updatePreviewControlsEnabled();
+        disable_preview_chk_->Bind(wxEVT_CHECKBOX, [updatePreviewControlsEnabled](wxCommandEvent &) {
+            updatePreviewControlsEnabled();
+        });
 
         pageRoot->AddStretchSpacer(1);
         page->SetSizer(pageRoot);
@@ -443,6 +537,15 @@ private:
             if (sel < 0 || sel >= 4) sel = 1; // fall back to 75% if somehow unselected
             state_.scale_factor = kPct[sel] / 100.0;
             hr_settings_set_resolution_pct(settings_, kPct[sel]);
+
+            bool custom = resolution_mode_choice_->GetSelection() == 1;
+            state_.resolution_mode = custom ? ResolutionMode::Absolute : ResolutionMode::Percent;
+            hr_settings_set_resolution_mode(settings_, custom ? 1 : 0);
+
+            state_.resolution_w = resolution_w_spin_->GetValue();
+            state_.resolution_h = resolution_h_spin_->GetValue();
+            hr_settings_set_resolution_w(settings_, state_.resolution_w);
+            hr_settings_set_resolution_h(settings_, state_.resolution_h);
         }
 
         state_.countdown_enabled = countdown_chk_->GetValue();
@@ -450,6 +553,18 @@ private:
         state_.cursor_enabled = cursor_chk_->GetValue();
         state_.show_summary = notify_chk_->GetValue();
         state_.disable_preview = disable_preview_chk_->GetValue();
+
+        {
+            static const int kPreviewQualityPct[] = {50, 75, 100};
+            int sel = preview_quality_choice_->GetSelection();
+            if (sel < 0 || sel >= 3) sel = 2;
+            state_.preview_quality_pct = kPreviewQualityPct[sel];
+            hr_settings_set_preview_quality_pct(settings_, state_.preview_quality_pct);
+
+            state_.preview_fps = preview_fps_spin_->GetValue();
+            hr_settings_set_preview_fps(settings_, state_.preview_fps);
+        }
+
         hr_settings_set_flag(settings_, "countdown", state_.countdown_enabled ? 1 : 0);
         hr_settings_set_flag(settings_, "timestamp", state_.timestamp_enabled ? 1 : 0);
         hr_settings_set_flag(settings_, "cursor", state_.cursor_enabled ? 1 : 0);
@@ -500,9 +615,13 @@ private:
     wxSpinCtrl *fps_spin_ = nullptr;
     wxChoice *monitor_choice_ = nullptr;
     wxChoice *resolution_choice_ = nullptr;
+    wxChoice *resolution_mode_choice_ = nullptr;
+    wxSpinCtrl *resolution_w_spin_ = nullptr, *resolution_h_spin_ = nullptr;
     wxTextCtrl *folder_edit_ = nullptr;
     wxCheckBox *countdown_chk_ = nullptr, *timestamp_chk_ = nullptr, *cursor_chk_ = nullptr, *notify_chk_ = nullptr;
     wxCheckBox *disable_preview_chk_ = nullptr;
+    wxChoice *preview_quality_choice_ = nullptr;
+    wxSpinCtrl *preview_fps_spin_ = nullptr;
 
     // Video / Codec
     wxComboBox *codec_combo_ = nullptr, *hwaccel_combo_ = nullptr, *preset_combo_ = nullptr,
