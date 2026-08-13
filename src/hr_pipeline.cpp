@@ -157,12 +157,93 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
 }
 
 // ---------------------------------------------------------------------------
+// BGRA->BGRA downscale (box filter on integer ratios, nearest-neighbour
+// otherwise) - used to shrink a captured frame down to the user's chosen
+// output resolution (Settings > Resolution) BEFORE color conversion and
+// encoding, instead of capturing/converting at full native size and only
+// scaling down afterward (previously done via ffmpeg's own -vf scale, see
+// hr_ff_set_output_size()'s comment in hr_ffmpeg_runner.cpp for the old
+// path). On weak/old hardware this matters a lot: color conversion
+// (bgra_to_yuv) and the bytes actually written to the pipe both now scale
+// with the OUTPUT size instead of the native capture size, and ffmpeg
+// never has to run its own scaler at all since what arrives on the pipe
+// already matches the encode size (hr_ff_build_cmd() already skips -vf
+// scale whenever input/output sizes match). Same structure as
+// bgra_to_thumb() above, just BGRA-in/BGRA-out instead of BGRA-in/RGB-out
+// (thumb is display-only, this feeds the encoder so channel order must be
+// preserved); alpha is irrelevant either way (hr_bgra_to_yuv420p never
+// reads it) so it's just written as opaque.
+// ---------------------------------------------------------------------------
+static void bgra_downscale(const uint8_t* __restrict src,
+                            uint8_t*       __restrict dst,
+                            int sw, int sh, int dw, int dh)
+{
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    if (sw == dw && sh == dh) {
+        std::memcpy(dst, src, (size_t)sw * sh * 4);
+        return;
+    }
+
+    if ((sw % dw) == 0 && (sh % dh) == 0) {
+        // Fast integer-ratio box filter - same cost class as the color
+        // conversion it feeds into, and much cheaper than ffmpeg's
+        // general-purpose swscale for this common case (exact ratios like
+        // 100%->75%->50%->25% of a 16:9/16:10 native resolution almost
+        // always land here).
+        int rx = sw / dw, ry = sh / dh;
+        int bsz = rx * ry;
+        for (int y = 0; y < dh; ++y) {
+            for (int x = 0; x < dw; ++x) {
+                uint32_t b = 0, g = 0, r = 0;
+                int sy0 = y * ry, sx0 = x * rx;
+                for (int by = 0; by < ry; ++by) {
+                    const uint8_t* row = src + ((size_t)(sy0 + by) * sw + sx0) * 4;
+                    for (int bx = 0; bx < rx; ++bx) {
+                        b += row[bx*4+0];
+                        g += row[bx*4+1];
+                        r += row[bx*4+2];
+                    }
+                }
+                uint8_t* o = dst + ((size_t)y * dw + x) * 4;
+                o[0] = (uint8_t)(b / (uint32_t)bsz);
+                o[1] = (uint8_t)(g / (uint32_t)bsz);
+                o[2] = (uint8_t)(r / (uint32_t)bsz);
+                o[3] = 255;
+            }
+        }
+    } else {
+        // Nearest-neighbour fallback (non-integer ratio, e.g. a custom
+        // absolute target resolution that doesn't evenly divide the
+        // monitor's native size) - cheaper than a general box filter and
+        // plenty for a downscale destined for lossy video encoding.
+        float rx = (float)sw / dw, ry = (float)sh / dh;
+        for (int y = 0; y < dh; ++y) {
+            int sy = (int)(y * ry); if (sy >= sh) sy = sh - 1;
+            for (int x = 0; x < dw; ++x) {
+                int sx = (int)(x * rx); if (sx >= sw) sx = sw - 1;
+                const uint8_t* s = src + ((size_t)sy * sw + sx) * 4;
+                uint8_t*       d = dst + ((size_t)y  * dw + x ) * 4;
+                d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline state
 // ---------------------------------------------------------------------------
 struct Pipeline {
     int src_w = 0, src_h = 0;
     int fps   = 30;
     int pv_w  = 960, pv_h = 540;
+    // "Preview:" settings (Settings > General) - separate from the
+    // recording fps/size above, since the live preview thumbnail costs
+    // real CPU/GPU time on weak machines even when nothing is being
+    // recorded and ideally shouldn't cost more than the user actually
+    // wants it to. Read every capture-loop iteration so a live change
+    // (hr_pl_set_preview_fps()) takes effect immediately, not just on
+    // the next hr_pl_create().
+    std::atomic<int> preview_fps{15};
     intptr_t pipe_handle = 0;
     bool recording = false;   // pipe open → encode YUV; false → preview only
 
@@ -189,6 +270,25 @@ struct Pipeline {
     // separately know about cropping. Set once per captured frame, right
     // after the crop step in capture_loop() below.
     int eff_w = 0, eff_h = 0;
+
+    // ====== OUTPUT-SIZE DOWNSCALE (Settings > Resolution) ======
+    // 0/0 (the default) means "no override, encode at eff_w/eff_h" - the
+    // capture_w_==output_w_ common case at 100%/Native costs nothing extra
+    // (bgra_downscale() above short-circuits to a memcpy... actually not
+    // even that, see the `enc_src` fast path in capture_loop() below,
+    // which skips the call entirely when sizes match). Set via
+    // hr_pl_set_output_size(), called once by RecordingController::Start()
+    // right after hr_pl_set_capture_rect(). Read every frame (capture_loop
+    // is the hot path) so it must stay atomic-safe even though in
+    // practice it's only ever written once before recording starts.
+    std::atomic<int> out_w{0}, out_h{0};
+    // Scratch buffer the downscaled BGRA frame is written into ahead of
+    // YUV conversion - separate from bgra_buf (rather than downscaling in
+    // place) so update_preview()'s thumbnail keeps reading the full
+    // eff_w/eff_h frame with cursor/overlays already composited into it,
+    // completely unaffected by the encode-side output size. Only ever
+    // touched by the capture thread, so no lock needed.
+    std::vector<uint8_t> scaled_buf;
 
     void* dx_ctx = nullptr;
     void* sw_ctx = nullptr;
@@ -445,11 +545,19 @@ struct Pipeline {
                                  : (1'000'000'000LL / 30);
         // Preview-only mode (not recording) never needs more than a
         // handful of frames/sec - the thumbnail shown in the UI is
-        // already throttled far below capture rate (see PREVIEW_EVERY).
+        // already throttled by the preview-fps check further down.
         // Capturing at the full target fps (often 60+) just to immediately
-        // discard nearly all of it was pure waste. Cap at ~15fps while
-        // idle; never *slow down* a deliberately-low target fps though.
-        const int64_t frame_ns_idle = std::max(frame_ns_recording, 1'000'000'000LL / 15);
+        // discard nearly all of it was pure waste. Cap idle capture at the
+        // user's Preview FPS setting instead of a fixed 15 - never *slow
+        // down* a deliberately-low target fps though. Recomputed on every
+        // is_recording_now transition below so a live change to the
+        // Preview FPS setting is picked up without restarting the pipeline.
+        auto compute_frame_ns_idle = [&]() {
+            int want_fps = preview_fps.load(std::memory_order_relaxed);
+            if (want_fps < 1) want_fps = 1;
+            return std::max(frame_ns_recording, (int64_t)(1'000'000'000LL / want_fps));
+        };
+        int64_t frame_ns_idle = compute_frame_ns_idle();
         int64_t frame_ns = frame_ns_recording;
         bool was_recording = recording;
 #ifdef _WIN32
@@ -457,11 +565,14 @@ struct Pipeline {
                                                              : THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
 
-        // Dynamic preview frequency: fps/20, minimum 1 (of *captured*
-        // frames - at the idle 15fps cap this is already a low absolute
-        // rate, so also updating every idle-captured frame directly
-        // below keeps things simple rather than compounding two throttles).
-        const int PREVIEW_EVERY = std::max(1, fps / 20);
+        // Dynamic preview frequency: driven by the "Preview FPS" setting
+        // (AppState::preview_fps / hr_pl_set_preview_fps()) rather than a
+        // fixed fraction of the recording fps - time-based (elapsed ns
+        // since the last preview update) instead of a frame-count modulo
+        // so it stays accurate to the requested rate regardless of how
+        // fast the capture loop itself is ticking (recording vs idle
+        // pacing above already differ by 2-4x).
+        int64_t last_preview_ns = 0;
 
         // timeout_ms = 2/3 frame (was 1/2) → fewer TIMEOUT drops
         int timeout_ms = static_cast<int>(frame_ns * 2 / 3'000'000LL);
@@ -474,7 +585,6 @@ struct Pipeline {
         if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
 #endif
         int64_t next_frame_ns = frame_ns;
-        int frame_idx = 0;
 
         // OPT: see overlays_gen's declaration -- this snapshot is only
         // refreshed (under overlays_mtx) when the generation counter has
@@ -500,6 +610,7 @@ struct Pipeline {
                 bool is_recording_now = recording;
                 if (is_recording_now != was_recording) {
                     was_recording = is_recording_now;
+                    if (!is_recording_now) frame_ns_idle = compute_frame_ns_idle();
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
 #ifdef _WIN32
@@ -697,6 +808,18 @@ struct Pipeline {
             // that pipe_queue.push(yuv_buf) used to perform.
 #ifdef _WIN32
             if (recording && g_libs.bgra_to_yuv) {
+                int req_w = out_w.load(std::memory_order_relaxed);
+                int req_h = out_h.load(std::memory_order_relaxed);
+                const uint8_t* enc_src = bgra_buf.data();
+                int enc_w = eff_w, enc_h = eff_h;
+                if (req_w > 0 && req_h > 0 && (req_w != eff_w || req_h != eff_h)) {
+                    const size_t scaled_needed = (size_t)req_w * req_h * 4;
+                    if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
+                    bgra_downscale(bgra_buf.data(), scaled_buf.data(), eff_w, eff_h, req_w, req_h);
+                    enc_src = scaled_buf.data();
+                    enc_w = req_w; enc_h = req_h;
+                }
+
                 std::vector<uint8_t> yuv_frame;
                 {
                     std::lock_guard<std::mutex> lock(free_bufs_mtx);
@@ -706,10 +829,10 @@ struct Pipeline {
                     }
                 }
 
-                const size_t needed = (size_t)eff_w * eff_h * 3 / 2;
+                const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
                 if (yuv_frame.size() != needed) yuv_frame.resize(needed);
 
-                g_libs.bgra_to_yuv(bgra_buf.data(), yuv_frame.data(), eff_w, eff_h);
+                g_libs.bgra_to_yuv(enc_src, yuv_frame.data(), enc_w, enc_h);
 
                 std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
                 {
@@ -735,9 +858,22 @@ struct Pipeline {
 #endif
             frames_captured.fetch_add(1, std::memory_order_relaxed);
 
-            // Preview: dynamic frequency
-            if (++frame_idx % PREVIEW_EVERY == 0)
-                update_preview();
+            // Preview: dynamic frequency, driven by the Preview FPS setting
+            // (see last_preview_ns's declaration above for why time-based).
+#ifdef _WIN32
+            {
+                int64_t now_ns = (sw_ctx && g_libs.sw_elapsed_ns)
+                                      ? g_libs.sw_elapsed_ns(sw_ctx)
+                                      : next_frame_ns; // fallback: still monotonic
+                int want_fps = preview_fps.load(std::memory_order_relaxed);
+                if (want_fps < 1) want_fps = 1;
+                int64_t preview_interval_ns = 1'000'000'000LL / want_fps;
+                if (now_ns - last_preview_ns >= preview_interval_ns) {
+                    last_preview_ns = now_ns;
+                    update_preview();
+                }
+            }
+#endif
 
             // FPS tracking
 #ifdef _WIN32
@@ -1023,6 +1159,23 @@ HR_EXPORT void hr_pl_set_capture_rect(void* handle, int x, int y, int w, int h) 
 #endif
 }
 
+// Settings > Resolution - the final encoded size (see ComputeOutputDims()
+// in recording_controller.cpp). Pass 0,0 (or never call this) for "no
+// downscale, encode at the captured/cropped size" - the default. Must be
+// called with the actual output size whenever it differs from the capture
+// size, otherwise ffmpeg's rawvideo demuxer (told this same size via
+// hr_ff_set_video_params()) will misinterpret the pipe's byte stream.
+HR_EXPORT void hr_pl_set_output_size(void* handle, int w, int h) {
+    if (!handle) return;
+#ifdef _WIN32
+    auto* pl = static_cast<Pipeline*>(handle);
+    if (w > 0 && (w % 2)) w--;
+    if (h > 0 && (h % 2)) h--;
+    pl->out_w.store(w > 0 ? w : 0, std::memory_order_relaxed);
+    pl->out_h.store(h > 0 ? h : 0, std::memory_order_relaxed);
+#endif
+}
+
 HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
     if (!handle) return;
 #ifdef _WIN32
@@ -1114,5 +1267,16 @@ HR_EXPORT void hr_pl_set_preview_size(void* handle, int pw, int ph) {
     pl->pv_w    = pw;
     pl->pv_h    = ph;
     pl->pv_ready = false;
+#endif
+}
+
+// Settings > General "Preview FPS" - how often the live preview thumbnail
+// is refreshed. Takes effect immediately (read every capture-loop
+// iteration, see preview_fps's declaration on the Pipeline struct), no
+// need to restart the pipeline.
+HR_EXPORT void hr_pl_set_preview_fps(void* handle, int fps) {
+    if (!handle || fps <= 0) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->preview_fps.store(fps, std::memory_order_relaxed);
 #endif
 }
