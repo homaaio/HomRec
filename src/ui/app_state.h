@@ -17,6 +17,11 @@
 enum class CaptureMode { Desktop, Window };
 enum class RecordingMode { Ultra, Turbo, Balanced, Eco };
 enum class VideoFormat { Mp4, Mkv };
+// "Resolution:" setting in Settings > General - Percent keeps the old
+// scale_factor-of-native behavior (25/50/75/100%), Absolute lets the user
+// type an exact target width/height (e.g. 1280x720) instead. See
+// RecordingController::ComputeOutputDims().
+enum class ResolutionMode { Percent, Absolute };
 
 struct OverlayDef {
     std::string id;
@@ -61,7 +66,12 @@ struct AppState {
     int window_min_w = 1200, window_min_h = 650;
 
     // -- capture / recording settings ------------------------------------
-    double        scale_factor       = 0.75;
+    double         scale_factor       = 0.75;
+    ResolutionMode resolution_mode    = ResolutionMode::Percent;
+    // Only used when resolution_mode == Absolute; ignored otherwise.
+    // Defaults to a common "old machine friendly" 720p target.
+    int            resolution_w       = 1280;
+    int            resolution_h       = 720;
     std::string   output_folder;                 // set to <root>/recordings at startup
     int           quality            = 70;
     int           target_fps         = 15;
@@ -101,6 +111,11 @@ struct AppState {
     bool show_audio_panel    = true;
     bool show_overlays_panel = true;
     bool disable_preview     = false; // skip capturing/rendering the live preview, for lower-end machines
+    // Live-preview panel (not the recording itself): how big and how often
+    // it's redrawn. Lower values cost real CPU/GPU time on weak machines
+    // even though they never end up in the actual recording.
+    int  preview_quality_pct = 100; // 25/50/75/100 - % of preview_width/height below to actually render at
+    int  preview_fps         = 15;  // how many times/sec the preview thumbnail is refreshed
 
     // -- runtime / recording status --------------------------------------
     bool   recording    = false;

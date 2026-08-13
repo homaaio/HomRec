@@ -37,6 +37,11 @@ extern "C" {
     int hr_settings_get_fps(const void *h);
     int hr_settings_get_monitor(const void *h);
     int hr_settings_get_resolution_pct(const void *h);
+    int hr_settings_get_resolution_mode(const void *h);
+    int hr_settings_get_resolution_w(const void *h);
+    int hr_settings_get_resolution_h(const void *h);
+    int hr_settings_get_preview_quality_pct(const void *h);
+    int hr_settings_get_preview_fps(const void *h);
     const char *hr_settings_get_codec(const void *h);
     const char *hr_settings_get_theme(const void *h);
     void hr_settings_set_theme(void *h, const char *v);
@@ -403,11 +408,18 @@ HomRecMainFrame::HomRecMainFrame()
         state_.target_fps = hr_settings_get_fps(settings);
         state_.monitor_id = hr_settings_get_monitor(settings);
         state_.scale_factor = hr_settings_get_resolution_pct(settings) / 100.0;
+        state_.resolution_mode = hr_settings_get_resolution_mode(settings) != 0
+                                      ? ResolutionMode::Absolute : ResolutionMode::Percent;
+        state_.resolution_w = hr_settings_get_resolution_w(settings);
+        state_.resolution_h = hr_settings_get_resolution_h(settings);
+        state_.preview_quality_pct = hr_settings_get_preview_quality_pct(settings);
+        state_.preview_fps = hr_settings_get_preview_fps(settings);
         state_.countdown_enabled = hr_settings_get_flag(settings, "countdown") != 0;
         state_.timestamp_enabled = hr_settings_get_flag(settings, "timestamp") != 0;
         state_.cursor_enabled = hr_settings_get_flag(settings, "cursor") != 0;
         state_.show_summary = hr_settings_get_flag(settings, "show_summary") != 0;
         state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
+        state_.show_audio_panel = hr_settings_get_flag(settings, "show_audio_panel") != 0;
         state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
         const char *codec = hr_settings_get_codec(settings);
         if (codec && codec[0]) state_.video_codec = codec;
@@ -668,6 +680,14 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
         if (audio_panel_) audio_panel_->Show(false);
         if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_AUDIO_PANEL, false);
         Layout();
+        // Same immediate persist as the ID_VIEW_AUDIO_PANEL menu toggle -
+        // this is the panel's own [x] close button, i.e. exactly the path
+        // that previously left show_audio_panel unsaved.
+        void *s = hr_settings_create();
+        hr_settings_load(s, "homrec_settings.json");
+        hr_settings_set_flag(s, "show_audio_panel", 0);
+        hr_settings_save(s, "homrec_settings.json");
+        hr_settings_destroy(s);
     };
     audio_panel_->Show(state_.show_audio_panel);
 
@@ -1081,12 +1101,31 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             if (overlays_host_) overlays_host_->Show(state_.show_overlays_panel);
             if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
             Layout();
+            // Persisted immediately (load-modify-save, matching the
+            // ID_THEME_DARK/LIGHT handlers below) rather than waiting for
+            // OnClose(), since minimize-to-tray vetoes the close event
+            // entirely - that was exactly why toggling a panel closed
+            // never stuck across a restart before.
+            {
+                void *s = hr_settings_create();
+                hr_settings_load(s, "homrec_settings.json");
+                hr_settings_set_flag(s, "show_overlays_panel", state_.show_overlays_panel ? 1 : 0);
+                hr_settings_save(s, "homrec_settings.json");
+                hr_settings_destroy(s);
+            }
             break;
         case ID_VIEW_AUDIO_PANEL:
             state_.show_audio_panel = !state_.show_audio_panel;
             if (audio_panel_) audio_panel_->Show(state_.show_audio_panel);
             if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_AUDIO_PANEL, state_.show_audio_panel);
             Layout();
+            {
+                void *s = hr_settings_create();
+                hr_settings_load(s, "homrec_settings.json");
+                hr_settings_set_flag(s, "show_audio_panel", state_.show_audio_panel ? 1 : 0);
+                hr_settings_save(s, "homrec_settings.json");
+                hr_settings_destroy(s);
+            }
             break;
         case ID_VIEW_PC_ANALYTICS: ShowPcAnalyticsDialog(GetHWND(), wxGetInstance(), state_.output_folder); break;
         case ID_VIEW_LOG: ShowLogViewerDialog(GetHWND(), wxGetInstance()); break;
