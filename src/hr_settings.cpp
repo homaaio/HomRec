@@ -141,8 +141,14 @@ struct HrSettings {
     int   dxgi;           /* bool - use DXGI capture */
     int   show_summary;        /* bool - "recording saved" popup, see main_window.cpp */
     int   show_overlays_panel; /* bool - persistent overlays dock panel, see overlays_dock_panel.cpp */
+    int   show_audio_panel;    /* bool - audio mixer strip below the preview, see audio_panel.cpp */
     int   resolution_pct;      /* 25/50/75/100 - % of native monitor resolution to capture at */
     int   disable_preview;     /* bool - skip live preview capture/render for lower-end machines */
+    int   resolution_mode;     /* 0 = percent (resolution_pct applies), 1 = absolute (resolution_w/h apply) */
+    int   resolution_w;        /* target output width,  only used when resolution_mode == 1 */
+    int   resolution_h;        /* target output height, only used when resolution_mode == 1 */
+    int   preview_quality_pct; /* 25/50/75/100 - % of the preview panel size to actually render the live preview at */
+    int   preview_fps;         /* how many times/sec the live preview thumbnail is refreshed */
 };
 
 /* Populate hard-coded defaults, used when no settings file exists yet */
@@ -175,7 +181,13 @@ static void _defaults(HrSettings *s) {
     s->dxgi = 0;
     s->show_summary        = 1; // matches AppState::show_summary's default (app_state.h)
     s->show_overlays_panel = 1; // matches AppState::show_overlays_panel's default (app_state.h)
+    s->show_audio_panel    = 1; // matches AppState::show_audio_panel's default (app_state.h)
     s->resolution_pct      = 75; // matches AppState::scale_factor's existing default of 0.75
+    s->resolution_mode     = 0;  // Percent - matches AppState::resolution_mode's default
+    s->resolution_w        = 1280; // matches AppState::resolution_w's default
+    s->resolution_h        = 720;  // matches AppState::resolution_h's default
+    s->preview_quality_pct = 100;  // matches AppState::preview_quality_pct's default
+    s->preview_fps         = 15;   // matches AppState::preview_fps's default
 }
 
 /* -- Public API ------------------------------------------------------------- */
@@ -240,7 +252,13 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     s->dxgi = _json_get_bool(json, "dxgi", s->dxgi) ? 1 : 0;
     s->show_summary        = _json_get_bool(json, "show_summary",        s->show_summary)        ? 1 : 0;
     s->show_overlays_panel = _json_get_bool(json, "show_overlays_panel", s->show_overlays_panel) ? 1 : 0;
+    s->show_audio_panel    = _json_get_bool(json, "show_audio_panel",    s->show_audio_panel)    ? 1 : 0;
     s->resolution_pct      = _json_get_int(json,  "resolution_pct",      s->resolution_pct);
+    s->resolution_mode     = _json_get_int(json,  "resolution_mode",     s->resolution_mode);
+    s->resolution_w        = _json_get_int(json,  "resolution_w",        s->resolution_w);
+    s->resolution_h        = _json_get_int(json,  "resolution_h",        s->resolution_h);
+    s->preview_quality_pct = _json_get_int(json,  "preview_quality_pct", s->preview_quality_pct);
+    s->preview_fps         = _json_get_int(json,  "preview_fps",         s->preview_fps);
 
     return 1;
 }
@@ -276,7 +294,13 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         "  \"dxgi\":          %s,\n"
         "  \"show_summary\":        %s,\n"
         "  \"show_overlays_panel\": %s,\n"
-        "  \"resolution_pct\":      %d\n"
+        "  \"show_audio_panel\":    %s,\n"
+        "  \"resolution_pct\":      %d,\n"
+        "  \"resolution_mode\":     %d,\n"
+        "  \"resolution_w\":        %d,\n"
+        "  \"resolution_h\":        %d,\n"
+        "  \"preview_quality_pct\": %d,\n"
+        "  \"preview_fps\":         %d\n"
         "}\n",
         _escape_json(s->output_folder).c_str(),
         s->quality, s->fps, s->monitor,
@@ -294,7 +318,13 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         s->dxgi ? "true" : "false",
         s->show_summary        ? "true" : "false",
         s->show_overlays_panel ? "true" : "false",
-        s->resolution_pct
+        s->show_audio_panel    ? "true" : "false",
+        s->resolution_pct,
+        s->resolution_mode,
+        s->resolution_w,
+        s->resolution_h,
+        s->preview_quality_pct,
+        s->preview_fps
     );
 
     FILE *f = fopen(path, "wb");
@@ -333,6 +363,41 @@ HR_EXPORT int  hr_settings_get_resolution_pct(const void *h) {
 }
 HR_EXPORT void hr_settings_set_resolution_pct(void *h, int v) {
     if (h) static_cast<HrSettings *>(h)->resolution_pct = v;
+}
+
+HR_EXPORT int  hr_settings_get_resolution_mode(const void *h) {
+    return h ? static_cast<const HrSettings *>(h)->resolution_mode : 0;
+}
+HR_EXPORT void hr_settings_set_resolution_mode(void *h, int v) {
+    if (h) static_cast<HrSettings *>(h)->resolution_mode = (v != 0) ? 1 : 0;
+}
+
+HR_EXPORT int  hr_settings_get_resolution_w(const void *h) {
+    return h ? static_cast<const HrSettings *>(h)->resolution_w : 1280;
+}
+HR_EXPORT void hr_settings_set_resolution_w(void *h, int v) {
+    if (h) static_cast<HrSettings *>(h)->resolution_w = (v < 2) ? 2 : v;
+}
+
+HR_EXPORT int  hr_settings_get_resolution_h(const void *h) {
+    return h ? static_cast<const HrSettings *>(h)->resolution_h : 720;
+}
+HR_EXPORT void hr_settings_set_resolution_h(void *h, int v) {
+    if (h) static_cast<HrSettings *>(h)->resolution_h = (v < 2) ? 2 : v;
+}
+
+HR_EXPORT int  hr_settings_get_preview_quality_pct(const void *h) {
+    return h ? static_cast<const HrSettings *>(h)->preview_quality_pct : 100;
+}
+HR_EXPORT void hr_settings_set_preview_quality_pct(void *h, int v) {
+    if (h) static_cast<HrSettings *>(h)->preview_quality_pct = (v < 10) ? 10 : (v > 100 ? 100 : v);
+}
+
+HR_EXPORT int  hr_settings_get_preview_fps(const void *h) {
+    return h ? static_cast<const HrSettings *>(h)->preview_fps : 15;
+}
+HR_EXPORT void hr_settings_set_preview_fps(void *h, int v) {
+    if (h) static_cast<HrSettings *>(h)->preview_fps = (v < 1) ? 1 : (v > 60 ? 60 : v);
 }
 
 HR_EXPORT int  hr_settings_get_monitor(const void *h) {
@@ -399,6 +464,7 @@ HR_EXPORT int hr_settings_get_flag(const void *h, const char *name) {
     if (strcmp(name, "always_on_top")== 0) return s->always_on_top;
     if (strcmp(name, "show_summary")        == 0) return s->show_summary;
     if (strcmp(name, "show_overlays_panel") == 0) return s->show_overlays_panel;
+    if (strcmp(name, "show_audio_panel") == 0) return s->show_audio_panel;
     if (strcmp(name, "disable_preview")     == 0) return s->disable_preview;
     return 0;
 }
@@ -414,5 +480,6 @@ HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
     if (strcmp(name, "always_on_top")== 0) { s->always_on_top= val; return; }
     if (strcmp(name, "show_summary")        == 0) { s->show_summary        = val; return; }
     if (strcmp(name, "show_overlays_panel") == 0) { s->show_overlays_panel = val; return; }
+    if (strcmp(name, "show_audio_panel") == 0) { s->show_audio_panel = val; return; }
     if (strcmp(name, "disable_preview")     == 0) { s->disable_preview     = val; return; }
 }
