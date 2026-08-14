@@ -26,6 +26,7 @@
 #include <wx/dirdlg.h>
 #include <wx/combobox.h>
 #include <wx/choice.h>
+#include <wx/scrolwin.h>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -178,7 +179,7 @@ private:
     }
 
     void BuildGeneralTab(wxColour bg, wxColour surface, wxColour accent, wxColour text) {
-        auto *page = new wxPanel(notebook_);
+        auto *page = new wxScrolledWindow(notebook_);
         page->SetBackgroundColour(bg);
         auto *pageRoot = new wxBoxSizer(wxVERTICAL);
         auto *grid = new wxFlexGridSizer(2, 10, 10);
@@ -336,6 +337,8 @@ private:
 
         pageRoot->AddStretchSpacer(1);
         page->SetSizer(pageRoot);
+        page->SetScrollRate(0, 12);
+        page->FitInside();
         notebook_->AddPage(page, "General");
     }
 
