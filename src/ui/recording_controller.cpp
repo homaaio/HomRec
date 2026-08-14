@@ -421,6 +421,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         ScaledPreviewSize(pvw, pvh);
         pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
                                  pvw, pvh);
+        last_overlays_sent_valid_ = false;
     }
     bool pipeline_started = reused_preview_pipeline;
     if (pipeline_ && !reused_preview_pipeline) pipeline_started = hr_pl_start(pipeline_) != 0;
@@ -769,6 +770,7 @@ void RecordingController::EnsurePreview() {
     ScaledPreviewSize(pvw, pvh);
     pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
                              pvw, pvh);
+    last_overlays_sent_valid_ = false;
     if (pipeline_ && !hr_pl_start(pipeline_)) {
         hr_pl_destroy(pipeline_);
         pipeline_ = nullptr;
@@ -787,7 +789,7 @@ void RecordingController::TeardownPreview() {
     // Stop() is what decides whether to keep or destroy it for a running
     // recording, based on the same state_.disable_preview flag.
     if (!pipeline_ || state_.recording) return;
-    hr_pl_stop(pipeline_);
+
     hr_pl_destroy(pipeline_);
     pipeline_ = nullptr;
 }
