@@ -215,13 +215,6 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCtxDelete, L"Delete");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // Live preview normally has to be running for the drag-to-position/
-    // resize handles on the preview panel to appear at all - if the user's
-    // turned it off (Settings > Disable live preview), this is the only
-    // way left to reposition an overlay. Grabs a one-off screenshot and
-    // shows every overlay (not just this row's) on top of it in the same
-    // preview panel, editable the normal way; "Refresh" re-takes the
-    // screenshot without leaving that mode.
     AppendMenuW(menu, MF_STRING, kCtxApplyNoPreview, L"Apply with preview off");
     AppendMenuW(menu, MF_STRING, kCtxRefreshSnapshot, L"Refresh screenshot");
 
