@@ -111,6 +111,8 @@ struct AppState {
     bool show_audio_panel    = true;
     bool show_overlays_panel = true;
     bool disable_preview     = false; // skip capturing/rendering the live preview, for lower-end machines
+    bool hint_no_overlay     = true;  // show the "don't see your overlay?" hint under the disabled-preview ':)' -
+                                       // togglable from the bter plugin console ("edit settings hint-no-overlay false")
     // Live-preview panel (not the recording itself): how big and how often
     // it's redrawn. Lower values cost real CPU/GPU time on weak machines
     // even though they never end up in the actual recording.
