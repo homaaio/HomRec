@@ -81,6 +81,18 @@ public:
     PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState &state);
     void SetPlaceholderText(const wxString &text) { placeholder_ = text; Refresh(); }
 
+    // "Apply with preview off" (overlays_dock_panel.cpp's row context
+    // menu, wired up in main_frame.cpp) - lets overlays still be dragged/
+    // resized here even with Settings > Disable live preview on, using a
+    // one-off screenshot instead of the live feed. While active, every
+    // overlay is drawn/hit-testable regardless of OverlayDef::visible (the
+    // user needs to be able to reach a hidden one to reposition it too),
+    // not just the ones normally shown live.
+    void EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h);
+    void UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, int h);
+    void ExitSnapshotMode();
+    bool InSnapshotMode() const { return snapshot_mode_; }
+
 private:
     void OnPaint(wxPaintEvent &evt);
     void OnLeftDown(wxMouseEvent &evt);
@@ -97,8 +109,18 @@ private:
 
     RecordingController *&rec_;
     AppState &state_;
-    wxString placeholder_ = "Preview (start recording to see it)";
+    // Shown only for the brief moment before the very first preview frame
+    // has arrived (EnsurePreview()'s pipeline starts at app launch and
+    // keeps running the whole session now - see RecordingController -
+    // so this is no longer "you must be recording to see anything", just
+    // "still warming up").
+    wxString placeholder_ = "Preview loading...";
     std::vector<uint8_t> frame_buf_;
+
+    // -- "Apply with preview off" snapshot mode (see EnterSnapshotMode()) --
+    bool snapshot_mode_ = false;
+    std::vector<uint8_t> snapshot_buf_;
+    int snapshot_w_ = 0, snapshot_h_ = 0;
 
     // -- direct overlay drag/resize on the preview -------------------------
     // Overlays previously could only be repositioned via a

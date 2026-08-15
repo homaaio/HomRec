@@ -170,7 +170,7 @@ PreviewPanel::PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState
 void PreviewPanel::OnPaint(wxPaintEvent &) {
     wxAutoBufferedPaintDC dc(this);
 
-    if (state_.disable_preview) {
+    if (state_.disable_preview && !snapshot_mode_) {
         // Deliberately distinct from the "no frame yet" placeholder below -
         // this is an intentional choice (Settings > Disable live preview),
         // not something that looks broken/waiting.
@@ -184,7 +184,23 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         wxString smiley = ":)";
         wxSize ext = dc.GetTextExtent(smiley);
         wxSize cs = GetClientSize();
-        dc.DrawText(smiley, (cs.GetWidth() - ext.GetWidth()) / 2, (cs.GetHeight() - ext.GetHeight()) / 2);
+        int smileyY = (cs.GetHeight() - ext.GetHeight()) / 2;
+        dc.DrawText(smiley, (cs.GetWidth() - ext.GetWidth()) / 2, smileyY);
+
+        // Preview being off means dragging/resizing overlays against the
+        // live image doesn't work (see overlays_dock_panel.cpp's "apply
+        // with preview off" snapshot editor for the actual fix) - this is
+        // just a pointer to it, and it's what "edit settings
+        // hint-no-overlay false" (bter plugin console command) turns off.
+        if (state_.hint_no_overlay) {
+            wxFont hintFont = GetFont();
+            dc.SetFont(hintFont);
+            wxString hint = "Don't see your overlay here? Preview is off - "
+                             "right-click it in the Overlays panel and use "
+                             "\"Apply with preview off\" instead.";
+            wxSize hintExt = dc.GetTextExtent(hint);
+            dc.DrawText(hint, (cs.GetWidth() - hintExt.GetWidth()) / 2, smileyY + ext.GetHeight() + 8);
+        }
         return;
     }
 
@@ -192,7 +208,17 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
     dc.Clear();
 
     int w = 0, h = 0;
-    bool got = rec_ && rec_->GetPreviewFrame(frame_buf_, w, h);
+    bool got;
+    if (snapshot_mode_) {
+        // Static one-off screenshot (see EnterSnapshotMode()) instead of
+        // the live feed - frame_buf_ below is what the rest of this
+        // function (scaling/caching/drawing) actually reads.
+        frame_buf_ = snapshot_buf_;
+        w = snapshot_w_; h = snapshot_h_;
+        got = !frame_buf_.empty() && w > 0 && h > 0;
+    } else {
+        got = rec_ && rec_->GetPreviewFrame(frame_buf_, w, h);
+    }
     if (!got || w <= 0 || h <= 0) {
         dc.SetTextForeground(wxColour(150, 150, 160));
         wxFont f = GetFont();
@@ -243,7 +269,11 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         const int handle = 8;
         for (size_t i = 0; i < state_.overlays.size(); ++i) {
             const auto &ov = state_.overlays[i];
-            if (!ov.visible) continue;
+            // In snapshot mode every overlay is shown/draggable, even a
+            // hidden one - that's the only way left to reach it when the
+            // live preview (where it'd otherwise be temporarily unhidden
+            // via Show/Hide) is off.
+            if (!ov.visible && !snapshot_mode_) continue;
             int rx = prevRect.GetX() + (int)(ov.x * sx);
             int ry = prevRect.GetY() + (int)(ov.y * sy);
             int rw = std::max(4, (int)(ov.w * sx));
@@ -291,7 +321,7 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
     // so overlapping overlays grab the one the user actually sees on top.
     for (int i = (int)state_.overlays.size() - 1; i >= 0; --i) {
         auto &ov = state_.overlays[(size_t)i];
-        if (!ov.visible) continue;
+        if (!ov.visible && !snapshot_mode_) continue;
         int rx = prevRect.GetX() + (int)(ov.x * sx);
         int ry = prevRect.GetY() + (int)(ov.y * sy);
         int rw = std::max(4, (int)(ov.w * sx));
@@ -388,6 +418,25 @@ void PreviewPanel::OnCaptureLost(wxMouseCaptureLostEvent &) {
     Refresh();
 }
 
+void PreviewPanel::EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h) {
+    snapshot_mode_ = true;
+    UpdateSnapshotFrame(buf, w, h);
+}
+
+void PreviewPanel::UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, int h) {
+    snapshot_buf_ = buf;
+    snapshot_w_ = w;
+    snapshot_h_ = h;
+    Refresh();
+}
+
+void PreviewPanel::ExitSnapshotMode() {
+    snapshot_mode_ = false;
+    snapshot_buf_.clear();
+    snapshot_w_ = snapshot_h_ = 0;
+    Refresh();
+}
+
 // ---------------------------------------------------------------------------
 // HomRecMainFrame
 // ---------------------------------------------------------------------------
@@ -420,6 +469,7 @@ HomRecMainFrame::HomRecMainFrame()
         state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
         state_.show_audio_panel = hr_settings_get_flag(settings, "show_audio_panel") != 0;
         state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
+        state_.hint_no_overlay = hr_settings_get_flag(settings, "hint_no_overlay") != 0;
         const char *codec = hr_settings_get_codec(settings);
         if (codec && codec[0]) state_.video_codec = codec;
         const char *theme = hr_settings_get_theme(settings);
@@ -715,6 +765,26 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
             if (overlays_host_) overlays_host_->Show(state_.show_overlays_panel);
             if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
             Layout();
+        }
+    };
+    // "Apply with preview off" / "Refresh screenshot" (row context menu) -
+    // OverlaysDockPanel has no access to RecordingController/PreviewPanel
+    // itself (see overlays_dock_panel.h), so it just asks; whether this is
+    // the first call of an editing session or a refresh of an already-
+    // active one is read off preview_panel_'s own state, not the menu
+    // item the user happened to click (both do the same thing once
+    // already in the mode).
+    overlays_panel_->on_apply_no_preview = [this](bool /*refresh_only*/) {
+        if (!rec_ || !preview_panel_) return;
+        bool already_active = preview_panel_->InSnapshotMode();
+        std::vector<uint8_t> buf;
+        int w = 0, h = 0;
+        if (rec_->CaptureSnapshotFrame(buf, w, h, /*first_call=*/!already_active)) {
+            if (already_active) preview_panel_->UpdateSnapshotFrame(buf, w, h);
+            else                 preview_panel_->EnterSnapshotMode(buf, w, h);
+        } else if (!already_active) {
+            wxMessageBox("Couldn't capture a screenshot to edit overlays against - try again in a moment.",
+                         "HomRec", wxOK | wxICON_WARNING, this);
         }
     };
     parentSizer->Add(overlays_host_, 0, wxEXPAND | wxLEFT, 15);
@@ -1152,6 +1222,15 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_) && rec_raw_) {
                 rec_raw_->RefreshPreviewSettings();
+                // Live preview is authoritative again the moment it's back
+                // on - drop the "Apply with preview off" screenshot (if any
+                // editing session was active) and let CaptureSnapshotFrame's
+                // temporary pipeline go back to being torn down normally
+                // when Disable live preview is still checked.
+                if (preview_panel_ && preview_panel_->InSnapshotMode() && !state_.disable_preview) {
+                    preview_panel_->ExitSnapshotMode();
+                }
+                if (rec_raw_) rec_raw_->EndSnapshotEditing();
             }
             // Hotkeys live on a tab of this same dialog - re-apply them in
             // case they changed, same as the old (now-removed) "Advanced
