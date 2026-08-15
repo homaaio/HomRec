@@ -7,11 +7,23 @@
 #include <wininet.h>
 #include <string>
 #include <cstdio>
+#include <cctype>
 
 extern "C" {
     #include "lua.h"
     #include "lauxlib.h"
     #include "lualib.h"
+}
+
+// hr_settings.cpp doesn't have a shared header (see main_frame.cpp, which
+// declares this same set locally too) - these are its HR_EXPORT'd C ABI.
+extern "C" {
+    void *hr_settings_create();
+    void  hr_settings_destroy(void *handle);
+    int   hr_settings_load(void *handle, const char *path);
+    int   hr_settings_get_flag(const void *h, const char *name);
+    void  hr_settings_set_flag(void *h, const char *name, int v);
+    int   hr_settings_save(const void *handle, const char *path);
 }
 
 #pragma comment(lib, "wininet.lib")
@@ -125,6 +137,37 @@ int L_store_get(lua_State *L) {
     const char *def = luaL_optstring(L, 2, "");
     std::string v = PluginStore::Get(uv->plugin_dir, key, def);
     lua_pushstring(L, v.c_str());
+    return 1;
+}
+
+int L_settings_get(lua_State *L) {
+    const char *key = luaL_checkstring(L, 1);
+    void *s = hr_settings_create();
+    bool v = false;
+    if (hr_settings_load(s, "homrec_settings.json")) {
+        v = hr_settings_get_flag(s, key) != 0;
+    }
+    hr_settings_destroy(s);
+    lua_pushboolean(L, v);
+    return 1;
+}
+
+int L_settings_set(lua_State *L) {
+    const char *key = luaL_checkstring(L, 1);
+    bool val;
+    if (lua_isboolean(L, 2)) {
+        val = lua_toboolean(L, 2) != 0;
+    } else {
+        std::string sval = luaL_checkstring(L, 2);
+        for (auto &c : sval) c = (char)tolower((unsigned char)c);
+        val = (sval == "true" || sval == "1" || sval == "on" || sval == "yes");
+    }
+    void *s = hr_settings_create();
+    hr_settings_load(s, "homrec_settings.json"); // ok if this is the first-ever write - falls back to defaults
+    hr_settings_set_flag(s, key, val ? 1 : 0);
+    bool ok = hr_settings_save(s, "homrec_settings.json") != 0;
+    hr_settings_destroy(s);
+    lua_pushboolean(L, ok);
     return 1;
 }
 
@@ -331,6 +374,8 @@ void *Install(lua_State *L, LuaPluginEngine *engine, const std::string &plugin_i
     registerFn("show_toast", L_show_toast);
     registerFn("store_set", L_store_set);
     registerFn("store_get", L_store_get);
+    registerFn("settings_get", L_settings_get);
+    registerFn("settings_set", L_settings_set);
     registerFn("get_colors", L_get_colors);
     registerFn("get_ffmpeg", L_get_ffmpeg);
     registerFn("plugin_info", L_plugin_info);
