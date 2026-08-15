@@ -1,3 +1,18 @@
+// settings_dialog.cpp - progressive-disclosure rewrite.
+//
+// Was a wxNotebook split into 5 tabs (General / Video & Codec / Audio /
+// Hotkeys / Advanced) - functional, but it put codec/CRF/hw-accel/custom
+// ffmpeg args (stuff an average user has no reason to touch, and can
+// genuinely break a recording if set wrong) at the same visual weight as
+// "where do my recordings get saved". Rebuilt as a single scrollable page:
+// everyday fields are always visible, and everything a casual user
+// wouldn't understand lives in a panel that's hidden by default and
+// toggled by one button in the header ("Show advanced settings" /
+// "Hide advanced settings") - clicking it adds/removes those fields to
+// THIS window in place, it never opens a second dialog. Persistence is
+// unchanged: still goes through hr_settings_create/load/save/get_*/set_*
+// (see the note above BuildAdvancedSection() for which fields that
+// covers).
 #include "settings_dialog.h"
 #include "themed_widgets.h"
 #include "../hr_mic_enum.h"
@@ -174,12 +189,44 @@ private:
     void ShowAdvanced(bool show) {
         if (show == advanced_shown_) return;
         advanced_shown_ = show;
-        advanced_panel_->Show(advanced_shown_);
+        // Go through the sizer's Show(), not just the window's - the
+        // sizer item that reserves advanced_panel_'s space needs to know
+        // too, or the space it occupies (or doesn't) can stay stale even
+        // though the panel's own visibility flag flipped.
+        scroller_->GetSizer()->Show(advanced_panel_, advanced_shown_, true);
         advanced_toggle_btn_->SetLabelText2(wxString::FromUTF8(
             advanced_shown_ ? "\u2699 Basic" : "\u2699 Advanced"));
+        // BUGFIX: advanced_panel_ itself was never told to re-Layout() when
+        // shown - its own wxFlexGridSizer (advRoot, built once back in the
+        // ctor while the panel was still Hidden()) never got a chance to
+        // compute real widths/heights for its children, since a hidden
+        // window's Layout() calls are skipped by wx. The result: the sizer
+        // Show() above correctly flips the "is this item visible" flag and
+        // the button label updated (proving the click handler *did* run),
+        // but scroller_->FitInside()/Layout() below were reflowing a child
+        // whose own internal layout was still the all-zero one from
+        // construction, so the reserved space for it stayed effectively
+        // empty - the fields never had a size to actually be visible at.
+        // Laying out advanced_panel_ itself first (now that it's shown, so
+        // its own Layout() call actually takes effect) before asking the
+        // parent scroller to size around it fixes that.
+        advanced_panel_->Layout();
         scroller_->FitInside();
         scroller_->Layout();
         Layout();
+        // Layout() alone can leave the scrolled window's virtual size and
+        // scrollbars stale on wxMSW after a runtime Show/Hide of a child -
+        // SendSizeEvent() forces the full resize/repaint path so the newly
+        // (in)visible fields and the scrollbar actually appear right away
+        // instead of only after the dialog is manually resized.
+        scroller_->SendSizeEvent();
+        SendSizeEvent();
+        // Belt-and-suspenders: force a repaint too, in case only the
+        // layout geometry updated on this run without a corresponding
+        // WM_PAINT (observed intermittently on wxMSW after a runtime
+        // Show()/Hide() inside a wxScrolledWindow).
+        scroller_->Refresh();
+        Refresh();
     }
 
     void OnToggleAdvanced(wxCommandEvent &) { ShowAdvanced(!advanced_shown_); }
