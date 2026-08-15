@@ -1,10 +1,16 @@
 // welcome_dialog.h
 //
-// Port of homrec_app/dialogs/welcome_dialog.py's WelcomeDialog.show(). Same
-// content (header card, feature pills, tips line, link buttons) drawn with
-// GDI instead of Tk Canvas/Frame/Label stacking. The Tk version's pulsing
-// dot animation is kept as a timer-driven repaint.
+// First-run wizard shown on a fresh install (AppState::first_launch) and
+// reachable any time afterward via Help > Welcome. Three pages in one
+// window (no child dialogs): greeting -> basic settings (output folder /
+// resolution / fps, or "I understand" to skip them) -> finish (links to
+// docs/changelog, "Get Started" to close). See welcome_dialog.cpp for the
+// page-visibility mechanics.
 #pragma once
 #include <windows.h>
+#include "app_state.h"
 
-void ShowWelcomeDialog(HWND parent, HINSTANCE hInst);
+// `state` is read for its current defaults (output_folder/target_fps/
+// scale_factor) and written back (plus persisted to homrec_settings.json)
+// if the user fills in page 2 instead of checking "I understand".
+void ShowWelcomeDialog(HWND parent, HINSTANCE hInst, AppState &state);

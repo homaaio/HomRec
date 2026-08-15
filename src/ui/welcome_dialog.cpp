@@ -2,14 +2,103 @@
 #include "version.h"
 #include "win32_theme.h"
 #include <string>
+#include <shlobj.h>
+
+extern "C" {
+    // Same persistence API settings_dialog.cpp uses - loading the existing
+    // file first (rather than starting from a blank settings_ object) so
+    // that finishing this wizard doesn't clobber fields it doesn't touch.
+    void *hr_settings_create();
+    void hr_settings_destroy(void *handle);
+    int hr_settings_load(void *handle, const char *path);
+    int hr_settings_save(const void *handle, const char *path);
+    void hr_settings_set_output_folder(void *h, const char *v);
+    void hr_settings_set_fps(void *h, int v);
+    void hr_settings_set_resolution_pct(void *h, int v);
+}
 
 namespace {
+constexpr char kSettingsPath[] = "homrec_settings.json";
 
-enum { IDC_CHANGELOG = 7001, IDC_GITHUB, IDC_WEBSITE, IDC_GETSTARTED, IDT_PULSE = 1 };
+enum {
+    IDC_CHANGELOG = 7001, IDC_GITHUB, IDC_WEBSITE, IDC_GETSTARTED,
+    IDC_BACK, IDC_NEXT, IDC_SKIP, IDC_BROWSE, IDC_FOLDER_EDIT,
+    IDC_RES_COMBO, IDC_FPS_COMBO,
+    IDT_PULSE = 1
+};
+
+constexpr int kResPct[] = { 100, 75, 50, 25 };
+constexpr int kFpsOpt[] = { 15, 24, 30, 60 };
+
+enum class Page { Greeting = 0, Settings = 1, Finish = 2 };
 
 struct WelcomeCtx {
+    AppState *state = nullptr;
+    Page page = Page::Greeting;
     bool pulse_on = true;
+
+    // Page 1 (basic settings)
+    HWND hSkipChk = nullptr;
+    HWND hFolderLbl = nullptr, hFolderEdit = nullptr, hBrowseBtn = nullptr;
+    HWND hResLbl = nullptr, hResCombo = nullptr;
+    HWND hFpsLbl = nullptr, hFpsCombo = nullptr;
+    HWND hSettingsTitle = nullptr;
+
+    // Page 2 (finish)
+    HWND hFinishTitle = nullptr, hFinishBody = nullptr;
+    HWND hChangelogBtn = nullptr, hGithubBtn = nullptr, hWebsiteBtn = nullptr;
+
+    // Nav (shared across pages)
+    HWND hBackBtn = nullptr, hNextBtn = nullptr;
 };
+
+// Applies the settings-page fields to *ctx->state and persists the three
+// fields this wizard actually edits (folder/fps/resolution) - mirrors
+// SettingsDialog::OnSave()'s load-existing/set-a-few/save round trip so
+// nothing else in homrec_settings.json gets clobbered. Skipped entirely
+// if the user checked "I understand" (defaults are kept as-is).
+void ApplyAndPersistSettings(WelcomeCtx *ctx) {
+    if (!ctx->state) return;
+    if (SendMessageW(ctx->hSkipChk, BM_GETCHECK, 0, 0) == BST_CHECKED) return;
+
+    wchar_t folderW[MAX_PATH] = {};
+    GetWindowTextW(ctx->hFolderEdit, folderW, MAX_PATH);
+    int len = WideCharToMultiByte(CP_UTF8, 0, folderW, -1, nullptr, 0, nullptr, nullptr);
+    std::string folder(len > 0 ? len - 1 : 0, '\0');
+    if (len > 0) WideCharToMultiByte(CP_UTF8, 0, folderW, -1, folder.data(), len, nullptr, nullptr);
+    if (!folder.empty()) ctx->state->output_folder = folder;
+
+    int resSel = (int)SendMessageW(ctx->hResCombo, CB_GETCURSEL, 0, 0);
+    if (resSel >= 0 && resSel < 4) ctx->state->scale_factor = kResPct[resSel] / 100.0;
+
+    int fpsSel = (int)SendMessageW(ctx->hFpsCombo, CB_GETCURSEL, 0, 0);
+    if (fpsSel >= 0 && fpsSel < 4) ctx->state->target_fps = kFpsOpt[fpsSel];
+
+    void *settings = hr_settings_create();
+    hr_settings_load(settings, kSettingsPath); // ok if this is the very first run and it fails
+    hr_settings_set_output_folder(settings, ctx->state->output_folder.c_str());
+    hr_settings_set_fps(settings, ctx->state->target_fps);
+    hr_settings_set_resolution_pct(settings, (int)(ctx->state->scale_factor * 100.0 + 0.5));
+    hr_settings_save(settings, kSettingsPath);
+    hr_settings_destroy(settings);
+}
+
+void SetPageVisibility(WelcomeCtx *ctx, HWND hwnd) {
+    bool onSettings = ctx->page == Page::Settings;
+    bool onFinish = ctx->page == Page::Finish;
+
+    for (HWND h : { ctx->hSettingsTitle, ctx->hSkipChk, ctx->hFolderLbl, ctx->hFolderEdit,
+                     ctx->hBrowseBtn, ctx->hResLbl, ctx->hResCombo, ctx->hFpsLbl, ctx->hFpsCombo })
+        ShowWindow(h, onSettings ? SW_SHOW : SW_HIDE);
+
+    for (HWND h : { ctx->hFinishTitle, ctx->hFinishBody, ctx->hChangelogBtn, ctx->hGithubBtn, ctx->hWebsiteBtn })
+        ShowWindow(h, onFinish ? SW_SHOW : SW_HIDE);
+
+    ShowWindow(ctx->hBackBtn, ctx->page != Page::Greeting ? SW_SHOW : SW_HIDE);
+    SetWindowTextW(ctx->hNextBtn, ctx->page == Page::Finish ? L"Get Started \u2192" : L"Next \u2192");
+
+    InvalidateRect(hwnd, nullptr, TRUE);
+}
 
 LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto *ctx = reinterpret_cast<WelcomeCtx *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -25,7 +114,12 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_TIMER:
             if (wParam == IDT_PULSE) {
                 ctx->pulse_on = !ctx->pulse_on;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                // Only the header (top ~100px) actually changes on the pulse
+                // tick - restricting the invalidated rect avoids repainting
+                // (and re-drawing text into) the page content underneath it
+                // 600ms out of every second for no reason.
+                RECT header; GetClientRect(hwnd, &header); header.bottom = 100;
+                InvalidateRect(hwnd, &header, FALSE);
             }
             return 0;
         case WM_PAINT: {
@@ -37,7 +131,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             FillRect(hdc, &client, bgBrush);
             DeleteObject(bgBrush);
 
-            RECT header = { 0, 0, client.right, 110 };
+            RECT header = { 0, 0, client.right, 100 };
             HBRUSH cardBrush = CreateSolidBrush(RGB(0x1a, 0x1a, 0x2e));
             FillRect(hdc, &header, cardBrush);
             DeleteObject(cardBrush);
@@ -46,7 +140,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             HPEN accentPen = CreatePen(PS_SOLID, 2, RGB(0x89, 0xb4, 0xfa));
             HGDIOBJ oldBrush = SelectObject(hdc, ringBrush);
             HGDIOBJ oldPen = SelectObject(hdc, accentPen);
-            Ellipse(hdc, 18, 18, 92, 92);
+            Ellipse(hdc, 18, 14, 82, 78);
             SelectObject(hdc, oldBrush);
             SelectObject(hdc, oldPen);
             DeleteObject(ringBrush);
@@ -56,68 +150,95 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             oldBrush = SelectObject(hdc, dotBrush);
             HPEN nullPen = (HPEN)GetStockObject(NULL_PEN);
             oldPen = SelectObject(hdc, nullPen);
-            Ellipse(hdc, 43, 43, 67, 67);
+            Ellipse(hdc, 38, 34, 62, 58);
             SelectObject(hdc, oldBrush);
             SelectObject(hdc, oldPen);
             DeleteObject(dotBrush);
 
             SetBkMode(hdc, TRANSPARENT);
-            // BUGFIX/PERF: these 3 fonts used to be CreateFontW'd and
-            // DeleteObject'd fresh on every single WM_PAINT - and WM_PAINT
-            // fires every 600ms for as long as this dialog is open, purely
-            // to toggle the pulsing dot's fill color above. Nothing else
-            // on screen ever changes, so all of this text/font churn was
-            // pure waste. Created once (function-static) and reused for
-            // every repaint instead - same visual result, no more
-            // create/destroy cycling of GDI font objects every pulse.
-            static HFONT titleFont = CreateFontW(-28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            static HFONT titleFont = CreateFontW(-26, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                            CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
             static HFONT subFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                          CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            static HFONT bodyBold = CreateFontW(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                          CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
             HFONT oldFont = (HFONT)SelectObject(hdc, titleFont);
             SetTextColor(hdc, RGB(0x89, 0xb4, 0xfa));
-            TextOutW(hdc, 110, 24, L"HomRec", 6);
+            TextOutW(hdc, 100, 18, L"HomRec", 6);
             SelectObject(hdc, subFont);
             SetTextColor(hdc, RGB(0xa6, 0xad, 0xc8));
             std::wstring verLine = L"Screen Recorder  v" HR_APP_VERSION_W;
-            TextOutW(hdc, 110, 62, verLine.c_str(), (int)verLine.size());
+            TextOutW(hdc, 100, 54, verLine.c_str(), (int)verLine.size());
             SetTextColor(hdc, RGB(0x45, 0x47, 0x5a));
-            TextOutW(hdc, 110, 82, L"by homaaio", 10);
+            TextOutW(hdc, 100, 72, L"by homaaio", 10);
             SelectObject(hdc, oldFont);
 
-            // Body text
-            oldFont = (HFONT)SelectObject(hdc, bodyBold);
-            SetTextColor(hdc, RGB(0xcd, 0xd6, 0xf4));
-            TextOutW(hdc, 28, 150, L"Hello,", 6);
-            SelectObject(hdc, oldFont);
+            // Page 0 body (page 1/2 bodies are real child controls, shown/
+            // hidden by SetPageVisibility() instead - only the greeting page
+            // is static enough to just paint directly).
+            if (ctx->page == Page::Greeting) {
+                static HFONT bodyBold = CreateFontW(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                              CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+                oldFont = (HFONT)SelectObject(hdc, bodyBold);
+                SetTextColor(hdc, RGB(0xcd, 0xd6, 0xf4));
+                TextOutW(hdc, 28, 132, L"Hello, and thanks for choosing HomRec!", 39);
+                SelectObject(hdc, oldFont);
 
-            RECT msgRect = { 28, 178, client.right - 28, 240 };
-            SetTextColor(hdc, RGB(0xa6, 0xad, 0xc8));
-            std::wstring msg = L"Welcome to HomRec! If you have any issues, reach out on GitHub.\n\nEnjoy. \u2014 homaaio";
-            DrawTextW(hdc, msg.c_str(), -1, &msgRect, DT_LEFT | DT_WORDBREAK);
-
-            RECT tipsRect = { 28, 252, client.right - 28, 300 };
-            HBRUSH tipsBg = CreateSolidBrush(RGB(0x1a, 0x1a, 0x2e));
-            FillRect(hdc, &tipsRect, tipsBg);
-            DeleteObject(tipsBg);
-            SetTextColor(hdc, RGB(0x89, 0xb4, 0xfa));
-            TextOutW(hdc, 40, 258, L"Quick tips:", 11);
-            SetTextColor(hdc, RGB(0xa6, 0xad, 0xc8));
-            std::wstring tips = L"F9 = Start/Stop   F10 = Pause   F11 = Fullscreen   Ctrl+Shift+T = Console";
-            TextOutW(hdc, 40, 278, tips.c_str(), (int)tips.size());
+                RECT msgRect = { 28, 168, client.right - 28, 300 };
+                SetTextColor(hdc, RGB(0xa6, 0xad, 0xc8));
+                std::wstring msg =
+                    L"This quick setup takes a few seconds and helps HomRec "
+                    L"record at settings that actually fit your machine.\n\n"
+                    L"Click Next to choose where recordings are saved and "
+                    L"pick a resolution/fps - or skip straight past it if "
+                    L"you'd rather just use the defaults.";
+                DrawTextW(hdc, msg.c_str(), -1, &msgRect, DT_LEFT | DT_WORDBREAK);
+            }
 
             EndPaint(hwnd, &ps);
             return 0;
         }
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             switch (id) {
+                case IDC_SKIP: {
+                    bool skip = SendMessageW(ctx->hSkipChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    for (HWND h : { ctx->hFolderEdit, ctx->hBrowseBtn, ctx->hResCombo, ctx->hFpsCombo })
+                        EnableWindow(h, !skip);
+                    break;
+                }
+                case IDC_BROWSE: {
+                    wchar_t path[MAX_PATH] = {};
+                    BROWSEINFOW bi = {};
+                    bi.hwndOwner = hwnd;
+                    bi.lpszTitle = L"Choose where recordings are saved";
+                    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+                    if (pidl) {
+                        if (SHGetPathFromIDListW(pidl, path)) SetWindowTextW(ctx->hFolderEdit, path);
+                        CoTaskMemFree(pidl);
+                    }
+                    break;
+                }
+                case IDC_BACK:
+                    if (ctx->page != Page::Greeting) {
+                        ctx->page = (Page)((int)ctx->page - 1);
+                        SetPageVisibility(ctx, hwnd);
+                    }
+                    break;
+                case IDC_NEXT:
+                    if (ctx->page == Page::Settings) ApplyAndPersistSettings(ctx);
+                    if (ctx->page == Page::Finish) { DestroyWindow(hwnd); break; }
+                    ctx->page = (Page)((int)ctx->page + 1);
+                    SetPageVisibility(ctx, hwnd);
+                    break;
                 case IDC_CHANGELOG:
                     ShellExecuteW(hwnd, L"open", L"https://github.com/homaaio/HomREC/blob/main/CHANGELOG.txt",
                                   nullptr, nullptr, SW_SHOWNORMAL);
@@ -127,9 +248,6 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     break;
                 case IDC_WEBSITE:
                     ShellExecuteW(hwnd, L"open", L"https://homaaio.github.io/HomREC/", nullptr, nullptr, SW_SHOWNORMAL);
-                    break;
-                case IDC_GETSTARTED:
-                    DestroyWindow(hwnd);
                     break;
             }
             return 0;
@@ -147,7 +265,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
 } // namespace
 
-void ShowWelcomeDialog(HWND parent, HINSTANCE hInst) {
+void ShowWelcomeDialog(HWND parent, HINSTANCE hInst, AppState &state) {
     static const wchar_t kClass[] = L"HomRecWelcomeDialog";
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WelcomeProc;
@@ -156,9 +274,10 @@ void ShowWelcomeDialog(HWND parent, HINSTANCE hInst) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
 
-    const int W = 580, H = 440;
+    const int W = 580, H = 470;
 
     WelcomeCtx ctx;
+    ctx.state = &state;
     int wx, wy, ww, wh;
     HrWin32Theme::CenteredWindowRect(W, H, WS_POPUP | WS_CAPTION | WS_SYSMENU, wx, wy, ww, wh);
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, L"Welcome to HomRec",
@@ -167,14 +286,100 @@ void ShowWelcomeDialog(HWND parent, HINSTANCE hInst) {
                                  parent, nullptr, hInst, &ctx);
     HrWin32Theme::ApplyDarkTitleBar(hwnd);
 
-    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"Changelog", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     24, H - 76, 100, 30, hwnd, (HMENU)IDC_CHANGELOG, hInst, nullptr));
-    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"GitHub", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     130, H - 76, 90, 30, hwnd, (HMENU)IDC_GITHUB, hInst, nullptr));
-    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"Website", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     226, H - 76, 90, 30, hwnd, (HMENU)IDC_WEBSITE, hInst, nullptr));
-    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"Get Started \u2192", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                     W - 154, H - 76, 130, 30, hwnd, (HMENU)IDC_GETSTARTED, hInst, nullptr));
+    // -- Page 1: basic settings --------------------------------------------
+    ctx.hSettingsTitle = CreateWindowExW(0, L"STATIC", L"A couple of basic settings",
+        WS_CHILD | SS_LEFT, 28, 118, W - 56, 22, hwnd, nullptr, hInst, nullptr);
+    // static: ShowWelcomeDialog() can be re-entered (Help > Welcome), and
+    // this same font object is reused by both page titles below - a fresh
+    // CreateFontW() per call with no matching DeleteObject would leak one
+    // GDI font handle every time the wizard is reopened.
+    static HFONT boldFont = CreateFontW(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    SendMessageW(ctx.hSettingsTitle, WM_SETFONT, (WPARAM)boldFont, TRUE);
+
+    ctx.hFolderLbl = CreateWindowExW(0, L"STATIC", L"Save recordings to:",
+        WS_CHILD | SS_LEFT, 28, 152, 200, 20, hwnd, nullptr, hInst, nullptr);
+    ctx.hFolderEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+        WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, 28, 174, W - 56 - 90, 24,
+        hwnd, (HMENU)IDC_FOLDER_EDIT, hInst, nullptr);
+    {
+        int len = MultiByteToWideChar(CP_UTF8, 0, state.output_folder.c_str(), -1, nullptr, 0);
+        std::wstring w(len > 0 ? len - 1 : 0, L'\0');
+        if (len > 0) MultiByteToWideChar(CP_UTF8, 0, state.output_folder.c_str(), -1, w.data(), len);
+        SetWindowTextW(ctx.hFolderEdit, w.empty() ? L"recordings" : w.c_str());
+    }
+    ctx.hBrowseBtn = CreateWindowExW(0, L"BUTTON", L"Browse\u2026", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        W - 56 - 80 + 28, 173, 80, 26, hwnd, (HMENU)IDC_BROWSE, hInst, nullptr);
+    HrWin32Theme::ThemeButton(ctx.hBrowseBtn);
+
+    ctx.hResLbl = CreateWindowExW(0, L"STATIC", L"Resolution:", WS_CHILD | SS_LEFT,
+        28, 214, 140, 20, hwnd, nullptr, hInst, nullptr);
+    ctx.hResCombo = CreateWindowExW(0, L"COMBOBOX", nullptr,
+        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+        28, 236, 160, 200, hwnd, (HMENU)IDC_RES_COMBO, hInst, nullptr);
+    SendMessageW(ctx.hResCombo, CB_ADDSTRING, 0, (LPARAM)L"100% (Native)");
+    SendMessageW(ctx.hResCombo, CB_ADDSTRING, 0, (LPARAM)L"75%");
+    SendMessageW(ctx.hResCombo, CB_ADDSTRING, 0, (LPARAM)L"50%");
+    SendMessageW(ctx.hResCombo, CB_ADDSTRING, 0, (LPARAM)L"25%");
+    {
+        int pct = (int)(state.scale_factor * 100.0 + 0.5);
+        int sel = pct >= 100 ? 0 : pct >= 75 ? 1 : pct >= 50 ? 2 : 3;
+        SendMessageW(ctx.hResCombo, CB_SETCURSEL, sel, 0);
+    }
+
+    ctx.hFpsLbl = CreateWindowExW(0, L"STATIC", L"FPS:", WS_CHILD | SS_LEFT,
+        220, 214, 140, 20, hwnd, nullptr, hInst, nullptr);
+    ctx.hFpsCombo = CreateWindowExW(0, L"COMBOBOX", nullptr,
+        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+        220, 236, 120, 200, hwnd, (HMENU)IDC_FPS_COMBO, hInst, nullptr);
+    SendMessageW(ctx.hFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"15");
+    SendMessageW(ctx.hFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"24");
+    SendMessageW(ctx.hFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"30");
+    SendMessageW(ctx.hFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"60");
+    {
+        int sel = 0, best = 1 << 30;
+        for (int i = 0; i < 4; ++i) {
+            int d = abs(kFpsOpt[i] - state.target_fps);
+            if (d < best) { best = d; sel = i; }
+        }
+        SendMessageW(ctx.hFpsCombo, CB_SETCURSEL, sel, 0);
+    }
+
+    ctx.hSkipChk = CreateWindowExW(0, L"BUTTON",
+        L"I understand - skip this and just use the defaults",
+        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, 28, 300, W - 56, 24,
+        hwnd, (HMENU)IDC_SKIP, hInst, nullptr);
+
+    // -- Page 2: finish -------------------------------------------------------
+    ctx.hFinishTitle = CreateWindowExW(0, L"STATIC", L"You're all set!", WS_CHILD | SS_LEFT,
+        28, 130, W - 56, 26, hwnd, nullptr, hInst, nullptr);
+    SendMessageW(ctx.hFinishTitle, WM_SETFONT, (WPARAM)boldFont, TRUE);
+    ctx.hFinishBody = CreateWindowExW(0, L"STATIC",
+        L"Good luck recording! If you'd like a tour of what HomRec can do, "
+        L"the documentation and changelog are one click away below - and "
+        L"you can always re-open this wizard later from Help > Welcome.",
+        WS_CHILD | SS_LEFT, 28, 164, W - 56, 90, hwnd, nullptr, hInst, nullptr);
+
+    ctx.hChangelogBtn = CreateWindowExW(0, L"BUTTON", L"Changelog", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        28, 270, 100, 30, hwnd, (HMENU)IDC_CHANGELOG, hInst, nullptr);
+    HrWin32Theme::ThemeButton(ctx.hChangelogBtn);
+    ctx.hGithubBtn = CreateWindowExW(0, L"BUTTON", L"GitHub", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        134, 270, 90, 30, hwnd, (HMENU)IDC_GITHUB, hInst, nullptr);
+    HrWin32Theme::ThemeButton(ctx.hGithubBtn);
+    ctx.hWebsiteBtn = CreateWindowExW(0, L"BUTTON", L"Documentation", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        230, 270, 120, 30, hwnd, (HMENU)IDC_WEBSITE, hInst, nullptr);
+    HrWin32Theme::ThemeButton(ctx.hWebsiteBtn);
+
+    // -- Nav (every page) -------------------------------------------------
+    ctx.hBackBtn = CreateWindowExW(0, L"BUTTON", L"\u2190 Back", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        24, H - 66, 100, 30, hwnd, (HMENU)IDC_BACK, hInst, nullptr);
+    HrWin32Theme::ThemeButton(ctx.hBackBtn);
+    ctx.hNextBtn = CreateWindowExW(0, L"BUTTON", L"Next \u2192", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        W - 154, H - 66, 130, 30, hwnd, (HMENU)IDC_NEXT, hInst, nullptr);
+    HrWin32Theme::ThemeButton(ctx.hNextBtn);
+
+    SetPageVisibility(&ctx, hwnd);
 
     EnableWindow(parent, FALSE);
     ShowWindow(hwnd, SW_SHOW);

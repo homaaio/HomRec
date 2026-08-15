@@ -398,8 +398,7 @@ HomRecMainFrame::HomRecMainFrame()
     g_frame = this;
     SetIcon(wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE));
 
-    // Load whatever Settings previously saved - see main_window.cpp's
-    // original OnCreate() comment; unchanged behavior, just moved here.
+    // Load whatever Settings was previously saved.
     void *settings = hr_settings_create();
     if (hr_settings_load(settings, "homrec_settings.json")) {
         const char *folder = hr_settings_get_output_folder(settings);
@@ -427,6 +426,7 @@ HomRecMainFrame::HomRecMainFrame()
         if (theme && theme[0]) state_.current_theme = theme;
     } else {
         state_.output_folder = "recordings";
+        state_.first_launch = true;
     }
     hr_settings_destroy(settings);
 
@@ -502,7 +502,7 @@ HomRecMainFrame::HomRecMainFrame()
     Bind(EVT_HOTKEY_FULLSCREEN, &HomRecMainFrame::OnHotkeyEvent, this);
 
     if (state_.first_launch) {
-        ShowWelcomeDialog(GetHWND(), wxGetInstance());
+        ShowWelcomeDialog(GetHWND(), wxGetInstance(), state_);
     }
 }
 
@@ -1169,7 +1169,7 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             if (!console_) console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), GetHWND(), plugins_.get());
             console_->Show(wxGetInstance());
             break;
-        case ID_HELP_WELCOME: ShowWelcomeDialog(GetHWND(), wxGetInstance()); break;
+        case ID_HELP_WELCOME: ShowWelcomeDialog(GetHWND(), wxGetInstance(), state_); break;
         case ID_HELP_ABOUT:
             wxMessageBox("HomRec " HR_APP_VERSION, "About", wxOK, this);
             break;
