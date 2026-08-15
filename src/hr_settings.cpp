@@ -139,7 +139,7 @@ struct HrSettings {
     int   always_on_top;  /* bool */
     char  performance[16];/* "ultra"/"turbo"/"balanced"/"eco" */
     int   dxgi;           /* bool - use DXGI capture */
-    int   show_summary;        /* bool - "recording saved" popup, see main_window.cpp */
+    int   show_summary;        /* bool - "recording saved" popup */
     int   show_overlays_panel; /* bool - persistent overlays dock panel, see overlays_dock_panel.cpp */
     int   show_audio_panel;    /* bool - audio mixer strip below the preview, see audio_panel.cpp */
     int   resolution_pct;      /* 25/50/75/100 - % of native monitor resolution to capture at */
