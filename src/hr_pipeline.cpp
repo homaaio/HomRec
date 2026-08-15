@@ -66,6 +66,7 @@ extern "C" {
                              int *out_w, int *out_h, char *name_buf, int name_buf_len);
     void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
+    void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
     void *hr_sw_create();
     void  hr_sw_destroy(void *handle);
     void  hr_sw_start(void *handle);
@@ -105,13 +106,49 @@ static bool ensure_libs() {
     g_libs.load(nullptr);
     return g_libs.loaded;
 }
+
+// ---------------------------------------------------------------------------
+// BGRA→YUV420p, split across a few worker threads by scanline band.
+//----------------------------------------------------------------------------
+
+static void convert_bgra_to_yuv420p_mt(const uint8_t *bgra, uint8_t *yuv,
+                                        int w, int h) {
+    static constexpr long long kMinPixelsForThreads = 640LL * 480LL;
+    unsigned hw = std::thread::hardware_concurrency();
+    int n_bands = 1;
+    if ((long long)w * h >= kMinPixelsForThreads && hw > 1) {
+        n_bands = (int)std::min<unsigned>(hw - 1, 4);
+        n_bands = std::max(n_bands, 1);
+    }
+    if (n_bands <= 1) {
+        hr_bgra_to_yuv420p_band(bgra, yuv, w, h, 0, h);
+        return;
+    }
+
+    int band_h = ((h / n_bands) + 1) & ~1;
+    if (band_h < 2) band_h = 2;
+
+    std::vector<std::thread> workers;
+    workers.reserve((size_t)n_bands - 1);
+    int y0 = 0;
+    for (int i = 0; i < n_bands && y0 < h; ++i) {
+        int y1 = (i == n_bands - 1) ? h : std::min(h, y0 + band_h);
+        if (i == n_bands - 1) {
+            hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, y1);
+        } else {
+            workers.emplace_back([bgra, yuv, w, h, y0, y1]() {
+                hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, y1);
+            });
+        }
+        y0 = y1;
+    }
+    for (auto &t : workers) t.join();
+}
 #endif  // _WIN32
+
 
 // ---------------------------------------------------------------------------
 // BGRA→thumbnail (box-filter, no intermediate RGB buffer)
-// OPT: устраняет bgra_to_rgb_inplace() + rgb_pv буфер целиком.
-// Работает только при целочисленных кратностях (быстрый путь).
-// При нецелочисленных - nearest-neighbour прямо из BGRA.
 // ---------------------------------------------------------------------------
 static void bgra_to_thumb(const uint8_t* __restrict bgra,
                            uint8_t*       __restrict dst,
@@ -832,7 +869,7 @@ struct Pipeline {
                 const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
                 if (yuv_frame.size() != needed) yuv_frame.resize(needed);
 
-                g_libs.bgra_to_yuv(enc_src, yuv_frame.data(), enc_w, enc_h);
+                convert_bgra_to_yuv420p_mt(enc_src, yuv_frame.data(), enc_w, enc_h);
 
                 std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
                 {
@@ -907,12 +944,13 @@ struct Pipeline {
 // ============================================================================
 
 HR_EXPORT void* hr_pl_create(int w, int h, int fps,
-                               intptr_t pipe_fd, int pv_w, int pv_h) {
+                               intptr_t pipe_fd, int pv_w, int pv_h, int output_idx) {
 #ifndef _WIN32
-    (void)w; (void)h; (void)fps; (void)pipe_fd; (void)pv_w; (void)pv_h;
+    (void)w; (void)h; (void)fps; (void)pipe_fd; (void)pv_w; (void)pv_h; (void)output_idx;
     return nullptr;
 #else
     if (!ensure_libs()) return nullptr;
+    if (output_idx < 0) output_idx = 0; // defensive - callers pass a resolved 0-based index
 
     auto* pl = new Pipeline();
     pl->src_w       = w;
@@ -925,25 +963,30 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     pl->pipe_handle = pipe_fd;
     pl->recording   = (pipe_fd != 0 && pipe_fd != -1);
 
-    pl->dx_ctx = g_libs.dx_create(0, 0);
+    // BUGFIX: this used to be a hardcoded dx_create(0, 0), so the
+    // "Monitor:" setting only ever affected capture *sizing*
+    // (RecordingController::ResolveCaptureSize()) and never which
+    // physical display DXGI actually duplicated - picking any monitor
+    // but the primary silently kept recording the primary one anyway.
+    // output_idx is RecordingController's resolved (0-based) monitor
+    // index; adapter_idx stays 0 (single-adapter assumption, i.e. all
+    // monitors on the same GPU - the common case; multi-adapter setups
+    // are a separate, bigger fix).
+    pl->dx_ctx = g_libs.dx_create(0, output_idx);
     if (!pl->dx_ctx) {
         HrLog::Error("Pipeline create failed: dx_create() returned null (DXGI desktop duplication init failed -- "
                      "common causes: running over RDP/a virtual display, a just-changed display mode, or "
                      "insufficient permissions)");
         delete pl; return nullptr;
     }
-    // Matches the hardcoded dx_create(0, 0) above -- needed so
+    // Matches dx_create(0, output_idx) above - needed so
     // hr_composite_cursor() can translate GetCursorInfo()'s virtual-
     // desktop coordinates into this capture buffer's local coordinates.
     // Defaults to (0,0) (i.e. "assume the captured output starts at the
-    // desktop origin") if the lookup fails for some reason, which is
-    // right for the common single/primary-monitor case and only wrong
-    // for a secondary monitor positioned elsewhere - same blind spot as
-    // dx_create(0, 0) itself always capturing output 0 regardless of the
-    // "monitor" setting.
+    // desktop origin") if the lookup fails for some reason.
     {
         int ox = 0, oy = 0, ow = 0, oh = 0;
-        if (hr_dx_output_desc(0, 0, &ox, &oy, &ow, &oh, nullptr, 0)) {
+        if (hr_dx_output_desc(0, output_idx, &ox, &oy, &ow, &oh, nullptr, 0)) {
             pl->cap_origin_x = ox;
             pl->cap_origin_y = oy;
         }
