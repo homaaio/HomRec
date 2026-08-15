@@ -47,7 +47,7 @@ extern "C" {
     int hr_ctl_format_elapsed(const void *handle, char *buf, int buf_len);
 
     // hr_pipeline.cpp
-    void *hr_pl_create(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h);
+    void *hr_pl_create(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h, int output_idx);
     void hr_pl_destroy(void *handle);
     int hr_pl_start(void *handle);
     void hr_pl_stop(void *handle);
@@ -247,9 +247,11 @@ void RecordingController::ResolveCaptureSize() {
     float dpi = 96.0f;
     int idx = state_.monitor_id > 0 ? state_.monitor_id - 1 : 0;
     if (!hr_di_get(di, idx, &mx, &my, &mw, &mh, &dpi)) {
+        idx = 0; // fell back to primary just below - keep the DXGI output index in sync with it
         hr_di_primary(di, &mx, &my, &mw, &mh, &dpi); // fall back to primary if the index is out of range
     }
     hr_di_destroy(di);
+    capture_output_idx_ = idx;
     state_.monitor_left = mx;
     state_.monitor_top = my;
 
@@ -412,7 +414,8 @@ bool RecordingController::Start(std::wstring &error_out) {
     // destroying and recreating it - keeps the live preview seamless
     // right through Start() instead of it blinking out and back.
     bool reused_preview_pipeline = false;
-    if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h) {
+    if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h &&
+        pipeline_output_idx_ == capture_output_idx_) {
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         reused_preview_pipeline = true;
     } else {
@@ -420,7 +423,8 @@ bool RecordingController::Start(std::wstring &error_out) {
         int pvw = 0, pvh = 0;
         ScaledPreviewSize(pvw, pvh);
         pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
-                                 pvw, pvh);
+                                 pvw, pvh, capture_output_idx_);
+        pipeline_output_idx_ = capture_output_idx_;
         last_overlays_sent_valid_ = false;
     }
     bool pipeline_started = reused_preview_pipeline;
@@ -769,7 +773,8 @@ void RecordingController::EnsurePreview() {
     int pvw = 0, pvh = 0;
     ScaledPreviewSize(pvw, pvh);
     pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
-                             pvw, pvh);
+                             pvw, pvh, capture_output_idx_);
+    pipeline_output_idx_ = capture_output_idx_;
     last_overlays_sent_valid_ = false;
     if (pipeline_ && !hr_pl_start(pipeline_)) {
         hr_pl_destroy(pipeline_);

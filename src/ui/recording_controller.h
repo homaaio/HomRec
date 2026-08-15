@@ -181,6 +181,16 @@ private:
 
     int mic_level_ = 0, sys_level_ = 0;
     int capture_w_ = 0, capture_h_ = 0; // native monitor resolution - MUST match what DXGI actually captures
+    // DXGI output index (0-based) for the monitor ResolveCaptureSize() just
+    // resolved state_.monitor_id to - passed into hr_pl_create() so the
+    // pipeline actually captures that output instead of always output 0.
+    int capture_output_idx_ = 0;
+    // Output index the *currently-alive* pipeline_ was actually created
+    // with, so Start()'s preview-pipeline-reuse check can tell "same size,
+    // same monitor" (safe to reuse) apart from "same size, different
+    // monitor" (two displays that happen to share a resolution - must
+    // recreate, or it'd keep recording the old one).
+    int pipeline_output_idx_ = -1;
     int output_w_ = 0, output_h_ = 0;   // final encoded size after Settings > Resolution scaling (0 = same as capture)
     // Window-capture crop rect, monitor-relative pixels; crop_w_==0 means
     // "no crop" (full desktop). Resolved once per ResolveCaptureSize()
