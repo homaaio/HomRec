@@ -34,6 +34,7 @@
 #pragma once
 
 #include <windows.h>
+#include <functional>
 #include "app_state.h"
 
 class OverlaysDockPanel {
@@ -52,6 +53,16 @@ public:
     void SetVisible(bool visible);
 
     HWND hwnd() const { return hwnd_; }
+
+    // "Apply with preview off" (row context menu) - this panel has no
+    // access to RecordingController/PreviewPanel (main_frame.cpp owns
+    // both), so it can't grab a screenshot or draw overlays over it
+    // itself; it just asks main_frame.cpp to. `refresh` is false for the
+    // menu item that (re-)enters the mode and takes the first shot, true
+    // for the "Refresh screenshot" item that re-takes it while already in
+    // that mode (also enters the mode if it wasn't active yet, so it
+    // works as a one-click "just show me a current screenshot" too).
+    std::function<void(bool refresh)> on_apply_no_preview;
 
 private:
     // Popup menu anchored under the "+" button; dispatches to one of the

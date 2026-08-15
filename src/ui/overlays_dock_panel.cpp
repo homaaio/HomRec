@@ -127,7 +127,7 @@ enum { kMenuAddText = 1, kMenuAddImage, kMenuAddWebcam, kMenuAddExternal, kMenuA
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the per-row right-click
 // menu -- same reasoning as kMenuAdd* above, a separate numbering space
 // local to this file.
-enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete };
+enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete, kCtxApplyNoPreview, kCtxRefreshSnapshot };
 
 } // namespace
 
@@ -214,6 +214,16 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
     AppendMenuW(menu, MF_STRING, kCtxEdit,   L"Edit Parameters\u2026");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCtxDelete, L"Delete");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // Live preview normally has to be running for the drag-to-position/
+    // resize handles on the preview panel to appear at all - if the user's
+    // turned it off (Settings > Disable live preview), this is the only
+    // way left to reposition an overlay. Grabs a one-off screenshot and
+    // shows every overlay (not just this row's) on top of it in the same
+    // preview panel, editable the normal way; "Refresh" re-takes the
+    // screenshot without leaving that mode.
+    AppendMenuW(menu, MF_STRING, kCtxApplyNoPreview, L"Apply with preview off");
+    AppendMenuW(menu, MF_STRING, kCtxRefreshSnapshot, L"Refresh screenshot");
 
     SetForegroundWindow(owner);
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
@@ -225,6 +235,8 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
         case kCtxRename: RenameAt(idx); break;
         case kCtxEdit:   EditParametersAt(idx); break;
         case kCtxDelete: RemoveAt(idx); break;
+        case kCtxApplyNoPreview: if (on_apply_no_preview) on_apply_no_preview(false); break;
+        case kCtxRefreshSnapshot: if (on_apply_no_preview) on_apply_no_preview(true); break;
         default: break; // dismissed without a choice
     }
 }
