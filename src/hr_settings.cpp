@@ -144,6 +144,7 @@ struct HrSettings {
     int   show_audio_panel;    /* bool - audio mixer strip below the preview, see audio_panel.cpp */
     int   resolution_pct;      /* 25/50/75/100 - % of native monitor resolution to capture at */
     int   disable_preview;     /* bool - skip live preview capture/render for lower-end machines */
+    int   hint_no_overlay;     /* bool - show the "don't see your overlay?" hint under the disabled-preview ':)' */
     int   resolution_mode;     /* 0 = percent (resolution_pct applies), 1 = absolute (resolution_w/h apply) */
     int   resolution_w;        /* target output width,  only used when resolution_mode == 1 */
     int   resolution_h;        /* target output height, only used when resolution_mode == 1 */
@@ -188,6 +189,8 @@ static void _defaults(HrSettings *s) {
     s->resolution_h        = 720;  // matches AppState::resolution_h's default
     s->preview_quality_pct = 100;  // matches AppState::preview_quality_pct's default
     s->preview_fps         = 15;   // matches AppState::preview_fps's default
+    s->disable_preview     = 0;    // matches AppState::disable_preview's default
+    s->hint_no_overlay     = 1;    // matches AppState::hint_no_overlay's default (shown until dismissed)
 }
 
 /* -- Public API ------------------------------------------------------------- */
@@ -259,6 +262,15 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     s->resolution_h        = _json_get_int(json,  "resolution_h",        s->resolution_h);
     s->preview_quality_pct = _json_get_int(json,  "preview_quality_pct", s->preview_quality_pct);
     s->preview_fps         = _json_get_int(json,  "preview_fps",         s->preview_fps);
+    // BUGFIX: these two flags had getters/setters (hr_settings_get_flag/
+    // hr_settings_set_flag below) and were dutifully read/written by the
+    // Settings dialog every session, but were never actually included in
+    // this load function (nor in hr_settings_save()'s format string below)
+    // - so toggling "Disable live preview" only ever lasted until the app
+    // was closed; every fresh launch silently reset both back to their
+    // compiled-in defaults regardless of what was saved.
+    s->disable_preview     = _json_get_bool(json, "disable_preview",     s->disable_preview)     ? 1 : 0;
+    s->hint_no_overlay     = _json_get_bool(json, "hint_no_overlay",     s->hint_no_overlay)      ? 1 : 0;
 
     return 1;
 }
@@ -300,7 +312,9 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         "  \"resolution_w\":        %d,\n"
         "  \"resolution_h\":        %d,\n"
         "  \"preview_quality_pct\": %d,\n"
-        "  \"preview_fps\":         %d\n"
+        "  \"preview_fps\":         %d,\n"
+        "  \"disable_preview\":     %s,\n"
+        "  \"hint_no_overlay\":     %s\n"
         "}\n",
         _escape_json(s->output_folder).c_str(),
         s->quality, s->fps, s->monitor,
@@ -324,7 +338,9 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         s->resolution_w,
         s->resolution_h,
         s->preview_quality_pct,
-        s->preview_fps
+        s->preview_fps,
+        s->disable_preview ? "true" : "false",
+        s->hint_no_overlay ? "true" : "false"
     );
 
     FILE *f = fopen(path, "wb");
@@ -466,6 +482,7 @@ HR_EXPORT int hr_settings_get_flag(const void *h, const char *name) {
     if (strcmp(name, "show_overlays_panel") == 0) return s->show_overlays_panel;
     if (strcmp(name, "show_audio_panel") == 0) return s->show_audio_panel;
     if (strcmp(name, "disable_preview")     == 0) return s->disable_preview;
+    if (strcmp(name, "hint_no_overlay")     == 0) return s->hint_no_overlay;
     return 0;
 }
 HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
@@ -482,4 +499,5 @@ HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
     if (strcmp(name, "show_overlays_panel") == 0) { s->show_overlays_panel = val; return; }
     if (strcmp(name, "show_audio_panel") == 0) { s->show_audio_panel = val; return; }
     if (strcmp(name, "disable_preview")     == 0) { s->disable_preview     = val; return; }
+    if (strcmp(name, "hint_no_overlay")     == 0) { s->hint_no_overlay     = val; return; }
 }

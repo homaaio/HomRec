@@ -40,7 +40,10 @@ struct DxCapCtx {
     ComPtr<ID3D11Device>           device;
     ComPtr<ID3D11DeviceContext>    context;
     ComPtr<IDXGIOutputDuplication> duplication;
-    ComPtr<ID3D11Texture2D>        staging;   /* CPU-readable shadow */
+    ComPtr<ID3D11Texture2D>        staging[2];
+    int  write_idx    = 0;
+    int  pending_idx  = -1;
+    bool have_pending  = false;
 
     int  adapter_idx;
     int  output_idx;
@@ -57,7 +60,11 @@ struct DxCapCtx {
             acquired = false;
         }
         duplication.Reset();
-        staging.Reset();
+        staging[0].Reset();
+        staging[1].Reset();
+        write_idx = 0;
+        pending_idx = -1;
+        have_pending = false;
 
         ComPtr<IDXGIDevice> dxgi_dev;
         HRESULT hr = device.As(&dxgi_dev);
@@ -84,7 +91,7 @@ struct DxCapCtx {
         width  = (int)dd.ModeDesc.Width;
         height = (int)dd.ModeDesc.Height;
 
-        /* (Re)create staging texture */
+        /* (Re)create both staging textures */
         D3D11_TEXTURE2D_DESC td{};
         td.Width          = (UINT)width;
         td.Height         = (UINT)height;
@@ -94,7 +101,9 @@ struct DxCapCtx {
         td.SampleDesc     = {1, 0};
         td.Usage          = D3D11_USAGE_STAGING;
         td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        return device->CreateTexture2D(&td, nullptr, &staging);
+        hr = device->CreateTexture2D(&td, nullptr, &staging[0]);
+        if (FAILED(hr)) return hr;
+        return device->CreateTexture2D(&td, nullptr, &staging[1]);
     }
 };
 #endif
@@ -198,22 +207,38 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
 
     ctx->acquired = true;
 
-    /* Copy GPU texture → staging (CPU-accessible) texture */
+    /* Copy GPU texture → this call's staging (CPU-accessible) texture */
     ComPtr<ID3D11Texture2D> gpu_tex;
     hr = res.As(&gpu_tex);
     if (FAILED(hr)) {
         ctx->duplication->ReleaseFrame(); ctx->acquired = false;
         return HR_DX_ERROR;
     }
-    ctx->context->CopyResource(ctx->staging.Get(), gpu_tex.Get());
+    ctx->context->CopyResource(ctx->staging[ctx->write_idx].Get(), gpu_tex.Get());
 
-    /* Map staging texture → read pixels */
+    /* Release the desktop-duplication frame as soon as the copy is queued
+     * rather than after Map()/Unmap() -- lets the next AcquireNextFrame()
+     * proceed sooner, and CopyResource()'s destination keeps the data
+     * alive regardless of when the source frame is released. */
+    ctx->duplication->ReleaseFrame();
+    ctx->acquired = false;
+
+    /* Output the buffer copied on the *previous* call, not this one -- see
+     * the staging[] comment on DxCapCtx for why. On the very first call
+     * there's nothing previous to output yet, so report it the same way a
+     * real DXGI timeout is reported; the capture loop already knows how to
+     * carry the last frame forward in that case. */
+    const int read_idx = ctx->pending_idx;
+    const bool have_output = ctx->have_pending;
+    ctx->pending_idx  = ctx->write_idx;
+    ctx->have_pending = true;
+    ctx->write_idx   ^= 1;
+
+    if (!have_output) return HR_DX_TIMEOUT;
+
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = ctx->context->Map(ctx->staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) {
-        ctx->duplication->ReleaseFrame(); ctx->acquired = false;
-        return HR_DX_ERROR;
-    }
+    hr = ctx->context->Map(ctx->staging[read_idx].Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return HR_DX_ERROR;
 
     const int row_bytes  = ctx->width * 4;
     const uint8_t *src   = reinterpret_cast<const uint8_t *>(mapped.pData);
@@ -228,9 +253,7 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
         }
     }
 
-    ctx->context->Unmap(ctx->staging.Get(), 0);
-    ctx->duplication->ReleaseFrame();
-    ctx->acquired = false;
+    ctx->context->Unmap(ctx->staging[read_idx].Get(), 0);
     return HR_DX_OK;
 #else
     return HR_DX_ERROR;

@@ -79,6 +79,23 @@ public:
     // recording owns the pipeline until Stop()" rule as TeardownPreview().
     void SetPreviewVisible(bool visible);
 
+    // "Apply with preview off" (overlays_dock_panel.cpp's row context
+    // menu): grabs one frame for the overlay editor even when the user
+    // has Settings > Disable live preview on, by starting the preview
+    // pipeline just long enough to capture it. If preview was already
+    // running (enabled, or a recording in progress) this is just a
+    // GetPreviewFrame() call. `first_call` should be true only for the
+    // very first snapshot of an editing session (it may need to start the
+    // pipeline and wait briefly for the first frame); pass false for
+    // subsequent "Refresh screenshot" calls, which just re-read the
+    // already-running pipeline's latest frame instantly.
+    bool CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h, bool first_call);
+    // Ends an "Apply with preview off" editing session - tears the
+    // preview pipeline back down if Settings > Disable live preview is
+    // still on (CaptureSnapshotFrame() only started it for the snapshot,
+    // it shouldn't keep running afterward), leaves it alone otherwise.
+    void EndSnapshotEditing();
+
     bool recording() const { return state_.recording; }
     bool paused() const { return state_.paused; }
     double elapsed_seconds() const;

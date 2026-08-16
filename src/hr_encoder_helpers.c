@@ -119,24 +119,27 @@ HR_EXPORT void hr_rgb_to_yuv420p(
     }
 }
 
-HR_EXPORT void hr_bgra_to_yuv420p(
+HR_EXPORT void hr_bgra_to_yuv420p_band(
     const uint8_t * HR_RESTRICT bgra,
     uint8_t       * HR_RESTRICT yuv_out,
-    int width, int height)
+    int width, int height, int y0, int y1)
 {
     if (HR_UNLIKELY(!bgra || !yuv_out || width <= 0 || height <= 0)) return;
+    if (y0 < 0) y0 = 0;
+    if (y1 > height) y1 = height;
+    if (y0 >= y1) return;
 
     size_t frame_sz = (size_t)width * (size_t)height;
     uint8_t *Y  = yuv_out;
     uint8_t *Cb = yuv_out + frame_sz;
     uint8_t *Cr = yuv_out + frame_sz + frame_sz / 4;
 
-    for (int y = 0; y < height; y += 2) {
+    for (int y = y0; y < y1; y += 2) {
         const uint8_t *row0 = bgra + (size_t)y * width * 4;
         const uint8_t *row1 = (y + 1 < height)
                             ? bgra + (size_t)(y+1) * width * 4
                             : row0;
-        int y1 = (y+1 < height) ? y+1 : y;
+        int y1r = (y+1 < height) ? y+1 : y;
 
         int x = 0;
         for (; x + 3 < width; x += 4) {
@@ -147,8 +150,8 @@ HR_EXPORT void hr_bgra_to_yuv420p(
             uint8_t r11=row1[(x+1)*4+2],g11=row1[(x+1)*4+1],b11=row1[(x+1)*4+0];
             Y[y*width+x]  =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
             Y[y*width+x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Y[y1*width+x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Y[y1*width+x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            Y[y1r*width+x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Y[y1r*width+x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
             {
                 int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
                 size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)(x/2);
@@ -162,8 +165,8 @@ HR_EXPORT void hr_bgra_to_yuv420p(
             uint8_t r13=row1[(x+3)*4+2],g13=row1[(x+3)*4+1],b13=row1[(x+3)*4+0];
             Y[y*width+x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
             Y[y*width+x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
-            Y[y1*width+x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
-            Y[y1*width+x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
+            Y[y1r*width+x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
+            Y[y1r*width+x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
             {
                 int ra=((int)r02+r03+r12+r13)>>2,ga=((int)g02+g03+g12+g13)>>2,ba=((int)b02+b03+b12+b13)>>2;
                 size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)((x+2)/2);
@@ -179,14 +182,22 @@ HR_EXPORT void hr_bgra_to_yuv420p(
             uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
             Y[y*width+x] =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
             Y[y*width+x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Y[y1*width+x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Y[y1*width+x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            Y[y1r*width+x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Y[y1r*width+x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
             int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
             size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)(x/2);
             Cb[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
             Cr[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
         }
     }
+}
+
+HR_EXPORT void hr_bgra_to_yuv420p(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT yuv_out,
+    int width, int height)
+{
+    hr_bgra_to_yuv420p_band(bgra, yuv_out, width, height, 0, height);
 }
 
 /* -------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 #include "window_picker_dialog.h"  // HR_ResolveCaptureWindow()
 #include "../hr_log.h"
 #include "../hr_overlay_render.h"
+#include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame
 #include <vector>
 #include <thread>
 #include <cstdint>
@@ -827,6 +828,39 @@ void RecordingController::SetPreviewVisible(bool visible) {
     if (state_.recording) return; // recording owns the pipeline until Stop()
     if (visible) EnsurePreview();
     else         TeardownPreview();
+}
+
+bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h,
+                                                bool first_call) {
+    if (!pipeline_ && first_call) {
+        // EnsurePreview() no-ops when state_.disable_preview is set - this
+        // is an explicit "show me a screenshot anyway" request, so start
+        // it regardless, same as SetPreviewVisible() would if the setting
+        // were off. Left running afterward; EndSnapshotEditing() is what
+        // decides whether to tear it back down once the user's done here.
+        bool was_disabled = state_.disable_preview;
+        state_.disable_preview = false;
+        EnsurePreview();
+        state_.disable_preview = was_disabled;
+    }
+    if (!pipeline_) return false;
+
+    // A freshly-started pipeline's capture thread needs a moment to
+    // produce its first thumbnail (hr_pl_get_preview() returns false
+    // until then) - only worth waiting out on the first call of an
+    // editing session; a "Refresh" on an already-running pipeline should
+    // already have one available immediately.
+    const int max_wait_ms = first_call ? 1000 : 0;
+    const int step_ms = 25;
+    for (int waited = 0; ; waited += step_ms) {
+        if (GetPreviewFrame(out, out_w, out_h)) return true;
+        if (waited >= max_wait_ms) return false;
+        Sleep(step_ms);
+    }
+}
+
+void RecordingController::EndSnapshotEditing() {
+    if (state_.disable_preview) TeardownPreview();
 }
 
 double RecordingController::elapsed_seconds() const {
