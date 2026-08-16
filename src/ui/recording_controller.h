@@ -188,6 +188,32 @@ private:
     // when it actually changed, not on every settings-dialog close.
     std::string applied_mic_device_id_;
 
+    // Snapshot of capture-affecting settings last used to (re)build the
+    // preview pipeline - see RefreshPreviewSettings()'s BUGFIX comment.
+    // Anything NOT in this list (theme, hotkeys, output folder, etc.)
+    // closing Settings should never touch the pipeline for.
+    struct PreviewCaptureSettings {
+        bool disable_preview = false;
+        int monitor_id = -1;
+        CaptureMode capture_mode = CaptureMode::Desktop;
+        std::string capture_window_title;
+        int target_fps = -1;
+        int preview_width = -1, preview_height = -1;
+        int preview_quality_pct = -1;
+        // preview_fps deliberately excluded - hr_pl_set_preview_fps() applies
+        // it cheaply to an already-running pipeline without touching the
+        // DXGI duplication interface at all, so it's applied unconditionally
+        // below instead of being a reason to rebuild.
+        bool operator==(const PreviewCaptureSettings &o) const {
+            return disable_preview == o.disable_preview && monitor_id == o.monitor_id &&
+                   capture_mode == o.capture_mode && capture_window_title == o.capture_window_title &&
+                   target_fps == o.target_fps && preview_width == o.preview_width &&
+                   preview_height == o.preview_height && preview_quality_pct == o.preview_quality_pct;
+        }
+    };
+    PreviewCaptureSettings applied_preview_capture_settings_;
+    bool applied_preview_capture_settings_valid_ = false;
+
     // Last overlay list actually pushed to the pipeline via
     // hr_pl_set_overlays(), so SyncOverlays() (called every preview timer
     // tick, i.e. continuously while the app is open) can skip rebuilding

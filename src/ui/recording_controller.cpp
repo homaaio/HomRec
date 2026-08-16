@@ -801,12 +801,23 @@ void RecordingController::TeardownPreview() {
 }
 
 void RecordingController::RefreshPreviewSettings() {
-    // Both of these no-op while actually recording (TeardownPreview()
-    // refuses to touch the pipeline then, and EnsurePreview() sees
-    // pipeline_ already set and does nothing) - the running recording
-    // keeps using whatever size/mode it started with until Stop().
-    TeardownPreview();
-    EnsurePreview();
+    PreviewCaptureSettings now;
+    now.disable_preview = state_.disable_preview;
+    now.monitor_id = state_.monitor_id;
+    now.capture_mode = state_.capture_mode;
+    now.capture_window_title = state_.capture_window_title;
+    now.target_fps = state_.target_fps;
+    now.preview_width = state_.preview_width;
+    now.preview_height = state_.preview_height;
+    now.preview_quality_pct = state_.preview_quality_pct;
+
+    if (!applied_preview_capture_settings_valid_ || !(now == applied_preview_capture_settings_)) {
+        TeardownPreview();
+        EnsurePreview();
+        applied_preview_capture_settings_ = now;
+        applied_preview_capture_settings_valid_ = true;
+    }
+    if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
 
     // BUGFIX: picking a different microphone in Settings had no effect
     // until the app was restarted -- hr_audio_start() only ever ran once,
