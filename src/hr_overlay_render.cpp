@@ -444,7 +444,29 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
         if (el.type == 1 && el.scan_code >= 0) {
             // Keyboard button: "code" is a hardware scan code, translated
             // to a virtual-key so GetAsyncKeyState() can read live state.
-            UINT vk = MapVirtualKeyW((UINT)el.scan_code, MAPVK_VSC_TO_VK);
+            //
+            // BUGFIX: this used to always call
+            // MapVirtualKeyW(el.scan_code, MAPVK_VSC_TO_VK), which only
+            // understands a plain 0-0x7F PS/2 Set-1 byte. The preset format
+            // (see hr_input_overlay.h's header comment) is documented as
+            // "DirectInput/PS2" scan codes - DirectInput's DIK_ constants
+            // use the *same* byte values as PS/2 Set-1 for ordinary keys,
+            // but encode "extended" keys (right Ctrl, right Alt/AltGr, the
+            // arrow/Ins/Del/Home/End/PgUp/PgDn cluster, numpad Enter,
+            // numpad /) by OR-ing 0x80 into the byte instead of the two-byte
+            // 0xE0-prefixed form Win32 expects. Passed straight through,
+            // MapVirtualKeyW(..., MAPVK_VSC_TO_VK) doesn't recognize that
+            // 0x80 bit, so it either maps to VK 0 (no key ever reads as
+            // pressed) or, worse, silently aliases onto a *different*,
+            // unrelated key - either way the overlay button for any such
+            // key (e.g. a preset's right-Alt "Alt" button) never highlights
+            // correctly no matter how it's pressed. Strip the DIK extended
+            // bit and route through MAPVK_VSC_TO_VK_EX with the correct
+            // Win32 0xE000-prefixed encoding instead, so extended keys
+            // translate the same as ordinary ones.
+            UINT raw = (UINT)el.scan_code;
+            UINT vsc = (raw & 0x80) ? (0xE000u | (raw & 0x7Fu)) : (raw & 0x7Fu);
+            UINT vk = MapVirtualKeyW(vsc, MAPVK_VSC_TO_VK_EX);
             pressed = vk != 0 && (GetAsyncKeyState((int)vk) & 0x8000) != 0;
         } else if ((el.type == 3 || el.type == 4) && el.scan_code >= 0) {
             pressed = (GetAsyncKeyState(el.scan_code) & 0x8000) != 0;

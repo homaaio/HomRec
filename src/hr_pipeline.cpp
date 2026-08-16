@@ -660,15 +660,51 @@ struct Pipeline {
             }
 
             // Frame pacing
+            //
+            // BUGFIX: this used to make a single g_libs.sw_sleep_until(sw_ctx,
+            // next_frame_ns) call covering the *entire* frame period. That's
+            // fine while recording (frame_ns is a fraction of a second), but
+            // in idle preview (frame_ns_idle, driven by the Preview FPS
+            // setting) it can be up to ~1 second at low fps - and the loop
+            // only rechecks `running` once it wakes up from that single
+            // blocking call. hr_pl_stop()/hr_pl_destroy() only wait 1s for
+            // this thread to join before giving up, so a wait that's itself
+            // up to ~1s routinely lost that race ("capture thread did not
+            // stop in time - detaching and leaking Pipeline to avoid
+            // use-after-free" in the log). Leaking the Pipeline also leaks
+            // its still-live D3D11 device + DXGI duplication interface (see
+            // hr_dx_destroy() in hr_dxgi_capture.cpp, never reached on that
+            // path), so the *next* hr_dx_create() finds the output's
+            // duplication interface already held and fails outright -
+            // exactly the "dx_create() returned null" / "Failed to start
+            // with capture pipeline" reported next.
+            //
+            // Fix: chunk the wait into <=15ms slices and recheck `running`
+            // between them, only doing the final sub-ms-precise
+            // sw_sleep_until() for the last slice. Shutdown latency is now
+            // bounded to ~15ms regardless of the configured fps, with no
+            // change to actual frame-pacing accuracy.
 #ifdef _WIN32
-            if (sw_ctx && g_libs.sw_sleep_until)
-                g_libs.sw_sleep_until(sw_ctx, next_frame_ns);
-            else
+            if (sw_ctx && g_libs.sw_sleep_until) {
+                for (;;) {
+                    int64_t now_ns = g_libs.sw_elapsed_ns ? g_libs.sw_elapsed_ns(sw_ctx) : next_frame_ns;
+                    int64_t remaining = next_frame_ns - now_ns;
+                    if (remaining <= 15'000'000LL) {
+                        g_libs.sw_sleep_until(sw_ctx, next_frame_ns);
+                        break;
+                    }
+                    if (!running.load(std::memory_order_relaxed)) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                }
+            } else {
                 std::this_thread::sleep_for(std::chrono::nanoseconds(frame_ns));
+            }
 #else
             std::this_thread::sleep_for(std::chrono::nanoseconds(frame_ns));
 #endif
             next_frame_ns += frame_ns;
+
+            if (!running.load(std::memory_order_relaxed)) break;
 
             // Capture
 #ifdef _WIN32

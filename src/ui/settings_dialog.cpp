@@ -196,16 +196,24 @@ private:
         scroller_->GetSizer()->Show(advanced_panel_, advanced_shown_, true);
         advanced_toggle_btn_->SetLabelText2(wxString::FromUTF8(
             advanced_shown_ ? "\u2699 Basic" : "\u2699 Advanced"));
+        // BUGFIX: advanced_panel_ itself was never told to re-Layout() when
+        // shown - its own wxFlexGridSizer (advRoot, built once back in the
+        // ctor while the panel was still Hidden()) never got a chance to
+        // compute real widths/heights for its children, since a hidden
+        // window's Layout() calls are skipped by wx. The result: the sizer
+        // Show() above correctly flips the "is this item visible" flag and
+        // the button label updated (proving the click handler *did* run),
+        // but scroller_->FitInside()/Layout() below were reflowing a child
+        // whose own internal layout was still the all-zero one from
+        // construction, so the reserved space for it stayed effectively
+        // empty - the fields never had a size to actually be visible at.
+        // Laying out advanced_panel_ itself first (now that it's shown, so
+        // its own Layout() call actually takes effect) before asking the
+        // parent scroller to size around it fixes that.
+        advanced_panel_->Layout();
         scroller_->FitInside();
         scroller_->Layout();
         Layout();
-        // Layout() alone can leave the scrolled window's virtual size and
-        // scrollbars stale on wxMSW after a runtime Show/Hide of a child -
-        // SendSizeEvent() forces the full resize/repaint path so the newly
-        // (in)visible fields and the scrollbar actually appear right away
-        // instead of only after the dialog is manually resized.
-        scroller_->SendSizeEvent();
-        SendSizeEvent();
     }
 
     void OnToggleAdvanced(wxCommandEvent &) { ShowAdvanced(!advanced_shown_); }
