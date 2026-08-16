@@ -214,6 +214,19 @@ private:
         scroller_->FitInside();
         scroller_->Layout();
         Layout();
+        // Layout() alone can leave the scrolled window's virtual size and
+        // scrollbars stale on wxMSW after a runtime Show/Hide of a child -
+        // SendSizeEvent() forces the full resize/repaint path so the newly
+        // (in)visible fields and the scrollbar actually appear right away
+        // instead of only after the dialog is manually resized.
+        scroller_->SendSizeEvent();
+        SendSizeEvent();
+        // Belt-and-suspenders: force a repaint too, in case only the
+        // layout geometry updated on this run without a corresponding
+        // WM_PAINT (observed intermittently on wxMSW after a runtime
+        // Show()/Hide() inside a wxScrolledWindow).
+        scroller_->Refresh();
+        Refresh();
     }
 
     void OnToggleAdvanced(wxCommandEvent &) { ShowAdvanced(!advanced_shown_); }
