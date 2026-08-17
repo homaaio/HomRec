@@ -694,7 +694,16 @@ void RecordingController::PollStats() {
 }
 
 void RecordingController::SyncOverlays() {
-    if (!pipeline_) return;
+    if (!pipeline_) {
+        if (!state_.disable_preview) {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= next_preview_retry_) {
+                next_preview_retry_ = now + std::chrono::seconds(2);
+                EnsurePreview();
+            }
+        }
+        return;
+    }
 
     // "Cursor" setting - cheap atomic store, fine to re-apply every tick
     // rather than needing its own change-tracking like the overlay list

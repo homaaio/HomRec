@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <chrono>
 #include "app_state.h"
 #include "../hr_overlay_render.h"
 
@@ -222,6 +223,7 @@ private:
     std::vector<HrOverlayDesc> last_overlays_sent_;
     bool last_overlays_sent_valid_ = false;
 
+    std::chrono::steady_clock::time_point next_preview_retry_{};
     int mic_level_ = 0, sys_level_ = 0;
     int capture_w_ = 0, capture_h_ = 0; // native monitor resolution - MUST match what DXGI actually captures
     // DXGI output index (0-based) for the monitor ResolveCaptureSize() just
