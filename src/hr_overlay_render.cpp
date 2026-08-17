@@ -171,50 +171,13 @@ static bool RenderTextBgra(const std::wstring &text, int w, int h, COLORREF colo
 // without pulling in a third-party image library) straight to a
 // premultiplied-alpha-free 32bpp BGRA buffer, scaled to the overlay's w x h.
 // ---------------------------------------------------------------------------
-static bool RenderImageBgra(const std::wstring &path, int w, int h, std::vector<uint8_t> &out)
-{
-    if (w <= 0 || h <= 0) return false;
-
-    // WIC needs COM; the capture thread initializes it once (see
-    // hr_pipeline.cpp's capture_loop), so just create the factory here.
-    ComPtr<IWICImagingFactory> factory;
-    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                   __uuidof(IWICImagingFactory),
-                                   reinterpret_cast<void **>(factory.GetAddressOf()));
-    if (FAILED(hr)) return false;
-
-    ComPtr<IWICBitmapDecoder> decoder;
-    hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
-                                             WICDecodeMetadataCacheOnDemand, &decoder);
-    if (FAILED(hr)) return false;
-
-    ComPtr<IWICBitmapFrameDecode> frame;
-    if (FAILED(decoder->GetFrame(0, &frame))) return false;
-
-    ComPtr<IWICFormatConverter> converter;
-    if (FAILED(factory->CreateFormatConverter(&converter))) return false;
-    if (FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA,
-                                      WICBitmapDitherTypeNone, nullptr, 0.0,
-                                      WICBitmapPaletteTypeCustom))) {
-        return false;
-    }
-
-    ComPtr<IWICBitmapScaler> scaler;
-    if (FAILED(factory->CreateBitmapScaler(&scaler))) return false;
-    if (FAILED(scaler->Initialize(converter.Get(), (UINT)w, (UINT)h, WICBitmapInterpolationModeFant))) {
-        return false;
-    }
-
-    out.assign((size_t)w * h * 4, 0);
-    hr = scaler->CopyPixels(nullptr, (UINT)(w * 4), (UINT)out.size(), out.data());
-    return SUCCEEDED(hr);
-}
-
-// ---------------------------------------------------------------------------
-// Image, native resolution: same WIC pipeline as RenderImageBgra() above,
-// minus the IWICBitmapScaler step -- used for input-overlay spritesheets,
-// where the source pixel rects in the layout JSON ("mapping": [x,y,w,h])
-// are only meaningful against the image's actual size.
+// Image, native resolution -- decodes straight to a 32bpp BGRA buffer with
+// no resize step. Used both for input-overlay spritesheets (whose source
+// pixel rects in the layout JSON are only meaningful against the image's
+// actual size) and for regular image overlays (GetOrRenderImage() rescales
+// from this cached native decode to whatever size the overlay is currently
+// configured at -- see ImageSourceCache's comment in hr_overlay_render.h
+// for why decode and resize are kept separate/independently cached).
 // ---------------------------------------------------------------------------
 static bool RenderImageBgraNative(const std::wstring &path, std::vector<uint8_t> &out, int &out_w, int &out_h)
 {
@@ -343,6 +306,25 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderImage(size_t
                       std::strncmp(snap.image_path, ov.image_path, sizeof(snap.image_path)) == 0;
     auto it0 = cache_.find(idx);
     if (unchanged && it0 != cache_.end()) return &it0->second;
+    ImageSourceCache &src = image_source_cache_[idx];
+    bool path_changed = src.path != ov.image_path;
+    if (path_changed || (!src.valid && !src.attempted)) {
+        src.path = ov.image_path;
+        src.valid = false;
+        src.attempted = true;
+
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, nullptr, 0);
+        if (wlen > 1) {
+            std::wstring wpath(wlen - 1, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, wpath.data(), wlen);
+            if (RenderImageBgraNative(wpath, src.native_bgra, src.native_w, src.native_h)) {
+                src.valid = true;
+            } else {
+                HrLog::Warn(std::string("Overlay: couldn't decode image '") + ov.image_path + "'");
+            }
+        }
+    }
+    if (!src.valid) return nullptr;
 
     std::string key = std::string("i|") + ov.image_path + "|" + std::to_string(ov.w) + "x" + std::to_string(ov.h);
     auto it = cache_.find(idx);
@@ -353,16 +335,12 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderImage(size_t
         return &it->second;
     }
 
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, nullptr, 0);
-    if (wlen <= 1) return nullptr;
-    std::wstring wpath(wlen - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, wpath.data(), wlen);
-
     CachedLayer layer;
     layer.w = ov.w; layer.h = ov.h; layer.key = key;
-    if (!RenderImageBgra(wpath, ov.w, ov.h, layer.bgra)) {
-        HrLog::Warn(std::string("Overlay: couldn't decode image '") + ov.image_path + "'");
-        return nullptr;
+    if (src.native_w == ov.w && src.native_h == ov.h) {
+        layer.bgra = src.native_bgra; // already the right size -- no rescale needed
+    } else {
+        ScaleBgraNearest(src.native_bgra, src.native_w, src.native_h, layer.bgra, ov.w, ov.h);
     }
     cache_[idx] = std::move(layer);
     snap.valid = true; _scopy_local(snap.type, sizeof(snap.type), "image");
@@ -442,28 +420,6 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
         int sx = el.map_x, sy = el.map_y;
         bool pressed = false;
         if (el.type == 1 && el.scan_code >= 0) {
-            // Keyboard button: "code" is a hardware scan code, translated
-            // to a virtual-key so GetAsyncKeyState() can read live state.
-            //
-            // BUGFIX: this used to always call
-            // MapVirtualKeyW(el.scan_code, MAPVK_VSC_TO_VK), which only
-            // understands a plain 0-0x7F PS/2 Set-1 byte. The preset format
-            // (see hr_input_overlay.h's header comment) is documented as
-            // "DirectInput/PS2" scan codes - DirectInput's DIK_ constants
-            // use the *same* byte values as PS/2 Set-1 for ordinary keys,
-            // but encode "extended" keys (right Ctrl, right Alt/AltGr, the
-            // arrow/Ins/Del/Home/End/PgUp/PgDn cluster, numpad Enter,
-            // numpad /) by OR-ing 0x80 into the byte instead of the two-byte
-            // 0xE0-prefixed form Win32 expects. Passed straight through,
-            // MapVirtualKeyW(..., MAPVK_VSC_TO_VK) doesn't recognize that
-            // 0x80 bit, so it either maps to VK 0 (no key ever reads as
-            // pressed) or, worse, silently aliases onto a *different*,
-            // unrelated key - either way the overlay button for any such
-            // key (e.g. a preset's right-Alt "Alt" button) never highlights
-            // correctly no matter how it's pressed. Strip the DIK extended
-            // bit and route through MAPVK_VSC_TO_VK_EX with the correct
-            // Win32 0xE000-prefixed encoding instead, so extended keys
-            // translate the same as ordinary ones.
             UINT raw = (UINT)el.scan_code;
             UINT vsc = (raw & 0x80) ? (0xE000u | (raw & 0x7Fu)) : (raw & 0x7Fu);
             UINT vk = MapVirtualKeyW(vsc, MAPVK_VSC_TO_VK_EX);
@@ -504,10 +460,25 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
 #endif
 }
 
+void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {
+    auto prune = [overlay_count](auto &map) {
+        for (auto it = map.begin(); it != map.end(); ) {
+            if (it->first >= overlay_count) it = map.erase(it);
+            else ++it;
+        }
+    };
+    prune(snapshots_);
+    prune(cache_);
+    prune(input_cache_);
+    prune(image_source_cache_);
+}
+
 void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
                                const std::vector<HrOverlayDesc> &overlays)
 {
     if (!base_bgra || base_w <= 0 || base_h <= 0) return;
+
+    PruneStaleCaches(overlays.size());
 
     static bool warned_webcam = false;
 

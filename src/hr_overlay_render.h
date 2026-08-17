@@ -83,6 +83,19 @@ private:
     std::unordered_map<size_t, TextImageSnapshot> snapshots_;
     // Keyed by the overlay's position in the list (stable enough for our
     // purposes -- overlays are edited in place, not frequently reordered).
+    //
+    // BUGFIX (unbounded growth / memory leak): entries here used to live
+    // forever once created -- nothing ever erased them. Every add/remove/
+    // resize of an overlay (especially an image or input_overlay one,
+    // whose CachedLayer/InputOverlayCache/ImageSourceCache entries can each
+    // hold a full decoded bitmap) grew whichever of these maps had a fresh,
+    // never-before-used idx a little further, and removing overlays never
+    // shrank them back down since the *count* of overlays going down
+    // doesn't remove the higher idx entries already sitting in the maps.
+    // Over a session with a lot of overlay editing this is a real, growing
+    // leak -- see PruneStaleCaches(), called at the top of Apply() every
+    // frame with the current overlay count, which is now the single place
+    // responsible for keeping all four of these maps trimmed to it.
     std::unordered_map<size_t, CachedLayer> cache_;
 
     // Decoded spritesheet + parsed layout for input_overlay entries,
@@ -115,6 +128,21 @@ private:
         std::vector<uint8_t> native_scratch;
     };
     std::unordered_map<size_t, InputOverlayCache> input_cache_;
+    struct ImageSourceCache {
+        std::string path;
+        std::vector<uint8_t> native_bgra; // native_w * native_h * 4
+        int native_w = 0, native_h = 0;
+        bool valid = false;
+        bool attempted = false; // see InputOverlayCache::attempted above
+    };
+    std::unordered_map<size_t, ImageSourceCache> image_source_cache_;
+
+    // Drops every entry in the four idx-keyed caches above whose idx is no
+    // longer in range for `overlay_count` -- called at the top of Apply()
+    // every frame so removing/reordering overlays actually frees what they
+    // were holding instead of leaving it cached forever at a now-unused
+    // index (see the maps' own comments for the leak this fixes).
+    void PruneStaleCaches(size_t overlay_count);
 
     const CachedLayer *GetOrRenderText(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *GetOrRenderImage(size_t idx, const HrOverlayDesc &ov);
