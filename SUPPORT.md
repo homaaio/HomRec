@@ -39,7 +39,7 @@ To help me resolve your issue quickly, please include:
 
 ## Response Time
 
-I usually reply within **1–3 days**. Please be patient - this is an open-source project, and I work on it in my free time.
+I usually reply within **2–4 days**. Please be patient - this is an open-source project, and I work on it in my free time.
 
 ---
 
