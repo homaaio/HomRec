@@ -363,17 +363,23 @@ struct Pipeline {
     std::thread       capture_thread;
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
+
+    // ====== SELF-CLEANUP ON A TIMED-OUT SHUTDOWN ======
+
+    std::atomic<int>  threads_remaining{2};
+    std::atomic<bool> handed_off{false};
+
+    void finish_thread() {
+        if (threads_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
+            handed_off.load(std::memory_order_acquire)) {
+#ifdef _WIN32
+            if (dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(dx_ctx);
+            if (sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(sw_ctx);
+#endif
+            delete this;
+        }
+    }
     bool logged_lost_ = false; // edge-trigger for the DX_LOST diagnostic below
-    // BUGFIX (game-launch FPS drop): see the HR_DX_LOST handling below -
-    // reset() does a full DuplicateOutput() re-acquisition, which is a
-    // genuinely expensive driver-level call. Desktop Duplication is
-    // fundamentally unavailable for as long as *any* app has an exclusive
-    // fullscreen surface up (a Windows limitation, not something this code
-    // can work around) - so launching a game that goes exclusive-fullscreen
-    // used to make this loop call reset() every single frame tick (30-60x/
-    // sec) for as long as the game held it, each one contending with the
-    // game itself for the same GPU/driver resources. Backed off to at most
-    // once/sec while repeatedly failing.
     std::chrono::steady_clock::time_point next_reset_attempt_{};
 
     std::atomic<int64_t> frames_captured{0};
@@ -525,6 +531,8 @@ struct Pipeline {
                 }
             }
         }
+
+        finish_thread();
     }
 
     // -------------------------------------------------------------------------
@@ -659,31 +667,6 @@ struct Pipeline {
                 }
             }
 
-            // Frame pacing
-            //
-            // BUGFIX: this used to make a single g_libs.sw_sleep_until(sw_ctx,
-            // next_frame_ns) call covering the *entire* frame period. That's
-            // fine while recording (frame_ns is a fraction of a second), but
-            // in idle preview (frame_ns_idle, driven by the Preview FPS
-            // setting) it can be up to ~1 second at low fps - and the loop
-            // only rechecks `running` once it wakes up from that single
-            // blocking call. hr_pl_stop()/hr_pl_destroy() only wait 1s for
-            // this thread to join before giving up, so a wait that's itself
-            // up to ~1s routinely lost that race ("capture thread did not
-            // stop in time - detaching and leaking Pipeline to avoid
-            // use-after-free" in the log). Leaking the Pipeline also leaks
-            // its still-live D3D11 device + DXGI duplication interface (see
-            // hr_dx_destroy() in hr_dxgi_capture.cpp, never reached on that
-            // path), so the *next* hr_dx_create() finds the output's
-            // duplication interface already held and fails outright -
-            // exactly the "dx_create() returned null" / "Failed to start
-            // with capture pipeline" reported next.
-            //
-            // Fix: chunk the wait into <=15ms slices and recheck `running`
-            // between them, only doing the final sub-ms-precise
-            // sw_sleep_until() for the last slice. Shutdown latency is now
-            // bounded to ~15ms regardless of the configured fps, with no
-            // change to actual frame-pacing accuracy.
 #ifdef _WIN32
             if (sw_ctx && g_libs.sw_sleep_until) {
                 for (;;) {
@@ -972,6 +955,7 @@ struct Pipeline {
 #ifdef _WIN32
         if (com_inited) CoUninitialize();
 #endif
+        finish_thread();
     }
 };
 
@@ -1051,10 +1035,12 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     // Both worker threads capture the raw `pl` pointer, so if either one is
     // still running after we give up waiting, force-detaching it and then
     // deleting `pl` below would leave that thread touching freed memory the
-    // next time it wakes up. A leaked Pipeline is recoverable; a
-    // heap-use-after-free from a zombie thread is not, so track that case
-    // and skip the delete (and the resource teardown below, which the
-    // still-running thread may also touch) rather than risk it.
+    // next time it wakes up. A leaked Pipeline used to be permanent (see
+    // the finish_thread()/handed_off comment on the Pipeline struct); now
+    // it's only temporary - detaching sets handed_off, and whichever
+    // thread finishes last does the actual free once it's really safe,
+    // instead of nobody ever doing it. leak_pl here just means "don't also
+    // do it ourselves below", not "it's gone forever".
     bool leak_pl = false;
 
     // Wait for writer thread with timeout
@@ -1063,8 +1049,18 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
         if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
             pl->writer_thread.join();
         } else {
-            // Force detach if stuck
-            HrLog::Error("Pipeline destroy: writer thread did not stop in time - detaching and leaking Pipeline to avoid use-after-free");
+            // Force detach if stuck. handed_off must be set *immediately*,
+            // before we go on to (possibly) wait up to another second on
+            // capture_thread below - if this writer thread finishes just
+            // after this WaitForSingleObject gave up on it (very plausible;
+            // it timed out by definition, not by a huge margin) and we
+            // hadn't set handed_off yet, its finish_thread() call would see
+            // handed_off still false and skip the cleanup it's now
+            // responsible for, right before we set it true a moment too
+            // late - leaking for real, forever, again. Setting it here,
+            // per-detach, closes that window.
+            HrLog::Error("Pipeline destroy: writer thread did not stop in time - handing off cleanup to it instead of leaking Pipeline forever");
+            pl->handed_off.store(true, std::memory_order_release);
             pl->writer_thread.detach();
             leak_pl = true;
         }
@@ -1076,12 +1072,22 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
         if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
             pl->capture_thread.join();
         } else {
-            // Force detach if stuck
-            HrLog::Error("Pipeline destroy: capture thread did not stop in time - detaching and leaking Pipeline to avoid use-after-free");
+            // Force detach if stuck - see the writer-thread branch above
+            // for why handed_off is set right here rather than afterward.
+            HrLog::Error("Pipeline destroy: capture thread did not stop in time - handing off cleanup to it instead of leaking Pipeline forever");
+            pl->handed_off.store(true, std::memory_order_release);
             pl->capture_thread.detach();
             leak_pl = true;
         }
     }
+
+    // Defensive: if handed_off somehow ended up set without leak_pl being
+    // set in this same call (there's no such path today - hr_pl_stop()
+    // deliberately never detaches, see its own comment, so this function is
+    // the only place handed_off gets set) - treat it the same as detaching
+    // right now, rather than freeing `this` out from under a thread that
+    // might still be alive.
+    if (pl->handed_off.load(std::memory_order_acquire)) leak_pl = true;
 
     if (leak_pl) return;
 
@@ -1155,21 +1161,13 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     // Wait for capture thread with timeout
     if (pl->capture_thread.joinable()) {
         HANDLE hThread = reinterpret_cast<HANDLE>(pl->capture_thread.native_handle());
-        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
-            pl->capture_thread.join();
-        } else {
-            pl->capture_thread.detach();
-        }
+        WaitForSingleObject(hThread, 1000);
     }
-    
-    // Wait for writer thread with timeout
+
+    // Wait for writer thread with timeout - same reasoning as above.
     if (pl->writer_thread.joinable()) {
         HANDLE hThread = reinterpret_cast<HANDLE>(pl->writer_thread.native_handle());
-        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
-            pl->writer_thread.join();
-        } else {
-            pl->writer_thread.detach();
-        }
+        WaitForSingleObject(hThread, 1000);
     }
     
     // Clear queue
