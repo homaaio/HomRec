@@ -805,8 +805,9 @@ void RecordingController::TeardownPreview() {
     // recording, based on the same state_.disable_preview flag.
     if (!pipeline_ || state_.recording) return;
 
-    hr_pl_destroy(pipeline_);
+    void *doomed = pipeline_;
     pipeline_ = nullptr;
+    std::thread([doomed]() { hr_pl_destroy(doomed); }).detach();
 }
 
 void RecordingController::RefreshPreviewSettings() {
