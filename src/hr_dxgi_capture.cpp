@@ -82,7 +82,12 @@ struct DxCapCtx {
         hr = output.As(&output1);
         if (FAILED(hr)) return hr;
 
-        hr = output1->DuplicateOutput(device.Get(), &duplication);
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            hr = output1->DuplicateOutput(device.Get(), &duplication);
+            if (SUCCEEDED(hr)) break;
+            if (hr != E_ACCESSDENIED && hr != static_cast<HRESULT>(DXGI_ERROR_ACCESS_DENIED)) break;
+            Sleep(50);
+        }
         if (FAILED(hr)) return hr;
 
         /* Get fresh size from output desc */
