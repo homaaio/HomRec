@@ -3,43 +3,110 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HomRec</title>
+    <title>HomRec — быстрый скринкаст</title>
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
         body {
             background: #ffffff;
             color: #000000;
             font-family: Arial, Helvetica, sans-serif;
             font-size: 13px;
-            margin: 0;
-            padding: 0;
+            line-height: 1.5;
+            display: flex;
+            min-height: 100vh;
+        }
+
+        .sidebar {
+            width: 220px;
+            background: #f4f6fa;
+            border-right: 1px solid #d0d7e2;
+            padding: 30px 15px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            overflow-y: auto;
+        }
+
+        .logo-container {
+            text-align: left;
+            margin-bottom: 20px;
+            padding-left: 8px;
+        }
+
+        .logo-container img {
+            width: 150px;
+            height: auto;
+            display: block;
+        }
+
+        .sidebar a {
+            display: block;
+            padding: 9px 12px;
+            border-radius: 6px;
+            color: #1a1f2b;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 14px;
+            transition: background 0.15s, color 0.15s;
+            border: 1px solid transparent;
+        }
+
+        .sidebar a:hover {
+            background: #e1e8f0;
+            color: #0047ab;
+            border-color: #cbd5e1;
+        }
+
+        .sidebar .spacer {
+            flex-grow: 1;
+        }
+
+        .sidebar .version-badge {
+            font-size: 12px;
+            color: #4b5563;
+            padding: 8px 12px;
+            border-top: 1px solid #d0d7e2;
+            margin-top: 10px;
         }
 
         .content {
-            max-width: 800px;
+            flex: 1;
+            max-width: 850px;
             margin: 0 auto;
-            padding: 10px 15px 30px 15px;
+            padding: 35px 30px 50px 30px;
         }
 
         h1 {
-            font-size: 26px;
+            font-size: 30px;
             font-weight: bold;
-            margin: 20px 0 5px 0;
+            margin: 10px 0 5px 0;
             color: #0a0e17;
+            letter-spacing: -0.3px;
         }
 
         h2 {
-            font-size: 18px;
+            font-size: 20px;
             font-weight: bold;
-            margin: 25px 0 8px 0;
+            margin: 30px 0 10px 0;
             color: #0a0e17;
             border-bottom: 2px solid #0047ab;
-            padding-bottom: 3px;
+            padding-bottom: 4px;
         }
 
         h3 {
-            font-size: 14px;
+            font-size: 16px;
             font-weight: bold;
-            margin: 18px 0 6px 0;
+            margin: 20px 0 8px 0;
+            color: #111827;
         }
 
         p {
@@ -58,25 +125,27 @@
         table {
             border-collapse: collapse;
             width: 100%;
-            margin: 10px 0;
+            margin: 12px 0;
             font-size: 13px;
-            border-radius: 6px;
+            border-radius: 8px;
             overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
 
         th {
             background: #0a0e17;
             color: #ffffff;
             text-align: left;
-            padding: 7px 10px;
+            padding: 9px 12px;
             border: 1px solid #0a0e17;
             font-weight: bold;
         }
 
         td {
-            padding: 6px 10px;
-            border: 1px solid #ccc;
+            padding: 8px 12px;
+            border: 1px solid #d9dee7;
             vertical-align: top;
+            background: #ffffff;
         }
 
         tr:nth-child(even) td {
@@ -87,9 +156,10 @@
             border: 1px solid #ccc;
             border-left: 5px solid #0047ab;
             background: #f5f7fa;
-            padding: 20px 24px;
-            margin: 15px 0;
-            border-radius: 6px;
+            padding: 22px 26px;
+            margin: 20px 0;
+            border-radius: 10px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.03);
         }
 
         .download-block p {
@@ -97,10 +167,10 @@
         }
 
         .download-title {
-            font-size: 20px;
+            font-size: 22px;
             font-weight: bold;
             color: #0a0e17;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
         }
 
         .download-link {
@@ -113,25 +183,25 @@
         pre {
             background: #f5f7fa;
             border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 10px;
+            border-radius: 6px;
+            padding: 12px;
             font-family: Consolas, "Courier New", monospace;
             font-size: 12px;
             overflow-x: auto;
-            margin: 10px 0;
+            margin: 12px 0;
         }
 
         code {
             font-family: Consolas, "Courier New", monospace;
             font-size: 12px;
             background: #f0f2f5;
-            padding: 1px 4px;
-            border-radius: 3px;
+            padding: 1px 5px;
+            border-radius: 4px;
         }
 
         .footer {
-            margin-top: 30px;
-            padding-top: 12px;
+            margin-top: 40px;
+            padding-top: 15px;
             border-top: 1px solid #ccc;
             font-size: 12px;
             color: #555;
@@ -141,248 +211,302 @@
         .note {
             background: #f0f4ff;
             border: 1px solid #b8c8e8;
-            border-radius: 4px;
-            padding: 8px 12px;
-            margin: 10px 0;
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin: 15px 0;
+        }
+
+        @media (max-width: 700px) {
+            body {
+                flex-direction: column;
+            }
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: static;
+                flex-direction: row;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 4px;
+                padding: 10px 15px;
+                border-right: none;
+                border-bottom: 1px solid #d0d7e2;
+            }
+            .logo-container {
+                margin-bottom: 0;
+                padding-left: 0;
+                margin-right: 15px;
+            }
+            .logo-container img {
+                width: 100px;
+            }
+            .sidebar a {
+                padding: 6px 10px;
+                font-size: 13px;
+            }
+            .sidebar .version-badge {
+                border-top: none;
+                margin-top: 0;
+                width: 100%;
+                text-align: right;
+                padding: 0;
+            }
+            .content {
+                padding: 20px 15px;
+            }
         }
     </style>
 </head>
 <body>
 
-<div class="content">
+    <aside class="sidebar">
+        <div class="logo-container">
+            <img src="assets/hom.png" alt="HomRec logo">
+        </div>
+        <a href="smth.html">Download</a>
+        <a href="smth.html">Documentation</a>
+        <a href="smth.html">Requirements</a>
+        <a href="smth.html">Install</a>
+        <a href="smth.html">Support</a>
+        <a href="smth.html">Forum</a>
+        <div class="spacer"></div>
+        <div class="version-badge">v2.0</div>
+    </aside>
 
-    <h1>HomRec</h1>
-    <p><b>Hardware Optimized Mechanism Recorder</b></p>
-    <p>Screen recorder built for weak PCs. No lags. No bloat. No GPU required.</p>
+    <div class="content">
 
-    <div class="download-block">
-        <div class="download-title">Download latest release</div>
+        <h1>HomRec</h1>
+        <p><b>Hardware Optimized Mechanism Recorder</b></p>
+        <p>Screen recorder built for weak PCs. No lags. No bloat. No GPU required.</p>
+
+        <div id="download" class="download-block">
+            <div class="download-title">Download latest release</div>
+            <p>
+                <a href="down-win.html" class="download-link">Windows (64-bit)</a><br>
+                <a href="down-deb.html" class="download-link">Linux (Debian/Ubuntu)</a>
+            </p>
+        </div>
+
+        <h2 id="features">What is HomRec?</h2>
         <p>
-            <a href="down-win.html" class="download-link">Windows (64-bit)</a><br>
-            <a href="down-deb.html" class="download-link">Linux (Debian/Ubuntu)</a>
+            If you've ever tried recording your screen with OBS or Bandicam on an old laptop
+            or office PC and everything lagged — <b>HomRec is made for you.</b>
         </p>
-    </div>
+        <p>
+            Written from the ground up to use the minimum possible CPU and RAM.
+            No fancy effects, no GPU requirement, no background services.
+            Just open, record, done.
+        </p>
+        <p>
+            HomRec is 100% native C/C++. There is no Python anywhere in this project —
+            the entire app (UI, recording pipeline, audio, plugins, console)
+            compiles directly into a single <code>hr.exe</code> with no runtime
+            dependencies beyond FFmpeg.
+        </p>
 
-    <h2>What is HomRec?</h2>
-    <p>
-        If you've ever tried recording your screen with OBS or Bandicam on an old laptop
-        or office PC and everything lagged — <b>HomRec is made for you.</b>
-    </p>
-    <p>
-        Written from the ground up to use the minimum possible CPU and RAM.
-        No fancy effects, no GPU requirement, no background services.
-        Just open, record, done.
-    </p>
-    <p>
-        HomRec is 100% native C/C++. There is no Python anywhere in this project —
-        the entire app (UI, recording pipeline, audio, plugins, console)
-        compiles directly into a single <code>hr.exe</code> with no runtime
-        dependencies beyond FFmpeg.
-    </p>
+        <h3>Features</h3>
+        <table>
+            <tr>
+                <th>Feature</th>
+                <th>Details</th>
+            </tr>
+            <tr>
+                <td>Screen recording</td>
+                <td>Full desktop or specific window</td>
+            </tr>
+            <tr>
+                <td>Audio capture</td>
+                <td>Microphone + Desktop audio (via WASAPI loopback)</td>
+            </tr>
+            <tr>
+                <td>Multi-monitor</td>
+                <td>Select which monitor to record</td>
+            </tr>
+            <tr>
+                <td>Hotkeys</td>
+                <td>F9 start/stop · F10 pause · F11 fullscreen</td>
+            </tr>
+            <tr>
+                <td>Custom languages</td>
+                <td>Drop a .hrl file in Advanced Settings to add any language instantly</td>
+            </tr>
+            <tr>
+                <td>Overlays</td>
+                <td>Add and position text/image/webcam overlays on your recording</td>
+            </tr>
+            <tr>
+                <td>Custom output folder</td>
+                <td>Choose where recordings are saved</td>
+            </tr>
+            <tr>
+                <td>Recording stats</td>
+                <td>Live FPS, duration, frame count in status bar</td>
+            </tr>
+            <tr>
+                <td>Console window</td>
+                <td>Access advanced commands directly via the built-in console</td>
+            </tr>
+            <tr>
+                <td>Plugins</td>
+                <td>Lua-scripted plugins with full filesystem/network access</td>
+            </tr>
+            <tr>
+                <td>Always on top</td>
+                <td>Keep the window above everything else</td>
+            </tr>
+            <tr>
+                <td>System tray</td>
+                <td>Minimise to tray, control recording from tray menu</td>
+            </tr>
+        </table>
 
-    <h2>Features</h2>
-    <table>
-        <tr>
-            <th>Feature</th>
-            <th>Details</th>
-        </tr>
-        <tr>
-            <td>Screen recording</td>
-            <td>Full desktop or specific window</td>
-        </tr>
-        <tr>
-            <td>Audio capture</td>
-            <td>Microphone + Desktop audio (via WASAPI loopback)</td>
-        </tr>
-        <tr>
-            <td>Multi-monitor</td>
-            <td>Select which monitor to record</td>
-        </tr>
-        <tr>
-            <td>Hotkeys</td>
-            <td>F9 start/stop · F10 pause · F11 fullscreen</td>
-        </tr>
-        <tr>
-            <td>Custom languages</td>
-            <td>Drop a .hrl file in Advanced Settings to add any language instantly</td>
-        </tr>
-        <tr>
-            <td>Overlays</td>
-            <td>Add and position text/image/webcam overlays on your recording</td>
-        </tr>
-        <tr>
-            <td>Custom output folder</td>
-            <td>Choose where recordings are saved</td>
-        </tr>
-        <tr>
-            <td>Recording stats</td>
-            <td>Live FPS, duration, frame count in status bar</td>
-        </tr>
-        <tr>
-            <td>Console window</td>
-            <td>Access advanced commands directly via the built-in console</td>
-        </tr>
-        <tr>
-            <td>Plugins</td>
-            <td>Lua-scripted plugins with full filesystem/network access</td>
-        </tr>
-        <tr>
-            <td>Always on top</td>
-            <td>Keep the window above everything else</td>
-        </tr>
-        <tr>
-            <td>System tray</td>
-            <td>Minimise to tray, control recording from tray menu</td>
-        </tr>
-    </table>
+        <h2 id="requirements">System Requirements</h2>
+        <table>
+            <tr>
+                <th>Component</th>
+                <th>Minimum</th>
+            </tr>
+            <tr>
+                <td>Operating System</td>
+                <td>Windows 10 (64-bit) or later, Debian/Ubuntu</td>
+            </tr>
+            <tr>
+                <td>Processor</td>
+                <td>Intel Core i3-M370 or equivalent</td>
+            </tr>
+            <tr>
+                <td>Memory</td>
+                <td>2 GB RAM or more recommended</td>
+            </tr>
+            <tr>
+                <td>Graphics</td>
+                <td>Integrated (Intel HD Graphics) or Dedicated GPU, DirectX 10</td>
+            </tr>
+            <tr>
+                <td>Disk Space</td>
+                <td>~170 MB for installation + free space for recordings</td>
+            </tr>
+        </table>
 
-    <h2>System Requirements</h2>
-    <table>
-        <tr>
-            <th>Component</th>
-            <th>Minimum</th>
-        </tr>
-        <tr>
-            <td>Operating System</td>
-            <td>Windows 10 (64-bit) or later, Debian/Ubuntu</td>
-        </tr>
-        <tr>
-            <td>Processor</td>
-            <td>Intel Core i3-M370 or equivalent</td>
-        </tr>
-        <tr>
-            <td>Memory</td>
-            <td>2 GB RAM or more recommended</td>
-        </tr>
-        <tr>
-            <td>Graphics</td>
-            <td>Integrated (Intel HD Graphics) or Dedicated GPU, DirectX 10</td>
-        </tr>
-        <tr>
-            <td>Disk Space</td>
-            <td>~170 MB for installation + free space for recordings</td>
-        </tr>
-    </table>
+        <div class="note">
+            <b>Note:</b> A more powerful processor and a video card with hardware encoding
+            (NVENC, AMD VCE, or Intel QSV) are recommended for recording 1080p or 60 FPS footage.
+        </div>
 
-    <div class="note">
-        <b>Note:</b> A more powerful processor and a video card with hardware encoding
-        (NVENC, AMD VCE, or Intel QSV) are recommended for recording 1080p or 60 FPS footage.
-    </div>
+        <h2 id="install">Installation</h2>
+        <h3>Option A — .exe (recommended)</h3>
+        <p>
+            1. Go to <a href="https://github.com/homaaio/HomRec">Releases</a> and download the latest .zip<br>
+            2. Unzip anywhere you want — no installer needed<br>
+            3. Launch <code>hr.exe</code>
+        </p>
+        <p>
+            FFmpeg is already included in the archive — no extra downloads needed.
+        </p>
+        <p>
+            <b>Antivirus warning?</b> Some antiviruses may flag HomRec because it is a new
+            program. It is not a virus — the full source code is on GitHub.
+        </p>
 
-    <h2>Installation</h2>
-    <h3>Option A — .exe (recommended)</h3>
-    <p>
-        1. Go to <a href="https://github.com/homaaio/HomRec">Releases</a> and download the latest .zip<br>
-        2. Unzip anywhere you want — no installer needed<br>
-        3. Launch <code>hr.exe</code>
-    </p>
-    <p>
-        FFmpeg is already included in the archive — no extra downloads needed.
-    </p>
-    <p>
-        <b>Antivirus warning?</b> Some antiviruses may flag HomRec because it is a new
-        program. It is not a virus — the full source code is on GitHub.
-    </p>
-
-    <h3>Option B — Build from source</h3>
-    <pre>git clone https://github.com/homaaio/HomRec.git
+        <h3>Option B — Build from source</h3>
+        <pre>git clone https://github.com/homaaio/HomRec.git
 cd homrec
 make
 hr.exe</pre>
-    <p>
-        Requires: MinGW-w64 toolchain, Lua 5.4, FFmpeg.
-        No pip install, no requirements.txt.
-    </p>
+        <p>
+            Requires: MinGW-w64 toolchain, Lua 5.4, FFmpeg.
+            No pip install, no requirements.txt.
+        </p>
 
-    <h2>Keyboard Shortcuts</h2>
-    <table>
-        <tr>
-            <th>Key</th>
-            <th>Action</th>
-        </tr>
-        <tr>
-            <td><code>F9</code></td>
-            <td>Start / Stop recording</td>
-        </tr>
-        <tr>
-            <td><code>F10</code></td>
-            <td>Pause / Resume recording</td>
-        </tr>
-        <tr>
-            <td><code>F11</code></td>
-            <td>Toggle fullscreen</td>
-        </tr>
-        <tr>
-            <td><code>Ctrl+Shift+T</code></td>
-            <td>Open built-in terminal</td>
-        </tr>
-        <tr>
-            <td><code>Ctrl+O</code></td>
-            <td>Open recordings folder</td>
-        </tr>
-        <tr>
-            <td><code>Ctrl+,</code></td>
-            <td>Open settings</td>
-        </tr>
-        <tr>
-            <td><code>Ctrl+Q</code></td>
-            <td>Quit the program</td>
-        </tr>
-        <tr>
-            <td><code>Esc</code></td>
-            <td>Minimize to tray</td>
-        </tr>
-    </table>
+        <h2 id="shortcuts">Keyboard Shortcuts</h2>
+        <table>
+            <tr>
+                <th>Key</th>
+                <th>Action</th>
+            </tr>
+            <tr>
+                <td><code>F9</code></td>
+                <td>Start / Stop recording</td>
+            </tr>
+            <tr>
+                <td><code>F10</code></td>
+                <td>Pause / Resume recording</td>
+            </tr>
+            <tr>
+                <td><code>F11</code></td>
+                <td>Toggle fullscreen</td>
+            </tr>
+            <tr>
+                <td><code>Ctrl+Shift+T</code></td>
+                <td>Open built-in terminal</td>
+            </tr>
+            <tr>
+                <td><code>Ctrl+O</code></td>
+                <td>Open recordings folder</td>
+            </tr>
+            <tr>
+                <td><code>Ctrl+,</code></td>
+                <td>Open settings</td>
+            </tr>
+            <tr>
+                <td><code>Ctrl+Q</code></td>
+                <td>Quit the program</td>
+            </tr>
+            <tr>
+                <td><code>Esc</code></td>
+                <td>Minimize to tray</td>
+            </tr>
+        </table>
 
-    <h2>Troubleshooting</h2>
-    <table>
-        <tr>
-            <th>Problem</th>
-            <th>Solution</th>
-        </tr>
-        <tr>
-            <td>"Windows protected your PC" (SmartScreen)</td>
-            <td>Click More info → Run anyway</td>
-        </tr>
-        <tr>
-            <td>Antivirus flags the file</td>
-            <td>False positive. Add HomRec folder to exceptions</td>
-        </tr>
-        <tr>
-            <td>"MSVCP140.dll not found"</td>
-            <td>Install Visual C++ Redistributable</td>
-        </tr>
-        <tr>
-            <td>Black screen instead of video</td>
-            <td>Run HomRec as administrator</td>
-        </tr>
-        <tr>
-            <td>Video lags or stutters</td>
-            <td>Lower FPS to 30, quality to Medium</td>
-        </tr>
-        <tr>
-            <td>No sound in recording</td>
-            <td>Check audio source in settings</td>
-        </tr>
-        <tr>
-            <td>Audio out of sync</td>
-            <td>Lower quality or FPS, restart HomRec</td>
-        </tr>
-    </table>
+        <h2 id="troubleshoot">Troubleshooting</h2>
+        <table>
+            <tr>
+                <th>Problem</th>
+                <th>Solution</th>
+            </tr>
+            <tr>
+                <td>"Windows protected your PC" (SmartScreen)</td>
+                <td>Click More info → Run anyway</td>
+            </tr>
+            <tr>
+                <td>Antivirus flags the file</td>
+                <td>False positive. Add HomRec folder to exceptions</td>
+            </tr>
+            <tr>
+                <td>"MSVCP140.dll not found"</td>
+                <td>Install Visual C++ Redistributable</td>
+            </tr>
+            <tr>
+                <td>Black screen instead of video</td>
+                <td>Run HomRec as administrator</td>
+            </tr>
+            <tr>
+                <td>Video lags or stutters</td>
+                <td>Lower FPS to 30, quality to Medium</td>
+            </tr>
+            <tr>
+                <td>No sound in recording</td>
+                <td>Check audio source in settings</td>
+            </tr>
+            <tr>
+                <td>Audio out of sync</td>
+                <td>Lower quality or FPS, restart HomRec</td>
+            </tr>
+        </table>
 
-    <h2>Links</h2>
-    <p>
-        <a href="https://github.com/homaaio/HomRec">GitHub</a> ·
-        <a href="https://discord.gg/Gv4t6Xhy7E">Discord</a> ·
-        <a href="https://t.me/homaexe">Telegram</a> ·
-        <a href="mailto:homa4ella@gmail.com">Email: homa4ella@gmail.com</a>
-    </p>
+        <h2 id="links">Links</h2>
+        <p>
+            <a href="https://github.com/homaaio/HomRec">GitHub</a> ·
+            <a href="https://discord.gg/Gv4t6Xhy7E">Discord</a> ·
+            <a href="https://t.me/homaexe">Telegram</a> ·
+            <a href="mailto:homa4ella@gmail.com">Email: homa4ella@gmail.com</a>
+        </p>
 
-    <div class="footer">
-        HomRec © 2026 · Made by homaaio
+        <div class="footer">
+            HomRec © 2026 · Made by homaaio
+        </div>
+
     </div>
-
-</div>
 
 </body>
 </html>
