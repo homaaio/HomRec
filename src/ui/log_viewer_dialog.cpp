@@ -1,5 +1,6 @@
 #include "log_viewer_dialog.h"
 #include "win32_theme.h"
+#include "../hr_log_paths.h"
 #include <windowsx.h>
 #include <string>
 #include <vector>
@@ -9,17 +10,6 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"HomRecLogViewer";
 enum { IDC_LOG_EDIT = 8201, IDC_LOG_REFRESH, IDC_LOG_OPENFOLDER, IDC_LOG_CLOSE, IDC_LOG_PATH_LABEL };
-
-// Duplicated from console_window.cpp's GetBaseDir() (anonymous-namespace,
-// not exported) - same small helper, same convention as this codebase's
-// other per-file NarrowFromWide/WideFromNarrow duplication.
-std::wstring GetBaseDir() {
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring full = path;
-    size_t pos = full.find_last_of(L"\\/");
-    return pos == std::wstring::npos ? full : full.substr(0, pos);
-}
 
 // Reads the log file leniently: if the bytes aren't valid UTF-8
 // (console.cpp's std::wofstream writer doesn't guarantee that for
@@ -78,7 +68,7 @@ LRESULT CALLBACK LogViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     switch (msg) {
         case WM_CREATE: {
             HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
-            logPath = new std::wstring(GetBaseDir() + L"\\homrec.log");
+            logPath = new std::wstring(HrLogPaths::LogFilePath(L"homrec.log"));
 
             CreateWindowExW(0, L"STATIC", logPath->c_str(), WS_CHILD | WS_VISIBLE,
                              12, 10, 660, 18, hwnd, (HMENU)IDC_LOG_PATH_LABEL, hInst, nullptr);
@@ -107,7 +97,12 @@ LRESULT CALLBACK LogViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             if (LOWORD(wParam) == IDC_LOG_REFRESH) {
                 LoadLogInto(GetDlgItem(hwnd, IDC_LOG_EDIT), *logPath);
             } else if (LOWORD(wParam) == IDC_LOG_OPENFOLDER) {
-                ShellExecuteW(hwnd, L"open", GetBaseDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                // Opens the logs\ folder now (homrec.log, pc.log,
+                // plugins.log, and any custom plugin log files all live
+                // there together - see HrLogPaths) instead of the whole
+                // install directory this used to point at back when
+                // homrec.log sat loose next to the .exe.
+                ShellExecuteW(hwnd, L"open", HrLogPaths::LogsDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             } else if (LOWORD(wParam) == IDC_LOG_CLOSE) {
                 DestroyWindow(hwnd);
             }
