@@ -32,16 +32,25 @@ void BuildCrashDir(wchar_t *out, DWORD out_chars) {
     CreateDirectoryW(out, nullptr); // harmless no-op if it already exists
 }
 
-// Appends one line to <exe-dir>\homrec.log without going through
+// Appends one line to <exe-dir>\logs\homrec.log without going through
 // hr_log.cpp's HrLog::Write() - that takes a std::mutex and opens an
 // std::ofstream, either of which could already be mid-operation (and
 // therefore stuck/corrupt) on whatever thread just crashed. Raw
 // CreateFileW/WriteFile with FILE_APPEND_DATA is the smallest amount of
-// machinery that can still get a line into the same file.
+// machinery that can still get a line into the same file. Deliberately
+// not using HrLogPaths::LogFilePath() (also just string-building plus a
+// CreateDirectoryW, no locks - would be safe here too) so this file has
+// zero dependency on anything that could change out from under a crash
+// handler; the "logs\" join is inlined instead.
 void AppendLogLine(const wchar_t *exe_dir, const char *line) {
+    wchar_t logs_dir[MAX_PATH];
+    wcscpy_s(logs_dir, exe_dir);
+    wcscat_s(logs_dir, L"logs");
+    CreateDirectoryW(logs_dir, nullptr); // harmless no-op if it already exists
+
     wchar_t path[MAX_PATH];
-    wcscpy_s(path, exe_dir);
-    wcscat_s(path, L"homrec.log");
+    wcscpy_s(path, logs_dir);
+    wcscat_s(path, L"\\homrec.log");
     HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
