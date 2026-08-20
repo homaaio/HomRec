@@ -301,3 +301,7 @@ recordings/
 create/
 icons/
 plugins/
+.png
+.jpg
+.webp
+.svg
