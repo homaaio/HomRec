@@ -1,6 +1,8 @@
 #include "lua_api.h"
 #include "lua_engine.h"
 #include "../hr_input_overlay_registry.h"
+#include "../hr_plugin_log.h"
+#include "../hr_log_paths.h"
 #include "../ui/theme.h"
 #include "../ui/recording_controller.h"
 #include <windows.h>
@@ -8,6 +10,9 @@
 #include <string>
 #include <cstdio>
 #include <cctype>
+#include <fstream>
+#include <ctime>
+#include <mutex>
 
 extern "C" {
     #include "lua.h"
@@ -40,6 +45,24 @@ struct Upvalues {
 
 Upvalues *GetUpvalues(lua_State *L) {
     return static_cast<Upvalues *>(lua_touserdata(L, lua_upvalueindex(1)));
+}
+
+// Guards homrec.log_to()'s per-file writes - separate from HrPluginLog's
+// own internal mutex since this opens whatever file the plugin named,
+// not logs\plugins.log itself.
+std::mutex &CustomLogMutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::wstring Utf8ToWide(const std::string &s) {
+    if (s.empty()) return std::wstring();
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return std::wstring();
+    std::wstring w(wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), wlen);
+    if (!w.empty() && w.back() == L'\0') w.pop_back(); // drop the NUL MultiByteToWideChar counted
+    return w;
 }
 
 std::string ColorRefToHex(COLORREF c) {
@@ -346,14 +369,73 @@ int L_register_command(lua_State *L) {
 }
 
 // --- homrec.print(text) -----------------------------------------------
-// Appends a line to the current command's console output. No-op (not an
-// error) outside of a command handler - see print_sink's comment in
-// lua_engine.h for why.
+// Appends a line to the current command's console output (no-op outside
+// of a command handler - see print_sink's comment in lua_engine.h for
+// why) *and* records it in logs\plugins.log tagged with this plugin's id,
+// so a plugin author gets a persisted trail of everything it printed even
+// from runs where nobody was watching the console live (on_load()/hooks
+// firing at startup, a scheduled/background task, etc).
 int L_print(lua_State *L) {
     auto *uv = GetUpvalues(L);
     const char *text = luaL_checkstring(L, 1);
     if (uv->engine->print_sink) uv->engine->print_sink->push_back(text);
+    HrPluginLog::Info(uv->plugin_id, text);
     return 0;
+}
+
+// --- homrec.log(message, level?) ---------------------------------------
+// Explicit logging call for plugins that want an entry in logs\plugins.log
+// without it also echoing to the console the way print() does - e.g.
+// on_tick()-style hooks that run constantly and would flood the console.
+// level defaults to "INFO"; anything else the plugin passes is used
+// as-is (kept as a free string, same as HrLog's own C++-side level
+// parameter, rather than validated against a fixed set) so a plugin can
+// use its own conventions if it wants.
+int L_log(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    const char *text = luaL_checkstring(L, 1);
+    const char *level = lua_isstring(L, 2) ? lua_tostring(L, 2) : "INFO";
+    HrPluginLog::Write(uv->plugin_id, level, text);
+    return 0;
+}
+
+// --- homrec.log_to(filename, message) -----------------------------------
+// Writes into the plugin's own log file under logs\ instead of the
+// shared plugins.log - e.g. a plugin doing heavy per-frame debug logging
+// that would otherwise drown out every other plugin's entries. filename
+// is sanitized down to a single safe path component (see
+// HrLogPaths::SanitizeLogFilename()) so a plugin can't escape logs\ or
+// clobber homrec.log/pc.log/plugins.log themselves - two plugins asking
+// for the same filename share that file (each line is still tagged with
+// the writing plugin's id, same as the shared logs), which is expected
+// and fine, not an error.
+int L_log_to(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    const char *filename = luaL_checkstring(L, 1);
+    const char *text = luaL_checkstring(L, 2);
+
+    // filenames from plugin.json/Lua source are UTF-8, same convention as
+    // every other string this API takes (see homrec.show_toast() above) -
+    // naively widening bytes instead would mangle any non-ASCII filename
+    // a plugin passed and could even change what SanitizeLogFilename()
+    // strips out.
+    std::wstring safe_name = HrLogPaths::SanitizeLogFilename(Utf8ToWide(filename));
+
+    std::lock_guard<std::mutex> lock(CustomLogMutex());
+    std::wstring full_path = HrLogPaths::LogFilePath(safe_name);
+    HrLogPaths::CapFileSize(full_path, 5 * 1024 * 1024);
+    std::ofstream f(full_path.c_str(), std::ios::app | std::ios::binary);
+    if (!f) { lua_pushboolean(L, 0); return 1; }
+
+    time_t t = time(nullptr);
+    tm lt{};
+    localtime_s(&lt, &t);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &lt);
+    f << "[" << ts << "] [" << uv->plugin_id << "] " << text << "\n";
+
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 } // namespace
@@ -385,6 +467,8 @@ void *Install(lua_State *L, LuaPluginEngine *engine, const std::string &plugin_i
     registerFn("register_input_overlay", L_register_input_overlay);
     registerFn("register_command", L_register_command);
     registerFn("print", L_print);
+    registerFn("log", L_log);
+    registerFn("log_to", L_log_to);
 
     lua_setglobal(L, "homrec");
     return uv;

@@ -2,6 +2,7 @@
 #include "lua_api.h"
 #include "../hr_archive.h"
 #include "../hr_input_overlay_registry.h"
+#include "../hr_plugin_log.h"
 #include <windows.h>
 #include <fstream>
 #include <sstream>
@@ -124,6 +125,7 @@ bool LuaPluginEngine::LoadPlugin(const std::string &plugin_dir_path) {
     if (luaL_dostring(plugin->L, script.c_str()) != LUA_OK) {
         const char *err = lua_tostring(plugin->L, -1);
         OutputDebugStringA(("Plugin script error [" + manifest.id + "]: " + (err ? err : "?") + "\n").c_str());
+        HrPluginLog::Error(manifest.id, std::string("script error: ") + (err ? err : "?"));
         lua_close(plugin->L);
         LuaApi::Uninstall(plugin->api_handle);
         return false;
@@ -135,6 +137,7 @@ bool LuaPluginEngine::LoadPlugin(const std::string &plugin_dir_path) {
         if (lua_pcall(plugin->L, 0, 0, 0) != LUA_OK) {
             const char *err = lua_tostring(plugin->L, -1);
             OutputDebugStringA(("Plugin on_load() error [" + manifest.id + "]: " + (err ? err : "?") + "\n").c_str());
+            HrPluginLog::Error(manifest.id, std::string("on_load() error: ") + (err ? err : "?"));
         }
     } else {
         lua_pop(plugin->L, 1);
@@ -143,6 +146,8 @@ bool LuaPluginEngine::LoadPlugin(const std::string &plugin_dir_path) {
     plugin->loaded_ok = true;
     loaded_ids_.push_back(manifest.id);
     plugins_[manifest.id] = std::move(plugin);
+    HrPluginLog::Info(manifest.id, "loaded (version " +
+                       (manifest.version.empty() ? std::string("?") : manifest.version) + ")");
     return true;
 }
 
@@ -167,6 +172,7 @@ bool LuaPluginEngine::LoadPluginArchive(const std::string &hrp_path) {
     if (need_extract) {
         if (!HrExtractArchive(hrp_path, extracted_dir)) {
             OutputDebugStringA(("Plugin archive extraction failed: " + hrp_path + "\n").c_str());
+            HrPluginLog::Error("", "archive extraction failed: " + hrp_path);
             return false;
         }
     }
@@ -181,6 +187,7 @@ void LuaPluginEngine::UnloadPlugin(const std::string &id) {
     if (lua_isfunction(it->second->L, -1)) {
         lua_pcall(it->second->L, 0, 0, 0); // best-effort; a misbehaving plugin shouldn't block unload
     }
+    HrPluginLog::Info(id, "unloaded");
 
     // Drop any console commands this plugin registered - otherwise
     // DispatchCommand() could look up a lua_ref into a lua_State we're
@@ -209,6 +216,7 @@ void LuaPluginEngine::EmitHook(const char *hook_name) {
                 const char *err = lua_tostring(L, -1);
                 OutputDebugStringA(("Plugin hook error [" + kv.first + "::" + hook_name + "]: " +
                                      (err ? err : "?") + "\n").c_str());
+                HrPluginLog::Error(kv.first, std::string(hook_name) + "() error: " + (err ? err : "?"));
             }
         } else {
             lua_pop(L, 1);
