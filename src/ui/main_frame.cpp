@@ -11,6 +11,7 @@
 #include "hrc_config.h"
 #include "win32_theme.h"
 #include "../hr_log.h"
+#include "../hr_pc_log.h"
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
@@ -1264,6 +1265,10 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
     if (audio_panel_) audio_panel_->PollLevels();
+
+    HrPcLog::MaybeLogSnapshot(state_.recording, rec_ ? rec_->current_fps() : 0.0,
+                               rec_ && !rec_->resolved_hw_encoder().empty(),
+                               state_.output_folder);
 
     if (state_.recording) {
         std::wstring elapsed = rec_ ? rec_->elapsed_formatted() : std::wstring(L"00:00:00");
