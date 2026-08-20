@@ -4,6 +4,7 @@
 #include "win32_theme.h"
 #include "hrc_config.h"
 #include "../plugins/lua_engine.h"
+#include "../hr_log_paths.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -667,7 +668,7 @@ void ConsoleWindow::CmdStatus(const std::wstring &) {
 }
 
 void ConsoleWindow::CmdLog(const std::wstring &raw) {
-    std::wstring log_path = GetBaseDir() + L"\\homrec.log";
+    std::wstring log_path = HrLogPaths::LogFilePath(L"homrec.log");
 
     size_t sp = raw.find(L' ');
     std::wstring rest = sp == std::wstring::npos ? L"" : Trim(raw.substr(sp + 1));
@@ -901,8 +902,8 @@ void ConsoleWindow::CmdRmSystemFiles(const std::wstring &raw) {
             std::wstring p = base + L"\\plugins";
             if (DirExists(p) && RemoveDirRecursive(p)) cleared.push_back(type);
         } else if (type == L"logs") {
-            std::wstring p = base + L"\\homrec.log";
-            if (FileExists(p) && DeleteFileW(p.c_str())) cleared.push_back(type);
+            std::wstring p = HrLogPaths::LogsDir();
+            if (DirExists(p) && RemoveDirRecursive(p)) cleared.push_back(type);
         } else if (type == L"cache") {
             wchar_t tempPath[MAX_PATH];
             GetTempPathW(MAX_PATH, tempPath);
