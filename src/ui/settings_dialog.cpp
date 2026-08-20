@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 
 extern "C" {
     void *hr_settings_create();
@@ -196,37 +197,37 @@ private:
         scroller_->GetSizer()->Show(advanced_panel_, advanced_shown_, true);
         advanced_toggle_btn_->SetLabelText2(wxString::FromUTF8(
             advanced_shown_ ? "\u2699 Basic" : "\u2699 Advanced"));
-        // BUGFIX: advanced_panel_ itself was never told to re-Layout() when
-        // shown - its own wxFlexGridSizer (advRoot, built once back in the
-        // ctor while the panel was still Hidden()) never got a chance to
-        // compute real widths/heights for its children, since a hidden
-        // window's Layout() calls are skipped by wx. The result: the sizer
-        // Show() above correctly flips the "is this item visible" flag and
-        // the button label updated (proving the click handler *did* run),
-        // but scroller_->FitInside()/Layout() below were reflowing a child
-        // whose own internal layout was still the all-zero one from
-        // construction, so the reserved space for it stayed effectively
-        // empty - the fields never had a size to actually be visible at.
-        // Laying out advanced_panel_ itself first (now that it's shown, so
-        // its own Layout() call actually takes effect) before asking the
-        // parent scroller to size around it fixes that.
-        advanced_panel_->Layout();
-        scroller_->FitInside();
-        scroller_->Layout();
-        Layout();
-        // Layout() alone can leave the scrolled window's virtual size and
-        // scrollbars stale on wxMSW after a runtime Show/Hide of a child -
-        // SendSizeEvent() forces the full resize/repaint path so the newly
-        // (in)visible fields and the scrollbar actually appear right away
-        // instead of only after the dialog is manually resized.
-        scroller_->SendSizeEvent();
-        SendSizeEvent();
-        // Belt-and-suspenders: force a repaint too, in case only the
-        // layout geometry updated on this run without a corresponding
-        // WM_PAINT (observed intermittently on wxMSW after a runtime
-        // Show()/Hide() inside a wxScrolledWindow).
-        scroller_->Refresh();
-        Refresh();
+        CallAfter([this]() {
+            if (!advanced_panel_) return; // dialog could have closed before this ran
+            advanced_panel_->Layout();
+            scroller_->FitInside();
+            scroller_->Layout();
+            Layout();
+
+            // CalcMin() here reflects whatever's currently shown in
+            // scrollRoot - basic fields alone when hiding, basic +
+            // advanced when showing (advanced_panel_'s Show()/Layout()
+            // above already ran, so its sizer item now reports a real
+            // height instead of the old all-zero one).
+            wxSize contentSize = scroller_->GetSizer()->CalcMin();
+            int wantHeight = GetSize().GetHeight();
+            if (advanced_shown_) {
+                int contentHeight = contentSize.GetHeight() + 140; // header + button row + margins
+                wxRect screen = wxGetClientDisplayRect();
+                int maxHeight = screen.GetHeight() - 40;
+                collapsed_height_ = GetSize().GetHeight();
+                wantHeight = std::min(std::max(contentHeight, collapsed_height_), maxHeight);
+            } else if (collapsed_height_ > 0) {
+                wantHeight = collapsed_height_;
+            }
+            if (wantHeight != GetSize().GetHeight())
+                SetSize(GetSize().GetWidth(), wantHeight);
+
+            scroller_->SendSizeEvent();
+            SendSizeEvent();
+            scroller_->Refresh();
+            Refresh();
+        });
     }
 
     void OnToggleAdvanced(wxCommandEvent &) { ShowAdvanced(!advanced_shown_); }
@@ -631,6 +632,11 @@ private:
     wxPanel *advanced_panel_ = nullptr;
     ColorButton *advanced_toggle_btn_ = nullptr;
     bool advanced_shown_ = false;
+    // Dialog height (client area) from just before Advanced was last
+    // shown, so hiding it again restores the original compact size
+    // instead of staying stretched out. 0 means "never grown yet" (i.e.
+    // Advanced hasn't been toggled on this instance).
+    int collapsed_height_ = 0;
 
     // Basic
     LabeledSlider *quality_slider_ = nullptr;
