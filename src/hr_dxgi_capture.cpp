@@ -82,10 +82,56 @@ struct DxCapCtx {
         hr = output.As(&output1);
         if (FAILED(hr)) return hr;
 
-        for (int attempt = 0; attempt < 10; ++attempt) {
+        // BUGFIX: "disable preview -> re-enable" would leave the live
+        // preview stuck on "Preview loading..." forever. Root cause:
+        // DuplicateOutput() can transiently fail with
+        // DXGI_ERROR_ACCESS_DENIED (or plain E_ACCESSDENIED) for a brief
+        // window right after the previous duplication session on this
+        // same output was released (hr_dx_destroy(), called from
+        // TeardownPreview() when the checkbox is checked) -- the OS-side
+        // desktop-duplication handoff isn't always instantaneous, even
+        // though our own COM refcounts drop to zero synchronously. A
+        // single failed attempt here used to make hr_dx_create() (and
+        // therefore EnsurePreview()) return null permanently for that
+        // pipeline; RecordingController::SyncOverlays()'s 2-second retry
+        // loop then just kept calling a brand new hr_dx_create() that hit
+        // the exact same one-shot failure every time, forever. Retry a
+        // few times with a short backoff instead of giving up on the
+        // first failure - this resolves within a couple hundred ms in
+        // practice, well before the user notices, and still fails fast
+        // (after ~500ms total) for a genuine capture failure (RDP,
+        // permissions, no active display) rather than hanging.
+        // BUGFIX: the retry above only covered E_ACCESSDENIED (this
+        // pipeline's own duplication session on this output was released
+        // a moment too recently, or another app briefly holds one). In
+        // practice a *second* transient failure mode hits the same
+        // codepath: HomRec's own previous Pipeline (a just-stopped
+        // recording, or an "Apply with preview off" snapshot pipeline -
+        // see overlays_dock_panel.h) can still be mid-shutdown on a
+        // detached, force-handed-off thread (hr_pl_destroy() in
+        // hr_pipeline.cpp gives up waiting after 1s and detaches rather
+        // than blocking the UI thread indefinitely - see its own
+        // comments) when a fresh dx_create()/reset() runs right after.
+        // That in-flight duplication session, still technically ours but
+        // not yet released, makes DuplicateOutput() fail with
+        // DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (too many concurrent
+        // duplication sessions on this output) instead of
+        // E_ACCESSDENIED - a different HRESULT for effectively the same
+        // "wait a beat, it's about to free up" situation, so it needs
+        // its own retry branch. Also widened the budget from 500ms to
+        // ~2s: a detached thread that timed out because its writer
+        // thread was blocked writing to an overloaded ffmpeg process
+        // (see "Recording overloaded" in hr_ff_process.cpp) can
+        // realistically take longer than 500ms total to actually exit
+        // and release the duplication interface.
+        for (int attempt = 0; attempt < 40; ++attempt) {
             hr = output1->DuplicateOutput(device.Get(), &duplication);
             if (SUCCEEDED(hr)) break;
-            if (hr != E_ACCESSDENIED && hr != static_cast<HRESULT>(DXGI_ERROR_ACCESS_DENIED)) break;
+            if (hr != E_ACCESSDENIED &&
+                hr != static_cast<HRESULT>(DXGI_ERROR_ACCESS_DENIED) &&
+                hr != static_cast<HRESULT>(DXGI_ERROR_NOT_CURRENTLY_AVAILABLE) &&
+                hr != static_cast<HRESULT>(DXGI_ERROR_SESSION_DISCONNECTED))
+                break;
             Sleep(50);
         }
         if (FAILED(hr)) return hr;
