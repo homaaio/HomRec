@@ -4,6 +4,17 @@ CC  := cc
 LUA_CFLAGS  ?= -IC:/lua54/include
 LUA_LDFLAGS ?= -LC:/lua54/lib
 
+# hom (tools/hom/hom.cpp) is a separate standalone tool (the HomRec
+# plugin package manager) - NOT linked into hr.exe, doesn't need
+# wxWidgets or Lua, and its main() is a plain narrow int main(argc, argv)
+# rather than hr.exe's wWinMain/wmain. Because of that last point it must
+# NOT get -municode: with -municode the linker looks for a wide entry
+# point (wWinMainCRTStartup/wmainCRTStartup) that a plain main() doesn't
+# provide, and the link fails. So hom gets its own flag variables instead
+# of reusing CXXFLAGS/LDFLAGS above.
+HOM_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE
+HOM_LDLIBS   := -lwinhttp -lshlwapi
+
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 \
             -Isrc -IC:/msys64/mingw64/lib/wx/include/msw-unicode-3.2 \
             -IC:/msys64/mingw64/include/wx-3.2 -DWXUSINGDLL -D__WXMSW__ $(LUA_CFLAGS)
@@ -36,10 +47,12 @@ OBJS := \
 	src/ui/window_picker_dialog.o \
 	src/ui/hide_window_dialog.o \
 	src/ui/overlays_dock_panel.o \
+	src/ui/overlay_placement_dialog.o \
 	src/hr_log.o \
 	src/hr_log_paths.o \
 	src/hr_plugin_log.o \
 	src/hr_pc_log.o \
+	src/hr_system_integration.o \
 	src/hr_crash_handler.o \
 	src/hr_archive.o \
 	src/hr_input_overlay.o \
@@ -78,7 +91,12 @@ src/%.o: src/%.c
 resource.o: resource.rc
 	windres resource.rc -O coff -o resource.o
 
-clean:
-	rm -f $(OBJS) resource.o hr.exe
+hom: hom.exe
 
-.PHONY: all clean
+hom.exe: tools/hom/hom.cpp
+	$(CXX) $(HOM_CXXFLAGS) -o hom.exe tools/hom/hom.cpp $(HOM_LDLIBS)
+
+clean:
+	rm -f $(OBJS) resource.o hr.exe hom.exe
+
+.PHONY: all clean hom
