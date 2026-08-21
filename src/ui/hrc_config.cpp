@@ -79,13 +79,19 @@ bool Save(const AppState &state, const std::wstring &path) {
       << "quality=" << state.quality << "\n"
       << "target_fps=" << state.target_fps << "\n"
       << "scale_factor=" << state.scale_factor << "\n"
+      << "resolution_mode=" << (state.resolution_mode == ResolutionMode::Absolute ? 1 : 0) << "\n"
+      << "resolution_w=" << state.resolution_w << "\n"
+      << "resolution_h=" << state.resolution_h << "\n"
       << "recording_mode=" << RecordingModeToStr(state.recording_mode) << "\n"
       << "show_summary=" << FromBool(state.show_summary) << "\n"
       << "monitor_id=" << state.monitor_id << "\n"
       << "capture_mode=" << CaptureModeToStr(state.capture_mode) << "\n"
       << "capture_window_title=" << state.capture_window_title << "\n"
       << "preview_width=" << state.preview_width << "\n"
-      << "preview_height=" << state.preview_height << "\n\n";
+      << "preview_height=" << state.preview_height << "\n"
+      << "preview_quality_pct=" << state.preview_quality_pct << "\n"
+      << "preview_fps=" << state.preview_fps << "\n"
+      << "disable_preview=" << FromBool(state.disable_preview) << "\n\n";
 
     f << "[video]\n"
       << "video_codec=" << state.video_codec << "\n"
@@ -122,7 +128,12 @@ bool Save(const AppState &state, const std::wstring &path) {
       << "show_audio_panel=" << FromBool(state.show_audio_panel) << "\n"
       << "show_overlays_panel=" << FromBool(state.show_overlays_panel) << "\n"
       << "notify_sound=" << FromBool(state.notify_sound) << "\n"
-      << "notify_flash=" << FromBool(state.notify_flash) << "\n";
+      << "notify_flash=" << FromBool(state.notify_flash) << "\n"
+      << "hint_no_overlay=" << FromBool(state.hint_no_overlay) << "\n";
+
+    f << "[security]\n"
+      << "system_logging_enabled=" << FromBool(state.system_logging_enabled) << "\n"
+      << "plugin_logging_enabled=" << FromBool(state.plugin_logging_enabled) << "\n\n";
 
     // BUGFIX: overlays used to not be saved at all -- anything set up in
     // the Overlays panel silently vanished the moment the profile was
@@ -189,6 +200,13 @@ bool Load(AppState &state, const std::wstring &path) {
     if (has("quality")) state.quality = atoi(get("quality").c_str());
     if (has("target_fps")) state.target_fps = atoi(get("target_fps").c_str());
     if (has("scale_factor")) state.scale_factor = atof(get("scale_factor").c_str());
+    // BUGFIX: see the matching comment in Save() -- resolution_mode/_w/_h
+    // and the preview_* fields below weren't round-tripped through .hrc
+    // profiles at all before this fix.
+    if (has("resolution_mode")) state.resolution_mode =
+        (atoi(get("resolution_mode").c_str()) != 0) ? ResolutionMode::Absolute : ResolutionMode::Percent;
+    if (has("resolution_w")) state.resolution_w = atoi(get("resolution_w").c_str());
+    if (has("resolution_h")) state.resolution_h = atoi(get("resolution_h").c_str());
     if (has("recording_mode")) state.recording_mode = RecordingModeFromStr(get("recording_mode"));
     if (has("show_summary")) state.show_summary = ToBool(get("show_summary"));
     if (has("monitor_id")) state.monitor_id = atoi(get("monitor_id").c_str());
@@ -196,6 +214,9 @@ bool Load(AppState &state, const std::wstring &path) {
     if (has("capture_window_title")) state.capture_window_title = get("capture_window_title");
     if (has("preview_width")) state.preview_width = atoi(get("preview_width").c_str());
     if (has("preview_height")) state.preview_height = atoi(get("preview_height").c_str());
+    if (has("preview_quality_pct")) state.preview_quality_pct = atoi(get("preview_quality_pct").c_str());
+    if (has("preview_fps")) state.preview_fps = atoi(get("preview_fps").c_str());
+    if (has("disable_preview")) state.disable_preview = ToBool(get("disable_preview"));
 
     if (has("video_codec")) state.video_codec = get("video_codec");
     if (has("hw_accel")) state.hw_accel = get("hw_accel");
@@ -228,6 +249,10 @@ bool Load(AppState &state, const std::wstring &path) {
     if (has("show_overlays_panel")) state.show_overlays_panel = ToBool(get("show_overlays_panel"));
     if (has("notify_sound")) state.notify_sound = ToBool(get("notify_sound"));
     if (has("notify_flash")) state.notify_flash = ToBool(get("notify_flash"));
+    if (has("hint_no_overlay")) state.hint_no_overlay = ToBool(get("hint_no_overlay"));
+
+    if (has("system_logging_enabled")) state.system_logging_enabled = ToBool(get("system_logging_enabled"));
+    if (has("plugin_logging_enabled")) state.plugin_logging_enabled = ToBool(get("plugin_logging_enabled"));
 
     // BUGFIX: see the matching comment in Save() -- overlays weren't
     // persisted at all before.
