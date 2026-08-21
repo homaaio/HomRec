@@ -119,6 +119,23 @@ struct AppState {
     int  preview_quality_pct = 100; // 25/50/75/100 - % of preview_width/height below to actually render at
     int  preview_fps         = 15;  // how many times/sec the preview thumbnail is refreshed
 
+    // -- Settings > Security -----------------------------------------------
+    // Independent on/off switches for the two always-on-by-default log
+    // files (see hr_pc_log.h / hr_plugin_log.h) - homrec.log itself
+    // (hr_log.h, events/errors) isn't covered by either of these, only
+    // the periodic hardware-sampling log and the plugin-system log.
+    bool system_logging_enabled = true; // logs/pc.log
+    bool plugin_logging_enabled = true; // logs/plugins.log
+
+    // -- Settings > System (also offered on first run in the Welcome
+    // wizard, see welcome_dialog.cpp's new Page::System) --------------------
+    bool        desktop_shortcut_enabled = false;
+    // Empty = "use the real Desktop folder"
+    // (HrSystemIntegration::GetDefaultDesktopPath()) - only set to
+    // something else when the user picks a custom folder via Browse.
+    std::string desktop_shortcut_path;
+    bool        autostart_enabled = false;
+
     // -- runtime / recording status --------------------------------------
     bool   recording    = false;
     bool   paused       = false;
