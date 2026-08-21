@@ -1,6 +1,7 @@
 #include "welcome_dialog.h"
 #include "version.h"
 #include "win32_theme.h"
+#include "../hr_system_integration.h"
 #include <string>
 #include <shlobj.h>
 
@@ -15,6 +16,8 @@ extern "C" {
     void hr_settings_set_output_folder(void *h, const char *v);
     void hr_settings_set_fps(void *h, int v);
     void hr_settings_set_resolution_pct(void *h, int v);
+    void hr_settings_set_desktop_shortcut_path(void *h, const char *v);
+    void hr_settings_set_flag(void *h, const char *name, int v);
 }
 
 namespace {
@@ -24,13 +27,19 @@ enum {
     IDC_CHANGELOG = 7001, IDC_GITHUB, IDC_WEBSITE, IDC_GETSTARTED,
     IDC_BACK, IDC_NEXT, IDC_SKIP, IDC_BROWSE, IDC_FOLDER_EDIT,
     IDC_RES_COMBO, IDC_FPS_COMBO,
+    IDC_SYS_SHORTCUT_CHK, IDC_SYS_SHORTCUT_BROWSE, IDC_SYS_AUTOSTART_CHK, IDC_SYS_TRAY_CHK,
     IDT_PULSE = 1
 };
 
 constexpr int kResPct[] = { 100, 75, 50, 25 };
 constexpr int kFpsOpt[] = { 15, 24, 30, 60 };
 
-enum class Page { Greeting = 0, Settings = 1, Finish = 2 };
+// New page inserted between the basic-settings page and the finish page
+// (see ShowWelcomeDialog()'s header comment) - offers the same three
+// System toggles Settings > System has (see settings_dialog.cpp's
+// BuildSystemTab()) so a fresh install can opt into them right away
+// instead of only discovering them later in Settings.
+enum class Page { Greeting = 0, Settings = 1, System = 2, Finish = 3 };
 
 struct WelcomeCtx {
     AppState *state = nullptr;
@@ -44,7 +53,12 @@ struct WelcomeCtx {
     HWND hFpsLbl = nullptr, hFpsCombo = nullptr;
     HWND hSettingsTitle = nullptr;
 
-    // Page 2 (finish)
+    // Page 2 (system integration)
+    HWND hSystemTitle = nullptr, hSystemBody = nullptr;
+    HWND hShortcutChk = nullptr, hShortcutPathEdit = nullptr, hShortcutBrowseBtn = nullptr;
+    HWND hAutostartChk = nullptr, hTrayChk = nullptr;
+
+    // Page 3 (finish)
     HWND hFinishTitle = nullptr, hFinishBody = nullptr;
     HWND hChangelogBtn = nullptr, hGithubBtn = nullptr, hWebsiteBtn = nullptr;
 
@@ -83,13 +97,50 @@ void ApplyAndPersistSettings(WelcomeCtx *ctx) {
     hr_settings_destroy(settings);
 }
 
+void ApplyAndPersistSystemSettings(WelcomeCtx *ctx) {
+    if (!ctx->state) return;
+
+    bool wantShortcut = SendMessageW(ctx->hShortcutChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    wchar_t pathW[MAX_PATH] = {};
+    GetWindowTextW(ctx->hShortcutPathEdit, pathW, MAX_PATH);
+    int plen = WideCharToMultiByte(CP_UTF8, 0, pathW, -1, nullptr, 0, nullptr, nullptr);
+    std::string shortcutDir(plen > 0 ? plen - 1 : 0, '\0');
+    if (plen > 0) WideCharToMultiByte(CP_UTF8, 0, pathW, -1, shortcutDir.data(), plen, nullptr, nullptr);
+    if (shortcutDir.empty()) shortcutDir = HrSystemIntegration::GetDefaultDesktopPath();
+
+    if (wantShortcut) HrSystemIntegration::CreateDesktopShortcut(shortcutDir);
+    else HrSystemIntegration::RemoveDesktopShortcut(shortcutDir);
+    ctx->state->desktop_shortcut_enabled = wantShortcut;
+    ctx->state->desktop_shortcut_path = shortcutDir;
+
+    bool wantAutostart = SendMessageW(ctx->hAutostartChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    HrSystemIntegration::SetAutostart(wantAutostart);
+    ctx->state->autostart_enabled = wantAutostart;
+
+    ctx->state->minimize_to_tray = SendMessageW(ctx->hTrayChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+
+    void *settings = hr_settings_create();
+    hr_settings_load(settings, kSettingsPath);
+    hr_settings_set_flag(settings, "desktop_shortcut_enabled", wantShortcut ? 1 : 0);
+    hr_settings_set_desktop_shortcut_path(settings, ctx->state->desktop_shortcut_path.c_str());
+    hr_settings_set_flag(settings, "autostart_enabled", wantAutostart ? 1 : 0);
+    hr_settings_set_flag(settings, "minimize_tray", ctx->state->minimize_to_tray ? 1 : 0);
+    hr_settings_save(settings, kSettingsPath);
+    hr_settings_destroy(settings);
+}
+
 void SetPageVisibility(WelcomeCtx *ctx, HWND hwnd) {
     bool onSettings = ctx->page == Page::Settings;
+    bool onSystem = ctx->page == Page::System;
     bool onFinish = ctx->page == Page::Finish;
 
     for (HWND h : { ctx->hSettingsTitle, ctx->hSkipChk, ctx->hFolderLbl, ctx->hFolderEdit,
                      ctx->hBrowseBtn, ctx->hResLbl, ctx->hResCombo, ctx->hFpsLbl, ctx->hFpsCombo })
         ShowWindow(h, onSettings ? SW_SHOW : SW_HIDE);
+
+    for (HWND h : { ctx->hSystemTitle, ctx->hSystemBody, ctx->hShortcutChk, ctx->hShortcutPathEdit,
+                     ctx->hShortcutBrowseBtn, ctx->hAutostartChk, ctx->hTrayChk })
+        ShowWindow(h, onSystem ? SW_SHOW : SW_HIDE);
 
     for (HWND h : { ctx->hFinishTitle, ctx->hFinishBody, ctx->hChangelogBtn, ctx->hGithubBtn, ctx->hWebsiteBtn })
         ShowWindow(h, onFinish ? SW_SHOW : SW_HIDE);
@@ -191,9 +242,11 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 std::wstring msg =
                     L"This quick setup takes a few seconds and helps HomRec "
                     L"record at settings that actually fit your machine.\n\n"
-                    L"Click Next to choose where recordings are saved and "
-                    L"pick a resolution/fps - or skip straight past it if "
-                    L"you'd rather just use the defaults.";
+                    L"Click Next to choose where recordings are saved, pick a "
+                    L"resolution/fps, and set up a few optional system "
+                    L"touches (desktop shortcut, startup, tray icon) - or "
+                    L"skip straight past either page if you'd rather just "
+                    L"use the defaults.";
                 DrawTextW(hdc, msg.c_str(), -1, &msgRect, DT_LEFT | DT_WORDBREAK);
             }
 
@@ -227,6 +280,25 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     }
                     break;
                 }
+                case IDC_SYS_SHORTCUT_CHK: {
+                    bool on = SendMessageW(ctx->hShortcutChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    EnableWindow(ctx->hShortcutPathEdit, on);
+                    EnableWindow(ctx->hShortcutBrowseBtn, on);
+                    break;
+                }
+                case IDC_SYS_SHORTCUT_BROWSE: {
+                    wchar_t path[MAX_PATH] = {};
+                    BROWSEINFOW bi = {};
+                    bi.hwndOwner = hwnd;
+                    bi.lpszTitle = L"Choose where to place the shortcut";
+                    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+                    if (pidl) {
+                        if (SHGetPathFromIDListW(pidl, path)) SetWindowTextW(ctx->hShortcutPathEdit, path);
+                        CoTaskMemFree(pidl);
+                    }
+                    break;
+                }
                 case IDC_BACK:
                     if (ctx->page != Page::Greeting) {
                         ctx->page = (Page)((int)ctx->page - 1);
@@ -235,6 +307,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     break;
                 case IDC_NEXT:
                     if (ctx->page == Page::Settings) ApplyAndPersistSettings(ctx);
+                    if (ctx->page == Page::System) ApplyAndPersistSystemSettings(ctx);
                     if (ctx->page == Page::Finish) { DestroyWindow(hwnd); break; }
                     ctx->page = (Page)((int)ctx->page + 1);
                     SetPageVisibility(ctx, hwnd);
@@ -351,7 +424,43 @@ void ShowWelcomeDialog(HWND parent, HINSTANCE hInst, AppState &state) {
         WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, 28, 300, W - 56, 24,
         hwnd, (HMENU)IDC_SKIP, hInst, nullptr);
 
-    // -- Page 2: finish -------------------------------------------------------
+    // -- Page 2: system integration ----------------------------------------
+    ctx.hSystemTitle = CreateWindowExW(0, L"STATIC", L"A couple of system options",
+        WS_CHILD | SS_LEFT, 28, 118, W - 56, 22, hwnd, nullptr, hInst, nullptr);
+    SendMessageW(ctx.hSystemTitle, WM_SETFONT, (WPARAM)boldFont, TRUE);
+    ctx.hSystemBody = CreateWindowExW(0, L"STATIC",
+        L"These are all optional, and the same three toggles are always\n"
+        L"available later in Settings > System.",
+        WS_CHILD | SS_LEFT, 28, 148, W - 56, 36, hwnd, nullptr, hInst, nullptr);
+
+    ctx.hShortcutChk = CreateWindowExW(0, L"BUTTON", L"Create a desktop shortcut",
+        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, 28, 194, W - 56, 22,
+        hwnd, (HMENU)IDC_SYS_SHORTCUT_CHK, hInst, nullptr);
+    ctx.hShortcutPathEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+        WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL, 28, 220, W - 56 - 90, 24,
+        hwnd, nullptr, hInst, nullptr);
+    {
+        std::string defPath = HrSystemIntegration::GetDefaultDesktopPath();
+        int len = MultiByteToWideChar(CP_UTF8, 0, defPath.c_str(), -1, nullptr, 0);
+        std::wstring w(len > 0 ? len - 1 : 0, L'\0');
+        if (len > 0) MultiByteToWideChar(CP_UTF8, 0, defPath.c_str(), -1, w.data(), len);
+        SetWindowTextW(ctx.hShortcutPathEdit, w.c_str());
+    }
+    EnableWindow(ctx.hShortcutPathEdit, FALSE); // shortcut checkbox starts unchecked
+    ctx.hShortcutBrowseBtn = CreateWindowExW(0, L"BUTTON", L"Browse\u2026", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+        W - 56 - 80 + 28, 219, 80, 26, hwnd, (HMENU)IDC_SYS_SHORTCUT_BROWSE, hInst, nullptr);
+    HrWin32Theme::ThemeButton(ctx.hShortcutBrowseBtn);
+    EnableWindow(ctx.hShortcutBrowseBtn, FALSE);
+
+    ctx.hAutostartChk = CreateWindowExW(0, L"BUTTON", L"Launch HomRec when Windows starts",
+        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, 28, 262, W - 56, 22,
+        hwnd, (HMENU)IDC_SYS_AUTOSTART_CHK, hInst, nullptr);
+    ctx.hTrayChk = CreateWindowExW(0, L"BUTTON", L"Enable tray icon (minimize to tray)",
+        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX, 28, 292, W - 56, 22,
+        hwnd, (HMENU)IDC_SYS_TRAY_CHK, hInst, nullptr);
+    SendMessageW(ctx.hTrayChk, BM_SETCHECK, state.minimize_to_tray ? BST_CHECKED : BST_UNCHECKED, 0);
+
+    // -- Page 3: finish -------------------------------------------------------
     ctx.hFinishTitle = CreateWindowExW(0, L"STATIC", L"You're all set!", WS_CHILD | SS_LEFT,
         28, 130, W - 56, 26, hwnd, nullptr, hInst, nullptr);
     SendMessageW(ctx.hFinishTitle, WM_SETFONT, (WPARAM)boldFont, TRUE);
