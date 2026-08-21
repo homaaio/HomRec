@@ -22,7 +22,9 @@
  *     "performance":     "turbo",
  *     "dxgi":            false,
  *     "show_summary":        true,
- *     "show_overlays_panel": true
+ *     "show_overlays_panel": true,
+ *     "system_logging_enabled": true,
+ *     "plugin_logging_enabled": true
  *   }
  *
  * NOTE: show_summary and show_overlays_panel were added in the feature-
@@ -150,6 +152,11 @@ struct HrSettings {
     int   resolution_h;        /* target output height, only used when resolution_mode == 1 */
     int   preview_quality_pct; /* 25/50/75/100 - % of the preview panel size to actually render the live preview at */
     int   preview_fps;         /* how many times/sec the live preview thumbnail is refreshed */
+    int   system_logging_enabled; /* bool - logs/pc.log on/off, see hr_pc_log.h */
+    int   plugin_logging_enabled; /* bool - logs/plugins.log on/off, see hr_plugin_log.h */
+    int   desktop_shortcut_enabled; /* bool - Settings > System, see hr_system_integration.h */
+    char  desktop_shortcut_path[512]; /* empty = default Desktop folder */
+    int   autostart_enabled;        /* bool - HKCU Run key, see hr_system_integration.h */
 };
 
 /* Populate hard-coded defaults, used when no settings file exists yet */
@@ -191,6 +198,11 @@ static void _defaults(HrSettings *s) {
     s->preview_fps         = 15;   // matches AppState::preview_fps's default
     s->disable_preview     = 0;    // matches AppState::disable_preview's default
     s->hint_no_overlay     = 1;    // matches AppState::hint_no_overlay's default (shown until dismissed)
+    s->system_logging_enabled = 1; // matches AppState::system_logging_enabled's default
+    s->plugin_logging_enabled = 1; // matches AppState::plugin_logging_enabled's default
+    s->desktop_shortcut_enabled = 0; // matches AppState::desktop_shortcut_enabled's default
+    s->desktop_shortcut_path[0] = '\0';
+    s->autostart_enabled = 0; // matches AppState::autostart_enabled's default
 }
 
 /* -- Public API ------------------------------------------------------------- */
@@ -271,6 +283,12 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     // compiled-in defaults regardless of what was saved.
     s->disable_preview     = _json_get_bool(json, "disable_preview",     s->disable_preview)     ? 1 : 0;
     s->hint_no_overlay     = _json_get_bool(json, "hint_no_overlay",     s->hint_no_overlay)      ? 1 : 0;
+    s->system_logging_enabled = _json_get_bool(json, "system_logging_enabled", s->system_logging_enabled) ? 1 : 0;
+    s->plugin_logging_enabled = _json_get_bool(json, "plugin_logging_enabled", s->plugin_logging_enabled) ? 1 : 0;
+    s->desktop_shortcut_enabled = _json_get_bool(json, "desktop_shortcut_enabled", s->desktop_shortcut_enabled) ? 1 : 0;
+    if (_json_get_str(json, "desktop_shortcut_path", tmp, sizeof(tmp)))
+        strncpy(s->desktop_shortcut_path, tmp, sizeof(s->desktop_shortcut_path)-1);
+    s->autostart_enabled = _json_get_bool(json, "autostart_enabled", s->autostart_enabled) ? 1 : 0;
 
     return 1;
 }
@@ -314,7 +332,12 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         "  \"preview_quality_pct\": %d,\n"
         "  \"preview_fps\":         %d,\n"
         "  \"disable_preview\":     %s,\n"
-        "  \"hint_no_overlay\":     %s\n"
+        "  \"hint_no_overlay\":     %s,\n"
+        "  \"system_logging_enabled\": %s,\n"
+        "  \"plugin_logging_enabled\": %s,\n"
+        "  \"desktop_shortcut_enabled\": %s,\n"
+        "  \"desktop_shortcut_path\": \"%s\",\n"
+        "  \"autostart_enabled\": %s\n"
         "}\n",
         _escape_json(s->output_folder).c_str(),
         s->quality, s->fps, s->monitor,
@@ -340,7 +363,12 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         s->preview_quality_pct,
         s->preview_fps,
         s->disable_preview ? "true" : "false",
-        s->hint_no_overlay ? "true" : "false"
+        s->hint_no_overlay ? "true" : "false",
+        s->system_logging_enabled ? "true" : "false",
+        s->plugin_logging_enabled ? "true" : "false",
+        s->desktop_shortcut_enabled ? "true" : "false",
+        _escape_json(s->desktop_shortcut_path).c_str(),
+        s->autostart_enabled ? "true" : "false"
     );
 
     FILE *f = fopen(path, "wb");
@@ -453,6 +481,14 @@ HR_EXPORT void hr_settings_set_theme(void *h, const char *v) {
     strncpy(static_cast<HrSettings *>(h)->theme, v, 31);
 }
 
+HR_EXPORT const char *hr_settings_get_desktop_shortcut_path(const void *h) {
+    return h ? static_cast<const HrSettings *>(h)->desktop_shortcut_path : "";
+}
+HR_EXPORT void hr_settings_set_desktop_shortcut_path(void *h, const char *v) {
+    if (!h || !v) return;
+    strncpy(static_cast<HrSettings *>(h)->desktop_shortcut_path, v, 511);
+}
+
 HR_EXPORT const char *hr_settings_get_language(const void *h) {
     return h ? static_cast<const HrSettings *>(h)->language : "en";
 }
@@ -483,6 +519,10 @@ HR_EXPORT int hr_settings_get_flag(const void *h, const char *name) {
     if (strcmp(name, "show_audio_panel") == 0) return s->show_audio_panel;
     if (strcmp(name, "disable_preview")     == 0) return s->disable_preview;
     if (strcmp(name, "hint_no_overlay")     == 0) return s->hint_no_overlay;
+    if (strcmp(name, "system_logging_enabled") == 0) return s->system_logging_enabled;
+    if (strcmp(name, "plugin_logging_enabled") == 0) return s->plugin_logging_enabled;
+    if (strcmp(name, "desktop_shortcut_enabled") == 0) return s->desktop_shortcut_enabled;
+    if (strcmp(name, "autostart_enabled") == 0) return s->autostart_enabled;
     return 0;
 }
 HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
@@ -500,4 +540,8 @@ HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
     if (strcmp(name, "show_audio_panel") == 0) { s->show_audio_panel = val; return; }
     if (strcmp(name, "disable_preview")     == 0) { s->disable_preview     = val; return; }
     if (strcmp(name, "hint_no_overlay")     == 0) { s->hint_no_overlay     = val; return; }
+    if (strcmp(name, "system_logging_enabled") == 0) { s->system_logging_enabled = val; return; }
+    if (strcmp(name, "plugin_logging_enabled") == 0) { s->plugin_logging_enabled = val; return; }
+    if (strcmp(name, "desktop_shortcut_enabled") == 0) { s->desktop_shortcut_enabled = val; return; }
+    if (strcmp(name, "autostart_enabled") == 0) { s->autostart_enabled = val; return; }
 }

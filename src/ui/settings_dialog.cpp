@@ -1,25 +1,42 @@
-// settings_dialog.cpp - progressive-disclosure rewrite.
+// settings_dialog.cpp - tabbed rewrite.
 //
-// Was a wxNotebook split into 5 tabs (General / Video & Codec / Audio /
-// Hotkeys / Advanced) - functional, but it put codec/CRF/hw-accel/custom
-// ffmpeg args (stuff an average user has no reason to touch, and can
-// genuinely break a recording if set wrong) at the same visual weight as
-// "where do my recordings get saved". Rebuilt as a single scrollable page:
-// everyday fields are always visible, and everything a casual user
-// wouldn't understand lives in a panel that's hidden by default and
-// toggled by one button in the header ("Show advanced settings" /
-// "Hide advanced settings") - clicking it adds/removes those fields to
-// THIS window in place, it never opens a second dialog. Persistence is
-// unchanged: still goes through hr_settings_create/load/save/get_*/set_*
-// (see the note above BuildAdvancedSection() for which fields that
-// covers).
+// Was a single scrollable page: everyday fields always visible, and
+// everything a casual user wouldn't need (codec/CRF/hw-accel/custom
+// ffmpeg args/audio format/filename template/auto-stop/replay buffer)
+// hidden behind one "Advanced" toggle button. That worked for 5 tabs'
+// worth of fields squeezed into one show/hide panel, but stopped
+// scaling once Security (logging toggles, live-preview resolution/fps,
+// "reset to defaults") and System (desktop shortcut, autostart, tray
+// icon) were added on top - cramming 7 tabs' worth of fields into one
+// collapsible panel would have made "Advanced" itself need sub-sections
+// again. Back to a wxNotebook, but with a cleaner split than the old
+// 5-tab version had: General / Video & Codec / Audio / Hotkeys /
+// Advanced / Security / System.
+//
+// Persistence note (was on the old BuildAdvancedSection(), still
+// applies): hr_settings.cpp's on-disk homrec_settings.json format only
+// covers output_folder/quality/fps/monitor/codec/audio-enabled/
+// countdown/timestamp/cursor/show_summary/theme/language/minimize_tray/
+// always_on_top/performance/dxgi/resolution_mode+w+h/preview_quality_pct
+// +fps/disable_preview/hint_no_overlay/system_logging_enabled/
+// plugin_logging_enabled/desktop_shortcut_enabled+path/autostart_enabled.
+// Everything on the Video & Codec / Audio / Advanced tabs besides the
+// video codec itself updates AppState in memory for the current run but
+// isn't written to homrec_settings.json - it does still round-trip
+// through .hrc profiles (see hrc_config.cpp, which mirrors the full
+// AppState). See each tab's on-page note, which explains this to the
+// user directly.
 #include "settings_dialog.h"
 #include "themed_widgets.h"
 #include "../hr_mic_enum.h"
+#include "../hr_system_integration.h"
+#include "../hr_pc_log.h"
+#include "../hr_plugin_log.h"
 #include <wx/spinctrl.h>
 #include <wx/dirdlg.h>
 #include <wx/combobox.h>
 #include <wx/choice.h>
+#include <wx/notebook.h>
 #include <wx/scrolwin.h>
 #include <string>
 #include <vector>
@@ -42,7 +59,14 @@ extern "C" {
     void hr_settings_set_preview_quality_pct(void *h, int v);
     void hr_settings_set_preview_fps(void *h, int v);
     void hr_settings_set_codec(void *h, const char *v);
+    void hr_settings_set_desktop_shortcut_path(void *h, const char *v);
     void hr_settings_set_flag(void *h, const char *name, int v);
+    int hr_settings_get_flag(const void *h, const char *name);
+    int hr_settings_get_quality(const void *h);
+    int hr_settings_get_fps(const void *h);
+    int hr_settings_get_resolution_pct(const void *h);
+    int hr_settings_get_resolution_mode(const void *h);
+    const char *hr_settings_get_codec(const void *h);
 
     // hr_display_info.cpp - used to list real connected monitors (with
     // their actual resolution) instead of making the user guess a plain
@@ -58,12 +82,14 @@ extern "C" {
 namespace {
 constexpr char kSettingsPath[] = "homrec_settings.json"; // relative to app root, matches constants.py's SETTINGS_PATH
 
-enum { IDC_QUALITY = 3001, IDC_BROWSE = 3002, IDC_SAVE = 3003, IDC_CANCEL = 3004, IDC_TOGGLE_ADVANCED = 3005 };
+enum {
+    IDC_QUALITY = 3001, IDC_BROWSE = 3002, IDC_SAVE = 3003, IDC_CANCEL = 3004,
+    IDC_SEC_RESET = 3006, IDC_SYS_SHORTCUT_BROWSE = 3007,
+};
 
 // Old tab indices ShowSettingsDialogTab() callers still pass in (see
-// settings_dialog.h) - 1 (old "Video/Codec") and 4 (old "Advanced") now
-// map to "open with the advanced panel already expanded" instead of
-// selecting a notebook page, since there are no separate pages anymore.
+// settings_dialog.h) mapped onto this version's actual notebook page
+// indices.
 constexpr int kOldTabVideoCodec = 1;
 constexpr int kOldTabAdvanced = 4;
 
@@ -96,10 +122,21 @@ wxStaticText *AddSectionHeading(wxWindow *page, wxSizer *sizer, wxColour accent,
     return lbl;
 }
 
+// Every tab is a plain scrolled page inside the notebook - some (Video &
+// Codec, Security) have enough fields to need scrolling on a small
+// screen, and using the same widget for every tab keeps them visually
+// consistent.
+wxScrolledWindow *NewTabPage(wxNotebook *nb, wxColour bg) {
+    auto *page = new wxScrolledWindow(nb);
+    page->SetBackgroundColour(bg);
+    page->SetScrollRate(0, 12);
+    return page;
+}
+
 class SettingsDialog : public wxDialog {
 public:
     SettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme)
-        : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(560, 600),
+        : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(600, 640),
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
           state_(state), theme_(theme) {
         settings_ = hr_settings_create();
@@ -114,11 +151,6 @@ public:
 
         auto *root = new wxBoxSizer(wxVERTICAL);
 
-        // Header: title on the left, the one button that reveals/hides
-        // everything in BuildAdvancedSection() on the right. This is the
-        // "corner button" from the spec - toggling it never opens a new
-        // window, it just Show()/Hide()s advanced_panel_ inside this one.
-        auto *headerRow = new wxBoxSizer(wxHORIZONTAL);
         auto *titleLbl = new wxStaticText(this, wxID_ANY, "Settings");
         wxFont titleFont = titleLbl->GetFont();
         titleFont.SetPointSize(titleFont.GetPointSize() + 3);
@@ -126,35 +158,43 @@ public:
         titleLbl->SetFont(titleFont);
         titleLbl->SetForegroundColour(text);
         titleLbl->SetBackgroundColour(bg);
-        headerRow->Add(titleLbl, 0, wxALIGN_CENTRE_VERTICAL);
-        headerRow->AddStretchSpacer(1);
-        advanced_toggle_btn_ = new ColorButton(this, IDC_TOGGLE_ADVANCED, wxString::FromUTF8("\u2699 Advanced"));
-        advanced_toggle_btn_->SetMinSize(wxSize(150, 28));
-        advanced_toggle_btn_->SetColours(surface, text);
-        headerRow->Add(advanced_toggle_btn_, 0, wxALIGN_CENTRE_VERTICAL);
-        root->Add(headerRow, 0, wxEXPAND | wxALL, 12);
+        root->Add(titleLbl, 0, wxALL, 12);
 
-        scroller_ = new wxScrolledWindow(this);
-        scroller_->SetBackgroundColour(bg);
-        auto *scrollRoot = new wxBoxSizer(wxVERTICAL);
+        notebook_ = new wxNotebook(this, wxID_ANY);
+        notebook_->SetBackgroundColour(bg);
 
-        BuildBasicSection(scroller_, scrollRoot, bg, surface, accent, text, textDim);
+        auto *generalPage = NewTabPage(notebook_, bg);
+        { auto *r = new wxBoxSizer(wxVERTICAL); BuildGeneralTab(generalPage, r, bg, surface, accent, text, textDim); generalPage->SetSizer(r); }
+        notebook_->AddPage(generalPage, "General");
+        kTabGeneral = notebook_->GetPageCount() - 1;
 
-        // Everything "for verified users" lives in this one panel so it
-        // can be added/removed from the layout as a single unit. Built
-        // hidden; ToggleAdvanced() is the only thing that shows it.
-        advanced_panel_ = new wxPanel(scroller_);
-        advanced_panel_->SetBackgroundColour(bg);
-        auto *advRoot = new wxBoxSizer(wxVERTICAL);
-        BuildAdvancedSection(advanced_panel_, advRoot, bg, accent, text, textDim);
-        advanced_panel_->SetSizer(advRoot);
-        advanced_panel_->Hide();
-        scrollRoot->Add(advanced_panel_, 0, wxEXPAND);
+        auto *videoPage = NewTabPage(notebook_, bg);
+        { auto *r = new wxBoxSizer(wxVERTICAL); BuildVideoCodecTab(videoPage, r, bg, accent, text, textDim); videoPage->SetSizer(r); }
+        notebook_->AddPage(videoPage, "Video && Codec");
+        kTabVideo = notebook_->GetPageCount() - 1;
 
-        scroller_->SetSizer(scrollRoot);
-        scroller_->SetScrollRate(0, 12);
-        scroller_->FitInside();
-        root->Add(scroller_, 1, wxEXPAND | wxLEFT | wxRIGHT, 12);
+        auto *audioPage = NewTabPage(notebook_, bg);
+        { auto *r = new wxBoxSizer(wxVERTICAL); BuildAudioTab(audioPage, r, bg, accent, text, textDim); audioPage->SetSizer(r); }
+        notebook_->AddPage(audioPage, "Audio");
+
+        auto *hotkeysPage = NewTabPage(notebook_, bg);
+        { auto *r = new wxBoxSizer(wxVERTICAL); BuildHotkeysTab(hotkeysPage, r, bg, text); hotkeysPage->SetSizer(r); }
+        notebook_->AddPage(hotkeysPage, "Hotkeys");
+
+        auto *advancedPage = NewTabPage(notebook_, bg);
+        { auto *r = new wxBoxSizer(wxVERTICAL); BuildAdvancedTab(advancedPage, r, bg, text, textDim); advancedPage->SetSizer(r); }
+        notebook_->AddPage(advancedPage, "Advanced");
+        kTabAdvanced = notebook_->GetPageCount() - 1;
+
+        auto *securityPage = NewTabPage(notebook_, bg);
+        { auto *r = new wxBoxSizer(wxVERTICAL); BuildSecurityTab(securityPage, r, bg, surface, accent, text, textDim); securityPage->SetSizer(r); }
+        notebook_->AddPage(securityPage, "Security");
+
+        auto *systemPage = NewTabPage(notebook_, bg);
+        { auto *r = new wxBoxSizer(wxVERTICAL); BuildSystemTab(systemPage, r, bg, surface, accent, text, textDim); systemPage->SetSizer(r); }
+        notebook_->AddPage(systemPage, "System");
+
+        root->Add(notebook_, 1, wxEXPAND | wxLEFT | wxRIGHT, 12);
 
         auto *btnRow = new wxBoxSizer(wxHORIZONTAL);
         btnRow->AddStretchSpacer(1);
@@ -172,66 +212,22 @@ public:
 
         Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowse, this, IDC_BROWSE);
         Bind(wxEVT_BUTTON, &SettingsDialog::OnSave, this, IDC_SAVE);
-        Bind(wxEVT_BUTTON, &SettingsDialog::OnToggleAdvanced, this, IDC_TOGGLE_ADVANCED);
+        Bind(wxEVT_BUTTON, &SettingsDialog::OnResetDefaults, this, IDC_SEC_RESET);
+        Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowseShortcutFolder, this, IDC_SYS_SHORTCUT_BROWSE);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_CANCEL); }, IDC_CANCEL);
     }
 
     ~SettingsDialog() override { hr_settings_destroy(settings_); }
 
-    // Old call sites (the "Advanced Settings..." menu item) used to pick a
-    // notebook tab by index; now there's only one page, so this just makes
-    // sure the advanced panel is open when the caller was asking for one
-    // of the tabs that used to hold "pro" fields (Video/Codec, Advanced).
+    // Old call sites (the "Advanced Settings..." menu item) used to pick
+    // a page by index in the old 5-tab layout; map those onto this
+    // version's actual page indices.
     void SelectTab(int index) {
-        if (index == kOldTabVideoCodec || index == kOldTabAdvanced) ShowAdvanced(true);
+        if (index == kOldTabVideoCodec) notebook_->SetSelection((int)kTabVideo);
+        else if (index == kOldTabAdvanced) notebook_->SetSelection((int)kTabAdvanced);
     }
 
 private:
-    void ShowAdvanced(bool show) {
-        if (show == advanced_shown_) return;
-        advanced_shown_ = show;
-        // Go through the sizer's Show(), not just the window's - the
-        // sizer item that reserves advanced_panel_'s space needs to know
-        // too, or the space it occupies (or doesn't) can stay stale even
-        // though the panel's own visibility flag flipped.
-        scroller_->GetSizer()->Show(advanced_panel_, advanced_shown_, true);
-        advanced_toggle_btn_->SetLabelText2(wxString::FromUTF8(
-            advanced_shown_ ? "\u2699 Basic" : "\u2699 Advanced"));
-        CallAfter([this]() {
-            if (!advanced_panel_) return; // dialog could have closed before this ran
-            advanced_panel_->Layout();
-            scroller_->FitInside();
-            scroller_->Layout();
-            Layout();
-
-            // CalcMin() here reflects whatever's currently shown in
-            // scrollRoot - basic fields alone when hiding, basic +
-            // advanced when showing (advanced_panel_'s Show()/Layout()
-            // above already ran, so its sizer item now reports a real
-            // height instead of the old all-zero one).
-            wxSize contentSize = scroller_->GetSizer()->CalcMin();
-            int wantHeight = GetSize().GetHeight();
-            if (advanced_shown_) {
-                int contentHeight = contentSize.GetHeight() + 140; // header + button row + margins
-                wxRect screen = wxGetClientDisplayRect();
-                int maxHeight = screen.GetHeight() - 40;
-                collapsed_height_ = GetSize().GetHeight();
-                wantHeight = std::min(std::max(contentHeight, collapsed_height_), maxHeight);
-            } else if (collapsed_height_ > 0) {
-                wantHeight = collapsed_height_;
-            }
-            if (wantHeight != GetSize().GetHeight())
-                SetSize(GetSize().GetWidth(), wantHeight);
-
-            scroller_->SendSizeEvent();
-            SendSizeEvent();
-            scroller_->Refresh();
-            Refresh();
-        });
-    }
-
-    void OnToggleAdvanced(wxCommandEvent &) { ShowAdvanced(!advanced_shown_); }
-
     // Enumerates actually-connected monitors (via hr_display_info.cpp) so
     // the dropdown shows "Monitor 1 - 1920x1080 (Primary)" instead of
     // making the user guess an opaque index 0-15 in a spin control.
@@ -264,9 +260,10 @@ private:
         monitor_choice_->SetSelection(sel);
     }
 
-    // -- Basic: everyday fields, always visible ---------------------------
-    void BuildBasicSection(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour surface,
-                            wxColour accent, wxColour text, wxColour textDim) {
+    // -- General: output location, capture quality/resolution, on-screen
+    // capture options ------------------------------------------------------
+    void BuildGeneralTab(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour surface,
+                          wxColour accent, wxColour text, wxColour /*textDim*/) {
         auto *grid = new wxFlexGridSizer(2, 10, 10);
         grid->AddGrowableCol(1, 1);
 
@@ -332,20 +329,6 @@ private:
             updateResEnabled();
         });
 
-        AddLabel(page, grid, text, bg, "Microphone:");
-        mic_choice_ = new wxChoice(page, wxID_ANY);
-        mic_ids_.clear();
-        mic_ids_.push_back(""); // "System Default" -- empty id means "keep using Windows' default"
-        mic_choice_->Append("System Default");
-        int mic_sel = 0;
-        for (const auto &mic : HrEnumerateMics()) {
-            mic_ids_.push_back(mic.id);
-            mic_choice_->Append(wxString::FromUTF8(mic.name));
-            if (mic.id == state_.mic_device_id) mic_sel = (int)mic_ids_.size() - 1;
-        }
-        mic_choice_->SetSelection(mic_sel);
-        grid->Add(mic_choice_, 0, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
         auto *folderLbl = new wxStaticText(page, wxID_ANY, "Output folder:");
@@ -366,82 +349,11 @@ private:
         timestamp_chk_ = AddCheck(page, pageRoot, text, bg, "Timestamp", state_.timestamp_enabled);
         cursor_chk_    = AddCheck(page, pageRoot, text, bg, "Cursor", state_.cursor_enabled);
         notify_chk_    = AddCheck(page, pageRoot, text, bg, "Show summary", state_.show_summary);
-        separate_mp3_chk_ = AddCheck(page, pageRoot, text, bg, "Also save audio as a separate MP3", state_.separate_audio_mp3);
-        disable_preview_chk_ = AddCheck(page, pageRoot, text, bg,
-                                         "Disable live preview (for performance)",
-                                         state_.disable_preview);
-
-        auto *previewRow = new wxBoxSizer(wxHORIZONTAL);
-        auto *pqLbl = new wxStaticText(page, wxID_ANY, "Preview quality:");
-        pqLbl->SetForegroundColour(text);
-        pqLbl->SetBackgroundColour(bg);
-        previewRow->Add(pqLbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
-
-        preview_quality_choice_ = new wxChoice(page, wxID_ANY);
-        preview_quality_choice_->Append("Low (50%)");
-        preview_quality_choice_->Append("Medium (75%)");
-        preview_quality_choice_->Append("High (100%)");
-        {
-            int pct = state_.preview_quality_pct;
-            int sel = pct <= 50 ? 0 : pct <= 75 ? 1 : 2;
-            preview_quality_choice_->SetSelection(sel);
-        }
-        previewRow->Add(preview_quality_choice_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 16);
-
-        auto *pfLbl = new wxStaticText(page, wxID_ANY, "Preview FPS:");
-        pfLbl->SetForegroundColour(text);
-        pfLbl->SetBackgroundColour(bg);
-        previewRow->Add(pfLbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
-        preview_fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition,
-                                            wxSize(70, -1), wxSP_ARROW_KEYS, 1, 60,
-                                            state_.preview_fps);
-        previewRow->Add(preview_fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
-        pageRoot->Add(previewRow, 0, wxALL, 16);
-
-        auto updatePreviewControlsEnabled = [this]() {
-            bool enabled = !disable_preview_chk_->GetValue();
-            preview_quality_choice_->Enable(enabled);
-            preview_fps_spin_->Enable(enabled);
-        };
-        updatePreviewControlsEnabled();
-        disable_preview_chk_->Bind(wxEVT_CHECKBOX, [updatePreviewControlsEnabled](wxCommandEvent &) {
-            updatePreviewControlsEnabled();
-        });
-
-        // Hotkeys - simple click-to-bind buttons, not "pro" enough to
-        // hide, but visually grouped under their own heading so they read
-        // as a distinct block rather than bleeding into the checkboxes
-        // above.
-        AddSectionHeading(page, pageRoot, accent, bg, "Hotkeys");
-        auto *hkGrid = new wxFlexGridSizer(2, 8, 10);
-        hkGrid->AddGrowableCol(1, 1);
-        AddLabel(page, hkGrid, text, bg, "Start/Stop:");
-        hk_startstop_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_start_stop));
-        hkGrid->Add(hk_startstop_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-        AddLabel(page, hkGrid, text, bg, "Pause:");
-        hk_pause_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_pause));
-        hkGrid->Add(hk_pause_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-        AddLabel(page, hkGrid, text, bg, "Fullscreen:");
-        hk_fullscreen_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_fullscreen));
-        hkGrid->Add(hk_fullscreen_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-        for (HotkeyButton *hk : {hk_startstop_btn_, hk_pause_btn_, hk_fullscreen_btn_})
-            hk->SetColours(bg, text, wxColour(120, 170, 250));
-        pageRoot->Add(hkGrid, 0, wxEXPAND | wxALL, 16);
     }
 
-    // -- Advanced ("for verified users"): hidden until the header button
-    // is clicked. Persistence note carried over from the old tabbed
-    // layout's Advanced tab: hr_settings.cpp's on-disk format only has
-    // fields for output_folder/quality/fps/monitor/codec/audio-enabled/
-    // countdown/timestamp/cursor/show_summary/theme/language/
-    // minimize_tray/always_on_top/performance/dxgi. Everything below
-    // besides the video codec updates AppState in memory for the current
-    // run but isn't written to homrec_settings.json yet - that needs
-    // hr_settings.cpp's struct + JSON reader/writer extended with the
-    // extra fields, a separate mechanical change to a core file rather
-    // than something to silently paper over here.
-    void BuildAdvancedSection(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour accent,
-                               wxColour text, wxColour textDim) {
+    // -- Video & Codec ------------------------------------------------------
+    void BuildVideoCodecTab(wxWindow *page, wxSizer *pageRoot, wxColour bg,
+                             wxColour accent, wxColour text, wxColour textDim) {
         AddSectionHeading(page, pageRoot, accent, bg, "Video & Codec");
         auto *grid = new wxFlexGridSizer(2, 10, 10);
         grid->AddGrowableCol(1, 1);
@@ -481,6 +393,44 @@ private:
             pixfmt_combo_->Append(c);
         grid->Add(pixfmt_combo_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
 
+        pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
+
+        auto *argsLbl = new wxStaticText(page, wxID_ANY, "Custom FFmpeg args:");
+        argsLbl->SetForegroundColour(text);
+        argsLbl->SetBackgroundColour(bg);
+        pageRoot->Add(argsLbl, 0, wxLEFT | wxRIGHT, 16);
+        custom_args_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.custom_ffmpeg_args));
+        pageRoot->Add(custom_args_edit_, 0, wxEXPAND | wxALL, 16);
+
+        auto *note = new wxStaticText(page, wxID_ANY,
+            "Note: only Video codec (above) is written to the settings file -\n"
+            "the rest of this tab applies for this session, and round-trips\n"
+            "through .hrc profiles, but resets to defaults on the next launch.");
+        note->SetForegroundColour(textDim);
+        note->SetBackgroundColour(bg);
+        pageRoot->Add(note, 0, wxALL, 16);
+    }
+
+    // -- Audio ----------------------------------------------------------
+    void BuildAudioTab(wxWindow *page, wxSizer *pageRoot, wxColour bg,
+                        wxColour accent, wxColour text, wxColour textDim) {
+        auto *grid = new wxFlexGridSizer(2, 10, 10);
+        grid->AddGrowableCol(1, 1);
+
+        AddLabel(page, grid, text, bg, "Microphone:");
+        mic_choice_ = new wxChoice(page, wxID_ANY);
+        mic_ids_.clear();
+        mic_ids_.push_back(""); // "System Default" -- empty id means "keep using Windows' default"
+        mic_choice_->Append("System Default");
+        int mic_sel = 0;
+        for (const auto &mic : HrEnumerateMics()) {
+            mic_ids_.push_back(mic.id);
+            mic_choice_->Append(wxString::FromUTF8(mic.name));
+            if (mic.id == state_.mic_device_id) mic_sel = (int)mic_ids_.size() - 1;
+        }
+        mic_choice_->SetSelection(mic_sel);
+        grid->Add(mic_choice_, 0, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+
         AddLabel(page, grid, text, bg, "Sample rate (Hz):");
         sample_rate_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
                                             wxSP_ARROW_KEYS, 8000, 192000, state_.audio_sample_rate);
@@ -497,38 +447,172 @@ private:
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
-        auto *argsLbl = new wxStaticText(page, wxID_ANY, "Custom FFmpeg args:");
-        argsLbl->SetForegroundColour(text);
-        argsLbl->SetBackgroundColour(bg);
-        pageRoot->Add(argsLbl, 0, wxLEFT | wxRIGHT, 16);
-        custom_args_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.custom_ffmpeg_args));
-        pageRoot->Add(custom_args_edit_, 0, wxEXPAND | wxALL, 16);
-
-        AddSectionHeading(page, pageRoot, accent, bg, "Advanced");
-        auto *grid2 = new wxFlexGridSizer(2, 10, 10);
-        grid2->AddGrowableCol(1, 1);
-
-        AddLabel(page, grid2, text, bg, "Filename template:");
-        fname_template_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.filename_template));
-        grid2->Add(fname_template_edit_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-
-        AddLabel(page, grid2, text, bg, "Auto-stop (min, 0 = off):");
-        autostop_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
-                                         wxSP_ARROW_KEYS, 0, 1440, state_.auto_stop_min);
-        grid2->Add(autostop_spin_, 0, wxALIGN_CENTRE_VERTICAL);
-
-        AddLabel(page, grid2, text, bg, "Replay buffer (sec, 0 = off):");
-        replay_buf_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
-                                           wxSP_ARROW_KEYS, 0, 3600, state_.replay_buffer_sec);
-        grid2->Add(replay_buf_spin_, 0, wxALIGN_CENTRE_VERTICAL);
-
-        pageRoot->Add(grid2, 0, wxEXPAND | wxALL, 16);
+        separate_mp3_chk_ = AddCheck(page, pageRoot, text, bg,
+                                      "Also save audio as a separate MP3", state_.separate_audio_mp3);
 
         auto *note = new wxStaticText(page, wxID_ANY,
-            "Note: everything on this panel besides Video codec applies for\n"
-            "this session but isn't written to disk yet - the settings file\n"
-            "only persists output folder, quality, FPS, monitor, video codec,\n"
-            "and the checkboxes above.");
+            "Note: sample rate/bitrate/channels apply for this session and\n"
+            "round-trip through .hrc profiles, but aren't written to the\n"
+            "settings file yet.");
+        note->SetForegroundColour(textDim);
+        note->SetBackgroundColour(bg);
+        pageRoot->Add(note, 0, wxLEFT | wxRIGHT | wxTOP, 16);
+        (void)accent;
+    }
+
+    // -- Hotkeys ----------------------------------------------------------
+    void BuildHotkeysTab(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour text) {
+        auto *hkGrid = new wxFlexGridSizer(2, 10, 10);
+        hkGrid->AddGrowableCol(1, 1);
+        AddLabel(page, hkGrid, text, bg, "Start/Stop:");
+        hk_startstop_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_start_stop));
+        hkGrid->Add(hk_startstop_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+        AddLabel(page, hkGrid, text, bg, "Pause:");
+        hk_pause_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_pause));
+        hkGrid->Add(hk_pause_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+        AddLabel(page, hkGrid, text, bg, "Fullscreen:");
+        hk_fullscreen_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_fullscreen));
+        hkGrid->Add(hk_fullscreen_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+        for (HotkeyButton *hk : {hk_startstop_btn_, hk_pause_btn_, hk_fullscreen_btn_})
+            hk->SetColours(bg, text, wxColour(120, 170, 250));
+        pageRoot->Add(hkGrid, 0, wxEXPAND | wxALL, 16);
+    }
+
+    // -- Advanced: filename template, auto-stop, replay buffer ------------
+    void BuildAdvancedTab(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour text, wxColour textDim) {
+        auto *grid = new wxFlexGridSizer(2, 10, 10);
+        grid->AddGrowableCol(1, 1);
+
+        AddLabel(page, grid, text, bg, "Filename template:");
+        fname_template_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.filename_template));
+        grid->Add(fname_template_edit_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+
+        AddLabel(page, grid, text, bg, "Auto-stop (min, 0 = off):");
+        autostop_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                         wxSP_ARROW_KEYS, 0, 1440, state_.auto_stop_min);
+        grid->Add(autostop_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+
+        AddLabel(page, grid, text, bg, "Replay buffer (sec, 0 = off):");
+        replay_buf_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                           wxSP_ARROW_KEYS, 0, 3600, state_.replay_buffer_sec);
+        grid->Add(replay_buf_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+
+        pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
+
+        auto *note = new wxStaticText(page, wxID_ANY,
+            "Note: these apply for this session and round-trip through .hrc\n"
+            "profiles, but aren't written to the settings file yet.");
+        note->SetForegroundColour(textDim);
+        note->SetBackgroundColour(bg);
+        pageRoot->Add(note, 0, wxALL, 16);
+    }
+
+    // -- Security: logging toggles, live-preview resolution/fps, reset ----
+    void BuildSecurityTab(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour surface,
+                           wxColour accent, wxColour text, wxColour textDim) {
+        AddSectionHeading(page, pageRoot, accent, bg, "Logging");
+        sys_log_chk_ = AddCheck(page, pageRoot, text, bg,
+            "System logging (logs/pc.log)", state_.system_logging_enabled);
+        plugin_log_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Plugin logging (logs/plugins.log)", state_.plugin_logging_enabled);
+
+        AddSectionHeading(page, pageRoot, accent, bg, "Live Preview");
+        disable_preview_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Disable live preview (for performance)", state_.disable_preview);
+
+        auto *previewRow = new wxBoxSizer(wxHORIZONTAL);
+        auto *pqLbl = new wxStaticText(page, wxID_ANY, "Preview resolution:");
+        pqLbl->SetForegroundColour(text);
+        pqLbl->SetBackgroundColour(bg);
+        previewRow->Add(pqLbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
+
+        preview_quality_choice_ = new wxChoice(page, wxID_ANY);
+        preview_quality_choice_->Append("Low (50%)");
+        preview_quality_choice_->Append("Medium (75%)");
+        preview_quality_choice_->Append("High (100%)");
+        {
+            int pct = state_.preview_quality_pct;
+            int sel = pct <= 50 ? 0 : pct <= 75 ? 1 : 2;
+            preview_quality_choice_->SetSelection(sel);
+        }
+        previewRow->Add(preview_quality_choice_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 16);
+
+        auto *pfLbl = new wxStaticText(page, wxID_ANY, "Preview FPS:");
+        pfLbl->SetForegroundColour(text);
+        pfLbl->SetBackgroundColour(bg);
+        previewRow->Add(pfLbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
+        preview_fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                            wxSize(70, -1), wxSP_ARROW_KEYS, 1, 60,
+                                            state_.preview_fps);
+        previewRow->Add(preview_fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+        pageRoot->Add(previewRow, 0, wxALL, 16);
+
+        auto updatePreviewControlsEnabled = [this]() {
+            bool enabled = !disable_preview_chk_->GetValue();
+            preview_quality_choice_->Enable(enabled);
+            preview_fps_spin_->Enable(enabled);
+        };
+        updatePreviewControlsEnabled();
+        disable_preview_chk_->Bind(wxEVT_CHECKBOX, [updatePreviewControlsEnabled](wxCommandEvent &) {
+            updatePreviewControlsEnabled();
+        });
+
+        AddSectionHeading(page, pageRoot, accent, bg, "Reset");
+        auto *resetRow = new wxBoxSizer(wxHORIZONTAL);
+        auto *resetBtn = new ColorButton(page, IDC_SEC_RESET, "Reset all settings to default");
+        resetBtn->SetMinSize(wxSize(220, 28));
+        resetBtn->SetColours(surface, FromColorref(theme_.error));
+        resetRow->Add(resetBtn, 0);
+        pageRoot->Add(resetRow, 0, wxALL, 16);
+
+        auto *note = new wxStaticText(page, wxID_ANY,
+            "Resets every field in this dialog (all tabs) back to defaults.\n"
+            "Nothing is written to disk until you click Save afterward.");
+        note->SetForegroundColour(textDim);
+        note->SetBackgroundColour(bg);
+        pageRoot->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+    }
+
+    // -- System: desktop shortcut, autostart, tray icon --------------------
+    void BuildSystemTab(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour surface,
+                         wxColour accent, wxColour text, wxColour textDim) {
+        AddSectionHeading(page, pageRoot, accent, bg, "Desktop Shortcut");
+        shortcut_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Create a shortcut", state_.desktop_shortcut_enabled);
+
+        auto *pathLbl = new wxStaticText(page, wxID_ANY, "Location:");
+        pathLbl->SetForegroundColour(text);
+        pathLbl->SetBackgroundColour(bg);
+        pageRoot->Add(pathLbl, 0, wxLEFT | wxRIGHT, 16);
+
+        auto *pathRow = new wxBoxSizer(wxHORIZONTAL);
+        std::string defaultPath = state_.desktop_shortcut_path.empty()
+            ? HrSystemIntegration::GetDefaultDesktopPath()
+            : state_.desktop_shortcut_path;
+        shortcut_path_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(defaultPath));
+        pathRow->Add(shortcut_path_edit_, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+        auto *shortcutBrowseBtn = new ColorButton(page, IDC_SYS_SHORTCUT_BROWSE, "Browse");
+        shortcutBrowseBtn->SetMinSize(wxSize(70, 26));
+        shortcutBrowseBtn->SetColours(surface, text);
+        pathRow->Add(shortcutBrowseBtn, 0);
+        pageRoot->Add(pathRow, 0, wxEXPAND | wxALL, 16);
+
+        auto updateShortcutEnabled = [this]() {
+            bool en = shortcut_chk_->GetValue();
+            shortcut_path_edit_->Enable(en);
+        };
+        updateShortcutEnabled();
+        shortcut_chk_->Bind(wxEVT_CHECKBOX, [updateShortcutEnabled](wxCommandEvent &) { updateShortcutEnabled(); });
+
+        AddSectionHeading(page, pageRoot, accent, bg, "Startup");
+        autostart_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Launch HomRec when Windows starts", state_.autostart_enabled);
+        tray_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Enable tray icon (minimize to tray)", state_.minimize_to_tray);
+
+        auto *note = new wxStaticText(page, wxID_ANY,
+            "Shortcut creation/removal and the startup entry are applied as\n"
+            "soon as you click Save on this dialog.");
         note->SetForegroundColour(textDim);
         note->SetBackgroundColour(bg);
         pageRoot->Add(note, 0, wxALL, 16);
@@ -539,8 +623,88 @@ private:
         if (dlg.ShowModal() == wxID_OK) folder_edit_->SetValue(dlg.GetPath());
     }
 
+    void OnBrowseShortcutFolder(wxCommandEvent &) {
+        wxDirDialog dlg(this, "Select shortcut location", shortcut_path_edit_->GetValue());
+        if (dlg.ShowModal() == wxID_OK) shortcut_path_edit_->SetValue(dlg.GetPath());
+    }
+
+    // Repopulates every control across every tab with hard-coded
+    // defaults - doesn't touch state_/settings_/disk itself, so Cancel
+    // (or just not clicking Save afterward) leaves everything exactly as
+    // it was before Reset was clicked. Values that hr_settings.cpp
+    // tracks are read from a fresh (never-loaded) HrSettings blob so
+    // this can't drift out of sync with hr_settings.cpp's own
+    // _defaults(); the handful of AppState-only fields hr_settings
+    // doesn't cover yet (hw_accel/enc_preset/enc_crf/pix_fmt/
+    // custom_ffmpeg_args/audio_*/filename_template/auto_stop_min/
+    // replay_buffer_sec/hotkeys) are hard-coded here, matching their
+    // app_state.h member-initializer defaults.
+    void OnResetDefaults(wxCommandEvent &) {
+        if (wxMessageBox(
+                "Reset every setting in this dialog to its default? "
+                "Nothing is written to disk until you click Save afterward.",
+                "Reset Settings", wxYES_NO | wxICON_WARNING, this) != wxYES)
+            return;
+
+        void *def = hr_settings_create(); // never loaded from disk -> pure defaults
+
+        quality_slider_->SetValue(hr_settings_get_quality(def));
+        fps_spin_->SetValue(hr_settings_get_fps(def));
+        monitor_choice_->SetSelection(0);
+        resolution_mode_choice_->SetSelection(hr_settings_get_resolution_mode(def));
+        {
+            int pct = hr_settings_get_resolution_pct(def);
+            int sel = pct >= 100 ? 0 : pct >= 75 ? 1 : pct >= 50 ? 2 : 3;
+            resolution_choice_->SetSelection(sel);
+        }
+        resolution_w_spin_->SetValue(1280);
+        resolution_h_spin_->SetValue(720);
+        folder_edit_->SetValue("recordings");
+        countdown_chk_->SetValue(hr_settings_get_flag(def, "countdown") != 0);
+        timestamp_chk_->SetValue(hr_settings_get_flag(def, "timestamp") != 0);
+        cursor_chk_->SetValue(hr_settings_get_flag(def, "cursor") != 0);
+        notify_chk_->SetValue(hr_settings_get_flag(def, "show_summary") != 0);
+
+        codec_combo_->SetValue(hr_settings_get_codec(def));
+        hwaccel_combo_->SetValue("auto");
+        preset_combo_->SetValue("ultrafast");
+        crf_spin_->SetValue(18);
+        pixfmt_combo_->SetValue("yuv420p");
+        custom_args_edit_->SetValue("");
+
+        mic_choice_->SetSelection(0);
+        sample_rate_spin_->SetValue(44100);
+        aac_bitrate_edit_->SetValue("192k");
+        channels_spin_->SetValue(2);
+        separate_mp3_chk_->SetValue(false);
+
+        hk_startstop_btn_->SetValue("F9");
+        hk_pause_btn_->SetValue("F10");
+        hk_fullscreen_btn_->SetValue("F11");
+
+        fname_template_edit_->SetValue("HomRec_{date}_{time}");
+        autostop_spin_->SetValue(0);
+        replay_buf_spin_->SetValue(0);
+
+        sys_log_chk_->SetValue(hr_settings_get_flag(def, "system_logging_enabled") != 0);
+        plugin_log_chk_->SetValue(hr_settings_get_flag(def, "plugin_logging_enabled") != 0);
+        disable_preview_chk_->SetValue(hr_settings_get_flag(def, "disable_preview") != 0);
+        preview_quality_choice_->SetSelection(2); // 100%
+        preview_fps_spin_->SetValue(15);
+        preview_quality_choice_->Enable(true);
+        preview_fps_spin_->Enable(true);
+
+        shortcut_chk_->SetValue(hr_settings_get_flag(def, "desktop_shortcut_enabled") != 0);
+        shortcut_path_edit_->SetValue(wxString::FromUTF8(HrSystemIntegration::GetDefaultDesktopPath()));
+        shortcut_path_edit_->Enable(false);
+        autostart_chk_->SetValue(hr_settings_get_flag(def, "autostart_enabled") != 0);
+        tray_chk_->SetValue(hr_settings_get_flag(def, "minimize_tray") != 0);
+
+        hr_settings_destroy(def);
+    }
+
     void OnSave(wxCommandEvent &) {
-        // -- Basic (persisted to disk via hr_settings_*) --------------------
+        // -- General ---------------------------------------------------
         state_.output_folder = folder_edit_->GetValue().ToUTF8().data();
         hr_settings_set_output_folder(settings_, state_.output_folder.c_str());
 
@@ -574,9 +738,54 @@ private:
         state_.timestamp_enabled = timestamp_chk_->GetValue();
         state_.cursor_enabled = cursor_chk_->GetValue();
         state_.show_summary = notify_chk_->GetValue();
-        state_.disable_preview = disable_preview_chk_->GetValue();
+
+        hr_settings_set_flag(settings_, "countdown", state_.countdown_enabled ? 1 : 0);
+        hr_settings_set_flag(settings_, "timestamp", state_.timestamp_enabled ? 1 : 0);
+        hr_settings_set_flag(settings_, "cursor", state_.cursor_enabled ? 1 : 0);
+        hr_settings_set_flag(settings_, "show_summary", state_.show_summary ? 1 : 0);
+
+        // -- Video & Codec (video_codec persists; the rest is in-memory
+        // only for now - see BuildVideoCodecTab()'s note) -----------------
+        state_.video_codec = codec_combo_->GetValue().ToUTF8().data();
+        hr_settings_set_codec(settings_, state_.video_codec.c_str());
+        state_.hw_accel = hwaccel_combo_->GetValue().ToUTF8().data();
+        state_.enc_preset = preset_combo_->GetValue().ToUTF8().data();
+        state_.enc_crf = crf_spin_->GetValue();
+        state_.pix_fmt = pixfmt_combo_->GetValue().ToUTF8().data();
+        state_.custom_ffmpeg_args = custom_args_edit_->GetValue().ToUTF8().data();
+
+        // -- Audio -------------------------------------------------------
+        {
+            int sel = mic_choice_->GetSelection();
+            state_.mic_device_id = (sel >= 0 && (size_t)sel < mic_ids_.size()) ? mic_ids_[(size_t)sel] : "";
+        }
+        state_.audio_sample_rate = sample_rate_spin_->GetValue();
+        state_.audio_aac_bitrate = aac_bitrate_edit_->GetValue().ToUTF8().data();
+        state_.audio_out_channels = channels_spin_->GetValue();
         state_.separate_audio_mp3 = separate_mp3_chk_->GetValue();
 
+        // -- Hotkeys -------------------------------------------------------
+        state_.hotkey_start_stop = hk_startstop_btn_->GetValue().ToUTF8().data();
+        state_.hotkey_pause = hk_pause_btn_->GetValue().ToUTF8().data();
+        state_.hotkey_fullscreen = hk_fullscreen_btn_->GetValue().ToUTF8().data();
+
+        // -- Advanced -------------------------------------------------------
+        state_.filename_template = fname_template_edit_->GetValue().ToUTF8().data();
+        state_.auto_stop_min = autostop_spin_->GetValue();
+        state_.replay_buffer_sec = replay_buf_spin_->GetValue();
+
+        // -- Security -------------------------------------------------------
+        state_.system_logging_enabled = sys_log_chk_->GetValue();
+        state_.plugin_logging_enabled = plugin_log_chk_->GetValue();
+        hr_settings_set_flag(settings_, "system_logging_enabled", state_.system_logging_enabled ? 1 : 0);
+        hr_settings_set_flag(settings_, "plugin_logging_enabled", state_.plugin_logging_enabled ? 1 : 0);
+        // Applied immediately (not just at next launch) - see
+        // hr_pc_log.h/hr_plugin_log.h's SetEnabled().
+        HrPcLog::SetEnabled(state_.system_logging_enabled);
+        HrPluginLog::SetEnabled(state_.plugin_logging_enabled);
+
+        state_.disable_preview = disable_preview_chk_->GetValue();
+        hr_settings_set_flag(settings_, "disable_preview", state_.disable_preview ? 1 : 0);
         {
             static const int kPreviewQualityPct[] = {50, 75, 100};
             int sel = preview_quality_choice_->GetSelection();
@@ -588,38 +797,34 @@ private:
             hr_settings_set_preview_fps(settings_, state_.preview_fps);
         }
 
-        hr_settings_set_flag(settings_, "countdown", state_.countdown_enabled ? 1 : 0);
-        hr_settings_set_flag(settings_, "timestamp", state_.timestamp_enabled ? 1 : 0);
-        hr_settings_set_flag(settings_, "cursor", state_.cursor_enabled ? 1 : 0);
-        hr_settings_set_flag(settings_, "show_summary", state_.show_summary ? 1 : 0);
-        hr_settings_set_flag(settings_, "disable_preview", state_.disable_preview ? 1 : 0);
-
+        // -- System -------------------------------------------------------
         {
-            int sel = mic_choice_->GetSelection();
-            state_.mic_device_id = (sel >= 0 && (size_t)sel < mic_ids_.size()) ? mic_ids_[(size_t)sel] : "";
+            bool wantShortcut = shortcut_chk_->GetValue();
+            std::string shortcutDir = shortcut_path_edit_->GetValue().ToUTF8().data();
+            if (shortcutDir.empty()) shortcutDir = HrSystemIntegration::GetDefaultDesktopPath();
+
+            if (wantShortcut) {
+                HrSystemIntegration::CreateDesktopShortcut(shortcutDir);
+            } else {
+                // Remove from wherever it was last created (falls back to
+                // the field's current folder if we never had a stored
+                // path - e.g. first time this checkbox is touched).
+                std::string prevDir = state_.desktop_shortcut_path.empty() ? shortcutDir : state_.desktop_shortcut_path;
+                HrSystemIntegration::RemoveDesktopShortcut(prevDir);
+            }
+            state_.desktop_shortcut_enabled = wantShortcut;
+            state_.desktop_shortcut_path = shortcutDir;
+            hr_settings_set_flag(settings_, "desktop_shortcut_enabled", wantShortcut ? 1 : 0);
+            hr_settings_set_desktop_shortcut_path(settings_, state_.desktop_shortcut_path.c_str());
+
+            bool wantAutostart = autostart_chk_->GetValue();
+            HrSystemIntegration::SetAutostart(wantAutostart);
+            state_.autostart_enabled = wantAutostart;
+            hr_settings_set_flag(settings_, "autostart_enabled", wantAutostart ? 1 : 0);
+
+            state_.minimize_to_tray = tray_chk_->GetValue();
+            hr_settings_set_flag(settings_, "minimize_tray", state_.minimize_to_tray ? 1 : 0);
         }
-
-        state_.hotkey_start_stop = hk_startstop_btn_->GetValue().ToUTF8().data();
-        state_.hotkey_pause = hk_pause_btn_->GetValue().ToUTF8().data();
-        state_.hotkey_fullscreen = hk_fullscreen_btn_->GetValue().ToUTF8().data();
-
-        // -- Advanced (video_codec persists; the rest is in-memory only for
-        // now - see BuildAdvancedSection()'s note) --------------------------
-        state_.video_codec = codec_combo_->GetValue().ToUTF8().data();
-        hr_settings_set_codec(settings_, state_.video_codec.c_str());
-        state_.hw_accel = hwaccel_combo_->GetValue().ToUTF8().data();
-        state_.enc_preset = preset_combo_->GetValue().ToUTF8().data();
-        state_.enc_crf = crf_spin_->GetValue();
-        state_.pix_fmt = pixfmt_combo_->GetValue().ToUTF8().data();
-        state_.custom_ffmpeg_args = custom_args_edit_->GetValue().ToUTF8().data();
-
-        state_.audio_sample_rate = sample_rate_spin_->GetValue();
-        state_.audio_aac_bitrate = aac_bitrate_edit_->GetValue().ToUTF8().data();
-        state_.audio_out_channels = channels_spin_->GetValue();
-
-        state_.filename_template = fname_template_edit_->GetValue().ToUTF8().data();
-        state_.auto_stop_min = autostop_spin_->GetValue();
-        state_.replay_buffer_sec = replay_buf_spin_->GetValue();
 
         hr_settings_save(settings_, kSettingsPath);
         EndModal(wxID_OK);
@@ -628,17 +833,10 @@ private:
     AppState &state_;
     ThemeColors theme_;
     void *settings_ = nullptr;
-    wxScrolledWindow *scroller_ = nullptr;
-    wxPanel *advanced_panel_ = nullptr;
-    ColorButton *advanced_toggle_btn_ = nullptr;
-    bool advanced_shown_ = false;
-    // Dialog height (client area) from just before Advanced was last
-    // shown, so hiding it again restores the original compact size
-    // instead of staying stretched out. 0 means "never grown yet" (i.e.
-    // Advanced hasn't been toggled on this instance).
-    int collapsed_height_ = 0;
+    wxNotebook *notebook_ = nullptr;
+    size_t kTabGeneral = 0, kTabVideo = 0, kTabAdvanced = 0;
 
-    // Basic
+    // General
     LabeledSlider *quality_slider_ = nullptr;
     wxSpinCtrl *fps_spin_ = nullptr;
     wxChoice *monitor_choice_ = nullptr;
@@ -647,24 +845,40 @@ private:
     wxSpinCtrl *resolution_w_spin_ = nullptr, *resolution_h_spin_ = nullptr;
     wxTextCtrl *folder_edit_ = nullptr;
     wxCheckBox *countdown_chk_ = nullptr, *timestamp_chk_ = nullptr, *cursor_chk_ = nullptr, *notify_chk_ = nullptr;
-    wxCheckBox *disable_preview_chk_ = nullptr;
-    wxChoice *preview_quality_choice_ = nullptr;
-    wxSpinCtrl *preview_fps_spin_ = nullptr;
-    wxChoice *mic_choice_ = nullptr;
-    std::vector<std::string> mic_ids_; // parallel to mic_choice_'s items
-    wxCheckBox *separate_mp3_chk_ = nullptr;
-    HotkeyButton *hk_startstop_btn_ = nullptr, *hk_pause_btn_ = nullptr, *hk_fullscreen_btn_ = nullptr;
 
-    // Advanced ("verified users")
+    // Video & Codec
     wxComboBox *codec_combo_ = nullptr, *hwaccel_combo_ = nullptr, *preset_combo_ = nullptr,
                *pixfmt_combo_ = nullptr;
     wxTextCtrl *custom_args_edit_ = nullptr;
     wxSpinCtrl *crf_spin_ = nullptr;
+
+    // Audio
+    wxChoice *mic_choice_ = nullptr;
+    std::vector<std::string> mic_ids_; // parallel to mic_choice_'s items
     wxSpinCtrl *sample_rate_spin_ = nullptr, *channels_spin_ = nullptr;
     wxTextCtrl *aac_bitrate_edit_ = nullptr;
+    wxCheckBox *separate_mp3_chk_ = nullptr;
+
+    // Hotkeys
+    HotkeyButton *hk_startstop_btn_ = nullptr, *hk_pause_btn_ = nullptr, *hk_fullscreen_btn_ = nullptr;
+
+    // Advanced
     wxTextCtrl *fname_template_edit_ = nullptr;
     wxSpinCtrl *autostop_spin_ = nullptr, *replay_buf_spin_ = nullptr;
+
+    // Security
+    wxCheckBox *sys_log_chk_ = nullptr, *plugin_log_chk_ = nullptr;
+    wxCheckBox *disable_preview_chk_ = nullptr;
+    wxChoice *preview_quality_choice_ = nullptr;
+    wxSpinCtrl *preview_fps_spin_ = nullptr;
+
+    // System
+    wxCheckBox *shortcut_chk_ = nullptr;
+    wxTextCtrl *shortcut_path_edit_ = nullptr;
+    wxCheckBox *autostart_chk_ = nullptr;
+    wxCheckBox *tray_chk_ = nullptr;
 };
+
 } // namespace
 
 bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme) {

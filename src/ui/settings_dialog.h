@@ -1,31 +1,27 @@
-// settings_dialog.h - progressive-disclosure rewrite.
+// settings_dialog.h - tabbed rewrite.
 //
-// Single scrollable page instead of a wxNotebook: everyday fields (output
-// folder, quality, fps, monitor, resolution, checkboxes, mic, hotkeys)
-// are always visible. Fields a casual user has no reason to touch (codec,
-// hw-accel, encoder preset, CRF, pixel format, custom ffmpeg args, sample
-// rate/bitrate/channels, filename template, auto-stop, replay buffer) are
-// grouped into one panel that's hidden by default and toggled by a single
-// button in the header - clicking it adds/removes that panel from THIS
-// window in place; it never opens a second window. See
-// settings_dialog.cpp's header comment for more, and its note above
-// BuildAdvancedSection() for which fields persist to disk vs. session-only.
+// Split into a wxNotebook with 7 tabs: General / Video & Codec / Audio /
+// Hotkeys / Advanced / Security / System. Replaces the previous single
+// scrollable page (everyday fields always visible + a hide-by-default
+// "Advanced" panel toggled by one button) - that layout put every field
+// in one place regardless of how often it's actually touched, which
+// stopped scaling once Security's and System's fields were added. See
+// settings_dialog.cpp's header comment for the full per-tab breakdown
+// and BuildAdvancedTab()'s note for which fields persist to disk.
 #pragma once
 
 #include <wx/wx.h>
 #include "app_state.h"
 #include "theme.h"
 
-// Shows the modal dialog with the advanced panel collapsed. Returns true
-// if the user clicked Save (in which case `state` has been updated and
-// persisted via hr_settings_save).
+// Shows the modal dialog on the General tab. Returns true if the user
+// clicked Save (in which case `state` has been updated and persisted
+// via hr_settings_save).
 bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme);
 
 // Same dialog, but pass one of the old tab indices (1 = former "Video/
-// Codec", 4 = former "Advanced") to open with the advanced panel already
-// expanded - used by the "Advanced Settings..." menu item so picking it
-// still lands the user on the codec/CRF/etc. fields directly instead of
-// having to click the toggle themselves. Any other index leaves the
-// advanced panel collapsed (those fields - Audio/Hotkeys basics - are
-// already always visible in the basic section).
+// Codec", 4 = former "Advanced") to open on that tab directly - used by
+// the "Advanced Settings..." menu item so picking it still lands the
+// user on the codec/CRF/etc. fields instead of the General tab. Any
+// other index leaves the dialog on the General tab.
 bool ShowSettingsDialogTab(wxWindow *parent, AppState &state, const ThemeColors &theme, int tab_index);
