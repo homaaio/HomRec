@@ -125,13 +125,10 @@ RecordingController::RecordingController(AppState &state) : state_(state) {
 
 RecordingController::~RecordingController() {
     if (state_.recording) Stop();
+    if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
     if (ctl_) hr_ctl_destroy(ctl_);
     if (ffproc_) hr_ff_destroy(ffproc_);
     if (pipeline_) hr_pl_destroy(pipeline_);
-    // Real audio teardown (stop capture threads, release WASAPI objects)
-    // only happens here, at actual app shutdown - Stop() above no longer
-    // does this, since capture runs continuously for live level metering
-    // even between recordings.
     hr_audio_stop(nullptr, nullptr);
 }
 
@@ -807,7 +804,15 @@ void RecordingController::TeardownPreview() {
 
     void *doomed = pipeline_;
     pipeline_ = nullptr;
-    std::thread([doomed]() { hr_pl_destroy(doomed); }).detach();
+
+    // If an earlier teardown is still in flight (its own stuck-DXGI 1s x2
+    // timeout hasn't elapsed yet), wait for it here rather than detaching a
+    // second one - two of these racing on unrelated Pipeline objects is
+    // harmless in itself, but it's needless overlap and makes it easy to
+    // lose track of one at shutdown. This only blocks the caller for the
+    // (rare) remainder of the previous teardown, not a fresh one.
+    if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
+    preview_teardown_thread_ = std::thread([doomed]() { hr_pl_destroy(doomed); });
 }
 
 void RecordingController::RefreshPreviewSettings() {

@@ -13,6 +13,7 @@
 #include <vector>
 #include <cstdint>
 #include <chrono>
+#include <thread>
 #include "app_state.h"
 #include "../hr_overlay_render.h"
 
@@ -167,6 +168,20 @@ private:
     AppState &state_;
 
     void *pipeline_ = nullptr;   // hr_pl_create() handle
+
+    // TeardownPreview() hands the actual hr_pl_destroy() off to a background
+    // thread (see its own comment for why - avoids freezing the UI while a
+    // stuck DXGI capture times out). That thread used to be fully detached
+    // and untracked: if it was still running (which a stuck capture can
+    // stretch to several seconds) when the app closed, it kept touching
+    // globals (the logger, the DXGI/D3D11 libs) that the CRT/DLL shutdown
+    // sequence was concurrently tearing down out from under it - the
+    // "unhandled C++ exception / std::terminate()" crash some users hit
+    // right around closing the app after toggling preview off. Tracking it
+    // here and joining it (in the destructor, and before starting a new
+    // one) keeps every pipeline teardown finished before anything it
+    // depends on goes away.
+    std::thread preview_teardown_thread_;
     void *ctl_ = nullptr;        // hr_ctl_create() handle
     void *ffproc_ = nullptr;     // hr_ff_create() handle
 
