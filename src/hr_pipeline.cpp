@@ -111,39 +111,107 @@ static bool ensure_libs() {
 // BGRA→YUV420p, split across a few worker threads by scanline band.
 //----------------------------------------------------------------------------
 
-static void convert_bgra_to_yuv420p_mt(const uint8_t *bgra, uint8_t *yuv,
-                                        int w, int h) {
-    static constexpr long long kMinPixelsForThreads = 640LL * 480LL;
-    unsigned hw = std::thread::hardware_concurrency();
-    int n_bands = 1;
-    if ((long long)w * h >= kMinPixelsForThreads && hw > 1) {
-        n_bands = (int)std::min<unsigned>(hw - 1, 4);
-        n_bands = std::max(n_bands, 1);
-    }
-    if (n_bands <= 1) {
-        hr_bgra_to_yuv420p_band(bgra, yuv, w, h, 0, h);
-        return;
-    }
+class Yuv420pWorkerPool {
+public:
+    ~Yuv420pWorkerPool() { Stop(); }
 
-    int band_h = ((h / n_bands) + 1) & ~1;
-    if (band_h < 2) band_h = 2;
-
-    std::vector<std::thread> workers;
-    workers.reserve((size_t)n_bands - 1);
-    int y0 = 0;
-    for (int i = 0; i < n_bands && y0 < h; ++i) {
-        int y1 = (i == n_bands - 1) ? h : std::min(h, y0 + band_h);
-        if (i == n_bands - 1) {
-            hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, y1);
-        } else {
-            workers.emplace_back([bgra, yuv, w, h, y0, y1]() {
-                hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, y1);
-            });
+    void Stop() {
+        if (threads_.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_ = true;
         }
-        y0 = y1;
+        cv_start_.notify_all();
+        for (auto &t : threads_) if (t.joinable()) t.join();
+        threads_.clear();
     }
-    for (auto &t : workers) t.join();
-}
+
+    // Splits [0,h) into worker_count()+1 horizontal bands (same split the
+    // old per-frame version used) and blocks until every worker-owned band
+    // is done. Falls back to converting the whole frame on the calling
+    // thread if the pool ends up with zero workers (single-core machine,
+    // or a frame small enough that kMinPixelsForThreads decided threading
+    // wasn't worth it for this session).
+    void Convert(const uint8_t *bgra, uint8_t *yuv, int w, int h) {
+        EnsureStarted((long long)w * h);
+        int n = (int)threads_.size();
+        if (n == 0) {
+            hr_bgra_to_yuv420p_band(bgra, yuv, w, h, 0, h);
+            return;
+        }
+        int n_bands = n + 1;
+        int band_h = ((h / n_bands) + 1) & ~1;
+        if (band_h < 2) band_h = 2;
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            bgra_ = bgra; yuv_ = yuv; w_ = w; h_ = h; band_h_ = band_h;
+            pending_ = n;
+            ++round_;
+        }
+        cv_start_.notify_all();
+
+        // Main/calling thread does the last band itself, same as before.
+        int y0 = band_h * n;
+        if (y0 < h) hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, h);
+
+        std::unique_lock<std::mutex> lk(mtx_);
+        cv_done_.wait(lk, [this] { return pending_ == 0; });
+    }
+
+private:
+    // No-op after the first call - sizing is decided once, from the first
+    // frame actually converted, rather than re-evaluated (and the pool
+    // restarted) if dimensions later change slightly mid-session, which
+    // isn't worth the thread churn this class exists to avoid in the
+    // first place.
+    void EnsureStarted(long long total_pixels) {
+        if (started_) return;
+        started_ = true;
+        static constexpr long long kMinPixelsForThreads = 640LL * 480LL;
+        unsigned hw = std::thread::hardware_concurrency();
+        int n_bands = 1;
+        if (total_pixels >= kMinPixelsForThreads && hw > 1) {
+            n_bands = (int)std::min<unsigned>(hw - 1, 4);
+            n_bands = std::max(n_bands, 1);
+        }
+        int n_workers = n_bands - 1; // main/calling thread does one band itself
+        threads_.reserve((size_t)std::max(0, n_workers));
+        for (int i = 0; i < n_workers; ++i) threads_.emplace_back([this, i] { WorkerLoop(i); });
+    }
+
+    void WorkerLoop(int idx) {
+        int seen_round = 0;
+        for (;;) {
+            const uint8_t *bgra; uint8_t *yuv; int w, h, band_h;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_start_.wait(lk, [&] { return stop_ || round_ != seen_round; });
+                if (stop_) return;
+                seen_round = round_;
+                bgra = bgra_; yuv = yuv_; w = w_; h = h_; band_h = band_h_;
+            }
+            int y0 = band_h * idx;
+            int y1 = std::min(h, y0 + band_h);
+            if (y0 < y1) hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, y1);
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if (--pending_ == 0) cv_done_.notify_one();
+            }
+        }
+    }
+
+    std::vector<std::thread> threads_;
+    std::mutex mtx_;
+    std::condition_variable cv_start_, cv_done_;
+    bool stop_ = false;
+    bool started_ = false;
+    int round_ = 0;
+    int pending_ = 0;
+    const uint8_t *bgra_ = nullptr;
+    uint8_t *yuv_ = nullptr;
+    int w_ = 0, h_ = 0, band_h_ = 0;
+};
 #endif  // _WIN32
 
 
@@ -330,6 +398,8 @@ struct Pipeline {
     void* dx_ctx = nullptr;
     void* sw_ctx = nullptr;
 
+    Yuv420pWorkerPool yuv_pool;
+
     // "Cursor" setting: whether to draw the live system cursor into each
     // captured frame (see hr_composite_cursor() in hr_ui_utils.cpp).
     // cap_origin_x/y is the captured output's virtual-desktop offset
@@ -490,44 +560,7 @@ struct Pipeline {
                 }
 
                 if (!ok) {
-                    // Pipe write failed - this is EXPECTED and routine the
-                    // moment a recording stops (Stop() closes ffmpeg's
-                    // stdin while this thread may still have one last
-                    // queued frame mid-write), not just a genuine
-                    // mid-recording failure.
-                    //
-                    // BUGFIX: this used to also do
-                    // `writer_running.store(false, ...); break;` here,
-                    // which permanently ended writer_loop() - i.e. this
-                    // whole thread - the very first time a pipe write
-                    // failed. That happens on essentially every normal
-                    // Stop() (see above), which is harmless for the
-                    // *first* recording of a session because hr_pl_start()
-                    // had just spun the thread up fresh. But since the
-                    // pipeline now stays alive afterward for continued
-                    // live preview instead of being destroyed (see
-                    // hr_pl_set_recording()/RecordingController's preview
-                    // handling), writer_thread is never recreated - it's
-                    // the same thread for the whole app session. So the
-                    // *second* recording (and every one after) started
-                    // with the pipe re-pointed at a brand new ffmpeg
-                    // process via hr_pl_set_recording(), but with nobody
-                    // left alive to ever call write_pipe() again: every
-                    // captured frame just piled up in pipe_queue and got
-                    // dropped, so that ffmpeg process received zero bytes
-                    // on stdin and produced only header/placeholder data -
-                    // exactly the "Windows says unsupported codec" empty
-                    // file, on every recording after the first.
-                    //
-                    // Now: just drop this one frame (its buffer's already
-                    // back on the free-list above) and keep the thread
-                    // alive, waiting on the queue as normal - the capture
-                    // thread already stops enqueueing new frames itself
-                    // the moment 'recording' goes false (see the
-                    // `if (recording && ...)` gate below), so there's
-                    // nothing left to write anyway until the next
-                    // recording's hr_pl_set_recording() re-arms it with a
-                    // live pipe.
+
                 }
             }
         }
@@ -888,7 +921,7 @@ struct Pipeline {
                 const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
                 if (yuv_frame.size() != needed) yuv_frame.resize(needed);
 
-                convert_bgra_to_yuv420p_mt(enc_src, yuv_frame.data(), enc_w, enc_h);
+                yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
 
                 std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
                 {
