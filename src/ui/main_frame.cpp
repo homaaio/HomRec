@@ -3,6 +3,7 @@
 #include "settings_dialog.h"
 // (overlay_manager.h removed - see overlays_dock_panel.h)
 #include "welcome_dialog.h"
+#include "overlay_placement_dialog.h"
 #include "pc_analytics_dialog.h"
 #include "log_viewer_dialog.h"
 #include "window_picker_dialog.h"
@@ -12,6 +13,7 @@
 #include "win32_theme.h"
 #include "../hr_log.h"
 #include "../hr_pc_log.h"
+#include "../hr_plugin_log.h"
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
@@ -471,6 +473,8 @@ HomRecMainFrame::HomRecMainFrame()
         state_.show_audio_panel = hr_settings_get_flag(settings, "show_audio_panel") != 0;
         state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
         state_.hint_no_overlay = hr_settings_get_flag(settings, "hint_no_overlay") != 0;
+        state_.system_logging_enabled = hr_settings_get_flag(settings, "system_logging_enabled") != 0;
+        state_.plugin_logging_enabled = hr_settings_get_flag(settings, "plugin_logging_enabled") != 0;
         const char *codec = hr_settings_get_codec(settings);
         if (codec && codec[0]) state_.video_codec = codec;
         const char *theme = hr_settings_get_theme(settings);
@@ -480,6 +484,12 @@ HomRecMainFrame::HomRecMainFrame()
         state_.first_launch = true;
     }
     hr_settings_destroy(settings);
+
+    // Apply the Security tab's logging toggles immediately at startup -
+    // both loggers default to enabled internally, so this is a no-op
+    // unless the user had actually turned one off last session.
+    HrPcLog::SetEnabled(state_.system_logging_enabled);
+    HrPluginLog::SetEnabled(state_.plugin_logging_enabled);
 
     lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
     theme_ = GetBuiltinTheme(state_.current_theme);
@@ -768,25 +778,12 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
             Layout();
         }
     };
-    // "Apply with preview off" / "Refresh screenshot" (row context menu) -
-    // OverlaysDockPanel has no access to RecordingController/PreviewPanel
-    // itself (see overlays_dock_panel.h), so it just asks; whether this is
-    // the first call of an editing session or a refresh of an already-
-    // active one is read off preview_panel_'s own state, not the menu
-    // item the user happened to click (both do the same thing once
-    // already in the mode).
-    overlays_panel_->on_apply_no_preview = [this](bool /*refresh_only*/) {
-        if (!rec_ || !preview_panel_) return;
-        bool already_active = preview_panel_->InSnapshotMode();
-        std::vector<uint8_t> buf;
-        int w = 0, h = 0;
-        if (rec_->CaptureSnapshotFrame(buf, w, h, /*first_call=*/!already_active)) {
-            if (already_active) preview_panel_->UpdateSnapshotFrame(buf, w, h);
-            else                 preview_panel_->EnterSnapshotMode(buf, w, h);
-        } else if (!already_active) {
-            wxMessageBox("Couldn't capture a screenshot to edit overlays against - try again in a moment.",
-                         "HomRec", wxOK | wxICON_WARNING, this);
-        }
+    // "Position Overlays..." (row context menu, see overlays_dock_panel.h) -
+    // OverlaysDockPanel has no access to RecordingController/theme_ itself,
+    // so it just asks main_frame.cpp to open the window.
+    overlays_panel_->on_apply_no_preview = [this](bool /*unused - see header*/) {
+        if (!rec_raw_) return;
+        ShowOverlayPlacementDialog(this, state_, rec_raw_, theme_);
     };
     parentSizer->Add(overlays_host_, 0, wxEXPAND | wxLEFT, 15);
     overlays_panel_->SetVisible(state_.show_overlays_panel);
@@ -1266,6 +1263,9 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
     if (audio_panel_) audio_panel_->PollLevels();
 
+    // logs\pc.log - throttles itself internally to ~once every 10s, so
+    // piggybacking on this existing 500ms tick (rather than adding a
+    // dedicated timer just for this) doesn't mean 500ms-resolution writes.
     HrPcLog::MaybeLogSnapshot(state_.recording, rec_ ? rec_->current_fps() : 0.0,
                                rec_ && !rec_->resolved_hw_encoder().empty(),
                                state_.output_folder);
