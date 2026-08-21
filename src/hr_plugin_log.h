@@ -12,6 +12,14 @@
 #include <string>
 
 namespace HrPluginLog {
+    // Settings > Security > "Plugin logging (logs/plugins.log)" toggle.
+    // Default enabled (matches this logger's pre-existing always-on
+    // behavior). Checked at the top of Write() below, so every call site
+    // above (Info/Warn/Error, and lua_api.cpp's homrec.log()) is covered
+    // without each one needing to check the setting itself.
+    void SetEnabled(bool enabled);
+    bool IsEnabled();
+
     // level: "INFO"/"WARN"/"ERROR", same convention as HrLog. plugin_id
     // may be empty for engine-level events (plugin system starting up,
     // shutting down) that aren't about any one plugin.

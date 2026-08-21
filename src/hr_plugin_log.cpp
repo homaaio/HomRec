@@ -13,12 +13,25 @@ std::mutex &LogMutex() {
     return m;
 }
 
+bool g_enabled = true;
+
 } // namespace
 
 namespace HrPluginLog {
 
+void SetEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(LogMutex());
+    g_enabled = enabled;
+}
+
+bool IsEnabled() {
+    std::lock_guard<std::mutex> lock(LogMutex());
+    return g_enabled;
+}
+
 void Write(const std::string &plugin_id, const char *level, const std::string &message) {
     std::lock_guard<std::mutex> lock(LogMutex());
+    if (!g_enabled) return;
 
     std::wstring path = HrLogPaths::LogFilePath(L"plugins.log");
     HrLogPaths::CapFileSize(path, 5 * 1024 * 1024);
