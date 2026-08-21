@@ -28,6 +28,8 @@ std::mutex &LogMutex() {
     return m;
 }
 
+bool g_enabled = true;
+
 // CPU usage needs two samples and the delta between them - both this
 // process's and the whole system's, so pc.log can distinguish "HomRec
 // itself is pegging a core" from "something else on this PC is."
@@ -67,6 +69,16 @@ CpuSample TakeCpuSample() {
 
 namespace HrPcLog {
 
+void SetEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(LogMutex());
+    g_enabled = enabled;
+}
+
+bool IsEnabled() {
+    std::lock_guard<std::mutex> lock(LogMutex());
+    return g_enabled;
+}
+
 void MaybeLogSnapshot(bool is_recording, double current_fps, bool hw_encoder_active,
                        const std::string &recordings_folder) {
     static double accumulated_seconds = kIntervalSeconds; // log immediately on first call
@@ -75,6 +87,7 @@ void MaybeLogSnapshot(bool is_recording, double current_fps, bool hw_encoder_act
     static bool have_prev_sample = false;
 
     std::lock_guard<std::mutex> lock(LogMutex());
+    if (!g_enabled) return;
 
     ULONGLONG now_tick = GetTickCount64();
     if (last_tick != 0) accumulated_seconds += (now_tick - last_tick) / 1000.0;

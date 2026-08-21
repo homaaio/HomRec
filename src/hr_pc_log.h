@@ -10,6 +10,9 @@
 #include <string>
 
 namespace HrPcLog {
+    void SetEnabled(bool enabled);
+    bool IsEnabled();
+
     // Call from an existing periodic tick (main_frame.cpp's stats_timer_,
     // ~500ms) - this function throttles itself internally (one line
     // roughly every kIntervalSeconds, see the .cpp) so callers don't need
