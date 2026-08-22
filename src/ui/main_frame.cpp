@@ -1256,7 +1256,20 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
 
 void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
     if (rec_) rec_->SyncOverlays();
-    if (preview_panel_) preview_panel_->Refresh(false);
+    // Once EnsurePreview() has failed enough times in a row (DXGI
+    // dx_create() stuck - RDP, a virtual display, a display mode that
+    // just changed), swap the generic "Preview loading..." placeholder
+    // for something that actually explains it instead of looking like a
+    // permanent freeze. Reverts the instant capture recovers (monitor
+    // reconnected, RDP session promoted to a real session, etc.).
+    if (preview_panel_) {
+        static const wxString kUnavailableText =
+            wxString::FromUTF8("Screen capture unavailable \u2014 check you're not on RDP/a "
+                                "virtual display, and that the selected monitor is connected.");
+        bool unavailable = rec_ && rec_->preview_capture_unavailable();
+        preview_panel_->SetPlaceholderText(unavailable ? kUnavailableText : wxString("Preview loading..."));
+        preview_panel_->Refresh(false);
+    }
 }
 
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
