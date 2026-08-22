@@ -112,6 +112,19 @@ public:
     // reset call needed.
     bool overloaded() const { return overloaded_; }
 
+    // True once the preview-only pipeline has failed to (re)start several
+    // times in a row (e.g. DXGI dx_create() keeps returning null - RDP,
+    // a virtual display, or a monitor that just changed mode) and
+    // SyncOverlays() has backed off to its slow retry cadence instead of
+    // hammering it every 2s. Purely informational - callers can use this
+    // to show a clearer "capture unavailable" placeholder instead of a
+    // preview that just looks frozen. Always false while disable_preview
+    // is set (nothing is being attempted) or while a recording owns the
+    // pipeline.
+    bool preview_capture_unavailable() const {
+        return preview_unavailable_ && !state_.disable_preview && !state_.recording;
+    }
+
     // Snapshot of the recording that just finished, taken at the moment
     // Stop() runs (before ctl_/ffproc_ are torn down / reset to IDLE, at
     // which point elapsed_seconds()/output_size_mb() would report 0 -- see
@@ -239,6 +252,21 @@ private:
     bool last_overlays_sent_valid_ = false;
 
     std::chrono::steady_clock::time_point next_preview_retry_{};
+    int preview_retry_streak_ = 0;
+    // Set once preview_retry_streak_ crosses kPreviewRetryBackoffAfter,
+    // cleared again on the next successful EnsurePreview(). See
+    // preview_capture_unavailable() above.
+    bool preview_unavailable_ = false;
+    // First few failures retry quickly (kPreviewRetryBaseSeconds) in case
+    // it's a one-off (display mode still settling, a game briefly holding
+    // exclusive fullscreen); past that we're almost certainly looking at
+    // something that won't resolve itself second-to-second (RDP session,
+    // no monitor at all), so back off to kPreviewRetryMaxSeconds instead
+    // of spinning dx_create() forever every 2s (see the "Pipeline create
+    // failed: dx_create() returned null" flood this used to produce).
+    static constexpr int kPreviewRetryBaseSeconds = 2;
+    static constexpr int kPreviewRetryMaxSeconds = 30;
+    static constexpr int kPreviewRetryBackoffAfter = 5;
     int mic_level_ = 0, sys_level_ = 0;
     int capture_w_ = 0, capture_h_ = 0; // native monitor resolution - MUST match what DXGI actually captures
     // DXGI output index (0-based) for the monitor ResolveCaptureSize() just

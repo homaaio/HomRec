@@ -7,6 +7,7 @@
 #include <thread>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 
 extern "C" {
     // hr_tools.cpp (wide-string API)
@@ -692,10 +693,17 @@ void RecordingController::PollStats() {
 
 void RecordingController::SyncOverlays() {
     if (!pipeline_) {
-        if (!state_.disable_preview) {
+        if (!state_.disable_preview && !state_.recording) {
             auto now = std::chrono::steady_clock::now();
             if (now >= next_preview_retry_) {
-                next_preview_retry_ = now + std::chrono::seconds(2);
+                int backoff_s = kPreviewRetryBaseSeconds;
+                if (preview_retry_streak_ >= kPreviewRetryBackoffAfter) {
+                    int shift = preview_retry_streak_ - kPreviewRetryBackoffAfter;
+                    if (shift > 8) shift = 8; // avoid overflowing the left-shift below
+                    int64_t scaled = (int64_t)kPreviewRetryBaseSeconds << shift;
+                    backoff_s = (int)std::min<int64_t>(scaled, kPreviewRetryMaxSeconds);
+                }
+                next_preview_retry_ = now + std::chrono::seconds(backoff_s);
                 EnsurePreview();
             }
         }
@@ -786,14 +794,39 @@ void RecordingController::EnsurePreview() {
     if (pipeline_ && !hr_pl_start(pipeline_)) {
         hr_pl_destroy(pipeline_);
         pipeline_ = nullptr;
+    }
+    if (!pipeline_) {
+        // BUGFIX: this used to fail completely silently - no error, no
+        // status change, nothing - so a stuck DXGI capture (dx_create()
+        // returning null: RDP, a virtual display, a display mode that
+        // just changed) just looked like a frozen preview forever, with
+        // SyncOverlays() hammering it again every 2s regardless. Track
+        // the failure streak here so SyncOverlays() can back off and,
+        // past a few failures, flag preview_capture_unavailable() so the
+        // UI can show something more honest than "still loading".
+        if (preview_retry_streak_ < 1'000'000) ++preview_retry_streak_; // don't overflow if this runs for days
+        if (preview_retry_streak_ >= kPreviewRetryBackoffAfter && !preview_unavailable_) {
+            preview_unavailable_ = true;
+            HrLog::Warn("Preview: capture pipeline has failed to start " +
+                        std::to_string(preview_retry_streak_) +
+                        " times in a row - backing off retries. Common causes: "
+                        "running over RDP/a virtual display, a just-changed display "
+                        "mode, or insufficient permissions.");
+        }
         return;
     }
+    // Reached only on success - clear any backoff state from earlier
+    // failures so the next time preview needs to (re)start (settings
+    // change, monitor reconnected, etc.) it retries at the fast cadence
+    // again instead of staying artificially slow.
+    preview_retry_streak_ = 0;
+    preview_unavailable_ = false;
     // Same crop rect ResolveCaptureSize() above just resolved for Start()
     // to reuse - without this, the live preview panel would keep showing
     // the full desktop even when a window is selected, only "correcting"
     // itself once Start() reuses this pipeline and re-applies the crop.
-    if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
-    if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+    hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+    hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
 }
 
 void RecordingController::TeardownPreview() {
