@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HomRec — Documentation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #ffffff; color: #000000;
+            font-family: Arial, Helvetica, sans-serif;
+            font-size: 13px; line-height: 1.5;
+            display: flex; min-height: 100vh;
+        }
+        .sidebar {
+            width: 220px; background: #f4f6fa; border-right: 1px solid #d0d7e2;
+            padding: 30px 15px; flex-shrink: 0; display: flex; flex-direction: column;
+            gap: 5px; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+        }
+        .logo-container { text-align: left; margin-bottom: 20px; padding-left: 8px; }
+        .logo-container img { width: 150px; height: auto; display: block; }
+        .sidebar a {
+            display: block; padding: 9px 12px; border-radius: 6px; color: #1a1f2b;
+            text-decoration: none; font-weight: 500; font-size: 14px;
+            transition: background 0.15s, color 0.15s; border: 1px solid transparent;
+        }
+        .sidebar a:hover { background: #e1e8f0; color: #0047ab; border-color: #cbd5e1; }
+        .sidebar a.active { background: #e1e8f0; color: #0047ab; border-color: #cbd5e1; }
+        .sidebar .spacer { flex-grow: 1; }
+        .sidebar .version-badge {
+            font-size: 12px; color: #4b5563; padding: 8px 12px;
+            border-top: 1px solid #d0d7e2; margin-top: 10px;
+        }
+        .content { flex: 1; max-width: 850px; margin: 0 auto; padding: 35px 30px 60px 30px; }
+        h1 { font-size: 30px; font-weight: bold; margin: 10px 0 5px 0; color: #0a0e17; letter-spacing: -0.3px; }
+        h2 { font-size: 20px; font-weight: bold; margin: 34px 0 10px 0; color: #0a0e17; border-bottom: 2px solid #0047ab; padding-bottom: 4px; }
+        h3 { font-size: 16px; font-weight: bold; margin: 20px 0 8px 0; color: #111827; }
+        p, li { margin: 8px 0; }
+        ul, ol { margin-left: 22px; }
+        a { color: #0047ab; text-decoration: underline; }
+        a:hover { color: #003380; }
+        table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; border-radius: 8px; overflow: hidden; }
+        th { background: #0a0e17; color: #ffffff; text-align: left; padding: 9px 12px; border: 1px solid #0a0e17; font-weight: bold; }
+        td { padding: 8px 12px; border: 1px solid #d9dee7; vertical-align: top; background: #ffffff; }
+        tr:nth-child(even) td { background: #f7f9fc; }
+        pre {
+            background: #0a0e17; color: #e5e9f0; border-radius: 8px; padding: 14px 16px;
+            font-family: Consolas, "Courier New", monospace; font-size: 12.5px;
+            overflow-x: auto; margin: 12px 0; line-height: 1.6;
+        }
+        code {
+            font-family: Consolas, "Courier New", monospace; font-size: 12px;
+            background: #f0f2f5; padding: 1px 5px; border-radius: 4px;
+        }
+        pre code { background: none; padding: 0; color: inherit; }
+        .note {
+            background: #f0f4ff; border: 1px solid #b8c8e8; border-radius: 6px;
+            padding: 10px 14px; margin: 15px 0;
+        }
+        .warn {
+            background: #fff7ed; border: 1px solid #f0c88a; border-left: 4px solid #b8860b;
+            border-radius: 6px; padding: 10px 14px; margin: 15px 0;
+        }
+        .toc { background: #f7f9fc; border: 1px solid #d9dee7; border-radius: 8px; padding: 16px 20px; margin: 15px 0 25px 0; }
+        .toc a { display: block; padding: 3px 0; }
+        .footer { margin-top: 40px; padding-top: 15px; border-top: 1px solid #ccc; font-size: 12px; color: #555; text-align: center; }
+        @media (max-width: 700px) {
+            body { flex-direction: column; }
+            .sidebar { width: 100%; height: auto; position: static; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding: 10px 15px; border-right: none; border-bottom: 1px solid #d0d7e2; }
+            .logo-container { margin-bottom: 0; padding-left: 0; margin-right: 15px; }
+            .logo-container img { width: 100px; }
+            .sidebar a { padding: 6px 10px; font-size: 13px; }
+            .content { padding: 20px 15px; }
+        }
+    </style>
+</head>
+<body>
+
+    <aside class="sidebar">
+        <div class="logo-container">
+            <img src="assets/hom.png" alt="HomRec logo">
+        </div>
+        <a href="index.html#download">Download</a>
+        <a href="documentation.html" class="active">Documentation</a>
+        <a href="index.html#requirements">Requirements</a>
+        <a href="index.html#install">Install</a>
+        <a href="support.html">Support</a>
+        <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
+        <div class="spacer"></div>
+        <div class="version-badge">v2.0</div>
+    </aside>
+
+    <div class="content">
+
+        <h1>Documentation</h1>
+        <p>Everything beyond "click record": the developer console, config scripts, plugins, and the <code>hom</code> plugin manager.</p>
+
+        <div class="toc">
+            <a href="#console">1. The developer console</a>
+            <a href="#builtins">2. Built-in commands</a>
+            <a href="#cfg">3. Config scripts (autoexec.cfg)</a>
+            <a href="#security">4. Console security (sec / secui / secp)</a>
+            <a href="#plugins">5. Plugins (Lua)</a>
+            <a href="#hom">6. hom — the plugin package manager</a>
+            <a href="#faq">7. FAQ</a>
+        </div>
+
+        <div class="note">
+            This page documents HomRec <b>v2.0</b> as it actually behaves today. HomRec's console
+            went through a Python → C++ rewrite, and some older material floating around (including
+            parts of the repo's own <code>commands.md</code>) still describes a fancier command
+            language — Windows/Rules/AE Objects, hotkeys, timers — from before that rewrite, which
+            <b>isn't implemented in the current build</b>. Everything below reflects what's actually
+            in <code>console_window.cpp</code> today, not the aspirational older spec.
+        </div>
+
+        <h2 id="console">1. The developer console</h2>
+        <p>
+            HomRec has a built-in console for scripting and diagnostics — it's the same idea as a
+            game's dev console (think Source/Quake), not a general shell. Open it from the app
+            (Help/Debug menu), type a command, press Enter.
+        </p>
+        <p>Commands share one line format:</p>
+        <pre><code>command [arguments]</code></pre>
+        <p>A few conventions apply everywhere:</p>
+        <ul>
+            <li>Flags look like <code>--name</code> or <code>--name=value</code>.</li>
+            <li>Commands chain with <code>&&</code> via <a href="#batch"><code>batch</code></a>.</li>
+            <li>Anything not matching a built-in is handed to loaded plugins in case one of them
+                registered that command name (see <a href="#plugins">Plugins</a>) — otherwise you
+                get <code>Unknown command: ...</code>.</li>
+        </ul>
+
+        <h2 id="builtins">2. Built-in commands</h2>
+
+        <h3>Diagnostics</h3>
+        <table>
+            <tr><th>Command</th><th>What it does</th></tr>
+            <tr><td><code>version</code></td><td>Prints <code>HomRec v2.0 (developer console)</code>.</td></tr>
+            <tr><td><code>ver</code></td><td>Prints the bare version number (<code>2.0</code>) — handy in scripts that need just the number.</td></tr>
+            <tr><td><code>ping</code></td><td>Replies <code>pong</code> — quick check that the console is alive.</td></tr>
+            <tr><td><code>info</code></td><td>Prints CPU core count, RAM total/used, whether FFmpeg was found, and which encoder got picked (hardware GPU encoder vs. software libx264 fallback). The encoder line is the fastest way to answer "why is recording eating my CPU."</td></tr>
+            <tr><td><code>status</code></td><td>Shows <code>idle</code>, or <code>RECORDING</code>/<code>PAUSED</code> with elapsed time and current frame count.</td></tr>
+            <tr><td><code>log</code></td><td>See <a href="#log-cmd">below</a>.</td></tr>
+        </table>
+
+        <h3 id="log-cmd">The <code>log</code> command</h3>
+        <table>
+            <tr><th>Form</th><th>Effect</th></tr>
+            <tr><td><code>log &lt;message&gt;</code></td><td>Appends <code>[console] &lt;message&gt;</code> to <code>homrec.log</code>.</td></tr>
+            <tr><td><code>log open</code></td><td>Opens <code>homrec.log</code> in your default text editor.</td></tr>
+            <tr><td><code>log clear</code></td><td>Truncates (empties) <code>homrec.log</code> — the file itself stays, only its contents are wiped.</td></tr>
+        </table>
+
+        <h3>Console utilities</h3>
+        <table>
+            <tr><th>Command</th><th>What it does</th></tr>
+            <tr><td><code>echo [--ok|--warn|--err] &lt;text&gt;</code></td><td>Prints text, optionally styled as success/warning/error.</td></tr>
+            <tr><td><code>clear</code></td><td>Clears the console output pane (not the same as <code>log clear</code>).</td></tr>
+            <tr><td><code>history</code></td><td>Lists every command run this session, numbered.</td></tr>
+            <tr><td><code>env</code></td><td>No args: lists session env vars. <code>env NAME</code>: prints its value. <code>env NAME=value</code>: sets it. Vars live only for the current session.</td></tr>
+            <tr><td><code>alias</code></td><td>No args: lists aliases. <code>alias name=target</code>: defines one (names are lower-cased).</td></tr>
+            <tr><td><code>ls [--aliases] [--env]</code></td><td>Lists aliases and/or env vars — the native equivalent of "list the registry" from the old command language, which doesn't otherwise exist in this port.</td></tr>
+            <tr><td><code>clip --copy "text"</code> / <code>--paste</code> / <code>--clear</code></td><td>Reads/writes the Windows clipboard.</td></tr>
+            <tr><td><code>hide</code></td><td>Hides the main window; restore it from the tray icon.</td></tr>
+            <tr><td><code>hrc save [path]</code> / <code>hrc load [path]</code></td><td>Saves or loads HomRec's settings to/from a <code>.hrc</code> file (default: <code>homrec_config.hrc</code> next to the exe). Some fields need a restart to take effect after loading.</td></tr>
+        </table>
+
+        <h3 id="batch">Scripting: <code>repeat</code> and <code>batch</code></h3>
+        <table>
+            <tr><th>Command</th><th>What it does</th></tr>
+            <tr><td><code>repeat --count=N &lt;command&gt;</code></td><td>Runs a command N times in a row (capped at 1000).</td></tr>
+            <tr><td><code>batch cmd1 && cmd2 && ... [-x | --stop-on-error]</code></td><td>Runs several commands in sequence. <code>-x</code> is accepted but only loosely enforced right now — most commands print their own error without yet reporting pass/fail back to <code>batch</code>.</td></tr>
+        </table>
+
+        <h3>Removal commands</h3>
+        <div class="warn">
+            <b>These are destructive and irreversible.</b> Both require the master security fuse to
+            be off first (<code>sec 0</code> — see <a href="#security">Console security</a>).
+        </div>
+        <table>
+            <tr><th>Command</th><th>What it does</th></tr>
+            <tr><td><code>rm --system@homrec.files --permission=core --type={recordings,plugins,logs,cache}</code></td><td>Deletes the listed data folders (any combination). E.g. <code>--type={logs,cache}</code> clears just those two.</td></tr>
+            <tr><td><code>rm @homrec [-q]</code></td><td>Uninstalls HomRec entirely once the app closes (confirmation prompt unless <code>-q</code>/<code>-y</code> is passed).</td></tr>
+        </table>
+
+        <h2 id="cfg">3. Config scripts</h2>
+        <p>
+            Drop a <code>.cfg</code> file into the <code>cfg/</code> folder next to the exe (created
+            automatically) and HomRec will run it line-by-line through the console, one command per
+            line. Blank lines are skipped, and both <code>//</code> and <code>#</code> work as comment
+            markers so you can use whichever convention you're used to.
+        </p>
+        <pre><code>// cfg/autoexec.cfg — runs automatically on startup
+echo --ok HomRec ready
+alias qr=hrc load quickrec.hrc
+env THEME=dark</code></pre>
+        <p>
+            <code>.cfg</code> files are read leniently (UTF-8 first, falling back to the system
+            ANSI codepage), since they're meant to be hand-edited in whatever text editor you've
+            got on Windows.
+        </p>
+
+        <h2 id="security">4. Console security</h2>
+        <p>
+            Three independent toggles gate different parts of the console. Each reports its state
+            with no argument, or is set with <code>0</code>/<code>off</code>/<code>false</code> to
+            disable, anything else to enable:
+        </p>
+        <table>
+            <tr><th>Command</th><th>Guards</th></tr>
+            <tr><td><code>sec [0|1]</code></td><td>The <b>master</b> fuse. Must be <code>0</code> before either <code>rm</code> command will run.</td></tr>
+            <tr><td><code>secui [0|1]</code></td><td>UI protection.</td></tr>
+            <tr><td><code>secp [0|1]</code></td><td>Plugin version-check / RAM watchdog.</td></tr>
+        </table>
+        <p>Example: <code>sec 0</code> then <code>rm --system@homrec.files --permission=core --type={cache}</code>.</p>
+
+        <h2 id="plugins">5. Plugins (Lua)</h2>
+        <p>
+            Plugins are Lua scripts loaded from <code>plugins/</code>, either as a loose folder or a
+            packaged <code>.hrp</code> archive. Each plugin needs a small manifest:
+        </p>
+        <pre><code>{
+    "id": "my_plugin",
+    "name": "My Plugin",
+    "version": "1.0.0",
+    "entry": "entry.lua"
+}</code></pre>
+        <p>and an entry script with an <code>on_load()</code> function HomRec calls when it loads the plugin:</p>
+        <pre><code>function on_load()
+    homrec.register_command("hello", "Says hi", function(args)
+        homrec.print("Hello from my_plugin!")
+    end)
+end</code></pre>
+
+        <h3>The <code>homrec.*</code> API</h3>
+        <table>
+            <tr><th>Function</th><th>Purpose</th></tr>
+            <tr><td><code>homrec.register_command(name, description, fn)</code></td><td>Adds a console command that runs your Lua function.</td></tr>
+            <tr><td><code>homrec.register_input_overlay(category, label, json_path, png_path)</code></td><td>Registers an input-overlay preset (keyboard/mouse/gamepad).</td></tr>
+            <tr><td><code>homrec.print(text)</code> / <code>homrec.log(message, level?)</code> / <code>homrec.log_to(filename, message)</code></td><td>Console output and logging, including to a custom file under your plugin's own log.</td></tr>
+            <tr><td><code>homrec.show_toast(message, color?, duration_ms?)</code></td><td>Shows a small non-blocking popup.</td></tr>
+            <tr><td><code>homrec.store_get/store_set</code></td><td>Persistent per-plugin key/value storage.</td></tr>
+            <tr><td><code>homrec.settings_get/settings_set</code></td><td>Reads/writes HomRec's own settings flags.</td></tr>
+            <tr><td><code>homrec.get_colors()</code></td><td>Returns the active UI theme's colors.</td></tr>
+            <tr><td><code>homrec.get_ffmpeg()</code></td><td>Returns the path to the FFmpeg binary HomRec is using.</td></tr>
+            <tr><td><code>homrec.plugin_info()</code></td><td>Returns your own plugin's <code>{id, name, version, author}</code>.</td></tr>
+            <tr><td><code>homrec.http_get(url)</code> / <code>homrec.http_post(url, body, content_type?)</code></td><td>Basic HTTPS requests.</td></tr>
+            <tr><td><code>homrec.emit(...)</code></td><td>Emits an event other plugins can react to.</td></tr>
+        </table>
+        <p>
+            Console commands a plugin registers are dispatched exactly like built-ins — if you type
+            a name the console doesn't recognize natively, it's handed to plugins before giving up.
+        </p>
+
+        <h2 id="hom">6. hom — the plugin package manager</h2>
+        <p>
+            <code>hom.exe</code> is a separate, tiny executable (no wxWidgets/Lua dependency) you
+            keep next to <code>hr.exe</code> for installing plugins the same way <code>apt</code> or
+            <code>pacman</code> installs packages — just aimed at <code>.hrp</code> plugin files.
+        </p>
+        <pre><code>hom --version              Show the hom version
+hom update                 Update hom itself
+hom install &lt;plugin-name&gt;  Download and install a plugin
+hom remove  &lt;plugin-name&gt;  Remove an installed plugin</code></pre>
+        <pre><code>&gt; hom install input-overlay
+Fetching plugin 'input-overlay'...
+Installed 'input-overlay' -&gt; plugins\input-overlay.hrp (552854 bytes)
+Restart HomRec (or reload plugins) to pick it up.</code></pre>
+        <p>
+            Run it from the same folder as <code>hr.exe</code> — it reads and writes
+            <code>./plugins/</code> relative to wherever it's launched from. <code>hom install</code>
+            fetches the plugin's <code>.hrp</code> straight from the repo's <code>Hom/plugins/</code>
+            folder over HTTPS; HomRec's own loader takes care of unpacking it. <code>hom remove</code>
+            deletes the file immediately, with no confirmation prompt.
+        </p>
+
+        <h2 id="faq">7. FAQ</h2>
+        <h3>Does <code>rm</code> ask for confirmation?</h3>
+        <p>
+            <code>rm --system@homrec.files</code> does not (beyond needing <code>sec 0</code> first).
+            <code>rm @homrec</code> pops a Yes/No dialog unless you pass <code>-q</code>/<code>-y</code>.
+        </p>
+        <h3>Where do plugin commands show up if I don't remember the plugin's name?</h3>
+        <p>There's no <code>help</code>/list-all-commands built-in yet — check the plugin's own README, or its <code>entry.lua</code>, for what it registers via <code>register_command</code>.</p>
+        <h3>Can I use HomRec on Linux?</h3>
+        <p>Not yet — see the <a href="down-deb.html">Linux status page</a> for what's planned.</p>
+        <h3>Something in the older docs doesn't match what I'm seeing</h3>
+        <p>That's expected for anything about Windows/Rules/AE Objects, hotkeys, or timers — that syntax predates the C++ rewrite and isn't implemented. This page reflects the current console; if something here is wrong, please <a href="support.html">let us know</a>.</p>
+
+        <div class="footer">
+            HomRec © 2026 · <a href="https://github.com/homaaio/HomRec">GitHub</a> ·
+            <a href="https://discord.gg/Gv4t6Xhy7E">Discord</a> ·
+            <a href="https://t.me/homaexe">Telegram</a>
+        </div>
+
+    </div>
+
+</body>
+</html>

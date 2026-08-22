@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HomRec — Download for Linux Debian</title>
+    <title>HomRec — Linux Support</title>
     <style>
         body {
             background: #ffffff;
@@ -36,7 +36,7 @@
             padding-bottom: 3px;
         }
 
-        p {
+        p, li {
             margin: 8px 0;
         }
 
@@ -55,31 +55,20 @@
             font-size: 13px;
         }
 
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 10px 0;
-            font-size: 13px;
-        }
-
-        th {
-            background: #0a0e17;
-            color: #ffffff;
-            text-align: left;
-            padding: 7px 10px;
-            border: 1px solid #0a0e17;
-            font-weight: bold;
-        }
-
-        td {
-            padding: 7px 10px;
+        .status-box {
             border: 1px solid #ccc;
-            vertical-align: middle;
-            white-space: nowrap;
+            border-left: 5px solid #b8860b;
+            background: #fffaf0;
+            padding: 20px 24px;
+            margin: 15px 0;
+            border-radius: 8px;
         }
 
-        tr:nth-child(even) td {
-            background: #f7f9fc;
+        .status-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #0a0e17;
+            margin-bottom: 6px;
         }
 
         .footer {
@@ -106,58 +95,50 @@
 
     <a href="index.html" class="back-link">← back</a>
 
-    <h1>Download HomRec for Linux Debian</h1>
+    <h1>HomRec on Linux</h1>
 
-    <h2>Downloads</h2>
-    <table>
-        <tr>
-            <th>Version</th>
-            <th>Date</th>
-            <th>File</th>
-            <th>Size</th>
-            <th>Links</th>
-        </tr>
-        <tr>
-            <td>2.0</td>
-            <td>2026-08-09</td>
-            <td>homrec-v2.0-linux-x86_64.tar.gz</td>
-            <td>~150 MB</td>
-            <td>
-                <a href=smth.html>[github]</a>
-                <a href=smth.html>[catbox]</a>
-                <a href=smth.html>[google drive]</a>
-                <a href=smth.html>[mega]</a>
-            </td>
-        </tr>
-        <tr>
-            <td>2.0</td>
-            <td>2026-08-09</td>
-            <td>homrec-v2.0-linux-amd64.deb</td>
-            <td>~110 MB</td>
-            <td>
-                <a href=smth.html>[github]</a>
-                <a href=smth.html>[catbox]</a>
-                <a href=smth.html>[google drive]</a>
-                <a href=smth.html>[mega]</a>
-            </td>
-        </tr>
-    </table>
+    <div class="status-box">
+        <div class="status-title">Not available yet</div>
+        <p>
+            There is no Linux build of HomRec to download right now. The current codebase
+            (recording pipeline, screen capture, UI) is built entirely on Windows-only APIs
+            (DXGI/D3D11/Win32 + wxWidgets-msw), so a <code>.deb</code> or <code>.tar.gz</code>
+            package simply wouldn't run on Linux today — this page previously implied
+            otherwise, which was a mistake on our part.
+        </p>
+    </div>
 
-    <p><a href=smth.html>[changelog]</a> · <a href=smth.html>[all releases]</a></p>
-
-    <h2>Installation</h2>
+    <h2>What's actually planned</h2>
     <p>
-        <b>From .deb package (recommended):</b><br>
-        1. Download the .deb file<br>
-        2. Install via terminal: <code>sudo dpkg -i homrec-v2.0-linux-amd64.deb</code><br>
-        3. Run <code>hr</code> from your applications menu or terminal.
+        Screen capture on Linux is split by <b>display server</b> rather than by distribution —
+        an Arch user and a Debian user on the same display server need identical capture code.
+        HomRec's Linux support is being planned around that split:
+    </p>
+    <ul>
+        <li><b>X11</b> — capture via Xlib/XShm (or similar), for X11 sessions.</li>
+        <li><b>Wayland</b> — capture via PipeWire and the <code>xdg-desktop-portal</code>
+            ScreenCast API (<code>org.freedesktop.portal.ScreenCast</code>), since Wayland's
+            security model doesn't allow X11-style direct capture. This is the same
+            compositor-agnostic approach used by other modern Linux recording tools, and works
+            the same way on GNOME, KDE, and others.</li>
+    </ul>
+    <p>
+        Distribution packaging (<code>.deb</code>, Arch's <code>PKGBUILD</code>, etc.) is a
+        separate, later step once one of the two capture backends above actually exists.
+    </p>
+
+    <h2>Want to help or get notified?</h2>
+    <p>
+        Linux support is one of the most-requested features. If you'd like to track progress,
+        contribute, or get pinged when a build is ready:
     </p>
     <p>
-        <b>From .tar.gz archive:</b><br>
-        1. Download and extract: <code>tar -xzf homrec-v2.0-linux-x86_64.tar.gz</code><br>
-        2. Navigate to the folder: <code>cd homrec-v2.0</code><br>
-        3. Run <code>./hr</code>
+        <a href="https://github.com/homaaio/HomRec">Watch the GitHub repo</a> ·
+        <a href="https://github.com/homaaio/HomRec/issues">Open/follow an issue</a> ·
+        <a href="https://discord.gg/Gv4t6Xhy7E">Join the Discord</a>
     </p>
+
+    <p>In the meantime, HomRec runs great on Windows — <a href="down-win.html">download it here</a>.</p>
 
     <div class="footer">
         HomRec © 2026 · <a href="https://github.com/homaaio/HomRec">GitHub</a> ·

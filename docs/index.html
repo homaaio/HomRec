@@ -263,12 +263,12 @@
         <div class="logo-container">
             <img src="assets/hom.png" alt="HomRec logo">
         </div>
-        <a href="smth.html">Download</a>
-        <a href="smth.html">Documentation</a>
-        <a href="smth.html">Requirements</a>
-        <a href="smth.html">Install</a>
-        <a href="smth.html">Support</a>
-        <a href="smth.html">Forum</a>
+        <a href="#download">Download</a>
+        <a href="documentation.html">Documentation</a>
+        <a href="#requirements">Requirements</a>
+        <a href="#install">Install</a>
+        <a href="support.html">Support</a>
+        <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
         <div class="spacer"></div>
         <div class="version-badge">v2.0</div>
     </aside>
@@ -282,9 +282,19 @@
         <div id="download" class="download-block">
             <div class="download-title">Download latest release</div>
             <p>
-                <a href="down-win.html" class="download-link">Windows (64-bit)</a><br>
-                <a href="down-deb.html" class="download-link">Linux (Debian/Ubuntu)</a>
+                <img src="assets/Windows_logo.png" alt="" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;">
+                <a href="down-win.html" class="download-link">Windows (64-bit)</a>
             </p>
+            <p>
+                <img src="assets/linux_logo.png" alt="" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;opacity:0.5;">
+                <span class="download-link" style="color:#6b7280;">Linux — in development</span>
+            </p>
+        </div>
+        <div class="note">
+            <b>About Linux support:</b> HomRec's capture engine is currently built on Windows-only
+            APIs (DXGI/D3D11/Win32). Native Linux support (X11 and Wayland capture) is planned and
+            in active development, but there is no working Linux build yet — see the
+            <a href="down-deb.html">Linux status page</a> for details.
         </div>
 
         <h2 id="features">What is HomRec?</h2>
@@ -368,7 +378,7 @@
             </tr>
             <tr>
                 <td>Operating System</td>
-                <td>Windows 10 (64-bit) or later, Debian/Ubuntu</td>
+                <td>Windows 10 (64-bit) or later. Linux support is in development — see <a href="down-deb.html">Linux status</a>.</td>
             </tr>
             <tr>
                 <td>Processor</td>
