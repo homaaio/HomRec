@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
@@ -273,7 +274,14 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     if (!have_output) return HR_DX_TIMEOUT;
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = ctx->context->Map(ctx->staging[read_idx].Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    const DWORD map_deadline = GetTickCount64() + (DWORD)std::max(timeout_ms, 1);
+    for (;;) {
+        hr = ctx->context->Map(ctx->staging[read_idx].Get(), 0, D3D11_MAP_READ,
+                                D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr != DXGI_ERROR_WAS_STILL_DRAWING) break;
+        if (GetTickCount64() >= map_deadline) return HR_DX_TIMEOUT;
+        Sleep(1);
+    }
     if (FAILED(hr)) return HR_DX_ERROR;
 
     const int row_bytes  = ctx->width * 4;
