@@ -27,6 +27,7 @@
 #include <queue>
 #include <condition_variable>
 #include <string>
+#include <cstdio>
 #include <exception>
 #include "hr_log.h"
 #include "hr_overlay_render.h"
@@ -64,6 +65,7 @@ extern "C" {
     int   hr_dx_reset(void *handle);
     int   hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y,
                              int *out_w, int *out_h, char *name_buf, int name_buf_len);
+    unsigned long hr_dx_last_error(void);
     void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
@@ -82,6 +84,7 @@ struct LibHandles {
     int   (*dx_capture)(void*, uint8_t*, int)           = &hr_dx_capture;
     int   (*dx_get_size)(void*, int*, int*)             = &hr_dx_get_size;
     int   (*dx_reset)(void*)                            = &hr_dx_reset;
+    unsigned long (*dx_last_error)(void)                = &hr_dx_last_error;
     void  (*bgra_to_yuv)(const uint8_t*, uint8_t*, int, int) = &hr_bgra_to_yuv420p;
     void *(*sw_create)()                                = &hr_sw_create;
     void  (*sw_destroy)(void*)                          = &hr_sw_destroy;
@@ -335,6 +338,29 @@ static void bgra_downscale(const uint8_t* __restrict src,
 }
 
 // ---------------------------------------------------------------------------
+// Outstanding "handed-off" Pipelines - see hr_pl_destroy()'s handed_off/
+// leak_pl comments below for what this refers to.
+//
+// BUGFIX: a Pipeline whose worker threads didn't stop within hr_pl_destroy()'s
+// 1s-per-thread budget gets detached rather than joined, and finishes
+// tearing itself down (dx_destroy/sw_destroy/delete this, from
+// finish_thread()) on its own time, on its own thread, once it actually
+// exits - anywhere from a few hundred ms to (per hr_dx_capture.cpp's own
+// retry budget) several seconds later. Nothing previously waited for that
+// to actually finish before the app itself was allowed to close: main()
+// returning (or WinMain falling out the bottom of the message loop) starts
+// unloading DLLs and tearing down process-wide state (including the very
+// g_libs function pointers and HrLog machinery those lingering threads are
+// still calling into) out from under them - exactly the
+// "[CRASH] unhandled C++ exception / std::terminate() -- (no dump written)"
+// users hit right around closing the app (or Start()/Stop() quickly
+// recreating a pipeline) shortly after a "did not stop in time" message.
+// Track how many Pipelines are currently in that handed-off-but-not-yet-
+// self-deleted state so shutdown can wait on it via hr_pl_wait_all_detached()
+// below instead of racing it blind.
+static std::atomic<int> g_handed_off_pipelines{0};
+
+// ---------------------------------------------------------------------------
 // Pipeline state
 // ---------------------------------------------------------------------------
 struct Pipeline {
@@ -447,6 +473,13 @@ struct Pipeline {
             if (sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(sw_ctx);
 #endif
             delete this;
+            // BUGFIX: must be decremented after the delete above, not
+            // before - hr_pl_wait_all_detached() uses this counter hitting
+            // zero as its "safe to let the process exit now" signal, and
+            // callers only want that signal once the Pipeline (and the
+            // dx_/sw_ handles it owned) are actually gone, not just about
+            // to be.
+            g_handed_off_pipelines.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
     bool logged_lost_ = false; // edge-trigger for the DX_LOST diagnostic below
@@ -1027,9 +1060,16 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     // are a separate, bigger fix).
     pl->dx_ctx = g_libs.dx_create(0, output_idx);
     if (!pl->dx_ctx) {
-        HrLog::Error("Pipeline create failed: dx_create() returned null (DXGI desktop duplication init failed -- "
-                     "common causes: running over RDP/a virtual display, a just-changed display mode, or "
-                     "insufficient permissions)");
+        // BUGFIX: this used to just say "returned null" with no way to
+        // tell which of the "common causes" it actually was - now logs
+        // the real HRESULT (hex, so it's directly greppable against the
+        // DXGI/WinError docs) alongside the guess. See hr_dx_last_error()
+        // in hr_dxgi_capture.cpp for where this comes from.
+        char hres_buf[32];
+        std::snprintf(hres_buf, sizeof(hres_buf), "0x%08lX", g_libs.dx_last_error ? g_libs.dx_last_error() : 0ul);
+        HrLog::Error(std::string("Pipeline create failed: dx_create() returned null, HRESULT ") + hres_buf +
+                     " (DXGI desktop duplication init failed -- common causes: running over RDP/a virtual "
+                     "display, a just-changed display mode, or insufficient permissions)");
         delete pl; return nullptr;
     }
     // Matches dx_create(0, output_idx) above - needed so
@@ -1093,7 +1133,9 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
             // late - leaking for real, forever, again. Setting it here,
             // per-detach, closes that window.
             HrLog::Error("Pipeline destroy: writer thread did not stop in time - handing off cleanup to it instead of leaking Pipeline forever");
-            pl->handed_off.store(true, std::memory_order_release);
+            bool was_off = false;
+            if (pl->handed_off.compare_exchange_strong(was_off, true, std::memory_order_release))
+                g_handed_off_pipelines.fetch_add(1, std::memory_order_acq_rel);
             pl->writer_thread.detach();
             leak_pl = true;
         }
@@ -1108,7 +1150,9 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
             // Force detach if stuck - see the writer-thread branch above
             // for why handed_off is set right here rather than afterward.
             HrLog::Error("Pipeline destroy: capture thread did not stop in time - handing off cleanup to it instead of leaking Pipeline forever");
-            pl->handed_off.store(true, std::memory_order_release);
+            bool was_off = false;
+            if (pl->handed_off.compare_exchange_strong(was_off, true, std::memory_order_release))
+                g_handed_off_pipelines.fetch_add(1, std::memory_order_acq_rel);
             pl->capture_thread.detach();
             leak_pl = true;
         }
@@ -1142,6 +1186,35 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     if (pl->dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(pl->dx_ctx);
     if (pl->sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(pl->sw_ctx);
     delete pl;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// hr_pl_wait_all_detached
+//
+// Blocks (sleeping, not busy-looping) until every Pipeline that
+// hr_pl_destroy() ever had to hand off (see g_handed_off_pipelines' own
+// comment above) has actually finished tearing itself down, or until
+// timeout_ms elapses - whichever comes first. Returns 1 if everything was
+// clear (either nothing was ever handed off, or it finished in time), 0 on
+// timeout, so the caller can log that something is still stuck rather than
+// silently racing it.
+//
+// Meant to be called once, late in app shutdown (after the window/recording
+// UI has already told everything to stop, right before returning from
+// WinMain/main) - see main_frame.cpp's OnClose(). Safe to call even if
+// nothing was ever handed off (returns 1 immediately).
+HR_EXPORT int hr_pl_wait_all_detached(int timeout_ms) {
+#ifdef _WIN32
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (g_handed_off_pipelines.load(std::memory_order_acquire) > 0) {
+        if (std::chrono::steady_clock::now() >= deadline) return 0;
+        Sleep(20);
+    }
+    return 1;
+#else
+    (void)timeout_ms;
+    return 1;
 #endif
 }
 
