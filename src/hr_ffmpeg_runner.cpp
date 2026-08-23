@@ -93,13 +93,43 @@ static int64_t _file_size(const char *path) {
 /* -- Process launch helpers ------------------------------------------------- */
 
 #ifdef _WIN32
+static bool _create_overlapped_stdin_pipe(HANDLE *out_read, HANDLE *out_write) {
+    static std::atomic<uint32_t> s_counter{0};
+    wchar_t name[128];
+    swprintf(name, 128, L"\\\\.\\pipe\\HomRecStdin_%lu_%u",
+             GetCurrentProcessId(), s_counter.fetch_add(1, std::memory_order_relaxed));
+
+    HANDLE hWrite = CreateNamedPipeW(
+        name,
+        PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_BYTE | PIPE_WAIT,
+        1,             // one instance - this is a private pipe, not a server
+        1 << 20,       // out buffer (1MB - comfortably holds a full 1080p BGRA/YUV frame)
+        0,             // in buffer - unused, outbound only
+        0,             // default timeout
+        nullptr);
+    if (hWrite == INVALID_HANDLE_VALUE) return false;
+
+    SECURITY_ATTRIBUTES sa_inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE hRead = CreateFileW(
+        name, GENERIC_READ, 0, &sa_inherit, OPEN_EXISTING,
+        0,             // ordinary synchronous handle - ffmpeg reads it like any pipe
+        nullptr);
+    if (hRead == INVALID_HANDLE_VALUE) { CloseHandle(hWrite); return false; }
+
+    *out_read  = hRead;
+    *out_write = hWrite;
+    return true;
+}
+
 static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
-    SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE hReadStdin{}, hWriteStdin{};
 
     if (ctx->pipe_input) {
-        if (!CreatePipe(&hReadStdin, &hWriteStdin, &sa, 0)) return false;
-        SetHandleInformation(hWriteStdin, HANDLE_FLAG_INHERIT, 0);
+        // hRead comes back already inheritable (sa_inherit above); hWrite
+        // (CreateNamedPipeW's server handle) is not inheritable by default,
+        // same as the SetHandleInformation(..., 0) call this replaces.
+        if (!_create_overlapped_stdin_pipe(&hReadStdin, &hWriteStdin)) return false;
     }
 
     STARTUPINFOW si{};
