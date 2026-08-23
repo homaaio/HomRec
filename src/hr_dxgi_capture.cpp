@@ -32,6 +32,10 @@ static constexpr int HR_DX_TIMEOUT =  1;
 static constexpr int HR_DX_LOST    =  2;
 static constexpr int HR_DX_ERROR   = -1;
 
+#ifdef _WIN32
+static HRESULT g_last_dx_error = S_OK;
+#endif
+
 /* -------------------------------------------------------------------------
  * Internal state
  * ---------------------------------------------------------------------- */
@@ -68,62 +72,20 @@ struct DxCapCtx {
 
         ComPtr<IDXGIDevice> dxgi_dev;
         HRESULT hr = device.As(&dxgi_dev);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
 
         ComPtr<IDXGIAdapter> adapter;
         hr = dxgi_dev->GetAdapter(&adapter);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
 
         ComPtr<IDXGIOutput> output;
         hr = adapter->EnumOutputs(output_idx, &output);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
 
         ComPtr<IDXGIOutput1> output1;
         hr = output.As(&output1);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
 
-        // BUGFIX: "disable preview -> re-enable" would leave the live
-        // preview stuck on "Preview loading..." forever. Root cause:
-        // DuplicateOutput() can transiently fail with
-        // DXGI_ERROR_ACCESS_DENIED (or plain E_ACCESSDENIED) for a brief
-        // window right after the previous duplication session on this
-        // same output was released (hr_dx_destroy(), called from
-        // TeardownPreview() when the checkbox is checked) -- the OS-side
-        // desktop-duplication handoff isn't always instantaneous, even
-        // though our own COM refcounts drop to zero synchronously. A
-        // single failed attempt here used to make hr_dx_create() (and
-        // therefore EnsurePreview()) return null permanently for that
-        // pipeline; RecordingController::SyncOverlays()'s 2-second retry
-        // loop then just kept calling a brand new hr_dx_create() that hit
-        // the exact same one-shot failure every time, forever. Retry a
-        // few times with a short backoff instead of giving up on the
-        // first failure - this resolves within a couple hundred ms in
-        // practice, well before the user notices, and still fails fast
-        // (after ~500ms total) for a genuine capture failure (RDP,
-        // permissions, no active display) rather than hanging.
-        // BUGFIX: the retry above only covered E_ACCESSDENIED (this
-        // pipeline's own duplication session on this output was released
-        // a moment too recently, or another app briefly holds one). In
-        // practice a *second* transient failure mode hits the same
-        // codepath: HomRec's own previous Pipeline (a just-stopped
-        // recording, or an "Apply with preview off" snapshot pipeline -
-        // see overlays_dock_panel.h) can still be mid-shutdown on a
-        // detached, force-handed-off thread (hr_pl_destroy() in
-        // hr_pipeline.cpp gives up waiting after 1s and detaches rather
-        // than blocking the UI thread indefinitely - see its own
-        // comments) when a fresh dx_create()/reset() runs right after.
-        // That in-flight duplication session, still technically ours but
-        // not yet released, makes DuplicateOutput() fail with
-        // DXGI_ERROR_NOT_CURRENTLY_AVAILABLE (too many concurrent
-        // duplication sessions on this output) instead of
-        // E_ACCESSDENIED - a different HRESULT for effectively the same
-        // "wait a beat, it's about to free up" situation, so it needs
-        // its own retry branch. Also widened the budget from 500ms to
-        // ~2s: a detached thread that timed out because its writer
-        // thread was blocked writing to an overloaded ffmpeg process
-        // (see "Recording overloaded" in hr_ff_process.cpp) can
-        // realistically take longer than 500ms total to actually exit
-        // and release the duplication interface.
         for (int attempt = 0; attempt < 40; ++attempt) {
             hr = output1->DuplicateOutput(device.Get(), &duplication);
             if (SUCCEEDED(hr)) break;
@@ -134,7 +96,7 @@ struct DxCapCtx {
                 break;
             Sleep(50);
         }
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
 
         /* Get fresh size from output desc */
         DXGI_OUTDUPL_DESC dd;
@@ -153,8 +115,10 @@ struct DxCapCtx {
         td.Usage          = D3D11_USAGE_STAGING;
         td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         hr = device->CreateTexture2D(&td, nullptr, &staging[0]);
-        if (FAILED(hr)) return hr;
-        return device->CreateTexture2D(&td, nullptr, &staging[1]);
+        if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
+        hr = device->CreateTexture2D(&td, nullptr, &staging[1]);
+        if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
+        return S_OK;
     }
 };
 #endif
@@ -173,11 +137,11 @@ HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
     ComPtr<IDXGIFactory1> factory;
     HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1),
                                      reinterpret_cast<void **>(factory.GetAddressOf()));
-    if (FAILED(hr)) { delete ctx; return nullptr; }
+    if (FAILED(hr)) { g_last_dx_error = hr; delete ctx; return nullptr; }
 
     ComPtr<IDXGIAdapter1> adapter;
     hr = factory->EnumAdapters1((UINT)adapter_idx, &adapter);
-    if (FAILED(hr)) { delete ctx; return nullptr; }
+    if (FAILED(hr)) { g_last_dx_error = hr; delete ctx; return nullptr; }
 
     /* Create D3D11 device on this adapter */
     D3D_FEATURE_LEVEL fl = (D3D_FEATURE_LEVEL)0;
@@ -189,14 +153,35 @@ HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
         nullptr, 0,
         D3D11_SDK_VERSION,
         &ctx->device, &fl, &ctx->context);
-    if (FAILED(hr)) { delete ctx; return nullptr; }
+    if (FAILED(hr)) { g_last_dx_error = hr; delete ctx; return nullptr; }
 
     hr = ctx->reset();
-    if (FAILED(hr)) { delete ctx; return nullptr; }
+    if (FAILED(hr)) { delete ctx; return nullptr; } // reset() already set g_last_dx_error
 
+    g_last_dx_error = S_OK;
     return ctx;
 #else
     return nullptr;
+#endif
+}
+
+/* -------------------------------------------------------------------------
+ * hr_dx_last_error
+ *
+ * HRESULT (as an unsigned 32-bit value, since HR_EXPORT functions are
+ * plain C and HRESULT isn't a portable type across the DLL boundary) from
+ * the most recent hr_dx_create() failure - S_OK (0) if the most recent
+ * attempt succeeded or none has run yet. Purely diagnostic: lets callers
+ * log *why* DXGI init failed (access denied vs. no current session vs.
+ * something else) instead of just "returned null", without having to
+ * plumb HRESULT itself across the C boundary. See hr_pl_create()'s use of
+ * this in hr_pipeline.cpp.
+ * ---------------------------------------------------------------------- */
+HR_EXPORT unsigned long hr_dx_last_error(void) {
+#ifdef _WIN32
+    return (unsigned long)g_last_dx_error;
+#else
+    return 0;
 #endif
 }
 
