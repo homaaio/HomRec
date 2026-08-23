@@ -460,6 +460,15 @@ struct Pipeline {
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
 
+#ifdef _WIN32
+    // Manual-reset event for overlapped writes to ffmpeg's stdin pipe - see
+    // write_pipe()'s own comment for why this exists. Created lazily (only
+    // ever needed while actually recording) and closed alongside dx_ctx/
+    // sw_ctx wherever those are (both hr_pl_destroy()'s direct-delete path
+    // and finish_thread()'s handed-off path).
+    HANDLE write_evt = nullptr;
+#endif
+
     // ====== SELF-CLEANUP ON A TIMED-OUT SHUTDOWN ======
 
     std::atomic<int>  threads_remaining{2};
@@ -471,6 +480,7 @@ struct Pipeline {
 #ifdef _WIN32
             if (dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(dx_ctx);
             if (sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(sw_ctx);
+            if (write_evt) { CloseHandle(write_evt); write_evt = nullptr; }
 #endif
             delete this;
             // BUGFIX: must be decremented after the delete above, not
@@ -510,16 +520,51 @@ struct Pipeline {
     // -------------------------------------------------------------------------
     // Write raw bytes to pipe
     // -------------------------------------------------------------------------
+    // BUGFIX: this used to be a single plain (non-overlapped) WriteFile()
+    // per chunk, which blocks until ffmpeg's side actually reads from the
+    // pipe - with no timeout of its own, same class of bug as
+    // hr_dx_capture()'s Map() call (see hr_dxgi_capture.cpp). If ffmpeg
+    // itself stalls (e.g. GPU/hardware-encoder contention under the same
+    // overload that produces "Recording overloaded: dropping frames"
+    // upstream) while its stdin pipe buffer is full, this call could block
+    // indefinitely - the writer thread never comes back around to check
+    // writer_running, hr_pl_destroy()'s join gives up on it ("writer
+    // thread did not stop in time"), and if that happens right as the app
+    // is closing, hr_pl_wait_all_detached()'s shutdown wait can time out
+    // too ("closing anyway") and tear down process-wide state out from
+    // under the still-blocked thread - std::terminate(). The pipe is
+    // created overlapped-capable now (see _launch_win() in
+    // hr_ffmpeg_runner.cpp) specifically so this can poll GetOverlappedResult()
+    // instead of blocking forever, coming back to check writer_running
+    // every 50ms and CancelIoEx()-ing the pending write to actually exit
+    // if we're shutting down while ffmpeg is stuck.
     bool write_pipe(const uint8_t* data, size_t total) {
         if (pipe_handle == 0 || pipe_handle == -1) return false;
         size_t written = 0;
 #ifdef _WIN32
         HANDLE h = reinterpret_cast<HANDLE>(pipe_handle);
+        if (!write_evt) write_evt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         while (written < total) {
+            OVERLAPPED ov{};
+            ov.hEvent = write_evt;
+            ResetEvent(write_evt);
+            DWORD chunk = static_cast<DWORD>(std::min<size_t>(total - written, 1u << 20));
             DWORD w = 0;
-            if (!WriteFile(h, data + written,
-                           static_cast<DWORD>(total - written), &w, nullptr)
-                || w == 0) return false;
+            BOOL ok = WriteFile(h, data + written, chunk, nullptr, &ov);
+            if (!ok && GetLastError() != ERROR_IO_PENDING) return false;
+
+            for (;;) {
+                if (GetOverlappedResult(h, &ov, &w, FALSE)) break;
+                DWORD err = GetLastError();
+                if (err != ERROR_IO_INCOMPLETE) { CancelIoEx(h, &ov); return false; }
+                if (!writer_running.load(std::memory_order_relaxed)) {
+                    CancelIoEx(h, &ov);
+                    GetOverlappedResult(h, &ov, &w, TRUE); // let the cancel land before reusing ov
+                    return false;
+                }
+                WaitForSingleObject(write_evt, 50);
+            }
+            if (w == 0) return false;
             written += w;
         }
 #else
@@ -1185,6 +1230,7 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     // Cleanup resources
     if (pl->dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(pl->dx_ctx);
     if (pl->sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(pl->sw_ctx);
+    if (pl->write_evt) { CloseHandle(pl->write_evt); pl->write_evt = nullptr; }
     delete pl;
 #endif
 }
