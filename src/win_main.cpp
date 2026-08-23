@@ -10,6 +10,7 @@
 #include "ui/main_frame.h"
 #include "ui/version.h"
 #include "hr_crash_handler.h"
+#include "hr_log.h"
 
 // Both predate some SDK header snapshots this project's MinGW-w64
 // toolchain may ship with (window_picker_dialog.cpp hits the same thing
@@ -21,6 +22,9 @@ typedef HANDLE DPI_AWARENESS_CONTEXT;
 #endif
 
 extern "C" int hr_acquire_single_instance(const char *mutex_name);
+// Implemented in hr_pipeline.cpp - see g_handed_off_pipelines' comment
+// there for what this is waiting on and why OnExit() below calls it.
+extern "C" int hr_pl_wait_all_detached(int timeout_ms);
 
 namespace {
 
@@ -97,6 +101,15 @@ public:
         auto *frame = new HomRecMainFrame();
         frame->Show(true);
         return true;
+    }
+
+    int OnExit() override {
+        if (!hr_pl_wait_all_detached(5000)) {
+            HrLog::Error("Shutdown: a capture pipeline still hadn't finished cleaning up after "
+                         "5s - closing anyway. If this keeps happening, it may show up as a "
+                         "crash right around app close.");
+        }
+        return wxApp::OnExit();
     }
 };
 
