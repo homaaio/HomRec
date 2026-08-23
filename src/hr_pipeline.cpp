@@ -520,24 +520,6 @@ struct Pipeline {
     // -------------------------------------------------------------------------
     // Write raw bytes to pipe
     // -------------------------------------------------------------------------
-    // BUGFIX: this used to be a single plain (non-overlapped) WriteFile()
-    // per chunk, which blocks until ffmpeg's side actually reads from the
-    // pipe - with no timeout of its own, same class of bug as
-    // hr_dx_capture()'s Map() call (see hr_dxgi_capture.cpp). If ffmpeg
-    // itself stalls (e.g. GPU/hardware-encoder contention under the same
-    // overload that produces "Recording overloaded: dropping frames"
-    // upstream) while its stdin pipe buffer is full, this call could block
-    // indefinitely - the writer thread never comes back around to check
-    // writer_running, hr_pl_destroy()'s join gives up on it ("writer
-    // thread did not stop in time"), and if that happens right as the app
-    // is closing, hr_pl_wait_all_detached()'s shutdown wait can time out
-    // too ("closing anyway") and tear down process-wide state out from
-    // under the still-blocked thread - std::terminate(). The pipe is
-    // created overlapped-capable now (see _launch_win() in
-    // hr_ffmpeg_runner.cpp) specifically so this can poll GetOverlappedResult()
-    // instead of blocking forever, coming back to check writer_running
-    // every 50ms and CancelIoEx()-ing the pending write to actually exit
-    // if we're shutting down while ffmpeg is stuck.
     bool write_pipe(const uint8_t* data, size_t total) {
         if (pipe_handle == 0 || pipe_handle == -1) return false;
         size_t written = 0;
