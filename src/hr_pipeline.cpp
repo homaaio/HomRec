@@ -699,7 +699,20 @@ struct Pipeline {
         int64_t frame_ns = frame_ns_recording;
         bool was_recording = recording;
 #ifdef _WIN32
-        SetThreadPriority(GetCurrentThread(), was_recording ? THREAD_PRIORITY_TIME_CRITICAL
+        // BUGFIX: this used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
+        // the moment recording started (both here and in the is_recording_now
+        // transition below). TIME_CRITICAL is the highest priority Windows
+        // has -- above every normal-priority thread in the system, not just
+        // this process -- so on anything less than a beefy multi-core
+        // machine it could starve the UI thread of the CPU time it needs to
+        // pump messages and repaint, which is exactly what "the preview
+        // freezes the moment recording starts" looks like from the user's
+        // side (the capture thread itself was fine; the UI just couldn't
+        // get scheduled to show it). HIGHEST is still well above normal/
+        // idle-process-class threads (enough to keep capture timing tight
+        // under load) without reserving the CPU ahead of literally
+        // everything else, including our own UI thread.
+        SetThreadPriority(GetCurrentThread(), was_recording ? THREAD_PRIORITY_HIGHEST
                                                              : THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
 
@@ -752,8 +765,14 @@ struct Pipeline {
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
 #ifdef _WIN32
+                    // BUGFIX: see the matching comment above (~line 702) -
+                    // TIME_CRITICAL here starved the UI thread the moment
+                    // recording started on an already-running preview
+                    // pipeline, which is the more common of the two cases
+                    // (see RecordingController::Start()'s reused_preview_pipeline
+                    // path) and so the more common way to see the freeze.
                     SetThreadPriority(GetCurrentThread(), is_recording_now
-                                          ? THREAD_PRIORITY_TIME_CRITICAL
+                                          ? THREAD_PRIORITY_HIGHEST
                                           : THREAD_PRIORITY_ABOVE_NORMAL);
                     if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
 #endif
