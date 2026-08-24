@@ -47,6 +47,65 @@ RecordingMode RecordingModeFromStr(const std::string &s) {
     return RecordingMode::Balanced;
 }
 
+// Shared by Save()/SaveOverlaysOnly() and Load()/LoadOverlaysOnly() below -
+// identical "overlay_N_field=value" line format either way, just written
+// to/read from a different file. Keeping this in one place means the two
+// serializers can't drift apart from each other.
+void WriteOverlaysSection(std::ofstream &f, const std::vector<OverlayDef> &overlays) {
+    f << "[overlays]\n"
+      << "overlay_count=" << overlays.size() << "\n\n";
+    for (size_t i = 0; i < overlays.size(); ++i) {
+        const OverlayDef &ov = overlays[i];
+        std::string p = "overlay_" + std::to_string(i) + "_";
+        f << p << "id=" << ov.id << "\n"
+          << p << "type=" << ov.type << "\n"
+          << p << "name=" << OneLine(ov.name) << "\n"
+          << p << "x=" << ov.x << "\n"
+          << p << "y=" << ov.y << "\n"
+          << p << "w=" << ov.w << "\n"
+          << p << "h=" << ov.h << "\n"
+          << p << "text=" << OneLine(ov.text) << "\n"
+          << p << "text_color=" << ov.text_color << "\n"
+          << p << "image_path=" << ov.image_path << "\n"
+          << p << "webcam_index=" << ov.webcam_index << "\n"
+          << p << "webcam_name=" << OneLine(ov.webcam_name) << "\n"
+          << p << "visible=" << FromBool(ov.visible) << "\n"
+          << p << "input_json_path=" << ov.input_json_path << "\n"
+          << p << "input_png_path=" << ov.input_png_path << "\n\n";
+    }
+}
+
+void ReadOverlaysSection(const std::unordered_map<std::string, std::string> &kv,
+                          std::vector<OverlayDef> &overlays) {
+    auto has = [&](const char *k) { return kv.find(k) != kv.end(); };
+    auto get = [&](const char *k) -> std::string { auto it = kv.find(k); return it == kv.end() ? std::string() : it->second; };
+
+    overlays.clear();
+    if (!has("overlay_count")) return;
+    int n = atoi(get("overlay_count").c_str());
+    for (int i = 0; i < n; ++i) {
+        std::string p = "overlay_" + std::to_string(i) + "_";
+        if (!has((p + "id").c_str())) continue; // tolerate a hand-edited/corrupt file
+        OverlayDef ov;
+        ov.id = get((p + "id").c_str());
+        if (has((p + "type").c_str())) ov.type = get((p + "type").c_str());
+        if (has((p + "name").c_str())) ov.name = get((p + "name").c_str());
+        if (has((p + "x").c_str())) ov.x = atoi(get((p + "x").c_str()).c_str());
+        if (has((p + "y").c_str())) ov.y = atoi(get((p + "y").c_str()).c_str());
+        if (has((p + "w").c_str())) ov.w = atoi(get((p + "w").c_str()).c_str());
+        if (has((p + "h").c_str())) ov.h = atoi(get((p + "h").c_str()).c_str());
+        if (has((p + "text").c_str())) ov.text = get((p + "text").c_str());
+        if (has((p + "text_color").c_str())) ov.text_color = get((p + "text_color").c_str());
+        if (has((p + "image_path").c_str())) ov.image_path = get((p + "image_path").c_str());
+        if (has((p + "webcam_index").c_str())) ov.webcam_index = atoi(get((p + "webcam_index").c_str()).c_str());
+        if (has((p + "webcam_name").c_str())) ov.webcam_name = get((p + "webcam_name").c_str());
+        if (has((p + "visible").c_str())) ov.visible = ToBool(get((p + "visible").c_str()));
+        if (has((p + "input_json_path").c_str())) ov.input_json_path = get((p + "input_json_path").c_str());
+        if (has((p + "input_png_path").c_str())) ov.input_png_path = get((p + "input_png_path").c_str());
+        overlays.push_back(ov);
+    }
+}
+
 std::string CaptureModeToStr(CaptureMode m) { return m == CaptureMode::Window ? "window" : "desktop"; }
 CaptureMode CaptureModeFromStr(const std::string &s) { return s == "window" ? CaptureMode::Window : CaptureMode::Desktop; }
 
@@ -143,27 +202,7 @@ bool Save(const AppState &state, const std::wstring &path) {
     // parses this whole file into one flat key/value map and ignores
     // section headers entirely -- giving every overlay's "x" key the same
     // name would just have the last one clobber all the others.
-    f << "[overlays]\n"
-      << "overlay_count=" << state.overlays.size() << "\n\n";
-    for (size_t i = 0; i < state.overlays.size(); ++i) {
-        const OverlayDef &ov = state.overlays[i];
-        std::string p = "overlay_" + std::to_string(i) + "_";
-        f << p << "id=" << ov.id << "\n"
-          << p << "type=" << ov.type << "\n"
-          << p << "name=" << OneLine(ov.name) << "\n"
-          << p << "x=" << ov.x << "\n"
-          << p << "y=" << ov.y << "\n"
-          << p << "w=" << ov.w << "\n"
-          << p << "h=" << ov.h << "\n"
-          << p << "text=" << OneLine(ov.text) << "\n"
-          << p << "text_color=" << ov.text_color << "\n"
-          << p << "image_path=" << ov.image_path << "\n"
-          << p << "webcam_index=" << ov.webcam_index << "\n"
-          << p << "webcam_name=" << OneLine(ov.webcam_name) << "\n"
-          << p << "visible=" << FromBool(ov.visible) << "\n"
-          << p << "input_json_path=" << ov.input_json_path << "\n"
-          << p << "input_png_path=" << ov.input_png_path << "\n\n";
-    }
+    WriteOverlaysSection(f, state.overlays);
 
     return true;
 }
@@ -256,32 +295,41 @@ bool Load(AppState &state, const std::wstring &path) {
 
     // BUGFIX: see the matching comment in Save() -- overlays weren't
     // persisted at all before.
-    state.overlays.clear();
-    if (has("overlay_count")) {
-        int n = atoi(get("overlay_count").c_str());
-        for (int i = 0; i < n; ++i) {
-            std::string p = "overlay_" + std::to_string(i) + "_";
-            if (!has((p + "id").c_str())) continue; // tolerate a hand-edited/corrupt file
-            OverlayDef ov;
-            ov.id = get((p + "id").c_str());
-            if (has((p + "type").c_str())) ov.type = get((p + "type").c_str());
-            if (has((p + "name").c_str())) ov.name = get((p + "name").c_str());
-            if (has((p + "x").c_str())) ov.x = atoi(get((p + "x").c_str()).c_str());
-            if (has((p + "y").c_str())) ov.y = atoi(get((p + "y").c_str()).c_str());
-            if (has((p + "w").c_str())) ov.w = atoi(get((p + "w").c_str()).c_str());
-            if (has((p + "h").c_str())) ov.h = atoi(get((p + "h").c_str()).c_str());
-            if (has((p + "text").c_str())) ov.text = get((p + "text").c_str());
-            if (has((p + "text_color").c_str())) ov.text_color = get((p + "text_color").c_str());
-            if (has((p + "image_path").c_str())) ov.image_path = get((p + "image_path").c_str());
-            if (has((p + "webcam_index").c_str())) ov.webcam_index = atoi(get((p + "webcam_index").c_str()).c_str());
-            if (has((p + "webcam_name").c_str())) ov.webcam_name = get((p + "webcam_name").c_str());
-            if (has((p + "visible").c_str())) ov.visible = ToBool(get((p + "visible").c_str()));
-            if (has((p + "input_json_path").c_str())) ov.input_json_path = get((p + "input_json_path").c_str());
-            if (has((p + "input_png_path").c_str())) ov.input_png_path = get((p + "input_png_path").c_str());
-            state.overlays.push_back(ov);
-        }
+    ReadOverlaysSection(kv, state.overlays);
+
+    return true;
+}
+
+// See hrc_config.h's comment on why this is a separate small file/function
+// pair from Save()/Load() above, rather than folding overlays into either
+// HrcConfig::Save() or homrec_settings.json directly.
+bool SaveOverlaysOnly(const std::vector<OverlayDef> &overlays, const std::wstring &path) {
+    std::ofstream f(path.c_str(), std::ios::trunc | std::ios::binary);
+    if (!f) return false;
+    f << "# HomRec Overlays (auto-saved) v1\n"
+      << "# Lines starting with # are comments. Format: key=value\n\n";
+    WriteOverlaysSection(f, overlays);
+    return true;
+}
+
+bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &path) {
+    std::ifstream f(path.c_str(), std::ios::binary);
+    if (!f) return false; // no autosave yet (fresh install, or never had an overlay) - not an error
+
+    std::unordered_map<std::string, std::string> kv;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == '[') continue;
+        size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = Trim(trimmed.substr(0, eq));
+        std::string val = Trim(trimmed.substr(eq + 1));
+        if (!key.empty()) kv[key] = val;
     }
 
+    ReadOverlaysSection(kv, overlays);
     return true;
 }
 

@@ -34,4 +34,30 @@ bool Save(const AppState &state, const std::wstring &path);
 // opened at all.
 bool Load(AppState &state, const std::wstring &path);
 
+// BUGFIX: overlays (AppState::overlays) used to only ever be written out
+// via the two functions above, which only run from the manual "Export/
+// Import Settings (.hrc)..." menu items - so anything set up in the
+// Overlays panel silently vanished the moment the app was closed and
+// reopened, with no warning. The auto-managed homrec_settings.json
+// (hr_settings.cpp) never touched state.overlays either - it only ever
+// persisted the show_overlays_panel visibility flag, not the list itself.
+//
+// SaveOverlaysOnly()/LoadOverlaysOnly() give the overlay list its own
+// small auto-persisted file (kOverlaysAutosavePath), written every time
+// the list actually changes (add/remove/rename/toggle/edit/reposition -
+// see the call sites in overlays_dock_panel.cpp and
+// overlay_placement_dialog.cpp) and read back once at startup
+// (main_frame.cpp's HomRecMainFrame ctor). Deliberately a separate file/
+// function pair from Save()/Load() above rather than folding overlays
+// into homrec_settings.json directly: hr_settings.cpp is a plain-C JSON
+// engine with a fixed field whitelist (see its own header comment) that
+// doesn't know about AppState::OverlayDef, and routing overlay saves
+// through the full HrcConfig::Save() (which also writes every other
+// setting) would mean any overlay edit auto-persists whatever else
+// happens to be in `state` at that moment too - not what an "auto-save
+// just the thing that changed" fix should do.
+constexpr wchar_t kOverlaysAutosavePath[] = L"homrec_overlays.hrc";
+bool SaveOverlaysOnly(const std::vector<OverlayDef> &overlays, const std::wstring &path);
+bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &path);
+
 } // namespace HrcConfig
