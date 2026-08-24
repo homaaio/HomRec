@@ -1,6 +1,7 @@
 #include "overlays_dock_panel.h"
 #include "win32_theme.h"
 #include "overlay_add_dialogs.h"
+#include "hrc_config.h"
 #include "../hr_input_overlay.h"
 #include "../hr_input_overlay_registry.h"
 #include "../hr_webcam_enum.h"
@@ -239,6 +240,20 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
 
 void OverlaysDockPanel::Refresh() {
     if (!list_) return;
+
+    // BUGFIX: state_.overlays used to only ever be written out via the
+    // manual "Export Settings (.hrc)..." menu item - anything set up here
+    // (add/remove/rename/toggle/edit) silently vanished the moment the app
+    // was closed and reopened. Refresh() runs after every single one of
+    // those mutations (see the Add*/ToggleVisibility/RemoveAt/RenameAt/
+    // EditParametersAt call sites below), including the initial one from
+    // Create() that just repopulates the list from what LoadOverlaysOnly()
+    // read at startup - so persisting here, once, covers every mutation
+    // path without needing a matching save call at each one individually
+    // (and the extra write on that initial no-op call is harmless, just a
+    // few KB written back unchanged).
+    HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
+
     SendMessageW(list_, LB_RESETCONTENT, 0, 0);
     if (state_.overlays.empty()) {
         SendMessageW(list_, LB_ADDSTRING, 0, (LPARAM)L"No overlays yet. Click \uFF0B to add one.");
