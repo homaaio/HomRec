@@ -480,6 +480,7 @@ HomRecMainFrame::HomRecMainFrame()
         state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
         state_.show_audio_panel = hr_settings_get_flag(settings, "show_audio_panel") != 0;
         state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
+        state_.minimize_to_tray = hr_settings_get_flag(settings, "minimize_tray") != 0;
         state_.hint_no_overlay = hr_settings_get_flag(settings, "hint_no_overlay") != 0;
         state_.system_logging_enabled = hr_settings_get_flag(settings, "system_logging_enabled") != 0;
         state_.plugin_logging_enabled = hr_settings_get_flag(settings, "plugin_logging_enabled") != 0;
