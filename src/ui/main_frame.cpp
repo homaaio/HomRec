@@ -410,6 +410,14 @@ void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
         if (HasCapture()) ReleaseMouse();
         drag_overlay_index_ = -1;
         drag_corner_ = Corner::kNone;
+        // BUGFIX: this in-place drag-on-the-live-preview path (the normal,
+        // most-used way to reposition an overlay) bypasses both
+        // OverlaysDockPanel::Refresh() and ShowOverlayPlacementDialog() -
+        // the two places that otherwise persist state_.overlays (see their
+        // own BUGFIX comments) - so a drag finishing here used to leave
+        // the new position live for the rest of the session but silently
+        // lost on the next launch.
+        HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
         Refresh();
     }
     evt.Skip();
@@ -484,6 +492,12 @@ HomRecMainFrame::HomRecMainFrame()
         state_.first_launch = true;
     }
     hr_settings_destroy(settings);
+
+    // BUGFIX: load back whatever the Overlays panel had last saved (see
+    // hrc_config.h's comment on SaveOverlaysOnly/LoadOverlaysOnly) - this
+    // is what's missing before, overlays used to always start empty every
+    // launch even though everything else in state_ was restored above.
+    HrcConfig::LoadOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
 
     // Apply the Security tab's logging toggles immediately at startup -
     // both loggers default to enabled internally, so this is a no-op
