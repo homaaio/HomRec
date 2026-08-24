@@ -97,6 +97,9 @@ hom.exe: tools/hom/hom.cpp
 	$(CXX) $(HOM_CXXFLAGS) -o hom.exe tools/hom/hom.cpp $(HOM_LDLIBS)
 
 clean:
+	rm -f $(OBJS) resource.o
+
+clear:
 	rm -f $(OBJS) resource.o hr.exe hom.exe
 
 .PHONY: all clean hom
