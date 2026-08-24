@@ -7,7 +7,7 @@ assignees: ''
 ---
 
 **HomRec Version:**
-<!-- Example: 1.2.3 -->
+<!-- Example: 1.2a -->
 
 **Windows Version:**
 <!-- Example: Windows 11 64-bit -->
