@@ -126,7 +126,7 @@ RecordingController::RecordingController(AppState &state) : state_(state) {
 
 RecordingController::~RecordingController() {
     if (state_.recording) Stop();
-    if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
+    JoinPendingPreviewTeardown();
     if (ctl_) hr_ctl_destroy(ctl_);
     if (ffproc_) hr_ff_destroy(ffproc_);
     if (pipeline_) hr_pl_destroy(pipeline_);
@@ -419,6 +419,15 @@ bool RecordingController::Start(std::wstring &error_out) {
         reused_preview_pipeline = true;
     } else {
         if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+        // BUGFIX: see JoinPendingPreviewTeardown()'s comment
+        // (recording_controller.h) - without this, starting a recording
+        // shortly after preview was torn down (e.g. "Disable live preview"
+        // is on, or the user just closed "Position Overlays...") could
+        // race that async teardown's DXGI duplication release and fail
+        // here with "Failed to start the capture pipeline", looking like
+        // recording just can't start with preview off until the app is
+        // restarted.
+        JoinPendingPreviewTeardown();
         int pvw = 0, pvh = 0;
         ScaledPreviewSize(pvw, pvh);
         pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
@@ -693,6 +702,7 @@ void RecordingController::PollStats() {
 
 void RecordingController::SyncOverlays() {
     if (!pipeline_) {
+        // pipeline - this retry is only for the idle/preview-only case.
         if (!state_.disable_preview && !state_.recording) {
             auto now = std::chrono::steady_clock::now();
             if (now >= next_preview_retry_) {
@@ -779,6 +789,11 @@ bool RecordingController::GetPreviewFrame(std::vector<uint8_t> &out, int &out_w,
 
 void RecordingController::EnsurePreview() {
     if (pipeline_ || state_.disable_preview) return; // already running, or user turned it off
+    // BUGFIX: see JoinPendingPreviewTeardown()'s comment (recording_controller.h) -
+    // without this, creating a new pipeline right after TeardownPreview()
+    // kicked off an async destroy of the old one could race its DXGI
+    // duplication handle and silently fail to start.
+    JoinPendingPreviewTeardown();
     ResolveCaptureSize();
     // pipe_fd=0 -> hr_pl_create() leaves this in preview-only mode (frames
     // captured + thumbnailed for the UI, nothing written anywhere) - see

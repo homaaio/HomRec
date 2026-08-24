@@ -195,6 +195,29 @@ private:
     // one) keeps every pipeline teardown finished before anything it
     // depends on goes away.
     std::thread preview_teardown_thread_;
+
+    // BUGFIX: DXGI Desktop Duplication only allows one active duplication
+    // handle per output at a time - hr_pl_create() (via dx_create()) fails
+    // and returns null if a previous pipeline's duplication handle hasn't
+    // actually been released yet. TeardownPreview() destroys the old
+    // pipeline_ on preview_teardown_thread_ in the background (see its
+    // comment above) precisely so a stuck capture doesn't freeze the UI -
+    // but that means a *new* pipeline created shortly after (EnsurePreview()
+    // for "Position Overlays..." with preview off, or Start() reusing/
+    // replacing the preview pipeline) could race the still-in-flight
+    // teardown and hit exactly that "only one duplication handle" limit:
+    // dx_create() returns null, CaptureSnapshotFrame() reports "no
+    // screenshot", or Start() fails with "Failed to start the capture
+    // pipeline" - both looking like they "only work after a restart"
+    // because a fresh process obviously has no pending teardown to race.
+    // Call this immediately before any hr_pl_create() so the previous
+    // pipeline's DXGI handle is guaranteed to be gone first. A no-op
+    // (joinable() is false) in the by-far-most-common case where there's
+    // nothing pending.
+    void JoinPendingPreviewTeardown() {
+        if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
+    }
+
     void *ctl_ = nullptr;        // hr_ctl_create() handle
     void *ffproc_ = nullptr;     // hr_ff_create() handle
 
@@ -252,6 +275,10 @@ private:
     bool last_overlays_sent_valid_ = false;
 
     std::chrono::steady_clock::time_point next_preview_retry_{};
+    // Consecutive EnsurePreview() failures since the last success (or
+    // since the last time preview was actually needed) - drives the
+    // backoff below. Reset to 0 the moment a preview pipeline actually
+    // starts.
     int preview_retry_streak_ = 0;
     // Set once preview_retry_streak_ crosses kPreviewRetryBackoffAfter,
     // cleared again on the next successful EnsurePreview(). See
