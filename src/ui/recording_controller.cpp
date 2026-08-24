@@ -906,7 +906,8 @@ void RecordingController::SetPreviewVisible(bool visible) {
 
 bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h,
                                                 bool first_call) {
-    if (!pipeline_ && first_call) {
+    bool just_started = false;
+    if (!pipeline_) {
         // EnsurePreview() no-ops when state_.disable_preview is set - this
         // is an explicit "show me a screenshot anyway" request, so start
         // it regardless, same as SetPreviewVisible() would if the setting
@@ -916,15 +917,17 @@ bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &o
         state_.disable_preview = false;
         EnsurePreview();
         state_.disable_preview = was_disabled;
+        just_started = true;
     }
     if (!pipeline_) return false;
 
     // A freshly-started pipeline's capture thread needs a moment to
     // produce its first thumbnail (hr_pl_get_preview() returns false
-    // until then) - only worth waiting out on the first call of an
-    // editing session; a "Refresh" on an already-running pipeline should
-    // already have one available immediately.
-    const int max_wait_ms = first_call ? 1000 : 0;
+    // until then) - worth waiting out whenever EnsurePreview() just (re)ran
+    // above, not only on the session's first call; an already-running
+    // pipeline from an earlier call should already have one available
+    // immediately.
+    const int max_wait_ms = (first_call || just_started) ? 1000 : 0;
     const int step_ms = 25;
     for (int waited = 0; ; waited += step_ms) {
         if (GetPreviewFrame(out, out_w, out_h)) return true;
