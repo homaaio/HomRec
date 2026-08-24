@@ -1,6 +1,7 @@
 #include "overlay_placement_dialog.h"
 #include "recording_controller.h"
 #include "themed_widgets.h"
+#include "hrc_config.h"
 #include <wx/dcbuffer.h>
 #include <algorithm>
 #include <cstring>
@@ -277,6 +278,11 @@ bool ShowOverlayPlacementDialog(wxWindow *parent, AppState &state,
 
     if (result == wxID_OK) {
         state.overlays = working;
+        // BUGFIX: dragging/resizing here bypasses OverlaysDockPanel::Refresh()
+        // (which is what normally persists state.overlays - see its own
+        // BUGFIX comment), so without this the new positions would stick
+        // for the rest of the session but be gone again on next launch.
+        HrcConfig::SaveOverlaysOnly(state.overlays, HrcConfig::kOverlaysAutosavePath);
         return true;
     }
     return false;
