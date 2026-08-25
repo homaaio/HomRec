@@ -5,6 +5,7 @@
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame
 #include <vector>
 #include <thread>
+#include <exception>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
@@ -860,7 +861,15 @@ void RecordingController::TeardownPreview() {
     // lose track of one at shutdown. This only blocks the caller for the
     // (rare) remainder of the previous teardown, not a fresh one.
     if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
-    preview_teardown_thread_ = std::thread([doomed]() { hr_pl_destroy(doomed); });
+    preview_teardown_thread_ = std::thread([doomed]() {
+        try {
+            hr_pl_destroy(doomed);
+        } catch (const std::exception &e) {
+            HrLog::Error(std::string("Preview teardown thread: uncaught exception (") + e.what() + ")");
+        } catch (...) {
+            HrLog::Error("Preview teardown thread: uncaught unknown exception");
+        }
+    });
 }
 
 void RecordingController::RefreshPreviewSettings() {
@@ -906,6 +915,13 @@ void RecordingController::SetPreviewVisible(bool visible) {
 
 bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h,
                                                 bool first_call) {
+    // BUGFIX: this used to be gated on `first_call` too, so if the very
+    // first attempt of an editing session failed to get a pipeline going
+    // (EnsurePreview() briefly stuck right after e.g. a tray restore),
+    // pipeline_ stayed null forever and every later Refresh - always
+    // called with first_call=false - hit the `if (!pipeline_) return
+    // false;` below without ever trying EnsurePreview() again. Refresh
+    // now retries the start on every call, not just the first.
     bool just_started = false;
     if (!pipeline_) {
         // EnsurePreview() no-ops when state_.disable_preview is set - this
