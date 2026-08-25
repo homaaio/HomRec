@@ -580,6 +580,12 @@ struct Pipeline {
 
         writer_running.store(true, std::memory_order_relaxed);
 
+        // BUGFIX: same reasoning as the try/catch wrapped around
+        // capture_loop()'s while-loop above - this is also a bare
+        // std::thread with nothing above it on the call stack to catch an
+        // uncaught exception, so any throw in here (write_pipe(), the
+        // free-list bookkeeping, etc.) was another std::terminate() path.
+        try {
         while (writer_running.load(std::memory_order_relaxed)) {
             std::vector<uint8_t> frame;
             
@@ -623,6 +629,13 @@ struct Pipeline {
 
                 }
             }
+        }
+        } catch (const std::exception &e) {
+            HrLog::Error(std::string("Writer thread: uncaught exception (") + e.what() +
+                         ") -- this pipeline is stopping instead of crashing the app.");
+        } catch (...) {
+            HrLog::Error("Writer thread: uncaught unknown exception -- this pipeline is "
+                         "stopping instead of crashing the app.");
         }
 
         finish_thread();
@@ -743,6 +756,22 @@ struct Pipeline {
         std::vector<HrOverlayDesc> overlays_snapshot;
         uint64_t last_overlays_gen = (uint64_t)-1; // sentinel: forces the first copy below
 
+        // BUGFIX: the whole loop below now runs inside a try/catch. This
+        // thread is started bare (std::thread([pl]{ pl->capture_loop(); }),
+        // see hr_pl_start()) with no exception handler anywhere above it on
+        // the call stack - the overlay-compositing try/catch further down
+        // was already added for exactly this reason (see its own comment),
+        // but it only covered that one call site. Any OTHER uncaught throw
+        // in this loop (a bad_alloc from a resize with a bogus size, a
+        // vector::at, anything) was still an unhandled C++ exception on a
+        // std::thread with nothing above it to catch it - which per the
+        // standard calls std::terminate() and takes the whole process down
+        // with it, matching the "[CRASH] unhandled C++ exception /
+        // std::terminate()" entries this app was hitting. Catching here
+        // turns that into "this one pipeline stops, logged, app keeps
+        // running" instead - same outcome a clean Stop()/TeardownPreview()
+        // would have produced.
+        try {
         while (running.load(std::memory_order_relaxed)) {
             if (paused.load(std::memory_order_relaxed)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -1060,7 +1089,16 @@ struct Pipeline {
             }
 #endif
         }
-        
+        } catch (const std::exception &e) {
+            HrLog::Error(std::string("Capture thread: uncaught exception (") + e.what() +
+                         ") -- this pipeline is stopping instead of crashing the app.");
+            running.store(false, std::memory_order_relaxed);
+        } catch (...) {
+            HrLog::Error("Capture thread: uncaught unknown exception -- this pipeline is "
+                         "stopping instead of crashing the app.");
+            running.store(false, std::memory_order_relaxed);
+        }
+
         // Signal writer thread to stop
         writer_running.store(false, std::memory_order_relaxed);
         pipe_queue_cv.notify_all();
@@ -1205,11 +1243,13 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     }
 
     // Defensive: if handed_off somehow ended up set without leak_pl being
-    // set in this same call (there's no such path today - hr_pl_stop()
-    // deliberately never detaches, see its own comment, so this function is
-    // the only place handed_off gets set) - treat it the same as detaching
-    // right now, rather than freeing `this` out from under a thread that
-    // might still be alive.
+    // set in this same call - the expected way that happens now is
+    // hr_pl_stop() (see its own comment) already having detached one or
+    // both threads before this function ever ran, in which case both
+    // joinable() checks above are false and this call never touched
+    // leak_pl at all - treat it the same as detaching right now, rather
+    // than freeing `this` out from under a thread that might still be
+    // alive.
     if (pl->handed_off.load(std::memory_order_acquire)) leak_pl = true;
 
     if (leak_pl) return;
@@ -1274,7 +1314,32 @@ HR_EXPORT int hr_pl_start(void* handle) {
 
     int real_w = pl->src_w, real_h = pl->src_h;
     if (g_libs.dx_get_size) g_libs.dx_get_size(pl->dx_ctx, &real_w, &real_h);
-    if (real_w > 0 && real_h > 0) { pl->src_w = real_w; pl->src_h = real_h; }
+    // BUGFIX: dx_get_size() reads back whatever DXGI's output-duplication
+    // desc last reported, queried right after dx_create()/reset() - under
+    // exactly the conditions this whole file's "common causes" comment
+    // keeps citing (RDP, a virtual display, a display mode that changes
+    // mid-query) that can come back as some huge/bogus positive value
+    // instead of failing outright. real_w/real_h > 0 alone doesn't catch
+    // that. Before this clamp, a bogus size sailed straight into the
+    // bgra_buf.resize() below with no try/catch anywhere above this call
+    // (hr_pl_start() runs on the caller's thread - RecordingController's,
+    // i.e. the UI thread, via EnsurePreview()/Start()) - a multi-gigabyte
+    // resize() request throws std::length_error/std::bad_alloc, uncaught,
+    // which is exactly an "unhandled C++ exception" crossing back out
+    // through wx's message loop: the std::terminate() this app was seen
+    // hitting. Clamp to a generous real-world bound (same idea as
+    // kMaxOverlayCanvasDim in hr_overlay_render.cpp) and fall back to
+    // whatever size the Pipeline already had instead.
+    constexpr int kMaxReasonableDim = 16384;
+    if (real_w > 0 && real_h > 0 &&
+        real_w <= kMaxReasonableDim && real_h <= kMaxReasonableDim) {
+        pl->src_w = real_w; pl->src_h = real_h;
+    } else if (real_w > kMaxReasonableDim || real_h > kMaxReasonableDim) {
+        HrLog::Warn("Pipeline start: dx_get_size() returned an unreasonable size (" +
+                    std::to_string(real_w) + "x" + std::to_string(real_h) +
+                    ") -- ignoring it and keeping the previous " +
+                    std::to_string(pl->src_w) + "x" + std::to_string(pl->src_h));
+    }
 
     pl->bgra_buf.resize((size_t)pl->src_w * pl->src_h * 4);
     // YUV conversion buffers are now lazily sized from the free-list pool
@@ -1311,18 +1376,68 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     pl->writer_running.store(false, std::memory_order_relaxed);
     pl->pipe_queue_cv.notify_all();
     
-    // Wait for capture thread with timeout
+    // BUGFIX: this used to WaitForSingleObject() on each thread and then
+    // just fall through without ever calling .join() or .detach() on
+    // either - the std::thread objects stayed "joinable" (from the C++
+    // object's point of view) no matter how the wait came out. That's
+    // harmless *today* only because RecordingController::Stop() (the one
+    // caller) always follows this up with hr_pl_destroy() on the same
+    // handle a little later, which redundantly re-waits and does the
+    // real join()/detach() itself - up to another 2s of needless waiting
+    // on top of the 2s already spent here, and a stuck pipeline sat
+    // completely unaccounted-for in g_handed_off_pipelines (see its own
+    // comment) for however long RecordingController::Stop() then spends
+    // finalizing ffmpeg/merging audio (documented up to ~30s) before it
+    // finally reaches that hr_pl_destroy() call. Any code path that ever
+    // called hr_pl_stop() without a guaranteed follow-up hr_pl_destroy()
+    // would leave a joinable-but-abandoned std::thread sitting in the
+    // Pipeline - destroying that Pipeline via any route other than
+    // hr_pl_destroy()'s own careful handling would destruct a joinable
+    // std::thread and call std::terminate() outright. Doing the real
+    // join()/detach() (with the same handed_off/g_handed_off_pipelines
+    // bookkeeping hr_pl_destroy() uses) here instead removes that
+    // fragility, makes hr_pl_destroy()'s later call on the same handle an
+    // instant no-op (both threads already non-joinable), and starts the
+    // handed-off accounting as soon as this function actually gives up
+    // instead of only once hr_pl_destroy() eventually runs.
     if (pl->capture_thread.joinable()) {
         HANDLE hThread = reinterpret_cast<HANDLE>(pl->capture_thread.native_handle());
-        WaitForSingleObject(hThread, 1000);
+        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+            pl->capture_thread.join();
+        } else {
+            HrLog::Error("Pipeline stop: capture thread did not stop in time - handing off "
+                         "cleanup to it instead of leaking Pipeline forever");
+            bool was_off = false;
+            if (pl->handed_off.compare_exchange_strong(was_off, true, std::memory_order_release))
+                g_handed_off_pipelines.fetch_add(1, std::memory_order_acq_rel);
+            pl->capture_thread.detach();
+        }
     }
 
     // Wait for writer thread with timeout - same reasoning as above.
     if (pl->writer_thread.joinable()) {
         HANDLE hThread = reinterpret_cast<HANDLE>(pl->writer_thread.native_handle());
-        WaitForSingleObject(hThread, 1000);
+        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+            pl->writer_thread.join();
+        } else {
+            HrLog::Error("Pipeline stop: writer thread did not stop in time - handing off "
+                         "cleanup to it instead of leaking Pipeline forever");
+            bool was_off = false;
+            if (pl->handed_off.compare_exchange_strong(was_off, true, std::memory_order_release))
+                g_handed_off_pipelines.fetch_add(1, std::memory_order_acq_rel);
+            pl->writer_thread.detach();
+        }
     }
-    
+
+    // If either thread got handed off above, hr_pl_destroy() (the only
+    // caller of this function today, a little further down in
+    // RecordingController::Stop()) will see handed_off already set and
+    // its own capture_thread/writer_thread.joinable() checks will both be
+    // false (already consumed by join()/detach() here) - it'll fall
+    // straight through to its own `if (pl->handed_off.load()) leak_pl =
+    // true;` and return without touching pl again, exactly as if it had
+    // done the detaching itself. Safe to keep going here either way.
+
     // Clear queue
     {
         std::lock_guard<std::mutex> lock(pl->pipe_queue_mtx);
