@@ -580,11 +580,6 @@ struct Pipeline {
 
         writer_running.store(true, std::memory_order_relaxed);
 
-        // BUGFIX: same reasoning as the try/catch wrapped around
-        // capture_loop()'s while-loop above - this is also a bare
-        // std::thread with nothing above it on the call stack to catch an
-        // uncaught exception, so any throw in here (write_pipe(), the
-        // free-list bookkeeping, etc.) was another std::terminate() path.
         try {
         while (writer_running.load(std::memory_order_relaxed)) {
             std::vector<uint8_t> frame;
@@ -756,21 +751,6 @@ struct Pipeline {
         std::vector<HrOverlayDesc> overlays_snapshot;
         uint64_t last_overlays_gen = (uint64_t)-1; // sentinel: forces the first copy below
 
-        // BUGFIX: the whole loop below now runs inside a try/catch. This
-        // thread is started bare (std::thread([pl]{ pl->capture_loop(); }),
-        // see hr_pl_start()) with no exception handler anywhere above it on
-        // the call stack - the overlay-compositing try/catch further down
-        // was already added for exactly this reason (see its own comment),
-        // but it only covered that one call site. Any OTHER uncaught throw
-        // in this loop (a bad_alloc from a resize with a bogus size, a
-        // vector::at, anything) was still an unhandled C++ exception on a
-        // std::thread with nothing above it to catch it - which per the
-        // standard calls std::terminate() and takes the whole process down
-        // with it, matching the "[CRASH] unhandled C++ exception /
-        // std::terminate()" entries this app was hitting. Catching here
-        // turns that into "this one pipeline stops, logged, app keeps
-        // running" instead - same outcome a clean Stop()/TeardownPreview()
-        // would have produced.
         try {
         while (running.load(std::memory_order_relaxed)) {
             if (paused.load(std::memory_order_relaxed)) {
