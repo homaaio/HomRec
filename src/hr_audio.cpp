@@ -18,6 +18,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cassert>
+#include <exception>
+
+#include "hr_log.h"
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
@@ -362,6 +365,7 @@ static AudioState* g_state = nullptr;
 // ---------------------------------------------------------------------------
 static void mic_worker(AudioState* st)
 {
+    try {
     const int SLEEP_MS = 10;
     while (st->running.load()) {
         if (st->paused.load()) {
@@ -396,10 +400,16 @@ static void mic_worker(AudioState* st)
         // (event or fallback poll) already paces this thread; sleeping again
         // here would just add a second, redundant delay on top of it.
     }
+    } catch (const std::exception &e) {
+        HrLog::Error(std::string("Mic capture thread: uncaught exception (") + e.what() + ")");
+    } catch (...) {
+        HrLog::Error("Mic capture thread: uncaught unknown exception");
+    }
 }
 
 static void sys_worker(AudioState* st)
 {
+    try {
     const int SLEEP_MS = 10;
     while (st->running.load()) {
         if (st->paused.load()) {
@@ -431,6 +441,11 @@ static void sys_worker(AudioState* st)
             }
         }
         // See matching comment in mic_worker() above.
+    }
+    } catch (const std::exception &e) {
+        HrLog::Error(std::string("System-audio capture thread: uncaught exception (") + e.what() + ")");
+    } catch (...) {
+        HrLog::Error("System-audio capture thread: uncaught unknown exception");
     }
 }
 
