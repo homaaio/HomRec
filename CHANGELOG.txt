@@ -2,196 +2,124 @@ welcome to changelog :D
 
 [Version 2.0] - 2026-08-08
 
+This release rewrites the app from the ground up: HomRec 1.7.2 was a
+Python/wxPython UI (src/homrec_app/*) driving a small C++ helper DLL for
+capture/encode. 2.0 replaces that entire UI layer with a native C++17 +
+wxWidgets app (src/win_main.cpp, src/ui/*) - there is no Python left in
+the shipped app, and the old Python-side files (homrec.py, homrec_app/,
+homrec_native.py, hr_console_bridge.py, hr_plugin_engine.py,
+requirements.txt) are gone. Because of that, this entry summarizes the
+rewrite by subsystem instead of as a commit-by-commit diff - a lot of
+1.7.2 logic was ported and restructured rather than "changed" in the
+usual sense.
+
 === Added ===
 
-- Countdown (3s), Cursor, and Show summary settings are now actually
-  wired up. All three were previously loaded from settings.json,
-  editable in the Settings dialog, and persisted correctly - but nothing
-  in main_frame.cpp (the live UI) ever read state_.countdown_enabled /
-  cursor_enabled / show_summary to change behavior at Start/Stop time.
-  - Countdown: HomRecMainFrame::RequestStart() shows a cancellable 3-2-1
-    in the status bar (click Start again to cancel) before calling
-    DoStart(); both the Start button and the global hotkey route
-    through it now.
-  - Cursor: added hr_composite_cursor() (hr_ui_utils.cpp) - draws the
-    live system cursor into each captured frame via
-    GetCursorInfo()+DrawIconEx() into a chroma-keyed off-screen DIB,
-    reusing Windows' own cursor rendering instead of re-implementing
-    DXGI pointer-shape mask blending. Wired through a new
-    hr_pl_set_include_cursor() pipeline export, applied every preview
-    tick via RecordingController::SyncOverlays().
-  - Show summary: DoStop() now shows the already-written (just never
-    called) ShowCustomMessageBox "recording saved, open folder?" popup.
-- Idle/AFK CPU fix: the preview-only capture pipeline (a real DXGI
-  capture thread) used to run continuously at 20fps from app launch
-  onward, regardless of whether the window was visible. Added
-  RecordingController::SetPreviewVisible(), called from a new
-  HomRecMainFrame::OnShowEvent() (wxEVT_SHOW) and an extended
-  OnIconize(), so the pipeline pauses while minimized (to tray or just
-  to the taskbar) and resumes when shown again. Never touches the
-  pipeline while actually recording.
-- Plugin command-registration API: previously a Lua plugin had no way
-  to add a console command at all (only toasts/storage/HTTP/theme
-  colors/input-overlay registration). Added
-  homrec.register_command(name, description, fn) and homrec.print(text)
-  to lua_api.cpp, a command registry + DispatchCommand() to
-  LuaPluginEngine, and wired console_window.cpp's unknown-command
-  fallback to check it before giving up. Commands are unregistered
-  cleanly on plugin unload.
-- plugin.json gets a new optional "author" field, parsed into
-  PluginManifest::author. Exposed to Lua via a new
-  homrec.plugin_info() (id/name/version/author for the calling plugin)
-  since there's no plugin-manager UI screen yet to surface it visually.
-- hom.exe (tools/hom/hom.cpp): added `hom ping` (repo connectivity
-  check with round-trip time) and `hom install update-hrp` (re-installs
-  every already-installed .hrp plugin in .\plugins).
-- console_window.cpp's existing `$log` command gained `log clear`
-  (truncates homrec.log) and `log open` (opens it in the default
-  editor) subcommands, alongside its original "log <message>" append
-  behaviour.
-- New plugin: plugins/bter/ (by HomRec) - 27 console commands added via
-  the new register_command API: an `inwid` settings-admin prefix
-  (stores afk-mode/perver/ffmpeg settings in the plugin's own store -
-  see plugins/bter/entry.lua and commands.md Section 19 for the honest
-  caveat that these are recorded but not yet wired to real engine
-  behaviour, since HomRec doesn't expose hooks for any of the three
-  yet), plus bping/ffpath/theme/remember/recall/forget/broadcast/toast,
-  OS-info wrappers (whoami/hostname/ipconfig/sysinfo/tasks/netinfo/
-  diskfree/pinghost/myip), and pure-Lua utilities (clock/calc/coinflip/
-  roll/b64encode/b64decode/revtext/wordcount). Verified by actually
-  executing the plugin's Lua against a stub homrec.* API (real Lua 5.4,
-  not just eyeballed) - caught and fixed two real bugs this way: a
-  content-search bug in argument parsing that broke if an argument's
-  text happened to be a substring of an earlier word (e.g. "recall re"
-  where "re" is also inside "remember"), and a spurious blank line
-  printed after any OS-wrapper command whose output already ended in a
-  newline (the normal case).
-- commands.md: flagged that most of the existing document describes an
-  older, pre-C++-port command language console_window.cpp doesn't
-  actually implement (rule engine, AE objects, DLL<->Python bridge,
-  flag-based log/ping syntax) rather than leaving it looking
-  authoritative; added an accurate Section 19 for everything above.
-
-=== Fixed ===
-
-- Countdown status text ("Starting in 3...") rendered as "3" followed by
-  mojibake instead of the ellipsis, because the two wxString::Format()
-  call sites in HomRecMainFrame::RequestStart()/OnCountdownTimer built the
-  string from a raw narrow-char literal containing a UTF-8 ellipsis
-  instead of wrapping it in wxString::FromUTF8() (every other special
-  character in main_frame.cpp already did this correctly - these two were
-  the exception).
-- "Show summary" popup (DoStop()) passed the same localized string as
-  both title and headline, and just the bare output folder as the body -
-  no filename, duration, resolution, or file size, i.e. no actual
-  information about the recording that just finished. Root cause:
-  RecordingController::Stop() called hr_ctl_stop(ctl_) as a bare
-  statement and threw away its return value, even though hr_ctl_stop()'s
-  own doc comment says that return is "elapsed seconds for final summary"
-  - and hr_ctl_stop() also flips the session to IDLE, so by the time the
-  popup was built, elapsed_seconds()/elapsed_formatted() were already
-  reporting 0. Added RecordingController::last_output_path()/
-  last_duration_formatted()/last_output_size_mb(), snapshotted in Stop()
-  before that data goes stale, and rebuilt the popup body around them.
-- "Don't show again" checkbox on that same popup only set an in-memory
-  flag for the rest of the current run - never persisted, so it reset on
-  every relaunch. Checking it now also turns the real show_summary
-  setting off and saves homrec_settings.json, same as unchecking "Show
-  summary" in Settings would.
-- AFK/idle memory growth (and a chunk of the idle CPU usage): mic_buf/
-  sys_buf in hr_audio.cpp were appended to unconditionally by
-  mic_worker()/sys_worker() every ~10ms for as long as the app was open -
-  including all the time spent NOT recording, since those capture threads
-  run continuously from startup so the live level meters keep working.
-  Nothing drained that idle-time audio (hr_audio_reset_buffers()/
-  hr_audio_capture_to_wav() only ever ran at actual Start()/Stop()), so
-  raw 44.1kHz stereo PCM from both streams just accumulated in memory for
-  as long as the app sat idle - unbounded the longer it was left running,
-  which is where the "50MB in AFK mode" was going. Added an
-  AudioState::buffering flag that gates the buffer *writes* only (level
-  metering still reads each read()'s fresh chunk regardless, so the
-  meters keep working exactly as before); Start() turns it on, Stop()
-  turns it off.
+- New native UI (src/ui/): main_frame, settings_dialog,
+  advanced_settings_dialog, audio_panel, overlays_dock_panel,
+  overlay_placement_dialog, overlay_add_dialogs, welcome_dialog,
+  window_picker_dialog, hide_window_dialog, log_viewer_dialog,
+  pc_analytics_dialog, console_window, custom_messagebox, theme/
+  themed_widgets/win32_theme, language, hrc_config, recording_controller
+  - all new, replacing the old wxPython dialogs of the same names.
+- Lua plugin system (src/plugins/lua_engine.cpp, lua_api.cpp): plugins
+  are loaded from plugin.json + Lua scripts, with a homrec.* API
+  (toasts/storage/HTTP/theme colors/input-overlay registration,
+  homrec.register_command()/homrec.print() for adding console commands,
+  homrec.plugin_info() exposing id/name/version/author). plugin.json
+  supports an optional "author" field.
+- `hom` plugin package manager (tools/hom/hom.cpp, built separately as
+  hom.exe): installs/updates .hrp plugin packages from the Hom/ repo
+  folder over HTTPS, with `hom ping` (repo connectivity check) and
+  `hom install update-hrp` (reinstalls every already-installed .hrp in
+  .\plugins).
+- Input overlay system (hr_input_overlay.cpp/.h,
+  hr_input_overlay_registry.cpp/.h) with bundled presets
+  (plugins/input_overlay_presets/: keyboard qwerty/wasd, mouse, gamepad)
+  for showing live key/button presses in recordings.
+- New live overlay renderer (hr_overlay_render.cpp/.h) for text/webcam/
+  image overlays with position/size/opacity, replacing the old
+  Python-side overlay handling.
+- Crash handler (hr_crash_handler.cpp/.h), structured logging
+  (hr_log.cpp/.h, hr_log_paths.cpp/.h), plugin-specific logging
+  (hr_plugin_log.cpp/.h), and basic usage/PC analytics logging
+  (hr_pc_log.cpp/.h, surfaced via the new PC analytics dialog).
+- hr_system_integration.cpp/.h and hr_archive.cpp/.h (new support
+  utilities for OS integration and file archiving respectively).
+- Dedicated mic/webcam device enumeration (hr_mic_enum, hr_webcam_enum),
+  split out of the old combined device-handling code.
+- cfg/ example config files (autoexec.cfg.example, startrec.cfg.example)
+  and a project Makefile (the Python version didn't need one).
+- Countdown (3s), cursor compositing, and "show summary" popup are now
+  actually wired to the UI (previously loaded/saved in settings but not
+  read at Start/Stop time): HomRecMainFrame::RequestStart() runs a
+  cancellable 3-2-1 before starting; hr_composite_cursor()
+  (hr_ui_utils.cpp) draws the live system cursor into captured frames;
+  DoStop() shows a "recording saved, open folder?" summary with the
+  actual filename/duration/resolution/size, and its "Don't show again"
+  checkbox now persists to homrec_settings.json instead of resetting
+  every relaunch.
+- Idle/AFK CPU fix: the preview capture pipeline no longer runs
+  continuously while the window is minimized -
+  RecordingController::SetPreviewVisible(), driven by a new
+  OnShowEvent()/extended OnIconize(), pauses it and resumes on restore
+  (never while actually recording).
+- Idle/AFK memory fix: mic/sys audio buffers in hr_audio.cpp were
+  appended to continuously from app launch (for the live level meters),
+  even while idle, growing unbounded the longer the app sat open. A new
+  AudioState::buffering flag now gates the buffer *writes* only (meters
+  still update every frame); Start() turns it on, Stop() turns it off.
+- New project-facing docs: docs/documentation.html + a small docs site
+  (down-win.html, down-deb.html, support.html), SUPPORT.md, FREE.txt,
+  cfg/README.md, scripts/README.md, plugins/READMEplugins.md, and
+  GitHub issue templates (.github/ISSUE_TEMPLATE/).
 
 === Changed ===
 
-- Version bumped to 2.0 (src/ui/version.h - the single HR_APP_VERSION/
-  HR_APP_VERSION_W macro everything else builds off). Also wired
-  hr_version.cpp's k_ver_homrec/k_ver_banner to actually include
-  version.h and use that macro - the file's own comment already claimed
-  this was the case, but hr_version.cpp never included version.h and had
-  its own separately-hardcoded "1.7.2" that just happened to still match.
+- Version bumped to 2.0 (src/ui/version.h is now the single
+  HR_APP_VERSION/HR_APP_VERSION_W source of truth for the app title,
+  replacing scattered hardcoded version strings).
 
-=== Investigated, not fixed (flagged for visibility) ===
+=== Known issues / not yet finished ===
 
+- src/hr_console.cpp and src/hr_console_pipe_server.cpp (the old
+  `!start --terminal as @terminal` command and its Named Pipe server for
+  a standalone hr_terminal.exe) are present in src/ but are **not** in
+  the Makefile's OBJS list, so they aren't compiled into hr.exe at all
+  right now. They also still reference the removed Python bridge
+  (forward_to_python / hr_console_bridge.py). The live, currently-built
+  console is src/ui/console_window.cpp, which is a separate
+  implementation and does not currently have any terminal-launching
+  command. hr_terminal.exe itself does not exist anywhere in the repo.
 - hr_pipeline.cpp's capture always hardcodes hr_dx_create(0, 0) - the
-  "monitor" setting is persisted and shown in the UI but never actually
-  used to pick which display gets captured. Found while wiring up
-  cursor compositing (needed the capture origin for coordinate
-  translation); out of scope for this pass, not touched.
+  "monitor" setting is persisted and shown in the UI but not yet used to
+  pick which display gets captured.
 - plugins/input_overlay_presets/assets/mouse/mouse.json: the smb1/smb2
   (side mouse button) sprite mapping rectangles are within 1px of each
-  other (near-duplicate crop region). Could be a copy-paste bug, or
-  could be intentional shared iconography (common in these community
-  overlay presets) - left untouched without visual confirmation either
-  way rather than guess wrong on a bundled asset.
-
-welcome to changelog :D
-
-[Unreleased] - 2026-08-07
+  other - possibly a copy-paste bug, possibly intentional shared
+  iconography; left untouched without visual confirmation either way.
 
 === Fixed ===
 
-- Version string was inconsistent between files: hr_version.cpp's
-  k_ver_homrec (and the "!homrec --version" banner) still said "1.7.0"
-  while README/version.h already said "1.7.2". Bumped to match. Note:
-  hr_version.cpp currently isn't in the Makefile's SRCS list, so this
-  export isn't linked into hr.exe yet either way - fixed for whenever it
-  is, so it doesn't carry the stale string forward.
-- src/ui/language.cpp hardcoded the title-bar string as the literal
-  "HomRec v1.7.1", duplicating (and drifting from) the real version
-  constant in version.h - a leftover flagged by an audit note already
-  sitting in that header. Now builds "app_title" from HR_APP_VERSION
-  directly, so there's exactly one place to bump on release. Removed the
-  now-resolved audit note from version.h.
-- hr_framequeue.cpp: hr_fq_push() silently dropped the oldest frame's
-  pointer when the queue was full, with no way for the caller to free
-  whatever it had allocated for that frame - a real leak under sustained
-  backpressure. hr_fq_push() now takes an out_dropped parameter so the
-  evicted pointer is handed back instead of discarded. (Also currently
-  unlinked/unused - same as above, fixed for future wiring-in.)
-- hr_pipeline.cpp: hr_pl_destroy() waits up to 1s for the writer/capture
-  threads to exit, then force-detaches them if they're stuck - but both
-  threads capture the raw Pipeline* and keep running after being
-  detached. The function then deleted the Pipeline object anyway,
-  meaning a still-running zombie thread could touch freed memory on its
-  next iteration (heap-use-after-free / possible crash or corruption).
-  Now skips the delete (and the resource teardown that a zombie thread
-  might also touch) if either thread had to be force-detached, and logs
-  an error - a deliberate small leak in that rare case beats a heap
-  corruption.
+- Version string was inconsistent between files (hr_version.cpp/
+  README/version.h all disagreed); consolidated onto version.h.
+- src/ui/language.cpp no longer hardcodes the title-bar version string;
+  it's built from HR_APP_VERSION.
+- hr_pipeline.cpp: hr_pl_destroy() could delete the Pipeline object while
+  a writer/capture thread that failed to stop in time was still running
+  detached against it (heap-use-after-free risk). It now hands cleanup
+  off to whichever thread finishes last (via a handed_off flag) instead
+  of deleting out from under a live thread or leaking the Pipeline
+  forever.
+- hr_overlay_render.cpp: GetOrRenderText()/GetOrRenderImage() no longer
+  rebuild a cache-key string (heap allocation) on every captured frame
+  for every overlay just to check "did anything change" - a cheap
+  field-by-field comparison short-circuits first for the common
+  nothing-changed case.
 - hr_ffmpeg_runner.cpp: corrected a stale comment claiming raw BGRA
-  frames are piped to ffmpeg's stdin - the pipeline actually converts
-  each frame to planar YUV420P first (matching the "-pixel_format
-  yuv420p" flag already being passed), so this was a documentation-only
-  fix, not a functional bug.
-
-=== Changed (optimizations) ===
-
-- hr_overlay_render.cpp: GetOrRenderText()/GetOrRenderImage() were
-  rebuilding a cache-key std::string (several std::to_string() calls +
-  concatenation, at least one heap allocation) on every single captured
-  frame for every visible text/image overlay, purely to compare it
-  against the previous key and detect "nothing changed." For a static
-  overlay - the overwhelming common case - that's wasted allocation
-  churn on the capture thread, every frame, for as long as the overlay
-  is on screen. Added a cheap field-by-field comparison (ints/bytes,
-  bounded strncmp against the fixed-size text/path buffers, plus the
-  overlay's type, to correctly invalidate the fast path if an overlay's
-  type is changed at runtime while keeping the same list index) that
-  short-circuits before any string work happens when nothing changed.
-  The original string-key path is kept as-is as the correctness
-  fallback for whenever something actually did change.
+  frames are piped to ffmpeg's stdin - frames are actually converted to
+  planar YUV420P first, matching the "-pixel_format yuv420p" flag
+  already in use (docs-only fix, not a functional bug).
 
 [Version 1.7.2] - 2026-07-09
 
