@@ -220,6 +220,7 @@ hr.exe
 homrec_settings.json
 *.bat
 docs/index.html
+desktop.ini
 
 # C++ part
 

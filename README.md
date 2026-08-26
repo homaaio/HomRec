@@ -139,9 +139,6 @@ Drop an `autoexec.cfg` in `cfg/` (next to `hr.exe`, auto-created on first run) a
 MinGW-w64 toolchain (g++, gcc, windres, make)
 Lua 5.4 (headers + library)
 ```
-
-That's it - no `pip install`, no `requirements.txt`. Everything else (capture, encoding, audio) is built-in native code with no third-party runtime dependencies.
-
 ---
 
 ## Stay updated
