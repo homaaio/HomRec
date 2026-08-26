@@ -216,6 +216,14 @@
             margin: 15px 0;
         }
 
+        .warn {
+            background: #fff7ed;
+            border: 1px solid #f0c88a;
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin: 15px 0;
+        }
+
         @media (max-width: 700px) {
             body {
                 flex-direction: column;
@@ -398,9 +406,8 @@
             </tr>
         </table>
 
-        <div class="note">
-            <b>Note:</b> A more powerful processor and a video card with hardware encoding
-            (NVENC, AMD VCE, or Intel QSV) are recommended for recording 1080p or 60 FPS footage.
+        <div class="warn">
+            <b>Note:</b>The program is new, so the system requirements may be very different from reality. If your computer can handle it, or can't handle it, please <a href="support.html">contact me.</a>
         </div>
 
         <h2 id="install">Installation</h2>
@@ -425,7 +432,6 @@ make
 hr.exe</pre>
         <p>
             Requires: MinGW-w64 toolchain, Lua 5.4, FFmpeg.
-            No pip install, no requirements.txt.
         </p>
 
         <h2 id="shortcuts">Keyboard Shortcuts</h2>
