@@ -13,27 +13,26 @@
 // 5-tab version had: General / Video & Codec / Audio / Hotkeys /
 // Advanced / Security / System.
 //
-// Persistence note (was on the old BuildAdvancedSection(), still
-// applies): hr_settings.cpp's on-disk homrec_settings.json format only
-// covers output_folder/quality/fps/monitor/codec/audio-enabled/
-// countdown/timestamp/cursor/show_summary/theme/language/minimize_tray/
-// always_on_top/performance/dxgi/resolution_mode+w+h/preview_quality_pct
-// +fps/disable_preview/hint_no_overlay/system_logging_enabled/
-// plugin_logging_enabled/desktop_shortcut_enabled+path/autostart_enabled.
-// Everything on the Video & Codec / Audio / Advanced tabs besides the
-// video codec itself updates AppState in memory for the current run but
-// isn't written to homrec_settings.json - it does still round-trip
-// through .hrc profiles (see hrc_config.cpp, which mirrors the full
-// AppState). See each tab's on-page note, which explains this to the
-// user directly.
+// Persistence note (Phase 1 settings-storage migration, see commands.md):
+// this dialog used to save through hr_settings.cpp's on-disk
+// homrec_settings.json, whose fixed field whitelist didn't cover
+// hw_accel/enc_preset/enc_crf/pix_fmt/custom_ffmpeg_args/audio_*/
+// filename_template/auto_stop_min/replay_buffer_sec/hotkeys - those
+// applied for the current run and round-tripped through .hrc profiles
+// (hrc_config.cpp) but reverted on next launch if you hadn't also
+// exported an .hrc. OnSave() now persists through HrcConfig::Save()
+// instead, which writes the *entire* AppState - every field on every
+// tab is saved for real now, and the on-page notes below reflect that.
 #include "settings_dialog.h"
 #include "themed_widgets.h"
 #include "../hr_mic_enum.h"
 #include "../hr_system_integration.h"
 #include "../hr_pc_log.h"
 #include "../hr_plugin_log.h"
+#include "hrc_config.h"
 #include <wx/spinctrl.h>
 #include <wx/dirdlg.h>
+#include <wx/filedlg.h>
 #include <wx/combobox.h>
 #include <wx/choice.h>
 #include <wx/notebook.h>
@@ -44,23 +43,12 @@
 #include <algorithm>
 
 extern "C" {
+    // Only the "read pure defaults" accessors remain in use here
+    // (OnResetDefaults() below) - actual persistence now goes through
+    // HrcConfig::Save()/Load() (hrc_config.h), see this file's header
+    // comment and OnSave().
     void *hr_settings_create();
     void hr_settings_destroy(void *handle);
-    int hr_settings_load(void *handle, const char *path);
-    int hr_settings_save(const void *handle, const char *path);
-    void hr_settings_set_output_folder(void *h, const char *v);
-    void hr_settings_set_quality(void *h, int v);
-    void hr_settings_set_fps(void *h, int v);
-    void hr_settings_set_monitor(void *h, int v);
-    void hr_settings_set_resolution_pct(void *h, int v);
-    void hr_settings_set_resolution_mode(void *h, int v);
-    void hr_settings_set_resolution_w(void *h, int v);
-    void hr_settings_set_resolution_h(void *h, int v);
-    void hr_settings_set_preview_quality_pct(void *h, int v);
-    void hr_settings_set_preview_fps(void *h, int v);
-    void hr_settings_set_codec(void *h, const char *v);
-    void hr_settings_set_desktop_shortcut_path(void *h, const char *v);
-    void hr_settings_set_flag(void *h, const char *name, int v);
     int hr_settings_get_flag(const void *h, const char *name);
     int hr_settings_get_quality(const void *h);
     int hr_settings_get_fps(const void *h);
@@ -80,11 +68,14 @@ extern "C" {
 }
 
 namespace {
-constexpr char kSettingsPath[] = "homrec_settings.json"; // relative to app root, matches constants.py's SETTINGS_PATH
+// Phase 1 settings-storage migration (see commands.md): this dialog now
+// persists via HrcConfig::Save() (hrc_config.h) instead of the old JSON
+// engine writing to a fixed "homrec_settings.json" path - see OnSave().
 
 enum {
     IDC_QUALITY = 3001, IDC_BROWSE = 3002, IDC_SAVE = 3003, IDC_CANCEL = 3004,
     IDC_SEC_RESET = 3006, IDC_SYS_SHORTCUT_BROWSE = 3007,
+    IDC_SETTINGS_PATH_BROWSE = 3008,
 };
 
 // Old tab indices ShowSettingsDialogTab() callers still pass in (see
@@ -139,9 +130,6 @@ public:
         : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(600, 640),
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
           state_(state), theme_(theme) {
-        settings_ = hr_settings_create();
-        hr_settings_load(settings_, kSettingsPath);
-
         wxColour bg = FromColorref(theme_.bg);
         wxColour surface = FromColorref(theme_.surface);
         wxColour text = FromColorref(theme_.text);
@@ -214,10 +202,11 @@ public:
         Bind(wxEVT_BUTTON, &SettingsDialog::OnSave, this, IDC_SAVE);
         Bind(wxEVT_BUTTON, &SettingsDialog::OnResetDefaults, this, IDC_SEC_RESET);
         Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowseShortcutFolder, this, IDC_SYS_SHORTCUT_BROWSE);
+        Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowseSettingsPath, this, IDC_SETTINGS_PATH_BROWSE);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_CANCEL); }, IDC_CANCEL);
     }
 
-    ~SettingsDialog() override { hr_settings_destroy(settings_); }
+    ~SettingsDialog() override {}
 
     // Old call sites (the "Advanced Settings..." menu item) used to pick
     // a page by index in the old 5-tab layout; map those onto this
@@ -499,9 +488,35 @@ private:
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
+        // -- Settings file path (Phase 1 storage migration, see
+        // commands.md) - the app's own auto-managed settings file, an
+        // .hrc-format file (hrc_config.cpp) that replaced the old
+        // homrec_settings.json. Empty = HrcConfig::kDefaultSettingsPath
+        // ("homrec.hrc" next to the exe). A custom path here is picked up
+        // immediately on the next Save and read back from on the next
+        // launch - it does NOT move an already-existing file for you.
+        AddSectionHeading(page, pageRoot, FromColorref(theme_.accent), bg, "Settings Storage");
+        auto *settingsPathLbl = new wxStaticText(page, wxID_ANY, "Settings file (.hrc):");
+        settingsPathLbl->SetForegroundColour(text);
+        settingsPathLbl->SetBackgroundColour(bg);
+        pageRoot->Add(settingsPathLbl, 0, wxLEFT | wxRIGHT, 16);
+
+        auto *settingsPathRow = new wxBoxSizer(wxHORIZONTAL);
+        wxString curPath = state_.settings_path.empty()
+            ? wxString(HrcConfig::kDefaultSettingsPath) : wxString::FromUTF8(state_.settings_path);
+        settings_path_edit_ = new wxTextCtrl(page, wxID_ANY, curPath);
+        settingsPathRow->Add(settings_path_edit_, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+        auto *settingsPathBrowseBtn = new ColorButton(page, IDC_SETTINGS_PATH_BROWSE, "Browse");
+        settingsPathBrowseBtn->SetMinSize(wxSize(70, 26));
+        settingsPathBrowseBtn->SetColours(bg, text);
+        settingsPathRow->Add(settingsPathBrowseBtn, 0);
+        pageRoot->Add(settingsPathRow, 0, wxEXPAND | wxALL, 16);
+
         auto *note = new wxStaticText(page, wxID_ANY,
-            "Note: these apply for this session and round-trip through .hrc\n"
-            "profiles, but aren't written to the settings file yet.");
+            "Filename template / auto-stop / replay buffer above, and every\n"
+            "other tab's fields, are saved to the settings file above on Save.\n"
+            "cfg/config.cfg (if present) can layer its own overrides on top of\n"
+            "this file at every launch - see commands.md's \"sethrc\" command.");
         note->SetForegroundColour(textDim);
         note->SetBackgroundColour(bg);
         pageRoot->Add(note, 0, wxALL, 16);
@@ -628,6 +643,13 @@ private:
         if (dlg.ShowModal() == wxID_OK) shortcut_path_edit_->SetValue(dlg.GetPath());
     }
 
+    void OnBrowseSettingsPath(wxCommandEvent &) {
+        wxFileDialog dlg(this, "Select settings file", "", settings_path_edit_->GetValue(),
+                          "HomRec Config (*.hrc)|*.hrc|All files (*.*)|*.*",
+                          wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (dlg.ShowModal() == wxID_OK) settings_path_edit_->SetValue(dlg.GetPath());
+    }
+
     // Repopulates every control across every tab with hard-coded
     // defaults - doesn't touch state_/settings_/disk itself, so Cancel
     // (or just not clicking Save afterward) leaves everything exactly as
@@ -706,32 +728,21 @@ private:
     void OnSave(wxCommandEvent &) {
         // -- General ---------------------------------------------------
         state_.output_folder = folder_edit_->GetValue().ToUTF8().data();
-        hr_settings_set_output_folder(settings_, state_.output_folder.c_str());
-
         state_.quality = quality_slider_->GetValue();
-        hr_settings_set_quality(settings_, state_.quality);
-
         state_.target_fps = fps_spin_->GetValue();
-        hr_settings_set_fps(settings_, state_.target_fps);
-
         state_.monitor_id = monitor_choice_->GetSelection() + 1;
-        hr_settings_set_monitor(settings_, state_.monitor_id);
 
         {
             static const int kPct[] = {100, 75, 50, 25};
             int sel = resolution_choice_->GetSelection();
             if (sel < 0 || sel >= 4) sel = 1; // fall back to 75% if somehow unselected
             state_.scale_factor = kPct[sel] / 100.0;
-            hr_settings_set_resolution_pct(settings_, kPct[sel]);
 
             bool custom = resolution_mode_choice_->GetSelection() == 1;
             state_.resolution_mode = custom ? ResolutionMode::Absolute : ResolutionMode::Percent;
-            hr_settings_set_resolution_mode(settings_, custom ? 1 : 0);
 
             state_.resolution_w = resolution_w_spin_->GetValue();
             state_.resolution_h = resolution_h_spin_->GetValue();
-            hr_settings_set_resolution_w(settings_, state_.resolution_w);
-            hr_settings_set_resolution_h(settings_, state_.resolution_h);
         }
 
         state_.countdown_enabled = countdown_chk_->GetValue();
@@ -739,15 +750,15 @@ private:
         state_.cursor_enabled = cursor_chk_->GetValue();
         state_.show_summary = notify_chk_->GetValue();
 
-        hr_settings_set_flag(settings_, "countdown", state_.countdown_enabled ? 1 : 0);
-        hr_settings_set_flag(settings_, "timestamp", state_.timestamp_enabled ? 1 : 0);
-        hr_settings_set_flag(settings_, "cursor", state_.cursor_enabled ? 1 : 0);
-        hr_settings_set_flag(settings_, "show_summary", state_.show_summary ? 1 : 0);
-
-        // -- Video & Codec (video_codec persists; the rest is in-memory
-        // only for now - see BuildVideoCodecTab()'s note) -----------------
+        // -- Video & Codec -------------------------------------------------
+        // These used to be "in-memory only for now" per
+        // this comment's own former text - hr_settings.cpp's JSON whitelist
+        // never had fields for hw_accel/enc_preset/enc_crf/pix_fmt/
+        // custom_ffmpeg_args, so anything typed here reverted on restart.
+        // Now that HrcConfig::Save() below persists the *entire* AppState
+        // in one shot (see hrc_config.cpp's Save()), every field set here
+        // actually round-trips - nothing further to do per-field.
         state_.video_codec = codec_combo_->GetValue().ToUTF8().data();
-        hr_settings_set_codec(settings_, state_.video_codec.c_str());
         state_.hw_accel = hwaccel_combo_->GetValue().ToUTF8().data();
         state_.enc_preset = preset_combo_->GetValue().ToUTF8().data();
         state_.enc_crf = crf_spin_->GetValue();
@@ -777,24 +788,19 @@ private:
         // -- Security -------------------------------------------------------
         state_.system_logging_enabled = sys_log_chk_->GetValue();
         state_.plugin_logging_enabled = plugin_log_chk_->GetValue();
-        hr_settings_set_flag(settings_, "system_logging_enabled", state_.system_logging_enabled ? 1 : 0);
-        hr_settings_set_flag(settings_, "plugin_logging_enabled", state_.plugin_logging_enabled ? 1 : 0);
         // Applied immediately (not just at next launch) - see
         // hr_pc_log.h/hr_plugin_log.h's SetEnabled().
         HrPcLog::SetEnabled(state_.system_logging_enabled);
         HrPluginLog::SetEnabled(state_.plugin_logging_enabled);
 
         state_.disable_preview = disable_preview_chk_->GetValue();
-        hr_settings_set_flag(settings_, "disable_preview", state_.disable_preview ? 1 : 0);
         {
             static const int kPreviewQualityPct[] = {50, 75, 100};
             int sel = preview_quality_choice_->GetSelection();
             if (sel < 0 || sel >= 3) sel = 2;
             state_.preview_quality_pct = kPreviewQualityPct[sel];
-            hr_settings_set_preview_quality_pct(settings_, state_.preview_quality_pct);
 
             state_.preview_fps = preview_fps_spin_->GetValue();
-            hr_settings_set_preview_fps(settings_, state_.preview_fps);
         }
 
         // -- System -------------------------------------------------------
@@ -814,25 +820,38 @@ private:
             }
             state_.desktop_shortcut_enabled = wantShortcut;
             state_.desktop_shortcut_path = shortcutDir;
-            hr_settings_set_flag(settings_, "desktop_shortcut_enabled", wantShortcut ? 1 : 0);
-            hr_settings_set_desktop_shortcut_path(settings_, state_.desktop_shortcut_path.c_str());
 
             bool wantAutostart = autostart_chk_->GetValue();
             HrSystemIntegration::SetAutostart(wantAutostart);
             state_.autostart_enabled = wantAutostart;
-            hr_settings_set_flag(settings_, "autostart_enabled", wantAutostart ? 1 : 0);
 
             state_.minimize_to_tray = tray_chk_->GetValue();
-            hr_settings_set_flag(settings_, "minimize_tray", state_.minimize_to_tray ? 1 : 0);
         }
 
-        hr_settings_save(settings_, kSettingsPath);
+        // -- Settings file path (Advanced tab) -------------------------
+        state_.settings_path = settings_path_edit_->GetValue().ToUTF8().data();
+
+        // Phase 1 settings-storage migration (see commands.md): one save
+        // call persists the *entire* AppState, replacing the old JSON
+        // engine's fixed field whitelist (hr_settings.cpp) - see that
+        // file's own header comment for the exact bug this whitelist
+        // caused previously (show_summary/show_overlays_panel silently
+        // not persisting because someone forgot to add them to it).
+        std::wstring target = HrcConfig::ResolveSettingsPath(state_);
+        HrcConfig::Save(state_, target);
+        if (target != HrcConfig::kDefaultSettingsPath) {
+            // Keep a live mirror at the default location too, so
+            // main_frame.cpp's startup bootstrap - which always checks
+            // kDefaultSettingsPath first - can find this custom path (via
+            // settings_path, saved as part of the mirror) and follow it,
+            // without needing a second file format just for that pointer.
+            HrcConfig::Save(state_, HrcConfig::kDefaultSettingsPath);
+        }
         EndModal(wxID_OK);
     }
 
     AppState &state_;
     ThemeColors theme_;
-    void *settings_ = nullptr;
     wxNotebook *notebook_ = nullptr;
     size_t kTabGeneral = 0, kTabVideo = 0, kTabAdvanced = 0;
 
@@ -875,6 +894,7 @@ private:
     // System
     wxCheckBox *shortcut_chk_ = nullptr;
     wxTextCtrl *shortcut_path_edit_ = nullptr;
+    wxTextCtrl *settings_path_edit_ = nullptr;
     wxCheckBox *autostart_chk_ = nullptr;
     wxCheckBox *tray_chk_ = nullptr;
 };
