@@ -75,7 +75,8 @@ OBJS := \
 	src/hr_settings.o \
 	src/hr_hotkey.o \
 	src/hr_mic_enum.o \
-	src/hr_encoder_helpers.o
+	src/hr_encoder_helpers.o \
+	src/hr_settings_registry.o
 
 all: hr.exe
 
@@ -97,9 +98,6 @@ hom.exe: tools/hom/hom.cpp
 	$(CXX) $(HOM_CXXFLAGS) -o hom.exe tools/hom/hom.cpp $(HOM_LDLIBS)
 
 clean:
-	rm -f $(OBJS) resource.o
-
-clear:
 	rm -f $(OBJS) resource.o hr.exe hom.exe
 
 .PHONY: all clean hom
