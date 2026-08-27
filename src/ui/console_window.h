@@ -83,6 +83,17 @@ private:
     void RefreshPrompt();
 
     void RunCommand(const std::wstring &raw);
+    // Fallback tried when `cmd` didn't match a built-in command or a
+    // plugin-registered command (homrec.register_command()): treats the
+    // line as "<setting> [=] <value>" (or a bare "<setting>" to query),
+    // against both HrSettingsRegistry's built-in .hrc-backed settings and
+    // any plugin-registered ones (homrec.register_setting()) - see
+    // commands.md's "Settings as commands" section. Returns false (line
+    // untouched, caller falls through to "Unknown command") if `cmd`
+    // isn't a known setting name either. Prints its own PrintOk/PrintWarn/
+    // PrintInfo output when it returns true, same convention every other
+    // Cmd* handler follows.
+    bool TryRunSetting(const std::wstring &cmd, const std::wstring &raw);
     // color is a COLORREF; only meaningful when the output control is a
     // RichEdit (rich_edit_ == true) -- see the color constants and the
     // OPT comment above OnCreate()'s control creation in the .cpp for why.
@@ -131,6 +142,17 @@ private:
     void CmdRmSystemFiles(const std::wstring &raw);
     void CmdRmSelfApp(const std::wstring &raw);
     void CmdHrc(const std::wstring &raw);
+    // "sethrc <path> <1|true|0|false>" - cfg-only combinator (see
+    // commands.md): merges another .hrc file's fields into the *current*
+    // in-memory settings right where this line sits in a cfg script (same
+    // "only touch keys the file actually has" semantics as `hrc load`), so
+    // a hand-written cfg/config.cfg can start from "sethrc homrec.hrc 1"
+    // and then override just the handful of fields it cares about on the
+    // lines that follow - ordinary sequential command execution is what
+    // gives later lines priority, no separate exception syntax needed.
+    // custom_ffmpeg_args is only carried over while the "sec" fuse is
+    // disabled (see HrcConfig::Load's allow_sensitive_fields parameter).
+    void CmdSetHrc(const std::wstring &raw);
     void CmdClip(const std::wstring &raw);
     void CmdRepeat(const std::wstring &raw);
     void CmdBatch(const std::wstring &raw);

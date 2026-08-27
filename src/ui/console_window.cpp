@@ -5,6 +5,7 @@
 #include "hrc_config.h"
 #include "../plugins/lua_engine.h"
 #include "../hr_log_paths.h"
+#include "../hr_settings_registry.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -50,6 +51,26 @@ std::wstring WideFromNarrow(const std::string &s) {
     std::wstring w(len > 0 ? len - 1 : 0, L'\0');
     if (len > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
     return w;
+}
+
+// Everything in `raw` after the first whitespace-delimited token (the
+// setting's name, as originally typed) and an optional '=' - so
+// "disable_preview = true", "disable_preview=true", and
+// "disable_preview true" are all accepted, matching how a person would
+// reasonably type any of the three. Returns "" (not an error - see
+// ConsoleWindow::TryRunSetting) if nothing follows the name, which is how
+// a bare "disable_preview" queries the current value instead of setting
+// it - the same "no args = show current state" convention env/alias/sec
+// above already use.
+std::wstring ExtractSettingValue(const std::wstring &raw) {
+    size_t i = 0;
+    while (i < raw.size() && !iswspace(raw[i])) ++i;      // skip the name itself
+    while (i < raw.size() && iswspace(raw[i])) ++i;       // skip spaces after it
+    if (i < raw.size() && raw[i] == L'=') {
+        ++i;
+        while (i < raw.size() && iswspace(raw[i])) ++i;   // skip spaces after '='
+    }
+    return Trim(raw.substr(i));
 }
 
 std::wstring GetBaseDir() {
@@ -268,7 +289,7 @@ void ConsoleWindow::RefreshPrompt() {
     swprintf(buf, 64, L"%dx%d@%dfps # ", w, h, state_.target_fps);
     SetWindowTextW(prompt_, buf);
 
-    // BUGFIX (design): the prompt/input split used to assume a fixed
+    // The prompt/input split used to assume a fixed
     // 160px-wide prompt (see OnSize()'s old hardcoded promptW). That's
     // wide enough for "1920x1080@60fps # ", but a higher-res monitor or a
     // high refresh-rate target ("3840x2160@144fps # ") renders noticeably
@@ -355,7 +376,7 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
     origInputProc = (WNDPROC)GetWindowLongPtrW(input_, GWLP_WNDPROC);
     SetWindowLongPtrW(input_, GWLP_WNDPROC, (LONG_PTR)(+[](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
         auto *self = reinterpret_cast<ConsoleWindow *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        // BUGFIX: the console window is created as a child/owned window of
+        // The console window is created as a child/owned window of
         // the app's wxWidgets main frame (main_window_ / GetHWND()), and
         // wxWidgets pre-processes keyboard messages for the whole app --
         // Enter/Tab/Esc are normally treated as dialog-navigation keys and
@@ -470,6 +491,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     else if (cmd == L"secui") CmdSecUi(raw);
     else if (cmd == L"secp") CmdSecP(raw);
     else if (cmd == L"hrc") CmdHrc(raw);
+    else if (cmd == L"sethrc") CmdSetHrc(raw);
     else if (cmd == L"clip") CmdClip(raw);
     else if (cmd == L"repeat") CmdRepeat(raw);
     else if (cmd == L"batch") CmdBatch(raw);
@@ -486,10 +508,61 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
         std::vector<std::string> plugin_cmd_lines;
         if (plugins_ && plugins_->DispatchCommand(NarrowFromWide(cmd), NarrowFromWide(raw), plugin_cmd_lines)) {
             for (const auto &line : plugin_cmd_lines) PrintInfo(WideFromNarrow(line));
+        } else if (TryRunSetting(cmd, raw)) {
+            // Handled - TryRunSetting() already printed its own output.
         } else {
             PrintWarn(L"Unknown command: " + cmd);
         }
     }
+}
+
+bool ConsoleWindow::TryRunSetting(const std::wstring &cmd, const std::wstring &raw) {
+    std::string key = NarrowFromWide(cmd);
+    std::wstring wvalue = ExtractSettingValue(raw);
+    std::string value = NarrowFromWide(wvalue);
+
+    if (const auto *def = HrSettingsRegistry::Find(key)) {
+        // custom_ffmpeg_args is the one sensitive field (see
+        // hr_settings_registry.cpp) - gated behind the same "sec" fuse
+        // CmdSetHrc()'s import of it above already respects, so an
+        // unattended cfg file (or a console line typed by someone who
+        // isn't you) can't quietly rewrite ffmpeg's real command line.
+        if (def->sensitive && !CoreUnlocked()) {
+            PrintWarn(WideFromNarrow(def->key) +
+                      L": blocked - protected by core security (run \"sec 0\" first if you trust this).");
+            return true;
+        }
+        if (value.empty()) {
+            // Bare "<setting>", no value - query, same convention env/
+            // alias/sec/secui/secp already use for "show current state".
+            PrintInfo(WideFromNarrow(def->key) + L" = " + WideFromNarrow(def->get(state_)));
+            return true;
+        }
+        if (!def->set(state_, value)) {
+            PrintWarn(WideFromNarrow(def->key) + L": invalid value '" + wvalue + L"'");
+            return true;
+        }
+        // Same persistence behavior as homrec.set_setting() (lua_api.cpp) -
+        // a setting assignment is meant to feel identical whether it came
+        // from a plugin, the console, or a cfg file (autoexec/config/
+        // startrec - see RunCfgFile() above, same RunCommand() either way).
+        std::wstring target = HrcConfig::ResolveSettingsPath(state_);
+        HrcConfig::Save(state_, target);
+        if (target != HrcConfig::kDefaultSettingsPath) HrcConfig::Save(state_, HrcConfig::kDefaultSettingsPath);
+        PrintOk(WideFromNarrow(def->key) + L" = " + wvalue);
+        return true;
+    }
+
+    // Not a built-in setting either - last stop before "Unknown command":
+    // a plugin's own homrec.register_setting().
+    if (plugins_) {
+        std::vector<std::string> lines;
+        if (plugins_->DispatchSetting(key, value, lines)) {
+            for (const auto &line : lines) PrintInfo(WideFromNarrow(line));
+            return true;
+        }
+    }
+    return false;
 }
 
 int ConsoleWindow::RunCfgFile(const std::wstring &name) {
@@ -719,6 +792,47 @@ void ConsoleWindow::CmdHrc(const std::wstring &raw) {
         else PrintErr(L"couldn't read " + path);
     } else {
         PrintWarn(L"usage: hrc save [path] | hrc load [path]  (default path: homrec_config.hrc next to the exe)");
+    }
+}
+
+void ConsoleWindow::CmdSetHrc(const std::wstring &raw) {
+    std::wistringstream iss(raw);
+    std::wstring cmd, path, flag;
+    iss >> cmd >> path >> flag;
+
+    if (path.empty()) {
+        PrintWarn(L"usage: sethrc <path> <1|true|0|false>  (e.g. \"sethrc homrec.hrc 1\" as the "
+                   L"first line of cfg/config.cfg to seed it from an .hrc profile - see commands.md)");
+        return;
+    }
+    // Match hrc_config.cpp's own ToBool(): "1"/"true"/"yes" are the only
+    // truthy spellings, anything else (including a missing flag) is a
+    // no-op read - lets a cfg author write "sethrc homrec.hrc 0" to
+    // document *where* a baseline would come from without applying it yet.
+    bool enable = (flag == L"1" || flag == L"true" || flag == L"yes");
+    if (!enable) {
+        PrintInfo(L"sethrc " + path + L": flag not set (1/true) - nothing imported");
+        return;
+    }
+
+    if (HrcConfig::Load(state_, path, /*allow_sensitive_fields=*/!sec_core_)) {
+        PrintOk(L"sethrc: merged settings from " + path + L" into the running config");
+        if (sec_core_) {
+            // Only worth a note if the file actually had one to skip -
+            // otherwise every "sethrc" call prints a warning nobody asked
+            // about (see hrc_config.cpp's own comment on this parameter).
+            std::wifstream probe(path.c_str());
+            std::wstring line;
+            bool file_sets_ffmpeg_args = false;
+            while (std::getline(probe, line)) {
+                if (line.rfind(L"custom_ffmpeg_args=", 0) == 0) { file_sets_ffmpeg_args = true; break; }
+            }
+            if (file_sets_ffmpeg_args)
+                PrintWarn(L"custom_ffmpeg_args in " + path + L" was NOT imported (sec fuse is on - "
+                           L"run \"sec 0\" first if this file is trusted)");
+        }
+    } else {
+        PrintErr(L"sethrc: couldn't read " + path);
     }
 }
 
