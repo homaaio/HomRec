@@ -121,6 +121,41 @@ public:
     // name -> (owning plugin id, description).
     const std::unordered_map<std::string, RegisteredCommand> &commands() const { return commands_; }
 
+    // --- Plugin-registered settings ---------------------------------------
+    // A plugin calls homrec.register_setting(name, description, get_fn,
+    // set_fn) from on_load(); this is the C++ side of that (see
+    // lua_api.cpp's L_register_setting). Mirrors RegisteredCommand above -
+    // get_fn/set_fn are Lua registry refs in the OWNING plugin's own
+    // lua_State - so a plugin-defined setting gets exactly the same
+    // "<name> = <value>" console/cfg-file syntax as a built-in .hrc
+    // setting does (see console_window.cpp's ConsoleWindow::RunCommand),
+    // without HomRec's console needing to know anything about how that
+    // plugin actually stores the value (typically homrec.store_get/
+    // store_set - see lua_api.cpp - but a plugin could just as easily back
+    // it with in-memory Lua state instead).
+    struct RegisteredSetting {
+        std::string plugin_id;
+        std::string description;
+        int get_ref = -1; // lua_State ref: function() -> value
+        int set_ref = -1; // lua_State ref: function(raw_value_string) -> ok?
+    };
+    void RegisterSetting(const std::string &plugin_id, const std::string &name,
+                          const std::string &description, int get_ref, int set_ref);
+
+    // Looked up case-insensitively, same "false means fall through, not
+    // failure" contract as DispatchCommand() above. `raw_value` empty means
+    // "print current value" (calls get_fn); non-empty means "assign"
+    // (calls set_fn(raw_value)). Either way, anything the plugin's get_fn/
+    // set_fn passes to homrec.print() is collected into out_lines - if
+    // set_fn didn't print anything itself, a default "<name> = <value>"
+    // confirmation line is appended so a plugin setting behaves the same
+    // as a built-in one from the user's side even if the plugin author
+    // didn't bother adding their own feedback.
+    bool DispatchSetting(const std::string &name, const std::string &raw_value,
+                         std::vector<std::string> &out_lines);
+
+    const std::unordered_map<std::string, RegisteredSetting> &plugin_settings() const { return settings_; }
+
     const std::vector<std::string> &loaded_ids() const { return loaded_ids_; }
     const PluginManifest *GetManifest(const std::string &id) const;
 
@@ -138,6 +173,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<LoadedPlugin>> plugins_;
     std::vector<std::string> loaded_ids_;
     std::unordered_map<std::string, RegisteredCommand> commands_; // key: lowercased command name
+    std::unordered_map<std::string, RegisteredSetting> settings_; // key: lowercased setting name
 
     RecordingController *rec_ = nullptr;
     const ThemeColors *colors_ = nullptr;

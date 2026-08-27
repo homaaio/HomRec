@@ -20,16 +20,13 @@ extern "C" {
     #include "lualib.h"
 }
 
-// hr_settings.cpp doesn't have a shared header (see main_frame.cpp, which
-// declares this same set locally too) - these are its HR_EXPORT'd C ABI.
-extern "C" {
-    void *hr_settings_create();
-    void  hr_settings_destroy(void *handle);
-    int   hr_settings_load(void *handle, const char *path);
-    int   hr_settings_get_flag(const void *h, const char *name);
-    void  hr_settings_set_flag(void *h, const char *name, int v);
-    int   hr_settings_save(const void *handle, const char *path);
-}
+// Phase 1 (see commands.md): homrec.get_setting()/set_setting() below now
+// read/write real AppState fields (via RecordingController::state()) and
+// persist through HrcConfig::Save() - the hr_settings.cpp JSON engine this
+// used to round-trip through is no longer touched from here at all.
+#include "../ui/hrc_config.h"
+#include "../hr_settings_registry.h"
+#include "../hr_str_convert.h"
 
 #pragma comment(lib, "wininet.lib")
 
@@ -163,33 +160,97 @@ int L_store_get(lua_State *L) {
     return 1;
 }
 
-int L_settings_get(lua_State *L) {
-    const char *key = luaL_checkstring(L, 1);
-    void *s = hr_settings_create();
-    bool v = false;
-    if (hr_settings_load(s, "homrec_settings.json")) {
-        v = hr_settings_get_flag(s, key) != 0;
+// homrec.get_setting(name)/set_setting(name, value) used to only support a
+// fixed dozen boolean flags, hand-listed here with their own separate
+// spellings from .hrc's (minimize_tray vs. minimize_to_tray, countdown vs.
+// countdown_enabled, etc.) - a second, independently-drifting copy of the
+// same field list hrc_config.cpp already had. Both now walk
+// HrSettingsRegistry::All() (see hr_settings_registry.h), so every scalar
+// .hrc setting - not just bools - is reachable from a plugin, and a field
+// added to the registry shows up here for free. The old short key
+// spellings above still work: they're registered as aliases on the
+// canonical entry (see hr_settings_registry.cpp), so existing plugin
+// scripts that call homrec.get_setting("minimize_tray") don't break.
+
+// Converts a Lua value on the stack (bool/number/string) to the plain-text
+// form HrSettingsRegistry::SettingDef::set() expects. `idx` is a stack
+// index (as usual for the Lua C API).
+std::string LuaValueToSettingString(lua_State *L, int idx) {
+    if (lua_isboolean(L, idx)) return lua_toboolean(L, idx) ? "true" : "false";
+    if (lua_isnumber(L, idx)) {
+        // lua_tostring would coerce+replace the stack slot in old Lua
+        // versions; use snprintf on the numeric value instead so we don't
+        // disturb whatever the caller does with the stack afterwards.
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.17g", (double)lua_tonumber(L, idx));
+        return buf;
     }
-    hr_settings_destroy(s);
-    lua_pushboolean(L, v);
+    const char *s = lua_tostring(L, idx);
+    return s ? s : "";
+}
+
+// Pushes `text` onto the Lua stack as whatever native type `kind` implies,
+// so homrec.get_setting("countdown") keeps returning a real Lua boolean
+// (not the string "1") the way plugins already expect.
+void PushSettingValue(lua_State *L, HrSettingsRegistry::Kind kind, const std::string &text) {
+    switch (kind) {
+        case HrSettingsRegistry::Kind::Bool:
+            lua_pushboolean(L, HrToBool(text));
+            break;
+        case HrSettingsRegistry::Kind::Int:
+        case HrSettingsRegistry::Kind::Double:
+            lua_pushnumber(L, atof(text.c_str()));
+            break;
+        default:
+            lua_pushstring(L, text.c_str());
+            break;
+    }
+}
+
+int L_settings_get(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    const char *key = luaL_checkstring(L, 1);
+    RecordingController *rec = uv->engine->recording_controller();
+    if (rec) {
+        if (const auto *def = HrSettingsRegistry::Find(key)) {
+            PushSettingValue(L, def->kind, def->get(rec->state()));
+            return 1;
+        }
+    }
+    // Unknown key: same "just false" fallback the old bool-only version
+    // gave a plugin that mistyped a setting name, rather than raising a
+    // Lua error and potentially crashing a plugin's whole script over it.
+    lua_pushboolean(L, false);
     return 1;
 }
 
 int L_settings_set(lua_State *L) {
     const char *key = luaL_checkstring(L, 1);
-    bool val;
-    if (lua_isboolean(L, 2)) {
-        val = lua_toboolean(L, 2) != 0;
-    } else {
-        std::string sval = luaL_checkstring(L, 2);
-        for (auto &c : sval) c = (char)tolower((unsigned char)c);
-        val = (sval == "true" || sval == "1" || sval == "on" || sval == "yes");
+    std::string val = LuaValueToSettingString(L, 2);
+
+    auto *uv = GetUpvalues(L);
+    RecordingController *rec = uv->engine->recording_controller();
+    bool ok = false;
+    if (rec) {
+        if (const auto *def = HrSettingsRegistry::Find(key)) {
+            // custom_ffmpeg_args is the one sensitive field (see
+            // hr_settings_registry.cpp) - plugins run with full trust
+            // already (register_command/http_get etc. have no sandboxing
+            // of their own), so this isn't gated behind "sec" the way the
+            // console's generic assignment is; a plugin that can call
+            // homrec.set_setting at all could already reach ffmpeg
+            // directly. Kept as a single explicit branch here (rather
+            // than silently falling through) so that's a deliberate
+            // choice, not an oversight.
+            if (def->set(rec->state(), val)) {
+                std::wstring target = HrcConfig::ResolveSettingsPath(rec->state());
+                HrcConfig::Save(rec->state(), target);
+                if (target != HrcConfig::kDefaultSettingsPath)
+                    HrcConfig::Save(rec->state(), HrcConfig::kDefaultSettingsPath);
+                ok = true;
+            }
+        }
     }
-    void *s = hr_settings_create();
-    hr_settings_load(s, "homrec_settings.json"); // ok if this is the first-ever write - falls back to defaults
-    hr_settings_set_flag(s, key, val ? 1 : 0);
-    bool ok = hr_settings_save(s, "homrec_settings.json") != 0;
-    hr_settings_destroy(s);
     lua_pushboolean(L, ok);
     return 1;
 }
@@ -368,6 +429,36 @@ int L_register_command(lua_State *L) {
     return 0;
 }
 
+// --- homrec.register_setting(name, description, get_fn, set_fn) -----------
+// Gives a plugin-defined value the exact same "<name> = <value>" treatment
+// a built-in .hrc setting gets, in the console AND in any .cfg file
+// (autoexec/config/startrec - same RunCommand parser either way, see
+// console_window.cpp). get_fn() -> value is called to print the current
+// value when the name is typed with no value after it; set_fn(raw_value)
+// is called with the raw text after the name when one IS given. Neither
+// function's return value (other than get_fn's) is otherwise interpreted -
+// call homrec.print() from either one if you want to show something
+// besides the default "<name> = <value>" confirmation.
+//
+// This is what "a plugin's own settings should be toggleable the same way
+// built-in ones are" means in practice: a plugin author backs get_fn/
+// set_fn with homrec.store_get/store_set (or their own in-memory state),
+// and from then on `myplugin_option = true` works in autoexec.cfg exactly
+// like `disable_preview = true` does.
+int L_register_setting(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    const char *name = luaL_checkstring(L, 1);
+    const char *description = luaL_checkstring(L, 2);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+    luaL_checktype(L, 4, LUA_TFUNCTION);
+    lua_pushvalue(L, 3);
+    int get_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_pushvalue(L, 4);
+    int set_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    uv->engine->RegisterSetting(uv->plugin_id, name, description, get_ref, set_ref);
+    return 0;
+}
+
 // --- homrec.print(text) -----------------------------------------------
 // Appends a line to the current command's console output (no-op outside
 // of a command handler - see print_sink's comment in lua_engine.h for
@@ -466,6 +557,7 @@ void *Install(lua_State *L, LuaPluginEngine *engine, const std::string &plugin_i
     registerFn("http_post", L_http_post);
     registerFn("register_input_overlay", L_register_input_overlay);
     registerFn("register_command", L_register_command);
+    registerFn("register_setting", L_register_setting);
     registerFn("print", L_print);
     registerFn("log", L_log);
     registerFn("log_to", L_log_to);

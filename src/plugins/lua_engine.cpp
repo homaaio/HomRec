@@ -196,6 +196,12 @@ void LuaPluginEngine::UnloadPlugin(const std::string &id) {
         if (cit->second.plugin_id == id) cit = commands_.erase(cit);
         else ++cit;
     }
+    // Same reasoning for plugin-registered settings' get_ref/set_ref -
+    // see RegisterSetting()/DispatchSetting() below.
+    for (auto sit = settings_.begin(); sit != settings_.end(); ) {
+        if (sit->second.plugin_id == id) sit = settings_.erase(sit);
+        else ++sit;
+    }
 
     lua_close(it->second->L);
     LuaApi::Uninstall(it->second->api_handle);
@@ -293,6 +299,63 @@ bool LuaPluginEngine::DispatchCommand(const std::string &name, const std::string
         out_lines.push_back(std::string("plugin command error: ") + (err ? err : "?"));
         lua_pop(L, 1);
     }
+    print_sink = nullptr;
+    return true;
+}
+
+void LuaPluginEngine::RegisterSetting(const std::string &plugin_id, const std::string &name,
+                                       const std::string &description, int get_ref, int set_ref) {
+    std::string key = ToLowerAscii(name);
+    if (key.empty()) return;
+    // Same "last plugin registering a given name wins" tradeoff as
+    // RegisterCommand() above, for the same reason.
+    settings_[key] = RegisteredSetting{plugin_id, description, get_ref, set_ref};
+}
+
+bool LuaPluginEngine::DispatchSetting(const std::string &name, const std::string &raw_value,
+                                      std::vector<std::string> &out_lines) {
+    auto sit = settings_.find(ToLowerAscii(name));
+    if (sit == settings_.end()) return false;
+
+    auto pit = plugins_.find(sit->second.plugin_id);
+    if (pit == plugins_.end()) return false; // owning plugin unloaded out from under its own setting
+    lua_State *L = pit->second->L;
+
+    print_sink = &out_lines;
+    size_t lines_before = out_lines.size();
+
+    if (raw_value.empty()) {
+        // Query: fn() -> value. Whatever it returns is stringified and
+        // shown as "<name> = <value>", same shape a built-in setting's
+        // query prints.
+        lua_rawgeti(L, LUA_REGISTRYINDEX, sit->second.get_ref);
+        if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+            const char *err = lua_tostring(L, -1);
+            out_lines.push_back(std::string("plugin setting error: ") + (err ? err : "?"));
+            lua_pop(L, 1);
+        } else {
+            const char *val = lua_tostring(L, -1);
+            out_lines.push_back(name + " = " + (val ? val : "?"));
+            lua_pop(L, 1);
+        }
+    } else {
+        // Assign: fn(raw_value_string). A plugin that wants its own
+        // confirmation text calls homrec.print() from inside set_fn (it
+        // lands in out_lines via print_sink, same as register_command's
+        // handler); if it didn't print anything, fall back to a default
+        // confirmation line so a plugin setting still gives feedback
+        // without every plugin author needing to remember to add it.
+        lua_rawgeti(L, LUA_REGISTRYINDEX, sit->second.set_ref);
+        lua_pushstring(L, raw_value.c_str());
+        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            const char *err = lua_tostring(L, -1);
+            out_lines.push_back(std::string("plugin setting error: ") + (err ? err : "?"));
+            lua_pop(L, 1);
+        } else if (out_lines.size() == lines_before) {
+            out_lines.push_back(name + " = " + raw_value);
+        }
+    }
+
     print_sink = nullptr;
     return true;
 }
