@@ -276,7 +276,7 @@ HR_EXPORT int hr_hk_start(void *handle) {
  * hr_hk_stop
  * Unregisters hotkeys and stops the message loop.
  *
- * BUGFIX: this used to just PostMessageW(WM_QUIT) and return immediately,
+ * This used to just PostMessageW(WM_QUIT) and return immediately,
  * without waiting for _MsgThread to actually exit (unlike hr_hk_destroy(),
  * a few functions up, which does wait). _MsgThread is the only thing that
  * ever sets ctx->running back to false, and it only does that *after* its

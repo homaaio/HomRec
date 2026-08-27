@@ -229,7 +229,7 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
     } else if (is_amf) {
         ss << L" -quality speed -rc cqp -qp_i " << qp << L" -qp_p " << qp << L" -g " << gop;
     } else {
-        // BUGFIX: this used to do the opposite of what you'd want here --
+        // This used to do the opposite of what you'd want here --
         // 1 thread flat on anything with 4 cores or fewer, and only
         // cpu_count/4 above that (so even an 8-core machine got just 2
         // x264 threads, a 16-core one only 4). libx264's "ultrafast"
@@ -245,7 +245,7 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
         // (DXGI grab + overlay compositing + BGRA->YUV) and everything
         // else (audio, UI) to run on without contention.
         int thr = std::max(1, cpu_count - 2);
-        // BUGFIX: the "Encoder preset" dropdown on the Video/Codec settings
+        // The "Encoder preset" dropdown on the Video/Codec settings
         // tab (Settings > Video > Encoder preset - ultrafast..veryslow,
         // AppState::enc_preset) was saved, reloaded, round-tripped through
         // every settings-persistence layer... and never actually read at

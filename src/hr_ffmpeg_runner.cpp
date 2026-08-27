@@ -93,6 +93,18 @@ static int64_t _file_size(const char *path) {
 /* -- Process launch helpers ------------------------------------------------- */
 
 #ifdef _WIN32
+// Plain CreatePipe() (used here previously) hands back an anonymous
+// pipe that only supports blocking, synchronous I/O - the write end had no
+// way to time out a WriteFile() that ffmpeg wasn't draining, which is what
+// caused the writer thread to hang forever under load (see write_pipe()'s
+// comment in hr_pipeline.cpp for the full story, including the
+// std::terminate() it led to). CreatePipe() itself can't be made overlapped
+// no matter what flags you pass it - this is the standard workaround:
+// a uniquely-named pipe with exactly one instance, server end
+// (FILE_FLAG_OVERLAPPED, for us to write) plus client end (opened normally,
+// for ffmpeg's child process to read) - functionally identical to
+// CreatePipe()'s anonymous pipe from ffmpeg's side, but our end now
+// supports the timeout/cancel logic write_pipe() needs.
 static bool _create_overlapped_stdin_pipe(HANDLE *out_read, HANDLE *out_write) {
     static std::atomic<uint32_t> s_counter{0};
     wchar_t name[128];

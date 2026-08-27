@@ -3,6 +3,19 @@
  *
  * Reads / writes a UTF-8 JSON file next to the application binary.
  *
+ * Phase 1 settings-storage migration (see commands.md): this JSON engine
+ * is no longer the app's primary settings store - that's now .hrc
+ * (hrc_config.cpp), which covers the full AppState instead of the fixed
+ * field list below. This file is kept for: (1) the one-time migration
+ * read of an existing homrec_settings.json on first launch after
+ * upgrading (see main_frame.cpp's ctor), and (2) the "Reset to defaults"
+ * button in Settings, which reads a fresh, never-loaded instance of this
+ * struct purely for its compiled-in default values (see
+ * settings_dialog.cpp's OnResetDefaults()). Nothing writes through this
+ * engine anymore - see this class's own get_flag()-based API for why a
+ * missing field here used to silently revert to its default every launch
+ * (show_summary/show_overlays_panel did exactly that).
+ *
  * The JSON schema:
  *   {
  *     "output_folder":   "C:\\Users\\...\\Videos",
@@ -274,7 +287,7 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     s->resolution_h        = _json_get_int(json,  "resolution_h",        s->resolution_h);
     s->preview_quality_pct = _json_get_int(json,  "preview_quality_pct", s->preview_quality_pct);
     s->preview_fps         = _json_get_int(json,  "preview_fps",         s->preview_fps);
-    // BUGFIX: these two flags had getters/setters (hr_settings_get_flag/
+    // These two flags had getters/setters (hr_settings_get_flag/
     // hr_settings_set_flag below) and were dutifully read/written by the
     // Settings dialog every session, but were never actually included in
     // this load function (nor in hr_settings_save()'s format string below)

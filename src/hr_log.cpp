@@ -23,7 +23,7 @@ namespace HrLog {
 void Write(const char *level, const std::string &message) {
     std::lock_guard<std::mutex> lock(LogMutex());
 
-    // BUGFIX: every log file used to sit loose in <exe-dir> (homrec.log
+    // Every log file used to sit loose in <exe-dir> (homrec.log
     // right next to the .exe). Now that pc.log and plugins.log exist
     // too, all three - and any custom per-plugin log a plugin opens via
     // homrec.log_to() - live under <exe-dir>\logs\ instead, so a user

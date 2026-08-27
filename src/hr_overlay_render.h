@@ -84,7 +84,7 @@ private:
     // Keyed by the overlay's position in the list (stable enough for our
     // purposes -- overlays are edited in place, not frequently reordered).
     //
-    // BUGFIX (unbounded growth / memory leak): entries here used to live
+    // Entries here used to live
     // forever once created -- nothing ever erased them. Every add/remove/
     // resize of an overlay (especially an image or input_overlay one,
     // whose CachedLayer/InputOverlayCache/ImageSourceCache entries can each
@@ -117,7 +117,7 @@ private:
         // one path, so this never blocks a genuine retry).
         bool attempted = false;
 
-        // BUGFIX (see GetOrRenderInputOverlay()): scratch buffer for the
+        // Scratch buffer for the
         // native-resolution composite, reused frame-to-frame instead of a
         // brand-new std::vector being heap-allocated (and immediately
         // freed) on every single frame for as long as the overlay is on

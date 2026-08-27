@@ -335,7 +335,7 @@ struct AudioState {
     std::atomic<bool>   running{false};
     std::atomic<bool>   paused{false};
 
-    // BUGFIX (AFK memory growth): mic_buf/sys_buf below used to be
+    // mic_buf/sys_buf below used to be
     // appended to unconditionally, every ~10ms, for as long as the app
     // was open - including all the time spent NOT recording, since the
     // capture threads run continuously from startup so the live level
@@ -489,7 +489,7 @@ HR_EXPORT int hr_audio_start(float mic_vol, float sys_vol,
     int result = 0;
 
     // ---- Mic ---------------------------------------------------------------
-    // BUGFIX: this always opened whatever Windows considered the default
+    // This always opened whatever Windows considered the default
     // capture device, with no way to record from a different one -- see
     // Settings' new microphone picker (settings_dialog.cpp) which is the
     // first thing to actually set mic_device_id to something. Falls back to

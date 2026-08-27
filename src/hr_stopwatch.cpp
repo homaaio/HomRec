@@ -17,7 +17,7 @@
  * ---------------------------------------------------------------------- */
 static inline int64_t _hw_now_ns() {
 #ifdef _WIN32
-    // BUGFIX/PERF: this used to call QueryPerformanceFrequency() on every
+    // This used to call QueryPerformanceFrequency() on every
     // single invocation. QPF's return value is fixed for the life of the
     // OS session (it never changes after boot), so re-querying it here is
     // pure waste - and this function is called *extremely* often: once

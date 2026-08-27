@@ -341,7 +341,7 @@ static void bgra_downscale(const uint8_t* __restrict src,
 // Outstanding "handed-off" Pipelines - see hr_pl_destroy()'s handed_off/
 // leak_pl comments below for what this refers to.
 //
-// BUGFIX: a Pipeline whose worker threads didn't stop within hr_pl_destroy()'s
+// A Pipeline whose worker threads didn't stop within hr_pl_destroy()'s
 // 1s-per-thread budget gets detached rather than joined, and finishes
 // tearing itself down (dx_destroy/sw_destroy/delete this, from
 // finish_thread()) on its own time, on its own thread, once it actually
@@ -483,7 +483,7 @@ struct Pipeline {
             if (write_evt) { CloseHandle(write_evt); write_evt = nullptr; }
 #endif
             delete this;
-            // BUGFIX: must be decremented after the delete above, not
+            // Must be decremented after the delete above, not
             // before - hr_pl_wait_all_detached() uses this counter hitting
             // zero as its "safe to let the process exit now" signal, and
             // callers only want that signal once the Pipeline (and the
@@ -580,6 +580,11 @@ struct Pipeline {
 
         writer_running.store(true, std::memory_order_relaxed);
 
+        // Same reasoning as the try/catch wrapped around
+        // capture_loop()'s while-loop above - this is also a bare
+        // std::thread with nothing above it on the call stack to catch an
+        // uncaught exception, so any throw in here (write_pipe(), the
+        // free-list bookkeeping, etc.) was another std::terminate() path.
         try {
         while (writer_running.load(std::memory_order_relaxed)) {
             std::vector<uint8_t> frame;
@@ -707,7 +712,7 @@ struct Pipeline {
         int64_t frame_ns = frame_ns_recording;
         bool was_recording = recording;
 #ifdef _WIN32
-        // BUGFIX: this used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
+        // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
         // the moment recording started (both here and in the is_recording_now
         // transition below). TIME_CRITICAL is the highest priority Windows
         // has -- above every normal-priority thread in the system, not just
@@ -751,6 +756,21 @@ struct Pipeline {
         std::vector<HrOverlayDesc> overlays_snapshot;
         uint64_t last_overlays_gen = (uint64_t)-1; // sentinel: forces the first copy below
 
+        // The whole loop below now runs inside a try/catch. This
+        // thread is started bare (std::thread([pl]{ pl->capture_loop(); }),
+        // see hr_pl_start()) with no exception handler anywhere above it on
+        // the call stack - the overlay-compositing try/catch further down
+        // was already added for exactly this reason (see its own comment),
+        // but it only covered that one call site. Any OTHER uncaught throw
+        // in this loop (a bad_alloc from a resize with a bogus size, a
+        // vector::at, anything) was still an unhandled C++ exception on a
+        // std::thread with nothing above it to catch it - which per the
+        // standard calls std::terminate() and takes the whole process down
+        // with it, matching the "[CRASH] unhandled C++ exception /
+        // std::terminate()" entries this app was hitting. Catching here
+        // turns that into "this one pipeline stops, logged, app keeps
+        // running" instead - same outcome a clean Stop()/TeardownPreview()
+        // would have produced.
         try {
         while (running.load(std::memory_order_relaxed)) {
             if (paused.load(std::memory_order_relaxed)) {
@@ -774,7 +794,7 @@ struct Pipeline {
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
 #ifdef _WIN32
-                    // BUGFIX: see the matching comment above (~line 702) -
+                    // See the matching comment above (~line 702) -
                     // TIME_CRITICAL here starved the UI thread the moment
                     // recording started on an already-running preview
                     // pipeline, which is the more common of the two cases
@@ -933,7 +953,7 @@ struct Pipeline {
                     last_overlays_gen = gen;
                 }
                 if (!overlays_snapshot.empty()) {
-                    // BUGFIX: belt-and-suspenders alongside the try/catch
+                    // Belt-and-suspenders alongside the try/catch
                     // now inside OverlayCompositor::Apply() itself (see
                     // hr_overlay_render.cpp) -- this loop runs on a bare
                     // std::thread with no exception handler anywhere above
@@ -1113,7 +1133,7 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     pl->pipe_handle = pipe_fd;
     pl->recording   = (pipe_fd != 0 && pipe_fd != -1);
 
-    // BUGFIX: this used to be a hardcoded dx_create(0, 0), so the
+    // This used to be a hardcoded dx_create(0, 0), so the
     // "Monitor:" setting only ever affected capture *sizing*
     // (RecordingController::ResolveCaptureSize()) and never which
     // physical display DXGI actually duplicated - picking any monitor
@@ -1124,7 +1144,7 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     // are a separate, bigger fix).
     pl->dx_ctx = g_libs.dx_create(0, output_idx);
     if (!pl->dx_ctx) {
-        // BUGFIX: this used to just say "returned null" with no way to
+        // This used to just say "returned null" with no way to
         // tell which of the "common causes" it actually was - now logs
         // the real HRESULT (hex, so it's directly greppable against the
         // DXGI/WinError docs) alongside the guess. See hr_dx_last_error()
@@ -1294,7 +1314,7 @@ HR_EXPORT int hr_pl_start(void* handle) {
 
     int real_w = pl->src_w, real_h = pl->src_h;
     if (g_libs.dx_get_size) g_libs.dx_get_size(pl->dx_ctx, &real_w, &real_h);
-    // BUGFIX: dx_get_size() reads back whatever DXGI's output-duplication
+    // dx_get_size() reads back whatever DXGI's output-duplication
     // desc last reported, queried right after dx_create()/reset() - under
     // exactly the conditions this whole file's "common causes" comment
     // keeps citing (RDP, a virtual display, a display mode that changes
@@ -1356,7 +1376,7 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     pl->writer_running.store(false, std::memory_order_relaxed);
     pl->pipe_queue_cv.notify_all();
     
-    // BUGFIX: this used to WaitForSingleObject() on each thread and then
+    // This used to WaitForSingleObject() on each thread and then
     // just fall through without ever calling .join() or .detach() on
     // either - the std::thread objects stayed "joinable" (from the C++
     // object's point of view) no matter how the wait came out. That's
@@ -1548,7 +1568,7 @@ HR_EXPORT void hr_pl_set_overlays(void* handle, const HrOverlayDesc* items, int 
     if (!pl) return;
     std::lock_guard<std::mutex> lock(pl->overlays_mtx);
 
-    // BUGFIX: this used to fetch_add() the generation counter on every
+    // This used to fetch_add() the generation counter on every
     // single call, regardless of whether the list actually changed. The
     // UI calls hr_pl_set_overlays() from the preview timer tick (see
     // RecordingController::SyncOverlays(), invoked ~20-60x/sec any time the
