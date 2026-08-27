@@ -144,6 +144,18 @@ private:
             Refresh();
             return;
         }
+
+        // See the matching comment in PreviewPanel::OnLeftDown
+        // (main_frame.cpp) - a click on empty space now also clears any
+        // drag_index_ left stuck from a drag that never got a matching
+        // OnLeftUp/OnCaptureLost, instead of leaving that overlay's frame
+        // rendered in its "active" state indefinitely.
+        if (drag_index_ >= 0) {
+            if (HasCapture()) ReleaseMouse();
+            drag_index_ = -1;
+            drag_corner_ = Corner::kNone;
+            Refresh();
+        }
         evt.Skip();
     }
 
@@ -278,9 +290,9 @@ bool ShowOverlayPlacementDialog(wxWindow *parent, AppState &state,
 
     if (result == wxID_OK) {
         state.overlays = working;
-        // BUGFIX: dragging/resizing here bypasses OverlaysDockPanel::Refresh()
+        // Dragging/resizing here bypasses OverlaysDockPanel::Refresh()
         // (which is what normally persists state.overlays - see its own
-        // BUGFIX comment), so without this the new positions would stick
+        // Comment), so without this the new positions would stick
         // for the rest of the session but be gone again on next launch.
         HrcConfig::SaveOverlaysOnly(state.overlays, HrcConfig::kOverlaysAutosavePath);
         return true;

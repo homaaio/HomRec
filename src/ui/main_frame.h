@@ -164,6 +164,14 @@ private:
     void BuildBottomBar(wxWindow *parent, wxSizer *parentSizer);
     void ApplyThemeColours();
     void ApplyLanguageText();
+    // Phase 1 settings-storage migration (see commands.md): persists the
+    // *entire* current state_ via HrcConfig::Save(), mirroring to the
+    // default location too if a custom settings path is configured (see
+    // hrc_config.h's ResolveSettingsPath()). Used by every menu-toggle /
+    // panel-close handler that used to hand-roll its own
+    // hr_settings_set_flag()+hr_settings_save() pair against the old,
+    // no-longer-authoritative homrec_settings.json.
+    void PersistSettings();
 
     void SetupHotkeys();
     void ConfigureHotkeysFromState();

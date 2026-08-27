@@ -47,10 +47,12 @@ extern "C" {
     int hr_settings_get_preview_fps(const void *h);
     const char *hr_settings_get_codec(const void *h);
     const char *hr_settings_get_theme(const void *h);
-    void hr_settings_set_theme(void *h, const char *v);
     int hr_settings_get_flag(const void *h, const char *name);
-    void hr_settings_set_flag(void *h, const char *name, int v);
-    int hr_settings_save(const void *handle, const char *path);
+    // Phase 1 (see commands.md): the set_*/save side of this API is no
+    // longer used here - PersistSettings() (this file) and HrcConfig::Save
+    // (hrc_config.h) replace it. Only the one-time migration read path
+    // above (get_* + load) is still needed, for upgrading an install that
+    // only ever had homrec_settings.json.
 }
 
 // FromColorref/ColorButton/StatusDot moved to themed_widgets.cpp.
@@ -89,7 +91,7 @@ protected:
             on_command(LOWORD(wParam));
             return 0;
         }
-        // BUGFIX: the overlay dock's raw HWNDs (the STATIC "panel"
+        // The overlay dock's raw HWNDs (the STATIC "panel"
         // background and the LISTBOX row list -- the two "+"/"x" buttons
         // already theme themselves via HrWin32Theme::ThemeButton()) send
         // WM_CTLCOLORSTATIC/WM_CTLCOLORLISTBOX here, to their *immediate*
@@ -354,6 +356,22 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
         Refresh();
         return;
     }
+
+    // If a previous drag never got a matching OnLeftUp/OnCaptureLost
+    // (e.g. mouse capture was silently stolen by another window mid-drag,
+    // or a modal dialog popped up while the button was held), drag_overlay_
+    // index_ could stay pointing at an overlay indefinitely - it would just
+    // sit rendered in its "active" gold-highlighted state (see OnPaint's
+    // `active` colour below) with no way to clear it short of restarting a
+    // fresh drag on that same overlay. A plain click on empty space now
+    // also clears any such stuck state, instead of only a fresh hit doing
+    // it via drag_overlay_index_ = i above.
+    if (drag_overlay_index_ >= 0) {
+        if (HasCapture()) ReleaseMouse();
+        drag_overlay_index_ = -1;
+        drag_corner_ = Corner::kNone;
+        Refresh();
+    }
     evt.Skip();
 }
 
@@ -410,11 +428,11 @@ void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
         if (HasCapture()) ReleaseMouse();
         drag_overlay_index_ = -1;
         drag_corner_ = Corner::kNone;
-        // BUGFIX: this in-place drag-on-the-live-preview path (the normal,
+        // This in-place drag-on-the-live-preview path (the normal,
         // most-used way to reposition an overlay) bypasses both
         // OverlaysDockPanel::Refresh() and ShowOverlayPlacementDialog() -
         // the two places that otherwise persist state_.overlays (see their
-        // own BUGFIX comments) - so a drag finishing here used to leave
+        // Own fix comments) - so a drag finishing here used to leave
         // the new position live for the rest of the session but silently
         // lost on the next launch.
         HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
@@ -458,43 +476,78 @@ HomRecMainFrame::HomRecMainFrame()
     g_frame = this;
     SetIcon(wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE));
 
-    // Load whatever Settings was previously saved.
-    void *settings = hr_settings_create();
-    if (hr_settings_load(settings, "homrec_settings.json")) {
-        const char *folder = hr_settings_get_output_folder(settings);
-        state_.output_folder = (folder && folder[0]) ? folder : "recordings";
-        state_.quality = hr_settings_get_quality(settings);
-        state_.target_fps = hr_settings_get_fps(settings);
-        state_.monitor_id = hr_settings_get_monitor(settings);
-        state_.scale_factor = hr_settings_get_resolution_pct(settings) / 100.0;
-        state_.resolution_mode = hr_settings_get_resolution_mode(settings) != 0
-                                      ? ResolutionMode::Absolute : ResolutionMode::Percent;
-        state_.resolution_w = hr_settings_get_resolution_w(settings);
-        state_.resolution_h = hr_settings_get_resolution_h(settings);
-        state_.preview_quality_pct = hr_settings_get_preview_quality_pct(settings);
-        state_.preview_fps = hr_settings_get_preview_fps(settings);
-        state_.countdown_enabled = hr_settings_get_flag(settings, "countdown") != 0;
-        state_.timestamp_enabled = hr_settings_get_flag(settings, "timestamp") != 0;
-        state_.cursor_enabled = hr_settings_get_flag(settings, "cursor") != 0;
-        state_.show_summary = hr_settings_get_flag(settings, "show_summary") != 0;
-        state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
-        state_.show_audio_panel = hr_settings_get_flag(settings, "show_audio_panel") != 0;
-        state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
-        state_.minimize_to_tray = hr_settings_get_flag(settings, "minimize_tray") != 0;
-        state_.hint_no_overlay = hr_settings_get_flag(settings, "hint_no_overlay") != 0;
-        state_.system_logging_enabled = hr_settings_get_flag(settings, "system_logging_enabled") != 0;
-        state_.plugin_logging_enabled = hr_settings_get_flag(settings, "plugin_logging_enabled") != 0;
-        const char *codec = hr_settings_get_codec(settings);
-        if (codec && codec[0]) state_.video_codec = codec;
-        const char *theme = hr_settings_get_theme(settings);
-        if (theme && theme[0]) state_.current_theme = theme;
-    } else {
-        state_.output_folder = "recordings";
-        state_.first_launch = true;
+    // ====== Settings load (Phase 1 storage migration - see commands.md) ======
+    // homrec.hrc (HrcConfig, .hrc format) replaces homrec_settings.json
+    // (hr_settings.cpp) as the app's own auto-managed settings file - see
+    // hr_settings.cpp's header comment for the JSON-whitelist bug class
+    // this sidesteps (a field missing from that whitelist silently
+    // reverting to its compiled-in default every launch, which is exactly
+    // what happened to show_summary/show_overlays_panel there). Bootstrap
+    // order:
+    //   1. Read the default location (HrcConfig::kDefaultSettingsPath) if
+    //      present. settings_dialog.cpp's OnSave always keeps a live
+    //      mirror of the real settings there even when a custom path is
+    //      configured, purely so this one fixed location is always
+    //      enough to find - or BE - the real settings, without a separate
+    //      pointer-file format just for that redirect.
+    //   2. If that mirror declares a different settings_path, load from
+    //      there too (the actual file, in case it's been hand-edited more
+    //      recently than the last in-app Save mirrored it over).
+    //   3. If neither exists yet, this is either a fresh install or an
+    //      upgrade from a version that only ever had homrec_settings.json
+    //      - read that once with the old JSON engine and immediately
+    //      write a .hrc so every later launch takes the fast, direct path
+    //      above instead of this one-time migration branch.
+    std::wstring hrc_path = HrcConfig::kDefaultSettingsPath;
+    bool have_hrc = HrcConfig::Load(state_, hrc_path);
+    if (have_hrc && !state_.settings_path.empty()) {
+        std::wstring custom_path = WideFromNarrow(state_.settings_path);
+        if (custom_path != hrc_path) HrcConfig::Load(state_, custom_path);
     }
-    hr_settings_destroy(settings);
 
-    // BUGFIX: load back whatever the Overlays panel had last saved (see
+    if (!have_hrc) {
+        void *settings = hr_settings_create();
+        if (hr_settings_load(settings, "homrec_settings.json")) {
+            const char *folder = hr_settings_get_output_folder(settings);
+            state_.output_folder = (folder && folder[0]) ? folder : "recordings";
+            state_.quality = hr_settings_get_quality(settings);
+            state_.target_fps = hr_settings_get_fps(settings);
+            state_.monitor_id = hr_settings_get_monitor(settings);
+            state_.scale_factor = hr_settings_get_resolution_pct(settings) / 100.0;
+            state_.resolution_mode = hr_settings_get_resolution_mode(settings) != 0
+                                          ? ResolutionMode::Absolute : ResolutionMode::Percent;
+            state_.resolution_w = hr_settings_get_resolution_w(settings);
+            state_.resolution_h = hr_settings_get_resolution_h(settings);
+            state_.preview_quality_pct = hr_settings_get_preview_quality_pct(settings);
+            state_.preview_fps = hr_settings_get_preview_fps(settings);
+            state_.countdown_enabled = hr_settings_get_flag(settings, "countdown") != 0;
+            state_.timestamp_enabled = hr_settings_get_flag(settings, "timestamp") != 0;
+            state_.cursor_enabled = hr_settings_get_flag(settings, "cursor") != 0;
+            state_.show_summary = hr_settings_get_flag(settings, "show_summary") != 0;
+            state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
+            state_.show_audio_panel = hr_settings_get_flag(settings, "show_audio_panel") != 0;
+            state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
+            state_.minimize_to_tray = hr_settings_get_flag(settings, "minimize_tray") != 0;
+            state_.hint_no_overlay = hr_settings_get_flag(settings, "hint_no_overlay") != 0;
+            state_.system_logging_enabled = hr_settings_get_flag(settings, "system_logging_enabled") != 0;
+            state_.plugin_logging_enabled = hr_settings_get_flag(settings, "plugin_logging_enabled") != 0;
+            const char *codec = hr_settings_get_codec(settings);
+            if (codec && codec[0]) state_.video_codec = codec;
+            const char *theme = hr_settings_get_theme(settings);
+            if (theme && theme[0]) state_.current_theme = theme;
+
+            // One-time migration: adopt .hrc as the authoritative format
+            // from now on, so this branch isn't taken again next launch
+            // (have_hrc will be true above once this file exists).
+            HrcConfig::Save(state_, hrc_path);
+        } else {
+            state_.output_folder = "recordings";
+            state_.first_launch = true;
+        }
+        hr_settings_destroy(settings);
+    }
+
+    // Load back whatever the Overlays panel had last saved (see
     // hrc_config.h's comment on SaveOverlaysOnly/LoadOverlaysOnly) - this
     // is what's missing before, overlays used to always start empty every
     // launch even though everything else in state_ was restored above.
@@ -558,6 +611,17 @@ HomRecMainFrame::HomRecMainFrame()
     console_->EnsureCreated(wxGetInstance());
     console_->RunCfgFile(L"autoexec");
 
+    // ====== cfg/config.cfg (Phase 1+2 settings-storage migration, see
+    // commands.md) ======
+    // Runs after autoexec.cfg, and after the .hrc/JSON-migration settings
+    // load earlier in this ctor - so a hand-written config.cfg can start
+    // with "sethrc homrec.hrc 1" to seed itself from whatever the app
+    // already loaded, then override just the handful of settings it
+    // actually cares about on the lines that follow (see commands.md's
+    // "sethrc" section for why that doesn't need any extra priority
+    // syntax beyond normal top-to-bottom execution).
+    console_->RunCfgFile(L"config");
+
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnPreviewTimer, this, preview_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnStatsTimer, this, stats_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnRestoreTopmostTimer, this, restore_topmost_timer_.GetId());
@@ -604,6 +668,12 @@ HomRecMainFrame::~HomRecMainFrame() {
         delete tray_icon_;
     }
     if (g_frame == this) g_frame = nullptr;
+}
+
+void HomRecMainFrame::PersistSettings() {
+    std::wstring target = HrcConfig::ResolveSettingsPath(state_);
+    HrcConfig::Save(state_, target);
+    if (target != HrcConfig::kDefaultSettingsPath) HrcConfig::Save(state_, HrcConfig::kDefaultSettingsPath);
 }
 
 void HomRecMainFrame::BuildMenuBar() {
@@ -759,11 +829,7 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
         // Same immediate persist as the ID_VIEW_AUDIO_PANEL menu toggle -
         // this is the panel's own [x] close button, i.e. exactly the path
         // that previously left show_audio_panel unsaved.
-        void *s = hr_settings_create();
-        hr_settings_load(s, "homrec_settings.json");
-        hr_settings_set_flag(s, "show_audio_panel", 0);
-        hr_settings_save(s, "homrec_settings.json");
-        hr_settings_destroy(s);
+        PersistSettings();
     };
     audio_panel_->Show(state_.show_audio_panel);
 
@@ -888,7 +954,13 @@ void HomRecMainFrame::ApplyLanguageText() {
 
 void HomRecMainFrame::SetupTrayIcon() {
     tray_icon_ = new TrayIcon(this);
-    tray_icon_->SetIcon(wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE), "HomRec");
+    // "#2" = icons/tray.ico (resource.rc) - a separate, smaller asset from
+    // "#1"/main.ico used for the window/taskbar icon. Used to be the same
+    // "#1" resource as the window icon, which is why the tray icon had
+    // the same white outline the full-size app icon does - a 16x16 tray
+    // render of an icon drawn for taskbar/Alt-Tab sizes just isn't the
+    // same asset.
+    tray_icon_->SetIcon(wxIcon("#2", wxBITMAP_TYPE_ICO_RESOURCE), "HomRec");
     tray_icon_->Bind(wxEVT_TASKBAR_LEFT_DCLICK, [this](wxTaskBarIconEvent &) {
         RestoreFromTray();
     });
@@ -1015,7 +1087,7 @@ void HomRecMainFrame::DoStop() {
     // show again" earlier, or if there's nowhere to open (empty
     // output_folder).
     if (state_.show_summary && !summary_dont_show_again_ && !state_.output_folder.empty()) {
-        // BUGFIX: this used to pass lang_.Get("recording_saved") as *both*
+        // This used to pass lang_.Get("recording_saved") as *both*
         // the title and the headline, and just the bare output folder as
         // the body - so the popup never actually said anything about the
         // recording that just finished (no filename, duration, resolution,
@@ -1046,7 +1118,7 @@ void HomRecMainFrame::DoStop() {
             info, dont_show);
         summary_dont_show_again_ = dont_show;
 
-        // BUGFIX: checking "Don't show again" only ever set the in-memory
+        // Checking "Don't show again" only ever set the in-memory
         // summary_dont_show_again_ flag above, which suppresses the popup
         // for the rest of this run but is gone the moment the app is
         // relaunched - from the user's side that reads as the checkbox
@@ -1055,11 +1127,7 @@ void HomRecMainFrame::DoStop() {
         // "Show summary" in Settings would.
         if (dont_show) {
             state_.show_summary = false;
-            void *settings = hr_settings_create();
-            hr_settings_load(settings, "homrec_settings.json");
-            hr_settings_set_flag(settings, "show_summary", 0);
-            hr_settings_save(settings, "homrec_settings.json");
-            hr_settings_destroy(settings);
+            PersistSettings();
         }
 
         if (open_folder) OpenRecordingsFolder();
@@ -1184,53 +1252,29 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             if (overlays_host_) overlays_host_->Show(state_.show_overlays_panel);
             if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
             Layout();
-            // Persisted immediately (load-modify-save, matching the
-            // ID_THEME_DARK/LIGHT handlers below) rather than waiting for
-            // OnClose(), since minimize-to-tray vetoes the close event
-            // entirely - that was exactly why toggling a panel closed
-            // never stuck across a restart before.
-            {
-                void *s = hr_settings_create();
-                hr_settings_load(s, "homrec_settings.json");
-                hr_settings_set_flag(s, "show_overlays_panel", state_.show_overlays_panel ? 1 : 0);
-                hr_settings_save(s, "homrec_settings.json");
-                hr_settings_destroy(s);
-            }
+            // Persisted immediately (matching the ID_THEME_DARK/LIGHT
+            // handlers below) rather than waiting for OnClose(), since
+            // minimize-to-tray vetoes the close event entirely - that was
+            // exactly why toggling a panel closed never stuck across a
+            // restart before.
+            PersistSettings();
             break;
         case ID_VIEW_AUDIO_PANEL:
             state_.show_audio_panel = !state_.show_audio_panel;
             if (audio_panel_) audio_panel_->Show(state_.show_audio_panel);
             if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_AUDIO_PANEL, state_.show_audio_panel);
             Layout();
-            {
-                void *s = hr_settings_create();
-                hr_settings_load(s, "homrec_settings.json");
-                hr_settings_set_flag(s, "show_audio_panel", state_.show_audio_panel ? 1 : 0);
-                hr_settings_save(s, "homrec_settings.json");
-                hr_settings_destroy(s);
-            }
+            PersistSettings();
             break;
         case ID_VIEW_PC_ANALYTICS: ShowPcAnalyticsDialog(GetHWND(), wxGetInstance(), state_.output_folder); break;
         case ID_VIEW_LOG: ShowLogViewerDialog(GetHWND(), wxGetInstance()); break;
         case ID_THEME_DARK:
             state_.current_theme = "dark"; theme_ = GetBuiltinTheme("dark"); ApplyThemeColours();
-            {
-                void *s = hr_settings_create();
-                hr_settings_load(s, "homrec_settings.json");
-                hr_settings_set_theme(s, "dark");
-                hr_settings_save(s, "homrec_settings.json");
-                hr_settings_destroy(s);
-            }
+            PersistSettings();
             break;
         case ID_THEME_LIGHT:
             state_.current_theme = "light"; theme_ = GetBuiltinTheme("light"); ApplyThemeColours();
-            {
-                void *s = hr_settings_create();
-                hr_settings_load(s, "homrec_settings.json");
-                hr_settings_set_theme(s, "light");
-                hr_settings_save(s, "homrec_settings.json");
-                hr_settings_destroy(s);
-            }
+            PersistSettings();
             break;
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_) && rec_raw_) {
