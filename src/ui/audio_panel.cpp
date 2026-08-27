@@ -85,7 +85,17 @@ AudioPanel::AudioPanel(wxWindow *parent, AppState &state, RecordingController &r
     auto *header = new wxBoxSizer(wxHORIZONTAL);
     auto *title = new wxStaticText(this, wxID_ANY, "Audio Mixer");
     header->Add(title, 1, wxALIGN_CENTRE_VERTICAL);
-    close_btn_ = new ColorButton(this, ID_AUDIO_CLOSE, "\u2715");
+    // A bare narrow-string literal here ("\u2715") gets encoded by
+    // the compiler using the *execution* character set, then handed to
+    // wxString's implicit const char* constructor, which decodes it back
+    // using the current *locale's* codepage (wxConvLibc) - not UTF-8. On
+    // a non-Latin Windows locale (e.g. Cyrillic/CP1251) those two don't
+    // agree, so the multiplication-sign glyph came out as a couple of
+    // garbled Cyrillic-looking characters instead of a clean "X"/cross.
+    // wxString::FromUTF8(...) (see every other icon literal in
+    // main_frame.cpp) decodes explicitly as UTF-8 regardless of locale,
+    // which is what this one was missing.
+    close_btn_ = new ColorButton(this, ID_AUDIO_CLOSE, wxString::FromUTF8("\u2715"));
     close_btn_->SetMinSize(wxSize(24, 24));
     header->Add(close_btn_, 0);
 
