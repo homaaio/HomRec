@@ -32,9 +32,20 @@ bool Save(const AppState &state, const std::wstring &path);
 // Returns true if the file was found and read (even if some individual
 // lines were malformed and skipped); false if the file couldn't be
 // opened at all.
-bool Load(AppState &state, const std::wstring &path);
+//
+// `allow_sensitive_fields` gates custom_ffmpeg_args specifically: that
+// field is written verbatim onto ffmpeg's command line (see
+// hr_ffmpeg_runner.cpp's _build_cmdline()), so importing an .hrc from
+// somewhere other than a deliberate, interactive "Import Settings..." click
+// - e.g. the console's unattended "sethrc <path>" (console_window.cpp),
+// which can run from cfg/autoexec.cfg or cfg/config.cfg with no prompt at
+// all - should not be able to silently rewrite it. Defaults to true so the
+// existing manual Import Settings menu item (an explicit, interactive user
+// action) is unaffected; callers driving an unattended/scripted import
+// should pass false unless the "sec" fuse has been deliberately disabled.
+bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields = true);
 
-// BUGFIX: overlays (AppState::overlays) used to only ever be written out
+// Overlays (AppState::overlays) used to only ever be written out
 // via the two functions above, which only run from the manual "Export/
 // Import Settings (.hrc)..." menu items - so anything set up in the
 // Overlays panel silently vanished the moment the app was closed and
@@ -59,5 +70,22 @@ bool Load(AppState &state, const std::wstring &path);
 constexpr wchar_t kOverlaysAutosavePath[] = L"homrec_overlays.hrc";
 bool SaveOverlaysOnly(const std::vector<OverlayDef> &overlays, const std::wstring &path);
 bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &path);
+
+// Default location for the app's own auto-managed settings file, now that
+// it uses this same .hrc format instead of homrec_settings.json
+// (hr_settings.cpp) - see the migration/startup-order comment in
+// main_frame.cpp's HomRecMainFrame ctor for the full picture. Overridable
+// via Settings > Advanced > "Settings file path" (AppState::settings_path;
+// empty means "use this default").
+constexpr wchar_t kDefaultSettingsPath[] = L"homrec.hrc";
+
+// Resolves AppState::settings_path to an actual path: the custom path if
+// the user set one via Settings > Advanced, otherwise kDefaultSettingsPath.
+// Centralized here (implemented in hrc_config.cpp, where MultiByteToWideChar
+// is available) so main_frame.cpp's startup load and settings_dialog.cpp's
+// Save can't drift apart on what "the default" means, or on how the
+// stored UTF-8 std::string gets turned into the std::wstring path Load()/
+// Save() actually take.
+std::wstring ResolveSettingsPath(const AppState &state);
 
 } // namespace HrcConfig

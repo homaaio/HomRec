@@ -169,6 +169,16 @@ struct AppState {
     std::string mic_device_id;
     bool        first_launch = false;
 
+    // -- Phase 1 settings-storage migration (see commands.md / hrc_config.h)
+    // Empty = use HrcConfig::kDefaultSettingsPath ("homrec.hrc" next to the
+    // exe). Settings dialog's Advanced tab lets this be pointed elsewhere;
+    // whichever path is here is both read at startup and written on Save.
+    // std::string (not std::wstring) to match every other free-text field
+    // .hrc already serializes (capture_window_title, desktop_shortcut_path,
+    // etc.) - converted to std::wstring only at the point of use, same as
+    // those.
+    std::string settings_path;
+
     // Logical-name -> HWND registry, for looking up windows/controls by name.
     std::unordered_map<std::string, HWND> ui_registry;
 };
