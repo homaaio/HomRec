@@ -9,13 +9,10 @@
 #include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
 #include <string>
 
-extern "C" {
-    void *hr_settings_create();
-    void hr_settings_destroy(void *handle);
-    int hr_settings_load(void *handle, const char *path);
-    int hr_settings_save(const void *handle, const char *path);
-    void hr_settings_set_flag(void *h, const char *name, int v);
-}
+// Phase 1 (see commands.md): show_overlays_panel is now persisted via
+// HrcConfig::Save() below, same as everything else in AppState - the old
+// hr_settings_* JSON engine's fixed field whitelist is no longer touched
+// here at all.
 
 namespace {
 
@@ -47,7 +44,7 @@ std::string PickOpenFile(HWND parent, const wchar_t *filter, const wchar_t *titl
     ofn.lpstrFilter = filter;
     ofn.lpstrFile   = file_buf;
     ofn.nMaxFile    = MAX_PATH;
-    // BUGFIX: without OFN_NOCHANGEDIR, GetOpenFileNameW() silently changes
+    // Without OFN_NOCHANGEDIR, GetOpenFileNameW() silently changes
     // the process's current working directory to the folder the user just
     // picked a file from. Every settings read/write in this app uses a
     // path relative to the app root (see kSettingsPath in
@@ -112,12 +109,16 @@ std::wstring RowLabel(const OverlayDef &ov) {
     return row;
 }
 
-void PersistShowOverlaysPanelFlag(bool show) {
-    void *settings = hr_settings_create();
-    hr_settings_load(settings, "homrec_settings.json");
-    hr_settings_set_flag(settings, "show_overlays_panel", show ? 1 : 0);
-    hr_settings_save(settings, "homrec_settings.json");
-    hr_settings_destroy(settings);
+// Persists the *entire* current AppState (not just show_overlays_panel -
+// see the header comment above on hr_settings.cpp's old JSON whitelist
+// bug class) to whichever .hrc path is configured, mirroring the same
+// path resolution / default-location mirroring settings_dialog.cpp's
+// OnSave uses, so this auto-save and an explicit Settings > Save can't
+// disagree about where "the settings file" is.
+void PersistState(AppState &state) {
+    std::wstring target = HrcConfig::ResolveSettingsPath(state);
+    HrcConfig::Save(state, target);
+    if (target != HrcConfig::kDefaultSettingsPath) HrcConfig::Save(state, HrcConfig::kDefaultSettingsPath);
 }
 
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the "+" menu -- local to
@@ -241,7 +242,7 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
 void OverlaysDockPanel::Refresh() {
     if (!list_) return;
 
-    // BUGFIX: state_.overlays used to only ever be written out via the
+    // state_.overlays used to only ever be written out via the
     // manual "Export Settings (.hrc)..." menu item - anything set up here
     // (add/remove/rename/toggle/edit) silently vanished the moment the app
     // was closed and reopened. Refresh() runs after every single one of
@@ -327,7 +328,7 @@ void OverlaysDockPanel::AddImageOverlay(HWND parent, HINSTANCE hInst) {
 }
 
 void OverlaysDockPanel::AddWebcamOverlay(HWND parent, HINSTANCE hInst) {
-    // BUGFIX: previously asked the user to type a raw camera index from
+    // Previously asked the user to type a raw camera index from
     // memory ("Camera index (0 = first camera)"). Enumerate what's actually
     // attached instead and let them pick it by name.
     std::vector<HrWebcamDevice> devices = HrEnumerateWebcams();
@@ -502,7 +503,7 @@ void OverlaysDockPanel::EditParametersAt(size_t idx) {
 
 void OverlaysDockPanel::ClosePanel() {
     state_.show_overlays_panel = false;
-    PersistShowOverlaysPanelFlag(false);
+    PersistState(state_);
     SetVisible(false);
 }
 
