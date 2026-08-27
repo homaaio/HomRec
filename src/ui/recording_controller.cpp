@@ -169,7 +169,7 @@ void RecordingController::Initialize() {
 }
 
 std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
-    // BUGFIX: state_.custom_ffmpeg_args (the "Custom FFmpeg args" box on
+    // state_.custom_ffmpeg_args (the "Custom FFmpeg args" box on
     // the Video/Codec settings tab) was saved/loaded like every other
     // setting but never actually consulted here - recording always used
     // the auto-generated args below regardless of what a power user typed
@@ -184,7 +184,7 @@ std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
     wchar_t buf[512] = {};
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    // BUGFIX: state_.enc_preset (the "Encoder preset" dropdown, same tab)
+    // state_.enc_preset (the "Encoder preset" dropdown, same tab)
     // had the same problem - saved, reloaded, never read. Passed through
     // now; hr_build_codec_args() only actually uses it for the software
     // libx264 path (the hardware encoder branches use their own fixed
@@ -420,7 +420,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         reused_preview_pipeline = true;
     } else {
         if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
-        // BUGFIX: see JoinPendingPreviewTeardown()'s comment
+        // See JoinPendingPreviewTeardown()'s comment
         // (recording_controller.h) - without this, starting a recording
         // shortly after preview was torn down (e.g. "Disable live preview"
         // is on, or the user just closed "Position Overlays...") could
@@ -502,7 +502,7 @@ void RecordingController::Stop() {
     }
     hr_ff_stop_graceful(ffproc_);
 
-    // BUGFIX: this used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second
+    // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second
     // budget for ffmpeg to receive EOF on stdin, flush libx264's internal
     // frame buffer, and write the moov atom (mp4) / cues (mkv) that make the
     // file actually playable. 3 seconds is fine on an idle machine for a
@@ -537,7 +537,7 @@ void RecordingController::Stop() {
     // mic/system audio were captured into separate temp WAVs (unless
     // muted); mix them into one file, then remux that into the finished
     // video via hr_merge_av, the native fast path used when no custom
-    // bitrate/extra ffmpeg args are set. See the BUGFIX comments below for
+    // bitrate/extra ffmpeg args are set. See the notes below for
     // what happens to that intermediate WAV afterward.
     std::string base = NarrowFromWide(current_output_path_);
     size_t dot = base.find_last_of('.');
@@ -574,7 +574,7 @@ void RecordingController::Stop() {
         have_audio_file = true;
     }
 
-    // BUGFIX: this used to fire-and-forget hr_merge_av() and never look at
+    // This used to fire-and-forget hr_merge_av() and never look at
     // its result, and on a *successful* native merge deliberately left the
     // leftover audio_wav file sitting right next to the finished video
     // forever (per the old comment above, that was on purpose -- but it's
@@ -600,7 +600,7 @@ void RecordingController::Stop() {
                     audio_wav + "' next to the video.");
     }
 
-    // BUGFIX: "Also save audio as a separate MP3" (Settings) was persisted
+    // "Also save audio as a separate MP3" (Settings) was persisted
     // (see hrc_config.cpp) and shown in the dialog, but nothing anywhere
     // ever read state_.separate_audio_mp3 or produced an .mp3 -- the
     // checkbox did nothing at all. On a successful merge the WAV's contents
@@ -623,7 +623,7 @@ void RecordingController::Stop() {
         }
     }
 
-    // BUGFIX: hr_ctl_stop()'s return value is "elapsed seconds for final
+    // hr_ctl_stop()'s return value is "elapsed seconds for final
     // summary" per its own doc comment, but this used to be called as a
     // bare statement that threw the result away. hr_ctl_stop() also flips
     // the session to HR_STATE_IDLE, at which point elapsed_seconds()/
@@ -790,7 +790,7 @@ bool RecordingController::GetPreviewFrame(std::vector<uint8_t> &out, int &out_w,
 
 void RecordingController::EnsurePreview() {
     if (pipeline_ || state_.disable_preview) return; // already running, or user turned it off
-    // BUGFIX: see JoinPendingPreviewTeardown()'s comment (recording_controller.h) -
+    // See JoinPendingPreviewTeardown()'s comment (recording_controller.h) -
     // without this, creating a new pipeline right after TeardownPreview()
     // kicked off an async destroy of the old one could race its DXGI
     // duplication handle and silently fail to start.
@@ -812,7 +812,7 @@ void RecordingController::EnsurePreview() {
         pipeline_ = nullptr;
     }
     if (!pipeline_) {
-        // BUGFIX: this used to fail completely silently - no error, no
+        // This used to fail completely silently - no error, no
         // status change, nothing - so a stuck DXGI capture (dx_create()
         // returning null: RDP, a virtual display, a display mode that
         // just changed) just looked like a frozen preview forever, with
@@ -861,6 +861,11 @@ void RecordingController::TeardownPreview() {
     // lose track of one at shutdown. This only blocks the caller for the
     // (rare) remainder of the previous teardown, not a fresh one.
     if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
+    // Wrapped in try/catch for the same reason as the thread
+    // entry points in hr_pipeline.cpp/hr_audio.cpp (see their matching
+    // comments) - this lambda is a bare std::thread with nothing above it
+    // to catch an uncaught exception out of hr_pl_destroy(), which would
+    // otherwise be another std::terminate() path.
     preview_teardown_thread_ = std::thread([doomed]() {
         try {
             hr_pl_destroy(doomed);
@@ -870,6 +875,12 @@ void RecordingController::TeardownPreview() {
             HrLog::Error("Preview teardown thread: uncaught unknown exception");
         }
     });
+}
+
+void RecordingController::ResetPreviewRetryState() {
+    preview_retry_streak_ = 0;
+    preview_unavailable_ = false;
+    next_preview_retry_ = std::chrono::steady_clock::now();
 }
 
 void RecordingController::RefreshPreviewSettings() {
@@ -885,13 +896,31 @@ void RecordingController::RefreshPreviewSettings() {
 
     if (!applied_preview_capture_settings_valid_ || !(now == applied_preview_capture_settings_)) {
         TeardownPreview();
+        // Re-enabling preview (Settings > "Disable live preview"
+        // unchecked) used to just call EnsurePreview() and leave
+        // preview_retry_streak_/next_preview_retry_ exactly as they were.
+        // Those only ever get cleared on a *successful* EnsurePreview(), so
+        // if preview had already backed off before being disabled (DXGI
+        // hiccup, RDP, etc. - see EnsurePreview()'s comment), turning it
+        // back on inherited that same escalated backoff. If this explicit,
+        // user-initiated attempt then also failed just once (e.g. the
+        // display hadn't quite settled yet), SyncOverlays()'s automatic
+        // retry wouldn't fire again for up to kPreviewRetryMaxSeconds - the
+        // preview panel just sits on "Preview loading..." for a long
+        // stretch, looking stuck, until something unrelated (minimizing/
+        // restoring the window) calls EnsurePreview() directly again and
+        // happens to catch it after the real issue cleared. Always start
+        // an explicit re-enable with a clean slate instead, so a failure
+        // here retries at the fast base cadence, not wherever the old
+        // backoff had escalated to.
+        ResetPreviewRetryState();
         EnsurePreview();
         applied_preview_capture_settings_ = now;
         applied_preview_capture_settings_valid_ = true;
     }
     if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
 
-    // BUGFIX: picking a different microphone in Settings had no effect
+    // Picking a different microphone in Settings had no effect
     // until the app was restarted -- hr_audio_start() only ever ran once,
     // at Init(), with whatever mic_device_id was set at the time. Restart
     // the continuous capture stream (level meters, not an actual recording)
@@ -909,13 +938,33 @@ void RecordingController::RefreshPreviewSettings() {
 
 void RecordingController::SetPreviewVisible(bool visible) {
     if (state_.recording) return; // recording owns the pipeline until Stop()
-    if (visible) EnsurePreview();
-    else         TeardownPreview();
+    if (visible) {
+        // Used to call EnsurePreview() directly here and nothing else.
+        // If the preview had already backed off before being hidden (DXGI
+        // hiccup, RDP session, no monitor - see EnsurePreview()'s
+        // comment), TeardownPreview() below never touches
+        // preview_retry_streak_/next_preview_retry_, so this call
+        // inherited whatever escalated backoff was already in effect. If
+        // THIS attempt (e.g. right as the window un-hides, before the
+        // display's had a moment to settle) also failed, the panel could
+        // sit missing/on "Preview loading..." for up to
+        // kPreviewRetryMaxSeconds after a tray restore, since
+        // SyncOverlays()'s automatic retry wouldn't fire again until
+        // next_preview_retry_ - a stale schedule from before the restore,
+        // unrelated to when the window actually came back. Restoring
+        // visibility is exactly as deliberate/user-initiated as toggling
+        // the Settings checkbox RefreshPreviewSettings() already resets
+        // this for, so it gets the same clean slate.
+        ResetPreviewRetryState();
+        EnsurePreview();
+    } else {
+        TeardownPreview();
+    }
 }
 
 bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h,
                                                 bool first_call) {
-    // BUGFIX: this used to be gated on `first_call` too, so if the very
+    // This used to be gated on `first_call` too, so if the very
     // first attempt of an editing session failed to get a pipeline going
     // (EnsurePreview() briefly stuck right after e.g. a tray restore),
     // pipeline_ stayed null forever and every later Refresh - always

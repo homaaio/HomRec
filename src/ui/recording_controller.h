@@ -99,6 +99,11 @@ public:
     void EndSnapshotEditing();
 
     bool recording() const { return state_.recording; }
+    // Phase 1 (see commands.md): lets homrec.get_setting()/set_setting()
+    // (src/plugins/lua_api.cpp) read/write real AppState fields directly
+    // instead of the now-disconnected homrec_settings.json copy they used
+    // to round-trip through - see that file's L_settings_get/set for why.
+    AppState &state() { return state_; }
     bool paused() const { return state_.paused; }
     double elapsed_seconds() const;
     std::wstring elapsed_formatted() const;
@@ -173,6 +178,15 @@ private:
     // and box-filtering it down) only ever sees the *scaled* size, so a
     // lower quality setting genuinely saves work, not just visual detail.
     void ScaledPreviewSize(int &out_w, int &out_h) const;
+    // Clears the preview retry/backoff state (preview_retry_streak_,
+    // preview_unavailable_, next_preview_retry_) so the very next
+    // EnsurePreview() call gets a fresh attempt at the fast base cadence
+    // instead of wherever an earlier failure streak had already escalated
+    // backoff to. Shared by RefreshPreviewSettings() (a settings-driven
+    // re-enable) and SetPreviewVisible(true) (a visibility-driven one,
+    // e.g. restoring from the tray) - see SetPreviewVisible()'s comment
+    // for why the latter needed this too.
+    void ResetPreviewRetryState();
     // Settings > Resolution: src_w/src_h (native monitor or cropped window
     // rect) -> desired output size, honoring Percent vs Absolute mode. See
     // the .cpp for the no-upscale/even-dimensions rules.
@@ -196,7 +210,7 @@ private:
     // depends on goes away.
     std::thread preview_teardown_thread_;
 
-    // BUGFIX: DXGI Desktop Duplication only allows one active duplication
+    // DXGI Desktop Duplication only allows one active duplication
     // handle per output at a time - hr_pl_create() (via dx_create()) fails
     // and returns null if a previous pipeline's duplication handle hasn't
     // actually been released yet. TeardownPreview() destroys the old
@@ -241,7 +255,7 @@ private:
     std::string applied_mic_device_id_;
 
     // Snapshot of capture-affecting settings last used to (re)build the
-    // preview pipeline - see RefreshPreviewSettings()'s BUGFIX comment.
+    // Preview pipeline - see RefreshPreviewSettings()'s comment.
     // Anything NOT in this list (theme, hotkeys, output folder, etc.)
     // closing Settings should never touch the pipeline for.
     struct PreviewCaptureSettings {
