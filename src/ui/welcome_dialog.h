@@ -11,6 +11,7 @@
 #include "app_state.h"
 
 // `state` is read for its current defaults (output_folder/target_fps/
-// scale_factor) and written back (plus persisted to homrec_settings.json)
-// if the user fills in page 2 instead of checking "I understand".
+// scale_factor) and written back (plus persisted via HrcConfig::Save() -
+// see commands.md's Phase 1 settings-storage migration) if the user fills
+// in page 2 instead of checking "I understand".
 void ShowWelcomeDialog(HWND parent, HINSTANCE hInst, AppState &state);

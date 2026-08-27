@@ -1,27 +1,17 @@
 #include "welcome_dialog.h"
 #include "version.h"
 #include "win32_theme.h"
+#include "hrc_config.h"
 #include "../hr_system_integration.h"
 #include <string>
 #include <shlobj.h>
 
-extern "C" {
-    // Same persistence API settings_dialog.cpp uses - loading the existing
-    // file first (rather than starting from a blank settings_ object) so
-    // that finishing this wizard doesn't clobber fields it doesn't touch.
-    void *hr_settings_create();
-    void hr_settings_destroy(void *handle);
-    int hr_settings_load(void *handle, const char *path);
-    int hr_settings_save(const void *handle, const char *path);
-    void hr_settings_set_output_folder(void *h, const char *v);
-    void hr_settings_set_fps(void *h, int v);
-    void hr_settings_set_resolution_pct(void *h, int v);
-    void hr_settings_set_desktop_shortcut_path(void *h, const char *v);
-    void hr_settings_set_flag(void *h, const char *name, int v);
-}
+// Phase 1 (see commands.md): persistence now goes through HrcConfig::Save
+// (hrc_config.h), which writes the entire AppState in one shot - the old
+// hr_settings_* JSON engine's fixed field whitelist is no longer touched
+// from this wizard at all.
 
 namespace {
-constexpr char kSettingsPath[] = "homrec_settings.json";
 
 enum {
     IDC_CHANGELOG = 7001, IDC_GITHUB, IDC_WEBSITE, IDC_GETSTARTED,
@@ -88,15 +78,12 @@ void ApplyAndPersistSettings(WelcomeCtx *ctx) {
     int fpsSel = (int)SendMessageW(ctx->hFpsCombo, CB_GETCURSEL, 0, 0);
     if (fpsSel >= 0 && fpsSel < 4) ctx->state->target_fps = kFpsOpt[fpsSel];
 
-    void *settings = hr_settings_create();
-    hr_settings_load(settings, kSettingsPath); // ok if this is the very first run and it fails
-    hr_settings_set_output_folder(settings, ctx->state->output_folder.c_str());
-    hr_settings_set_fps(settings, ctx->state->target_fps);
-    hr_settings_set_resolution_pct(settings, (int)(ctx->state->scale_factor * 100.0 + 0.5));
-    hr_settings_save(settings, kSettingsPath);
-    hr_settings_destroy(settings);
+    // Phase 1 (see commands.md): persist the whole AppState via HrcConfig
+    // instead of the old JSON engine's fixed field whitelist - this first-
+    // run wizard is often the very first save an install ever makes, so
+    // it's what actually creates the initial homrec.hrc.
+    HrcConfig::Save(*ctx->state, HrcConfig::ResolveSettingsPath(*ctx->state));
 }
-
 void ApplyAndPersistSystemSettings(WelcomeCtx *ctx) {
     if (!ctx->state) return;
 
@@ -119,14 +106,7 @@ void ApplyAndPersistSystemSettings(WelcomeCtx *ctx) {
 
     ctx->state->minimize_to_tray = SendMessageW(ctx->hTrayChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
 
-    void *settings = hr_settings_create();
-    hr_settings_load(settings, kSettingsPath);
-    hr_settings_set_flag(settings, "desktop_shortcut_enabled", wantShortcut ? 1 : 0);
-    hr_settings_set_desktop_shortcut_path(settings, ctx->state->desktop_shortcut_path.c_str());
-    hr_settings_set_flag(settings, "autostart_enabled", wantAutostart ? 1 : 0);
-    hr_settings_set_flag(settings, "minimize_tray", ctx->state->minimize_to_tray ? 1 : 0);
-    hr_settings_save(settings, kSettingsPath);
-    hr_settings_destroy(settings);
+    HrcConfig::Save(*ctx->state, HrcConfig::ResolveSettingsPath(*ctx->state));
 }
 
 void SetPageVisibility(WelcomeCtx *ctx, HWND hwnd) {
