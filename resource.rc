@@ -5,3 +5,14 @@
 // same project folder (this file lives at the HomRec-main root now,
 // alongside icons/ and src/ - not in a separate subfolder).
 1 ICON "icons/main.ico"
+
+// Resource ID 2: the system tray icon (loaded as wxIcon("#2", ...) by
+// HomRecMainFrame::SetupTrayIcon()). Used to just reuse #1/main.ico -
+// meaning the tray icon was, pixel for pixel, the same image as the
+// window/taskbar icon, white outline and all. icons/tray.ico is a
+// separate, smaller asset meant to be legible at 16x16 (the actual size
+// Windows renders a tray icon at) rather than a full-size app icon
+// squeezed down. Placeholder art is included so the project still builds
+// (see icons/README.md) - swap it for real art whenever it's ready, no
+// code changes needed on either side.
+2 ICON "icons/tray.ico"
