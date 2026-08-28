@@ -2,6 +2,7 @@
 # src/homrec_native.py linguist-generated=true
 
 src/win_main.cpp linguist-generated=true
+tools/homrec_check.py linguist-generated=true # not generated, but its an unnecessary script for testing the program if im away on another PC where i cant run the .exe
 # src/homrec_app/mixins/** linguist-generated=true
 
 # src/homrec_app/core/system_utils.py linguist-generated=true
