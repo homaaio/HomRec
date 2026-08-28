@@ -829,6 +829,14 @@ private:
         }
 
         // -- Settings file path (Advanced tab) -------------------------
+        // Resolve the path this session's settings actually live at
+        // *before* overwriting settings_path with the field's new value -
+        // that's the file on disk that needs to become the new name, not
+        // just get a fresh copy written next to it. See
+        // HrcConfig::RenameSettingsFile()'s comment for why this used to
+        // look like the setting "didn't do anything": only the save
+        // *destination* changed, the old file itself was never touched.
+        std::wstring old_target = HrcConfig::ResolveSettingsPath(state_);
         state_.settings_path = settings_path_edit_->GetValue().ToUTF8().data();
 
         // Phase 1 settings-storage migration (see commands.md): one save
@@ -838,6 +846,7 @@ private:
         // caused previously (show_summary/show_overlays_panel silently
         // not persisting because someone forgot to add them to it).
         std::wstring target = HrcConfig::ResolveSettingsPath(state_);
+        HrcConfig::RenameSettingsFile(old_target, target);
         HrcConfig::Save(state_, target);
         if (target != HrcConfig::kDefaultSettingsPath) {
             // Keep a live mirror at the default location too, so
