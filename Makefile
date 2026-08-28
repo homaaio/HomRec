@@ -92,12 +92,12 @@ src/%.o: src/%.c
 resource.o: resource.rc
 	windres resource.rc -O coff -o resource.o
 
-hom: hom.exe
-
-hom.exe: tools/hom/hom.cpp
+hom: FORCE
 	$(CXX) $(HOM_CXXFLAGS) -o hom.exe tools/hom/hom.cpp $(HOM_LDLIBS)
+
+FORCE:
 
 clean:
 	rm -f $(OBJS) resource.o hr.exe hom.exe
 
-.PHONY: all clean hom
+.PHONY: all clean hom FORCE
