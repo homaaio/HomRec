@@ -1119,6 +1119,14 @@ struct Pipeline {
 #ifdef _WIN32
         if (com_inited) CoUninitialize();
 #endif
+        // Portable completion signal - see capture_thread_done's declaration
+        // (mirrors writer_thread_done above).
+        {
+            std::lock_guard<std::mutex> lk(finish_mtx);
+            capture_thread_done.store(true, std::memory_order_release);
+        }
+        finish_cv.notify_all();
+
         finish_thread();
     }
 };
@@ -1214,10 +1222,14 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     // do it ourselves below", not "it's gone forever".
     bool leak_pl = false;
 
-    // Wait for writer thread with timeout
     if (pl->writer_thread.joinable()) {
-        HANDLE hThread = reinterpret_cast<HANDLE>(pl->writer_thread.native_handle());
-        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+        bool finished;
+        {
+            std::unique_lock<std::mutex> lk(pl->finish_mtx);
+            finished = pl->finish_cv.wait_for(lk, std::chrono::milliseconds(1000),
+                [pl] { return pl->writer_thread_done.load(std::memory_order_acquire); });
+        }
+        if (finished) {
             pl->writer_thread.join();
         } else {
             // Force detach if stuck. handed_off must be set *immediately*,
@@ -1239,10 +1251,16 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
         }
     }
     
-    // Wait for capture thread with timeout
+    // Wait for capture thread with timeout - see the writer-thread branch
+    // above for why this uses finish_cv instead of native_handle().
     if (pl->capture_thread.joinable()) {
-        HANDLE hThread = reinterpret_cast<HANDLE>(pl->capture_thread.native_handle());
-        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+        bool finished;
+        {
+            std::unique_lock<std::mutex> lk(pl->finish_mtx);
+            finished = pl->finish_cv.wait_for(lk, std::chrono::milliseconds(1000),
+                [pl] { return pl->capture_thread_done.load(std::memory_order_acquire); });
+        }
+        if (finished) {
             pl->capture_thread.join();
         } else {
             // Force detach if stuck - see the writer-thread branch above
@@ -1415,8 +1433,13 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     // handed-off accounting as soon as this function actually gives up
     // instead of only once hr_pl_destroy() eventually runs.
     if (pl->capture_thread.joinable()) {
-        HANDLE hThread = reinterpret_cast<HANDLE>(pl->capture_thread.native_handle());
-        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+        bool finished;
+        {
+            std::unique_lock<std::mutex> lk(pl->finish_mtx);
+            finished = pl->finish_cv.wait_for(lk, std::chrono::milliseconds(1000),
+                [pl] { return pl->capture_thread_done.load(std::memory_order_acquire); });
+        }
+        if (finished) {
             pl->capture_thread.join();
         } else {
             HrLog::Error("Pipeline stop: capture thread did not stop in time - handing off "
@@ -1430,8 +1453,13 @@ HR_EXPORT void hr_pl_stop(void* handle) {
 
     // Wait for writer thread with timeout - same reasoning as above.
     if (pl->writer_thread.joinable()) {
-        HANDLE hThread = reinterpret_cast<HANDLE>(pl->writer_thread.native_handle());
-        if (WaitForSingleObject(hThread, 1000) == WAIT_OBJECT_0) {
+        bool finished;
+        {
+            std::unique_lock<std::mutex> lk(pl->finish_mtx);
+            finished = pl->finish_cv.wait_for(lk, std::chrono::milliseconds(1000),
+                [pl] { return pl->writer_thread_done.load(std::memory_order_acquire); });
+        }
+        if (finished) {
             pl->writer_thread.join();
         } else {
             HrLog::Error("Pipeline stop: writer thread did not stop in time - handing off "
