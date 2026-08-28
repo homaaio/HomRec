@@ -296,7 +296,6 @@ create/
 # HomRec files
 
 *.hrc
-*.hrp
 *.hrl
 recordings/
 create/
