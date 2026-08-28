@@ -460,6 +460,11 @@ struct Pipeline {
     std::atomic<bool> running{false};
     std::atomic<bool> paused{false};
 
+    std::mutex              finish_mtx;
+    std::condition_variable finish_cv;
+    std::atomic<bool>       writer_thread_done{false};
+    std::atomic<bool>       capture_thread_done{false};
+
 #ifdef _WIN32
     // Manual-reset event for overlapped writes to ffmpeg's stdin pipe - see
     // write_pipe()'s own comment for why this exists. Created lazily (only
@@ -637,6 +642,15 @@ struct Pipeline {
             HrLog::Error("Writer thread: uncaught unknown exception -- this pipeline is "
                          "stopping instead of crashing the app.");
         }
+
+        // Portable completion signal - see writer_thread_done's declaration
+        // for why this replaced a WaitForSingleObject-on-native_handle()
+        // check on the waiting side.
+        {
+            std::lock_guard<std::mutex> lk(finish_mtx);
+            writer_thread_done.store(true, std::memory_order_release);
+        }
+        finish_cv.notify_all();
 
         finish_thread();
     }
