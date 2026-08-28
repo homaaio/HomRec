@@ -24,6 +24,15 @@ Hom/
    immediately - there's no build step or index to regenerate for `hom`
    itself to find it (`index.json` is just for human browsing).
 
+Where the *source* for a packaged `.hrp` lives isn't load-bearing (`hom`
+only ever fetches the `.hrp` itself), but by convention this repo keeps
+it in a `Hom/plugins/<name>-src/` folder right next to the package it
+builds, e.g. [`Hom/plugins/bter-src/`](bter-src) → `Hom/plugins/bter.hrp`
+- so re-packaging after an edit is just re-zipping that folder's contents
+(flat, no wrapping subfolder - `LoadPluginArchive()` in `lua_engine.cpp`
+expects `plugin.json` directly at the archive root) and overwriting the
+`.hrp`.
+
 ## Publishing a hom update
 
 1. Bump the version and rebuild `hom.exe` (`make hom` at the repo root).

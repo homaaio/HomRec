@@ -6,6 +6,12 @@
             "file": "input-overlay.hrp",
             "description": "Keyboard / mouse / gamepad input overlay presets (WASD, QWERTY, mouse, gamepad).",
             "version": "1.0.0"
+        },
+        {
+            "name": "bter",
+            "file": "bter.hrp",
+            "description": "Grab-bag utility plugin (27 console commands - see commands.md section 19) - harmless, no real dependencies, mainly here as something real for `hom install bter` to fetch when testing the package manager itself.",
+            "version": "1.0.0"
         }
     ]
 }
