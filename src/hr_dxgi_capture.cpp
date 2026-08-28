@@ -93,7 +93,8 @@ struct DxCapCtx {
             if (hr != E_ACCESSDENIED &&
                 hr != static_cast<HRESULT>(DXGI_ERROR_ACCESS_DENIED) &&
                 hr != static_cast<HRESULT>(DXGI_ERROR_NOT_CURRENTLY_AVAILABLE) &&
-                hr != static_cast<HRESULT>(DXGI_ERROR_SESSION_DISCONNECTED))
+                hr != static_cast<HRESULT>(DXGI_ERROR_SESSION_DISCONNECTED) &&
+                hr != E_INVALIDARG)
                 break;
             Sleep(50);
         }
