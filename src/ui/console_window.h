@@ -12,7 +12,8 @@
 //   - The three-tier security fuse (sec/secui/secp) - core/UI/plugin
 //     lock state and the associated unlock-gating logic.
 //   - version, ping, echo, clear, env, alias, history, info, status, log,
-//     hide.
+//     hide, hom (forwards to hom.exe, the plugin package manager - see
+//     CmdHom()).
 //   - rm --system@homrec.files (clears recordings/plugins/logs/cache,
 //     gated by sec 0) and rm @homrec (schedules self-uninstall via a
 //     generated .bat, gated by sec 0 + interactive confirmation) - these
@@ -157,6 +158,15 @@ private:
     void CmdRepeat(const std::wstring &raw);
     void CmdBatch(const std::wstring &raw);
     void CmdLs(const std::wstring &raw);
+    // Forwards everything typed after "hom" to hom.exe (the standalone
+    // plugin package manager, tools/hom/hom.cpp) as a child process, with
+    // its working directory set to HomRec's own folder so "hom install x"
+    // writes to the same .\plugins\ HomRec itself reads from - same
+    // behaviour as running hom.exe from PowerShell/cmd in that folder,
+    // just without having to leave the app. hom.exe's own stdout/stderr
+    // are printed back verbatim (it already formats its own success/error
+    // text), not re-wrapped in PrintOk/PrintErr.
+    void CmdHom(const std::wstring &raw);
     void ScheduleSelfDelete(const std::wstring &base_dir);
 
     bool CoreUnlocked() const { return !sec_core_; }

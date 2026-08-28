@@ -13,6 +13,7 @@
 #include <vector>
 #include <cmath>
 #include <cwchar>
+#include <thread>       // reader thread in RunCapturedProcess() (CmdHom)
 #include <richedit.h>   // CHARFORMAT2W / EM_SETCHARFORMAT / EM_SETBKGNDCOLOR
 #include <uxtheme.h>    // SetWindowTheme (dark scrollbars, Win10 1809+)
 
@@ -109,6 +110,84 @@ bool DirExists(const std::wstring &p) {
 bool FileExists(const std::wstring &p) {
     DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Runs `cmdline` as a child process with working directory `cwd`,
+// capturing its combined stdout+stderr. Used by CmdHom() to run hom.exe
+// in-process instead of requiring a separate PowerShell/cmd window.
+//
+// The reader thread (draining the pipe while we wait, not after) exists
+// for the same reason hr_tools.cpp's run_cmd() has one: CreatePipe()'s
+// default buffer is small, and a child that writes more than that before
+// anyone reads it will block on WriteFile() forever if we only start
+// reading after WaitForSingleObject() returns - see that file's comment
+// for the full story.
+//
+// Returns false only if the process couldn't be started at all (missing
+// exe, etc.) - a timeout or non-zero exit still returns true, with
+// *out_code set to (DWORD)-2 for "killed after timing out" so the caller
+// can tell that apart from a real exit code.
+bool RunCapturedProcess(const std::wstring &cmdline, const std::wstring &cwd,
+                         DWORD timeout_ms, std::wstring *out_text, DWORD *out_code) {
+    SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE hRead = nullptr, hWrite = nullptr;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return false;
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.hStdOutput = hWrite;
+    si.hStdError  = hWrite;
+    si.dwFlags    = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> mut_cmd(cmdline.begin(), cmdline.end());
+    mut_cmd.push_back(L'\0');
+    if (!CreateProcessW(nullptr, mut_cmd.data(), nullptr, nullptr, TRUE,
+                         CREATE_NO_WINDOW, nullptr,
+                         cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+    CloseHandle(hWrite);
+
+    std::string raw;
+    std::thread reader([&]() {
+        char buf[4096];
+        DWORD br = 0;
+        while (ReadFile(hRead, buf, sizeof(buf) - 1, &br, nullptr) && br) {
+            buf[br] = '\0';
+            raw += buf;
+        }
+    });
+
+    DWORD wait = WaitForSingleObject(pi.hProcess, timeout_ms);
+    bool timed_out = (wait == WAIT_TIMEOUT);
+    if (timed_out) TerminateProcess(pi.hProcess, 1);
+
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // The process exiting (naturally, or via TerminateProcess just above)
+    // closes its inherited handle to the write end, which is what lets
+    // the reader thread's ReadFile loop see EOF and return.
+    reader.join();
+    CloseHandle(hRead);
+
+    if (!raw.empty()) {
+        int wl = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, nullptr, 0);
+        std::wstring w(wl > 0 ? wl - 1 : 0, L'\0');
+        if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, w.data(), wl);
+        *out_text = w;
+    } else {
+        *out_text = L"";
+    }
+    *out_code = timed_out ? (DWORD)-2 : code;
+    return true;
 }
 
 enum { IDC_CONSOLE_INPUT = 9001, IDC_CONSOLE_OUTPUT };
@@ -496,6 +575,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     else if (cmd == L"repeat") CmdRepeat(raw);
     else if (cmd == L"batch") CmdBatch(raw);
     else if (cmd == L"ls") CmdLs(raw);
+    else if (cmd == L"hom") CmdHom(raw);
     else if (cmd == L"rm") {
         // Route the two ported rm forms; anything else under rm (--ui,
         // @ts, bare rm_vid, etc.) isn't implemented yet.
@@ -954,6 +1034,65 @@ void ConsoleWindow::CmdLs(const std::wstring &raw) {
     }
     if (showAll) {
         PrintInfo(L"(windows/rules/ae objects aren't in this native port yet)");
+    }
+}
+
+// `hom` -- previously only usable from a separate PowerShell/cmd window
+// (see tools/hom/README.md); this runs the exact same hom.exe as a child
+// process so it works from the in-app console too, without duplicating
+// hom's own WinHTTP/install/remove logic here.
+void ConsoleWindow::CmdHom(const std::wstring &raw) {
+    // Strip the leading "hom" token itself; everything after it is
+    // forwarded to hom.exe verbatim ("hom install input-overlay" ->
+    // argv = {"install", "input-overlay"}, same as typing it in a shell).
+    std::wstring args;
+    size_t sp = raw.find(L' ');
+    if (sp != std::wstring::npos) args = Trim(raw.substr(sp + 1));
+
+    std::wstring base_dir = GetBaseDir();
+    std::wstring hom_path = base_dir + L"\\hom.exe";
+    if (!FileExists(hom_path)) {
+        PrintErr(L"hom: hom.exe not found in " + base_dir);
+        PrintInfo(L"  build it with `make hom` from the repo root, or copy hom.exe "
+                  L"from the Hom\\ folder, then place it next to hr.exe.");
+        return;
+    }
+
+    std::wstring cmdline = L"\"" + hom_path + L"\"" + (args.empty() ? L"" : L" " + args);
+
+    // hom does real network I/O for update/ping/install/remove (all of
+    // hom's own commands hit raw.githubusercontent.com), so give it much
+    // more room than the few-second timeouts used elsewhere in this file
+    // for local, non-networked work - 30s is generous for a single
+    // plugin download without leaving the console hung forever if the
+    // repo is unreachable.
+    std::wstring output;
+    DWORD code = 0;
+    // Run with cwd = base_dir so "hom install <name>" writes to
+    // <base_dir>\plugins\, the same folder HomRec's own plugin loader
+    // reads from - matching "run hom from the same folder as hr.exe" in
+    // tools/hom/README.md, regardless of what HomRec's own process cwd
+    // happens to be.
+    if (!RunCapturedProcess(cmdline, base_dir, 30000, &output, &code)) {
+        PrintErr(L"hom: couldn't start " + hom_path);
+        return;
+    }
+
+    // Print hom's own output back verbatim, one line at a time - hom
+    // already formats its own success/error text (see CmdInstall() etc.
+    // in tools/hom/hom.cpp), so this isn't re-decorated with this
+    // console's own PrintOk/PrintErr glyphs.
+    std::wistringstream oss(output);
+    std::wstring line;
+    while (std::getline(oss, line)) {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        if (!line.empty()) Print(line, kColText);
+    }
+
+    if (code == static_cast<DWORD>(-2)) {
+        PrintErr(L"hom: timed out after 30s and was killed (network hang?)");
+    } else if (code != 0) {
+        PrintWarn(L"hom: exited with code " + std::to_wstring(code));
     }
 }
 
