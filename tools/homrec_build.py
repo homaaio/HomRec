@@ -15,9 +15,11 @@ VERSION_H = os.path.join(REPO_ROOT, "src", "ui", "version.h")
 CHANGELOG = os.path.join(REPO_ROOT, "CHANGELOG.txt")
 DIST_DIR = os.path.join(REPO_ROOT, "dist")
 
-# Directories/patterns never bundled into any archive, regardless of preset.
-ALWAYS_SKIP_DIRS = {".git", "__pycache__", "dist", "build", "Build", ".github"}
-ALWAYS_SKIP_SUFFIXES = (".o", ".obj", ".pdb")
+ALWAYS_SKIP_DIRS = {".git", "__pycache__", "dist", "build", "Build", ".github", "logs"}
+ALWAYS_SKIP_SUFFIXES = (".o", ".obj", ".pdb", ".log")
+ALWAYS_SKIP_FILES = {
+    "homrec.hrc", "homrec_settings.json", "homrec_overlays.hrc",
+}
 
 
 def section(title):
@@ -219,13 +221,27 @@ BASE_DOCS = [
 BASE_DIRS = ["cfg", "plugins"]
 
 
+def discover_root_dlls():
+    """hr.exe is linked dynamically against wxWidgets + the image codec libs
+    it pulls in (see LDFLAGS in the Makefile - only libgcc/libstdc++/pthread
+    are -static, everything else, e.g. libpng/zlib/libwebp/wx*.dll, is a
+    runtime DLL that MinGW drops next to the exe). hom.exe only links
+    system DLLs (-lwinhttp -lshlwapi), so it needs none of these. Without
+    bundling these, hr.exe simply won't launch on a machine that doesn't
+    have the exact same MSYS2/MinGW install."""
+    return sorted(
+        f for f in os.listdir(REPO_ROOT)
+        if f.lower().endswith(".dll") and os.path.isfile(os.path.join(REPO_ROOT, f))
+    )
+
+
 def iter_tree(root_dir, arc_prefix=""):
     """Yield (abs_path, arcname) for every file under root_dir, skipping
     build artifacts and VCS metadata."""
     for dirpath, dirnames, filenames in os.walk(root_dir):
         dirnames[:] = [d for d in dirnames if d not in ALWAYS_SKIP_DIRS]
         for fname in filenames:
-            if fname.endswith(ALWAYS_SKIP_SUFFIXES):
+            if fname.endswith(ALWAYS_SKIP_SUFFIXES) or fname in ALWAYS_SKIP_FILES:
                 continue
             abs_path = os.path.join(dirpath, fname)
             rel = os.path.relpath(abs_path, root_dir)
@@ -239,6 +255,15 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
     if preset in ("full", "portable"):
         if hr_exe:
             files.append((hr_exe, "hr.exe"))
+            # hr.exe needs its runtime DLLs next to it to launch at all -
+            # see discover_root_dlls(). hom.exe doesn't need these.
+            dlls = discover_root_dlls()
+            if not dlls:
+                print("  WARNING: hr.exe включён, но рядом в корне репозитория не найдено ни "
+                      "одной .dll - если сборка динамическая (по умолчанию для этого Makefile), "
+                      "архив без них не запустится на чужой машине.")
+            for dll in dlls:
+                files.append((os.path.join(REPO_ROOT, dll), dll))
         if hom_exe:
             files.append((hom_exe, "hom.exe"))
         if preset == "full" and ffmpeg_path:
@@ -254,12 +279,12 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
 
     elif preset == "source":
         for entry in sorted(os.listdir(REPO_ROOT)):
-            if entry in ALWAYS_SKIP_DIRS or entry == "dist":
+            if entry in ALWAYS_SKIP_DIRS or entry == "dist" or entry in ALWAYS_SKIP_FILES:
                 continue
             abs_path = os.path.join(REPO_ROOT, entry)
             if os.path.isdir(abs_path):
                 files.extend(iter_tree(abs_path, arc_prefix=entry))
-            elif not abs_path.endswith((".exe",) + ALWAYS_SKIP_SUFFIXES):
+            elif not abs_path.endswith((".exe", ".dll") + ALWAYS_SKIP_SUFFIXES):
                 files.append((abs_path, entry))
 
     return files
