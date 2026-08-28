@@ -44,7 +44,12 @@ hom is already up to date (1.0.0).
 ```
 
 Run `hom` from the same folder as `hr.exe` - it reads/writes `./plugins/`
-relative to wherever you run it from, same as HomRec itself does.
+relative to wherever you run it from, same as HomRec itself does. You can
+also run it without leaving HomRec: the in-app developer console (see
+`commands.md`) has a `hom` built-in that forwards to this same `hom.exe`
+as a child process, with its working directory forced to HomRec's own
+folder - so `hom install <name>` behaves identically whether you type it
+in PowerShell/cmd or in the console.
 
 ## How it works
 
