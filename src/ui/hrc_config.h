@@ -88,4 +88,18 @@ constexpr wchar_t kDefaultSettingsPath[] = L"homrec.hrc";
 // Save() actually take.
 std::wstring ResolveSettingsPath(const AppState &state);
 
+// Physically moves the settings file from `old_path` to `new_path` on
+// disk (used by the Settings > Advanced > "Settings file (.hrc)" field -
+// see settings_dialog.cpp's OnSave()). Changing that text field used to
+// only change *where the next Save() writes to*, silently leaving the
+// old file sitting right where it was - so from the user's point of
+// view "renaming" the settings file appeared to do nothing at all (the
+// old file never went away, and its name on disk never changed).
+// Returns true if a move actually happened; false (a no-op, not an
+// error) when old_path == new_path, old_path doesn't exist yet (nothing
+// to move - e.g. very first save under a custom name), or new_path
+// already exists (never silently overwrite/clobber an existing file
+// just because two settings_path values happened to collide).
+bool RenameSettingsFile(const std::wstring &old_path, const std::wstring &new_path);
+
 } // namespace HrcConfig

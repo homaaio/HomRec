@@ -216,6 +216,19 @@ bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &pat
     return true;
 }
 
+bool RenameSettingsFile(const std::wstring &old_path, const std::wstring &new_path) {
+    if (old_path == new_path) return false;
+    DWORD oldAttrs = GetFileAttributesW(old_path.c_str());
+    if (oldAttrs == INVALID_FILE_ATTRIBUTES) return false; // nothing there yet to move
+    DWORD newAttrs = GetFileAttributesW(new_path.c_str());
+    if (newAttrs != INVALID_FILE_ATTRIBUTES) return false; // don't clobber an existing file
+    // No MOVEFILE_REPLACE_EXISTING (see the check above) and no COPY_ALLOWED
+    // needed - both old_path and new_path are always plain filenames/relative
+    // paths resolved next to the exe (see kDefaultSettingsPath / the Advanced
+    // tab's Browse dialog), i.e. the same volume, so a plain rename suffices.
+    return MoveFileW(old_path.c_str(), new_path.c_str()) != 0;
+}
+
 std::wstring ResolveSettingsPath(const AppState &state) {
     if (state.settings_path.empty()) return kDefaultSettingsPath;
     // settings_path is stored as UTF-8 (like every other free-text field
