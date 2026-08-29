@@ -1,0 +1,7 @@
+{
+    "id": "bter",
+    "name": "Bter",
+    "version": "1.0.0",
+    "author": "homaaio",
+    "entry": "entry.lua"
+}
