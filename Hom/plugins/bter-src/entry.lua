@@ -293,9 +293,20 @@ end
 
 -- --- the rest of the command list ---------------------------------------
 
-local function cmd_bter()
+local function cmd_bter(raw)
     local info = homrec.plugin_info()
     local author = (info.author and info.author ~= "") and (" by " .. info.author) or ""
+
+    -- "bter --version" / "bter -v": just the version line, nothing else -
+    -- lets scripts/cfg files grep a single line instead of parsing the
+    -- full about+command-list dump below.
+    local _, rest = split_first(raw or "")
+    rest = trim(rest)
+    if rest == "--version" or rest == "-v" then
+        homrec.print((info.name or "bter") .. " v" .. (info.version or "?") .. author)
+        return
+    end
+
     homrec.print((info.name or "bter") .. " v" .. (info.version or "?") .. author)
     homrec.print("\"i know what i'll do\" - a grab-bag utility plugin for testing hom / the console.")
     homrec.print("")
