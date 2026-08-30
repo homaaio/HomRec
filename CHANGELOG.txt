@@ -69,6 +69,9 @@ twice, reconciled to one copy; console_window.cpp/.h's "inwid" gate and
 the async-hom/redraw-batching fixes above are additive to each other
 and both are in this tree now). Kept here for the record.
 
+=== Added ===
+
+Settings -> General -> Add language (choice .hrl file) for more languages
 
 [Version 2.0] - 2026-08-08
 
