@@ -1278,6 +1278,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_) && rec_raw_) {
+                lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
+                ApplyLanguageText();
+
                 rec_raw_->RefreshPreviewSettings();
                 // Live preview is authoritative again the moment it's back
                 // on - drop the "Apply with preview off" screenshot (if any

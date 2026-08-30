@@ -144,6 +144,80 @@ std::vector<std::pair<std::string, std::string>> LanguageTable::ScanCustomLangua
     return result;
 }
 
+namespace {
+
+// Keeps only [a-z0-9_] (ASCII), lower-cased, so the result is always a
+// safe filename component and a safe .hrl "code" - matches what
+// ScanCustomLanguages()/Load() above expect (langsDir + "\" + code +
+// ".hrl", no path separators or exotic characters allowed through).
+std::string SanitizeLangCode(const std::string &raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (char c : raw) {
+        if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') out.push_back(c);
+    }
+    return out;
+}
+
+std::string DeriveCodeFromPath(const std::string &srcPath) {
+    // Strip directory.
+    std::string base = srcPath;
+    size_t slash = base.find_last_of("\\/");
+    if (slash != std::string::npos) base = base.substr(slash + 1);
+    // Strip extension.
+    size_t dot = base.find_last_of('.');
+    if (dot != std::string::npos) base = base.substr(0, dot);
+
+    std::string code = SanitizeLangCode(base);
+    if (code.empty() || code == "en") code = "custom";
+    return code;
+}
+
+} // namespace
+
+bool LanguageTable::ImportLanguageFile(const std::string &srcPath, const std::string &langsDir,
+                                        std::string &outCode, std::string &outDisplayName,
+                                        std::string &outError) {
+    // Validate first (before touching langsDir at all): file_type 1 ==
+    // HRL, same convention Load()/ScanCustomLanguages() use above. A
+    // negative return is "valid HRL, here's the JSON size"; anything
+    // else means wrong magic, not gzip, or unreadable.
+    int needed = hr_hrc_read(srcPath.c_str(), 1, nullptr, 0);
+    if (needed >= 0) {
+        outError = "Not a valid .hrl language file (wrong format or corrupted).";
+        return false;
+    }
+
+    std::vector<char> json(-needed);
+    if (hr_hrc_read(srcPath.c_str(), 1, json.data(), (int)json.size()) <= 0) {
+        outError = "Could not read the selected .hrl file.";
+        return false;
+    }
+
+    std::string code = DeriveCodeFromPath(srcPath);
+
+    // langsDir ("Assets\L") may not exist yet on a fresh install - this
+    // is the first thing that ever writes to it, everything else so far
+    // has only ever read from it.
+    CreateDirectoryA(langsDir.c_str(), nullptr);
+
+    std::string destPath = langsDir + "\\" + code + ".hrl";
+    if (!CopyFileA(srcPath.c_str(), destPath.c_str(), FALSE)) {
+        outError = "Failed to copy the language file into " + langsDir + ".";
+        return false;
+    }
+
+    outCode = code;
+    char nameBuf[256] = {};
+    if (hr_lang_get_value(json.data(), "lang_name", nameBuf, sizeof(nameBuf)) == 1 && nameBuf[0] != '\0') {
+        outDisplayName = nameBuf;
+    } else {
+        outDisplayName = code;
+    }
+    return true;
+}
+
 const std::string &LanguageTable::Get(const std::string &key) const {
     static const std::string kEmpty;
     auto it = strings_.find(key);
