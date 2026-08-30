@@ -125,6 +125,15 @@ plugins/
 ```
 Plugins get full filesystem and network access (`io`, `os`, and `homrec.http_get`/`http_post` are all available), plus hooks like `on_load`, `on_recording_start`, `on_recording_stop`, and a `homrec.*` API for toasts, colors, and cross-plugin events.
 
+**Installing a plugin** doesn't require any tooling: a packaged plugin
+is just a `.hrp` file (a renamed `.zip`) - download it and drop it into
+`plugins/` as-is, then restart HomRec. If you'd rather not fetch the
+file by hand, `hom` (the plugin manager in `tools/hom/`) does the same
+download-and-place step for you: `hom install <plugin-name>`. Either
+way ends with the exact same file sitting in `plugins/`. See
+[`plugins/READMEplugins.md`](plugins/READMEplugins.md) for the full
+walkthrough.
+
 ---
 
 ## Console startup scripts
