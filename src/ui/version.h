@@ -5,7 +5,7 @@
 // only one place left to bump on release.
 #pragma once
 
-#define HR_APP_VERSION      "2.0"
-#define HR_APP_VERSION_W    L"2.0"
+#define HR_APP_VERSION      "2.0.1"
+#define HR_APP_VERSION_W    L"2.0.1"
 
 #define HR_SINGLE_INSTANCE_MUTEX_NAME "HomRec_SingleInstance_150"
