@@ -3,9 +3,11 @@
 #include <windows.h>
 #include <vector>
 #include <sstream>
+#include <cstdio>
 
 extern "C" {
     int hr_hrc_read(const char *path, int expected_type, char *out_json, int out_len);
+    int hr_hrc_write(const char *path, const char *json_body, int file_type);
     int hr_lang_get_value(const char *json_body, const char *key, char *out, int out_len);
     int hr_lang_count_missing_keys(const char *json_body, const char *required_keys);
 }
@@ -81,6 +83,62 @@ std::string JoinRequiredKeysNullSeparated() {
     return blob;
 }
 
+bool ReadLanguageJson(const std::string &path, std::string &outJson, bool *outWasHrl = nullptr) {
+    int needed = hr_hrc_read(path.c_str(), 1, nullptr, 0);
+    if (needed < 0) {
+        std::vector<char> buf(-needed);
+        if (hr_hrc_read(path.c_str(), 1, buf.data(), (int)buf.size()) > 0) {
+            outJson = buf.data();
+            if (outWasHrl) *outWasHrl = true;
+            return true;
+        }
+    }
+
+    if (outWasHrl) *outWasHrl = false;
+
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::string raw;
+    char chunk[4096];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) raw.append(chunk, n);
+    fclose(f);
+
+    size_t i = 0;
+    if (raw.size() >= 3 && (unsigned char)raw[0] == 0xEF &&
+        (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF) i = 3;
+    while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\r' || raw[i] == '\n')) ++i;
+
+    if (i >= raw.size() || raw[i] != '{') return false;
+    outJson = raw;
+    return true;
+}
+
+// CreateDirectoryA only ever creates the *last* path component - it
+// fails outright if any parent is missing too, which "Assets" always
+// was on a fresh checkout (nothing before ImportLanguageFile below ever
+// had a reason to create it; every other reader of "Assets\L" only
+// ever read from it, never created it). Walks `dir` component by
+// component, creating each one, so "Assets\L" succeeds even when
+// neither "Assets" nor "Assets\L" exist yet.
+bool EnsureDirectoryRecursive(const std::string &dir) {
+    std::string partial;
+    size_t pos = 0;
+    while (pos < dir.size()) {
+        size_t next = dir.find_first_of("\\/", pos);
+        std::string component = (next == std::string::npos) ? dir.substr(pos) : dir.substr(pos, next - pos);
+        partial += component;
+        if (!partial.empty()) {
+            if (!CreateDirectoryA(partial.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+                return false;
+        }
+        if (next == std::string::npos) break;
+        partial += dir[next];
+        pos = next + 1;
+    }
+    return true;
+}
+
 } // namespace
 
 LanguageTable LanguageTable::Load(const std::string &code, const std::string &langsDir) {
@@ -90,24 +148,20 @@ LanguageTable LanguageTable::Load(const std::string &code, const std::string &la
 
     std::string path = langsDir + "\\" + code + ".hrl";
 
-    // file_type 1 == HRL per hr_hrc_write's convention.
-    int needed = hr_hrc_read(path.c_str(), 1, nullptr, 0);
-    if (needed >= 0) return table; // not found / bad magic -> English fallback
-
-    std::vector<char> json(-needed);
-    if (hr_hrc_read(path.c_str(), 1, json.data(), (int)json.size()) <= 0) return table;
+    std::string json;
+    if (!ReadLanguageJson(path, json)) return table; // not found / unreadable -> English fallback
 
     // Overlay every required key found in the file on top of the English
     // defaults, exactly like `result = dict(LANGUAGES["en"]); result.update(data)`.
     for (const auto &key : kLangRequiredKeys) {
         char buf[512] = {};
-        if (hr_lang_get_value(json.data(), key.c_str(), buf, sizeof(buf)) == 1 && buf[0] != '\0') {
+        if (hr_lang_get_value(json.c_str(), key.c_str(), buf, sizeof(buf)) == 1 && buf[0] != '\0') {
             table.strings_[key] = buf;
         }
     }
 
     std::string required_blob = JoinRequiredKeysNullSeparated();
-    int missing = hr_lang_count_missing_keys(json.data(), required_blob.c_str());
+    int missing = hr_lang_count_missing_keys(json.c_str(), required_blob.c_str());
     if (missing > 0) {
         std::ostringstream msg;
         msg << "Language " << code << ": " << missing << " missing keys\n";
@@ -127,15 +181,12 @@ std::vector<std::pair<std::string, std::string>> LanguageTable::ScanCustomLangua
         std::string code = fname.substr(0, fname.size() - 4); // strip ".hrl"
         std::string full = langsDir + "\\" + fname;
 
-        int needed = hr_hrc_read(full.c_str(), 1, nullptr, 0);
+        std::string json;
         std::string display_name = code;
-        if (needed < 0) {
-            std::vector<char> json(-needed);
-            if (hr_hrc_read(full.c_str(), 1, json.data(), (int)json.size()) > 0) {
-                char buf[256] = {};
-                if (hr_lang_get_value(json.data(), "lang_name", buf, sizeof(buf)) == 1 && buf[0] != '\0') {
-                    display_name = buf;
-                }
+        if (ReadLanguageJson(full, json)) {
+            char buf[256] = {};
+            if (hr_lang_get_value(json.c_str(), "lang_name", buf, sizeof(buf)) == 1 && buf[0] != '\0') {
+                display_name = buf;
             }
         }
         result.emplace_back(code, display_name);
@@ -179,38 +230,48 @@ std::string DeriveCodeFromPath(const std::string &srcPath) {
 bool LanguageTable::ImportLanguageFile(const std::string &srcPath, const std::string &langsDir,
                                         std::string &outCode, std::string &outDisplayName,
                                         std::string &outError) {
-    // Validate first (before touching langsDir at all): file_type 1 ==
-    // HRL, same convention Load()/ScanCustomLanguages() use above. A
-    // negative return is "valid HRL, here's the JSON size"; anything
-    // else means wrong magic, not gzip, or unreadable.
-    int needed = hr_hrc_read(srcPath.c_str(), 1, nullptr, 0);
-    if (needed >= 0) {
-        outError = "Not a valid .hrl language file (wrong format or corrupted).";
-        return false;
-    }
-
-    std::vector<char> json(-needed);
-    if (hr_hrc_read(srcPath.c_str(), 1, json.data(), (int)json.size()) <= 0) {
-        outError = "Could not read the selected .hrl file.";
+    std::string json;
+    bool wasHrl = false;
+    if (!ReadLanguageJson(srcPath, json, &wasHrl)) {
+        outError = "Not a valid language file - expected either a HomRec .hrl "
+                   "export, or a plain JSON file with the language's keys.";
         return false;
     }
 
     std::string code = DeriveCodeFromPath(srcPath);
 
-    // langsDir ("Assets\L") may not exist yet on a fresh install - this
-    // is the first thing that ever writes to it, everything else so far
-    // has only ever read from it.
-    CreateDirectoryA(langsDir.c_str(), nullptr);
+    // langsDir ("Assets\L") may not exist yet on a fresh install, and
+    // neither may "Assets" itself - this is the first thing that ever
+    // writes there, everything else so far has only ever read from it.
+    if (!EnsureDirectoryRecursive(langsDir)) {
+        outError = "Couldn't create the \"" + langsDir + "\" folder. Check that "
+                    "HomRec has permission to create folders next to hr.exe, or "
+                    "create it by hand and try again.";
+        return false;
+    }
 
     std::string destPath = langsDir + "\\" + code + ".hrl";
-    if (!CopyFileA(srcPath.c_str(), destPath.c_str(), FALSE)) {
-        outError = "Failed to copy the language file into " + langsDir + ".";
+    bool wrote;
+    if (wasHrl) {
+        // Already in the on-disk .hrl format - copy the bytes as-is.
+        wrote = CopyFileA(srcPath.c_str(), destPath.c_str(), FALSE) != 0;
+    } else {
+        // Plain JSON someone typed by hand - wrap it into a proper .hrl
+        // right now (file_type 1, same convention Load() expects), so
+        // what ends up on disk looks exactly like something the app
+        // itself wrote, and any future re-scan/re-import of this exact
+        // file sees a normal gzip HRL rather than needing this same
+        // plain-JSON fallback again.
+        wrote = hr_hrc_write(destPath.c_str(), json.c_str(), 1) != 0;
+    }
+    if (!wrote) {
+        outError = "Failed to write the language file into " + langsDir + ".";
         return false;
     }
 
     outCode = code;
     char nameBuf[256] = {};
-    if (hr_lang_get_value(json.data(), "lang_name", nameBuf, sizeof(nameBuf)) == 1 && nameBuf[0] != '\0') {
+    if (hr_lang_get_value(json.c_str(), "lang_name", nameBuf, sizeof(nameBuf)) == 1 && nameBuf[0] != '\0') {
         outDisplayName = nameBuf;
     } else {
         outDisplayName = code;
