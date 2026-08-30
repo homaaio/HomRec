@@ -1,5 +1,75 @@
 welcome to changelog :D
 
+[Version 2.0.1] - 2026-08-30
+
+Bug fixes and hardening, no feature changes.
+
+=== Fixed ===
+
+- Pipeline shutdown ("did not stop in time" in the log on basically every
+  close/Stop(), plus preview-off-then-Start-Recording intermittently
+  failing with "capture pipeline didn't start" until the app was
+  restarted): hr_pl_destroy()/hr_pl_stop() detected whether the writer/
+  capture threads had actually finished via
+  WaitForSingleObject(HANDLE(std::thread::native_handle()), 1000) - only
+  correct if std::thread is backed by real Win32 threads. This project
+  links -lpthread (the Makefile's posix-threads MinGW model), where
+  native_handle() returns a pthread_t rather than a HANDLE, so that check
+  never worked: every shutdown "timed out" and detached even though the
+  real thread had already exited, which meant finish_thread()'s actual
+  cleanup (dx_destroy() releasing the DXGI desktop-duplication interface,
+  freeing the Pipeline) silently never ran. Since DXGI only allows one
+  duplication interface per output per process, that leaked interface is
+  what made a later capture pipeline in the same process fail to start.
+  Replaced with a portable std::condition_variable-based completion
+  signal each thread sets right before returning (hr_pipeline.cpp).
+- hom.exe had no crash handler at all - an unhandled exception surfaced
+  only as a bare NT status code (e.g. "hom: exited with code
+  3221225477"/0xC0000005) with no way to tell where or why. Added a
+  minidump-writing SEH filter (writes to crashes\ next to hom.exe, same
+  folder hr.exe already uses) so a future crash is diagnosable instead of
+  silent (tools/hom/hom.cpp).
+- hom.exe was linked dynamically against libstdc++/libgcc, unlike hr.exe
+  - on a machine without the matching MinGW runtime DLLs in PATH,
+  hom.exe could fail to run at all. Now built with
+  -static-libgcc -static-libstdc++, same as hr.exe (Makefile).
+- `hom install`/`hom remove` didn't validate the plugin name at all - a
+  crafted name containing "..", a path separator, or a drive letter
+  could resolve outside .\plugins\. Rejected up front now
+  (tools/hom/hom.cpp).
+- The in-app console's `hom` command ran hom.exe synchronously on the
+  same thread the whole app's UI is pumped on, so any slow/stalled
+  network request (hom does real HTTPS installs/updates) froze all of
+  HomRec, not just the console, for up to its own 30s timeout. hom.exe
+  now runs on a background thread; the console prints its output once
+  it's done (src/ui/console_window.cpp/.h).
+- Console output printed one line at a time with no redraw batching, so
+  a command producing many lines at once (a `hom` run with a lot of
+  output, in particular) was visibly choppy. Batched with
+  WM_SETREDRAW around the whole burst (src/ui/console_window.cpp).
+- Audio Mixer volume sliders changed the mic/system-audio gain as one
+  flat multiplier for the whole ~10ms buffer chunk being processed when
+  the slider moved, heard as a choppy, stepped volume change rather than
+  a smooth one. Now ramped linearly across the samples in that chunk
+  instead - same per-sample cost as before (hr_audio.cpp), no extra CPU
+  to speak of.
+
+=== Changed ===
+
+- Version bumped to 2.0.1 (src/ui/version.h).
+
+---
+
+The block below was originally a second, separate patch set sent over
+afterward as a zip (not authored in the same session as the fixes
+above) - it has now been merged into this same tree by hand, on top of
+the fixes above (both independently touched hr_pipeline.cpp and
+console_window.cpp/.h - hr_pipeline.cpp's overlap was the same fix
+twice, reconciled to one copy; console_window.cpp/.h's "inwid" gate and
+the async-hom/redraw-batching fixes above are additive to each other
+and both are in this tree now). Kept here for the record.
+
+
 [Version 2.0] - 2026-08-08
 
 This release rewrites the app from the ground up: HomRec 1.7.2 was a
