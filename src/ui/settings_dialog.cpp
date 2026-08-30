@@ -25,6 +25,7 @@
 // tab is saved for real now, and the on-page notes below reflect that.
 #include "settings_dialog.h"
 #include "themed_widgets.h"
+#include "language.h"
 #include "../hr_mic_enum.h"
 #include "../hr_system_integration.h"
 #include "../hr_pc_log.h"
@@ -75,8 +76,13 @@ namespace {
 enum {
     IDC_QUALITY = 3001, IDC_BROWSE = 3002, IDC_SAVE = 3003, IDC_CANCEL = 3004,
     IDC_SEC_RESET = 3006, IDC_SYS_SHORTCUT_BROWSE = 3007,
-    IDC_SETTINGS_PATH_BROWSE = 3008,
+    IDC_SETTINGS_PATH_BROWSE = 3008, IDC_LANG_ADD = 3009,
 };
+
+// Same folder LanguageTable::Load()/ScanCustomLanguages() read from
+// (main_frame.cpp's ctor uses this literal too) - kept as one constant
+// here since this dialog is now also the thing that writes into it.
+const char *const kLangsDir = "Assets\\L";
 
 // Old tab indices ShowSettingsDialogTab() callers still pass in (see
 // settings_dialog.h) mapped onto this version's actual notebook page
@@ -203,6 +209,7 @@ public:
         Bind(wxEVT_BUTTON, &SettingsDialog::OnResetDefaults, this, IDC_SEC_RESET);
         Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowseShortcutFolder, this, IDC_SYS_SHORTCUT_BROWSE);
         Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowseSettingsPath, this, IDC_SETTINGS_PATH_BROWSE);
+        Bind(wxEVT_BUTTON, &SettingsDialog::OnAddLanguage, this, IDC_LANG_ADD);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_CANCEL); }, IDC_CANCEL);
     }
 
@@ -334,10 +341,78 @@ private:
         folderRow->Add(browseBtn, 0);
         pageRoot->Add(folderRow, 0, wxEXPAND | wxALL, 16);
 
+        auto *langLbl = new wxStaticText(page, wxID_ANY, "Language:");
+        langLbl->SetForegroundColour(text);
+        langLbl->SetBackgroundColour(bg);
+        pageRoot->Add(langLbl, 0, wxLEFT | wxRIGHT | wxTOP, 16);
+
+        auto *langRow = new wxBoxSizer(wxHORIZONTAL);
+        lang_choice_ = new wxChoice(page, wxID_ANY);
+        RefreshLanguageChoices();
+        langRow->Add(lang_choice_, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+        auto *langAddBtn = new ColorButton(page, IDC_LANG_ADD, "Add Language...");
+        langAddBtn->SetMinSize(wxSize(120, 26));
+        langAddBtn->SetColours(surface, text);
+        langRow->Add(langAddBtn, 0);
+        pageRoot->Add(langRow, 0, wxEXPAND | wxALL, 16);
+
         countdown_chk_ = AddCheck(page, pageRoot, text, bg, "Countdown (3s)", state_.countdown_enabled);
         timestamp_chk_ = AddCheck(page, pageRoot, text, bg, "Timestamp", state_.timestamp_enabled);
         cursor_chk_    = AddCheck(page, pageRoot, text, bg, "Cursor", state_.cursor_enabled);
         notify_chk_    = AddCheck(page, pageRoot, text, bg, "Show summary", state_.show_summary);
+    }
+
+    // Repopulates lang_choice_/lang_codes_ from the built-in "English"
+    // entry plus whatever *.hrl files ScanCustomLanguages() finds in
+    // kLangsDir right now - called on dialog build, and again after
+    // OnAddLanguage() successfully imports a new one so it shows up
+    // without having to close and reopen Settings. Tries to keep
+    // whichever code was selected before (falling back to
+    // state_.current_language the first time, then to "en" if that
+    // code isn't in the list at all, e.g. it was deleted from disk).
+    void RefreshLanguageChoices() {
+        std::string keep = lang_codes_.empty() ? state_.current_language
+                            : (lang_choice_->GetSelection() >= 0 &&
+                               (size_t)lang_choice_->GetSelection() < lang_codes_.size())
+                                  ? lang_codes_[(size_t)lang_choice_->GetSelection()]
+                                  : state_.current_language;
+
+        lang_choice_->Clear();
+        lang_codes_.clear();
+
+        lang_codes_.push_back("en");
+        lang_choice_->Append("English");
+
+        for (const auto &entry : LanguageTable::ScanCustomLanguages(kLangsDir)) {
+            lang_codes_.push_back(entry.first);
+            lang_choice_->Append(wxString::FromUTF8(entry.second));
+        }
+
+        auto it = std::find(lang_codes_.begin(), lang_codes_.end(), keep);
+        int sel = (it != lang_codes_.end()) ? (int)std::distance(lang_codes_.begin(), it) : 0;
+        lang_choice_->SetSelection(sel);
+    }
+
+    void OnAddLanguage(wxCommandEvent &) {
+        wxFileDialog dlg(this, "Select a HomRec language file", "", "",
+                          "HomRec Language (*.hrl)|*.hrl|All files (*.*)|*.*",
+                          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dlg.ShowModal() != wxID_OK) return;
+
+        std::string code, displayName, error;
+        if (!LanguageTable::ImportLanguageFile(dlg.GetPath().ToUTF8().data(), kLangsDir,
+                                                code, displayName, error)) {
+            wxMessageBox(wxString::FromUTF8(error), "Add Language", wxOK | wxICON_ERROR, this);
+            return;
+        }
+
+        RefreshLanguageChoices();
+        auto it = std::find(lang_codes_.begin(), lang_codes_.end(), code);
+        if (it != lang_codes_.end())
+            lang_choice_->SetSelection((int)std::distance(lang_codes_.begin(), it));
+
+        wxMessageBox("Added \"" + wxString::FromUTF8(displayName) + "\" - select Save to apply it.",
+                     "Add Language", wxOK | wxICON_INFORMATION, this);
     }
 
     // -- Video & Codec ------------------------------------------------------
@@ -750,6 +825,12 @@ private:
         state_.cursor_enabled = cursor_chk_->GetValue();
         state_.show_summary = notify_chk_->GetValue();
 
+        {
+            int sel = lang_choice_->GetSelection();
+            state_.current_language = (sel >= 0 && (size_t)sel < lang_codes_.size())
+                                           ? lang_codes_[(size_t)sel] : "en";
+        }
+
         // -- Video & Codec -------------------------------------------------
         // These used to be "in-memory only for now" per
         // this comment's own former text - hr_settings.cpp's JSON whitelist
@@ -873,6 +954,8 @@ private:
     wxSpinCtrl *resolution_w_spin_ = nullptr, *resolution_h_spin_ = nullptr;
     wxTextCtrl *folder_edit_ = nullptr;
     wxCheckBox *countdown_chk_ = nullptr, *timestamp_chk_ = nullptr, *cursor_chk_ = nullptr, *notify_chk_ = nullptr;
+    wxChoice *lang_choice_ = nullptr;
+    std::vector<std::string> lang_codes_; // parallel to lang_choice_'s items
 
     // Video & Codec
     wxComboBox *codec_combo_ = nullptr, *hwaccel_combo_ = nullptr, *preset_combo_ = nullptr,
