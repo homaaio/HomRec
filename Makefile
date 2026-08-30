@@ -12,8 +12,8 @@ LUA_LDFLAGS ?= -LC:/lua54/lib
 # point (wWinMainCRTStartup/wmainCRTStartup) that a plain main() doesn't
 # provide, and the link fails. So hom gets its own flag variables instead
 # of reusing CXXFLAGS/LDFLAGS above.
-HOM_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE
-HOM_LDLIBS   := -lwinhttp -lshlwapi
+HOM_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++
+HOM_LDLIBS   := -lwinhttp -lshlwapi -ldbghelp
 
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 \
             -Isrc -IC:/msys64/mingw64/lib/wx/include/msw-unicode-3.2 \

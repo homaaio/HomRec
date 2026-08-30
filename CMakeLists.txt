@@ -124,8 +124,10 @@ add_executable(hom tools/hom/hom.cpp)
 
 target_compile_features(hom PRIVATE cxx_std_17)
 
-target_compile_options(hom PRIVATE -O2 -Wall -Wextra)
+target_compile_options(hom PRIVATE -O2 -Wall -Wextra -static-libgcc -static-libstdc++)
 
 target_compile_definitions(hom PRIVATE UNICODE _UNICODE)
 
-target_link_libraries(hom PRIVATE winhttp shlwapi)
+target_link_options(hom PRIVATE -static-libgcc -static-libstdc++)
+
+target_link_libraries(hom PRIVATE winhttp shlwapi dbghelp)
