@@ -307,3 +307,4 @@ plugins/
 *.svg
 tools/*.hrl
 tools/*.json
+crashes/*.dmp
