@@ -14,6 +14,16 @@
 //   - version, ping, echo, clear, env, alias, history, info, status, log,
 //     hide, hom (forwards to hom.exe, the plugin package manager - see
 //     CmdHom()).
+//   - The "inwid" confirmation gate: a handful of commands that reach
+//     the network and rewrite files (hom update/remove), delete things
+//     (rm), or persist a settings change (any "<setting> <value>", not
+//     a bare query) are refused unless prefixed with "inwid" ("I Know
+//     What I'm Doing") - "disable_preview true" is blocked, "inwid
+//     disable_preview true" runs it. See CommandNeedsInwid() in the
+//     .cpp. This is intentionally separate from sec/secui/secp below -
+//     inwid is a per-line "yes I meant that", not a session-wide unlock.
+//     A cfg file (RunCfgFile()) is exempt from this gate: it's local
+//     content the person already put on disk, not a one-off typed line.
 //   - rm --system@homrec.files (clears recordings/plugins/logs/cache,
 //     gated by sec 0) and rm @homrec (schedules self-uninstall via a
 //     generated .bat, gated by sec 0 + interactive confirmation) - these
@@ -35,6 +45,8 @@
 #include <vector>
 #include <unordered_map>
 #include <set>
+#include <thread>
+#include <mutex>
 #include "app_state.h"
 
 class RecordingController;
@@ -83,7 +95,18 @@ private:
     // last opened.
     void RefreshPrompt();
 
-    void RunCommand(const std::wstring &raw);
+    // Parses and dispatches one line as a command, same as if it were
+    // typed directly at the prompt. `confirmed` is true only on the
+    // recursive call RunCommand() makes to itself after stripping a
+    // leading "inwid" prefix (see the "inwid gate" block at the top of
+    // the .cpp) and on every call coming from RunCfgFile() below (a cfg
+    // file already sitting on disk in this install is trusted content,
+    // the same way .bashrc doesn't re-ask for sudo on every line) -
+    // ordinary typed input always starts as false. When false, a command
+    // CommandNeedsInwid() flags as gated (hom update/remove, rm, or any
+    // settings *assignment* - see TryRunSetting()) is refused instead of
+    // run, with a message telling the person to prefix it with "inwid".
+    void RunCommand(const std::wstring &raw, bool confirmed = false);
     // Fallback tried when `cmd` didn't match a built-in command or a
     // plugin-registered command (homrec.register_command()): treats the
     // line as "<setting> [=] <value>" (or a bare "<setting>" to query),
@@ -93,8 +116,13 @@ private:
     // untouched, caller falls through to "Unknown command") if `cmd`
     // isn't a known setting name either. Prints its own PrintOk/PrintWarn/
     // PrintInfo output when it returns true, same convention every other
-    // Cmd* handler follows.
-    bool TryRunSetting(const std::wstring &cmd, const std::wstring &raw);
+    // Cmd* handler follows. A *query* (bare "<setting>", no value) never
+    // needs `confirmed`; *setting* a value does, same "inwid" gate
+    // RunCommand() applies to hom/rm - see CommandNeedsInwid() in the
+    // .cpp. Known limitation: this gate only covers built-in
+    // (HrSettingsRegistry) settings, not plugin-registered ones reached
+    // through DispatchSetting() below - see commands.md.
+    bool TryRunSetting(const std::wstring &cmd, const std::wstring &raw, bool confirmed);
     // color is a COLORREF; only meaningful when the output control is a
     // RichEdit (rich_edit_ == true) -- see the color constants and the
     // OPT comment above OnCreate()'s control creation in the .cpp for why.
@@ -167,6 +195,36 @@ private:
     // are printed back verbatim (it already formats its own success/error
     // text), not re-wrapped in PrintOk/PrintErr.
     void CmdHom(const std::wstring &raw);
+    // hom.exe does real network I/O (up to CmdHom()'s own 30s timeout) -
+    // running RunCapturedProcess() straight from CmdHom() (i.e. on this
+    // window's own message-loop thread, the same one wx/win32 pumps the
+    // whole app's UI on - see the .cpp for why there's no separate thread
+    // for this window) used to freeze all of HomRec, not just the
+    // console, for as long as hom.exe's network request took. Fixed by
+    // running the actual process on hom_thread_ and posting kWmHomDone
+    // back to this window once it's done (HandleMessage() picks that up
+    // and prints the result) - RunCommand() itself now just kicks the
+    // thread off and returns immediately. hom_result_mtx_ guards the one
+    // in-flight HomResult handed from that thread back to the UI thread;
+    // hom_thread_ is joined (near-instant, since kWmHomDone only fires
+    // after the thread's already done its work and is about to return)
+    // before starting a new one and in the destructor, so a hom command
+    // and app shutdown/exit can never race a still-detached thread.
+    static constexpr UINT kWmHomDone = WM_APP + 1;
+    struct HomResult {
+        std::wstring hom_path;   // for the "couldn't start" message
+        std::wstring output;
+        DWORD        code = 0;
+        bool         started = false; // false -> RunCapturedProcess() itself failed
+    };
+    void JoinPendingHomThread();
+    std::thread hom_thread_;
+    std::mutex  hom_result_mtx_;
+    HomResult   hom_result_;
+    // Prints the standard "blocked, prefix with inwid" refusal for a
+    // gated command - see CommandNeedsInwid() in the .cpp and the class
+    // comment above.
+    void RefuseNeedsInwid(const std::wstring &raw);
     void ScheduleSelfDelete(const std::wstring &base_dir);
 
     bool CoreUnlocked() const { return !sec_core_; }

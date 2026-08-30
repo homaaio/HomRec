@@ -74,6 +74,34 @@ std::wstring ExtractSettingValue(const std::wstring &raw) {
     return Trim(raw.substr(i));
 }
 
+// Should this resolved (post-alias-expansion) command require the
+// "inwid" confirmation prefix before RunCommand() actually runs it? See
+// the class comment at the top of console_window.h for the concept.
+// `cmd` is the already-lowercased first token; `raw` is the full line
+// (needed for "hom", where it's the *subcommand* - update/remove vs.
+// install - that decides this, not "hom" itself).
+//
+// Deliberately NOT gated: version/ping/echo/clear/env/alias/history/
+// info/status/log/hide/sec*/hrc/clip/repeat/batch/ls, "hom install"/
+// "hom --version"/"hom ping"/bare "hom", and querying a setting (no
+// value). None of those write anything persistent or delete anything.
+bool CommandNeedsInwid(const std::wstring &cmd, const std::wstring &raw) {
+    if (cmd == L"rm") return true;
+    if (cmd == L"hom") {
+        std::wistringstream iss(raw);
+        std::wstring first, sub;
+        iss >> first >> sub;
+        std::transform(sub.begin(), sub.end(), sub.begin(), ::towlower);
+        // "update" re-downloads and swaps hom.exe itself; "remove"/
+        // "uninstall" delete a plugin. "install" (including the
+        // "update-hrp" special-case) and everything else (--version,
+        // ping, bare help) stay ungated - that's what a package manager
+        // is *for*, it shouldn't need a second confirmation every time.
+        return sub == L"update" || sub == L"remove" || sub == L"uninstall";
+    }
+    return false;
+}
+
 std::wstring GetBaseDir() {
     wchar_t path[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -258,6 +286,7 @@ ConsoleWindow::ConsoleWindow(AppState &state, RecordingController *rec, HWND mai
     : state_(state), rec_(rec), main_window_(main_window), plugins_(plugins) {}
 
 ConsoleWindow::~ConsoleWindow() {
+    JoinPendingHomThread();
     if (hwnd_) DestroyWindow(hwnd_);
 }
 
@@ -301,6 +330,43 @@ LRESULT ConsoleWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             SetBkColor(hdc, RGB(0, 0, 0));
             SetTextColor(hdc, kColOk);
             return (LRESULT)blackBrush;
+        }
+        case kWmHomDone: {
+            // Posted by CmdHom()'s background thread right before it
+            // returns - see hom_thread_'s declaration. The thread has
+            // already finished all its work by the time this message is
+            // even queued, so hom_thread_.join() below is effectively
+            // instant, never a real wait.
+            HomResult res;
+            { std::lock_guard<std::mutex> lk(hom_result_mtx_); res = hom_result_; }
+            if (hom_thread_.joinable()) hom_thread_.join();
+
+            if (!res.started) {
+                PrintErr(L"hom: couldn't start " + res.hom_path);
+                return 0;
+            }
+            // Batch the redraw across every output line instead of one
+            // reflow per SendMessageW(EM_REPLACESEL) - `hom install
+            // update-hrp` (or any command producing many lines) was
+            // visibly choppy printing them one at a time, each forcing
+            // its own RichEdit layout pass.
+            if (rich_edit_) SendMessageW(output_, WM_SETREDRAW, FALSE, 0);
+            std::wistringstream oss(res.output);
+            std::wstring line;
+            while (std::getline(oss, line)) {
+                if (!line.empty() && line.back() == L'\r') line.pop_back();
+                if (!line.empty()) Print(line, kColText);
+            }
+            if (res.code == static_cast<DWORD>(-2)) {
+                PrintErr(L"hom: timed out after 30s and was killed (network hang?)");
+            } else if (res.code != 0) {
+                PrintWarn(L"hom: exited with code " + std::to_wstring(res.code));
+            }
+            if (rich_edit_) {
+                SendMessageW(output_, WM_SETREDRAW, TRUE, 0);
+                InvalidateRect(output_, nullptr, FALSE);
+            }
+            return 0;
         }
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -542,7 +608,7 @@ void ConsoleWindow::Print(const std::wstring &line, COLORREF color) {
     SendMessageW(output_, EM_REPLACESEL, FALSE, (LPARAM)toAppend.c_str());
 }
 
-void ConsoleWindow::RunCommand(const std::wstring &raw) {
+void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
     std::wistringstream iss(raw);
     std::wstring cmd;
     iss >> cmd;
@@ -553,6 +619,40 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     // Alias expansion (simple one-level substitution of the command word).
     auto aliasIt = aliases_.find(cmd);
     if (aliasIt != aliases_.end()) cmd = aliasIt->second;
+
+    // "inwid <command...>" - the confirmation prefix (see the class
+    // comment in console_window.h). Only actually consumed as a prefix
+    // when what follows is something CommandNeedsInwid() (or a settings
+    // assignment) would otherwise refuse - "inwid status" and "inwid
+    // settings ..." fall straight through to the `cmd == "inwid"` case
+    // below unchanged, which is whatever a loaded plugin registered
+    // under the literal name "inwid" (bter's own admin prefix, see
+    // Hom/plugins/bter-src/entry.lua) - this keeps that pre-existing
+    // usage working exactly as before.
+    if (!confirmed && cmd == L"inwid") {
+        size_t sp = raw.find(L' ');
+        std::wstring rest = (sp == std::wstring::npos) ? L"" : Trim(raw.substr(sp + 1));
+        if (!rest.empty()) {
+            std::wistringstream riss(rest);
+            std::wstring rcmd;
+            riss >> rcmd;
+            std::transform(rcmd.begin(), rcmd.end(), rcmd.begin(), ::towlower);
+            auto rAliasIt = aliases_.find(rcmd);
+            if (rAliasIt != aliases_.end()) rcmd = rAliasIt->second;
+
+            bool settingAssignment = !ExtractSettingValue(rest).empty() &&
+                                      HrSettingsRegistry::Find(NarrowFromWide(rcmd)) != nullptr;
+
+            if (CommandNeedsInwid(rcmd, rest) || settingAssignment) {
+                RunCommand(rest, /*confirmed=*/true);
+                return;
+            }
+        }
+        // Bare "inwid", "inwid status", "inwid settings ...", or
+        // anything else that isn't a gated command - fall through below
+        // and dispatch the *original* line starting with "inwid" as an
+        // ordinary command word.
+    }
 
     if (cmd == L"version") CmdVersion(raw);
     else if (cmd == L"ver") CmdVer(raw);
@@ -575,8 +675,11 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     else if (cmd == L"repeat") CmdRepeat(raw);
     else if (cmd == L"batch") CmdBatch(raw);
     else if (cmd == L"ls") CmdLs(raw);
-    else if (cmd == L"hom") CmdHom(raw);
-    else if (cmd == L"rm") {
+    else if (cmd == L"hom") {
+        if (!confirmed && CommandNeedsInwid(cmd, raw)) { RefuseNeedsInwid(raw); return; }
+        CmdHom(raw);
+    } else if (cmd == L"rm") {
+        if (!confirmed && CommandNeedsInwid(cmd, raw)) { RefuseNeedsInwid(raw); return; }
         // Route the two ported rm forms; anything else under rm (--ui,
         // @ts, bare rm_vid, etc.) isn't implemented yet.
         if (raw.find(L"--system@homrec.files") != std::wstring::npos) CmdRmSystemFiles(raw);
@@ -588,7 +691,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
         std::vector<std::string> plugin_cmd_lines;
         if (plugins_ && plugins_->DispatchCommand(NarrowFromWide(cmd), NarrowFromWide(raw), plugin_cmd_lines)) {
             for (const auto &line : plugin_cmd_lines) PrintInfo(WideFromNarrow(line));
-        } else if (TryRunSetting(cmd, raw)) {
+        } else if (TryRunSetting(cmd, raw, confirmed)) {
             // Handled - TryRunSetting() already printed its own output.
         } else {
             PrintWarn(L"Unknown command: " + cmd);
@@ -596,7 +699,11 @@ void ConsoleWindow::RunCommand(const std::wstring &raw) {
     }
 }
 
-bool ConsoleWindow::TryRunSetting(const std::wstring &cmd, const std::wstring &raw) {
+void ConsoleWindow::RefuseNeedsInwid(const std::wstring &raw) {
+    PrintWarn(L"blocked - needs the \"inwid\" confirmation prefix (I Know What I'm Doing). Run: inwid " + raw);
+}
+
+bool ConsoleWindow::TryRunSetting(const std::wstring &cmd, const std::wstring &raw, bool confirmed) {
     std::string key = NarrowFromWide(cmd);
     std::wstring wvalue = ExtractSettingValue(raw);
     std::string value = NarrowFromWide(wvalue);
@@ -615,7 +722,14 @@ bool ConsoleWindow::TryRunSetting(const std::wstring &cmd, const std::wstring &r
         if (value.empty()) {
             // Bare "<setting>", no value - query, same convention env/
             // alias/sec/secui/secp already use for "show current state".
+            // Never gated - reading a value back isn't the kind of thing
+            // "inwid" needs to be involved in.
             PrintInfo(WideFromNarrow(def->key) + L" = " + WideFromNarrow(def->get(state_)));
+            return true;
+        }
+        if (!confirmed) {
+            PrintWarn(WideFromNarrow(def->key) +
+                      L": blocked - setting a value needs the \"inwid\" confirmation prefix. Run: inwid " + raw);
             return true;
         }
         if (!def->set(state_, value)) {
@@ -634,7 +748,11 @@ bool ConsoleWindow::TryRunSetting(const std::wstring &cmd, const std::wstring &r
     }
 
     // Not a built-in setting either - last stop before "Unknown command":
-    // a plugin's own homrec.register_setting().
+    // a plugin's own homrec.register_setting(). NOTE: not currently
+    // gated by "inwid" - DispatchSetting() doesn't expose a way to check
+    // "is this actually a known plugin setting" separately from doing
+    // the query/set itself, so gating it here would mean guessing at a
+    // key that might not even exist. Known limitation - see commands.md.
     if (plugins_) {
         std::vector<std::string> lines;
         if (plugins_->DispatchSetting(key, value, lines)) {
@@ -689,7 +807,15 @@ int ConsoleWindow::RunCfgFile(const std::wstring &name) {
         // so people can use whichever they're already used to.
         if (trimmed.compare(0, 2, L"//") == 0 || trimmed[0] == L'#') continue;
 
-        RunCommand(trimmed);
+        // confirmed=true: a cfg file already sitting on disk in this
+        // install (autoexec/config/startrec, hand-placed by whoever
+        // owns this HomRec folder) is trusted local content, not a
+        // one-off interactively-typed line - same reasoning .bashrc
+        // doesn't re-prompt for sudo on every line it runs. Without
+        // this, "disable_preview = true" (or any other setting) in an
+        // existing config.cfg would silently stop applying the moment
+        // the "inwid" gate shipped.
+        RunCommand(trimmed, /*confirmed=*/true);
         ++ran;
     }
 
@@ -1041,6 +1167,15 @@ void ConsoleWindow::CmdLs(const std::wstring &raw) {
 // (see tools/hom/README.md); this runs the exact same hom.exe as a child
 // process so it works from the in-app console too, without duplicating
 // hom's own WinHTTP/install/remove logic here.
+//
+// Runs on hom_thread_, not this function's own (UI) thread - see
+// hom_thread_'s declaration in console_window.h for why a synchronous
+// RunCapturedProcess() call here used to freeze the whole app for up to
+// 30s on any slow/stalled network request, not just the console window.
+void ConsoleWindow::JoinPendingHomThread() {
+    if (hom_thread_.joinable()) hom_thread_.join();
+}
+
 void ConsoleWindow::CmdHom(const std::wstring &raw) {
     // Strip the leading "hom" token itself; everything after it is
     // forwarded to hom.exe verbatim ("hom install input-overlay" ->
@@ -1060,40 +1195,43 @@ void ConsoleWindow::CmdHom(const std::wstring &raw) {
 
     std::wstring cmdline = L"\"" + hom_path + L"\"" + (args.empty() ? L"" : L" " + args);
 
-    // hom does real network I/O for update/ping/install/remove (all of
-    // hom's own commands hit raw.githubusercontent.com), so give it much
-    // more room than the few-second timeouts used elsewhere in this file
-    // for local, non-networked work - 30s is generous for a single
-    // plugin download without leaving the console hung forever if the
-    // repo is unreachable.
-    std::wstring output;
-    DWORD code = 0;
-    // Run with cwd = base_dir so "hom install <name>" writes to
-    // <base_dir>\plugins\, the same folder HomRec's own plugin loader
-    // reads from - matching "run hom from the same folder as hr.exe" in
-    // tools/hom/README.md, regardless of what HomRec's own process cwd
-    // happens to be.
-    if (!RunCapturedProcess(cmdline, base_dir, 30000, &output, &code)) {
-        PrintErr(L"hom: couldn't start " + hom_path);
-        return;
-    }
+    // A previous hom_thread_ is only still joinable() here if its
+    // kWmHomDone message hasn't been pumped yet (it's already finished
+    // running by the time it posts that message) - join is a formality,
+    // not a real wait, and guards against starting a second thread while
+    // one is (nominally) still attached.
+    JoinPendingHomThread();
 
-    // Print hom's own output back verbatim, one line at a time - hom
-    // already formats its own success/error text (see CmdInstall() etc.
-    // in tools/hom/hom.cpp), so this isn't re-decorated with this
-    // console's own PrintOk/PrintErr glyphs.
-    std::wistringstream oss(output);
-    std::wstring line;
-    while (std::getline(oss, line)) {
-        if (!line.empty() && line.back() == L'\r') line.pop_back();
-        if (!line.empty()) Print(line, kColText);
-    }
+    PrintInfo(L"hom: running " + (args.empty() ? std::wstring(L"hom") : L"hom " + args) + L"...");
 
-    if (code == static_cast<DWORD>(-2)) {
-        PrintErr(L"hom: timed out after 30s and was killed (network hang?)");
-    } else if (code != 0) {
-        PrintWarn(L"hom: exited with code " + std::to_wstring(code));
-    }
+    HWND self_hwnd = hwnd_;
+    hom_thread_ = std::thread([this, self_hwnd, cmdline, base_dir, hom_path]() {
+        // hom does real network I/O for update/ping/install/remove (all
+        // of hom's own commands hit raw.githubusercontent.com), so give
+        // it much more room than the few-second timeouts used elsewhere
+        // in this file for local, non-networked work - 30s is generous
+        // for a single plugin download without hanging forever if the
+        // repo is unreachable.
+        //
+        // Run with cwd = base_dir so "hom install <name>" writes to
+        // <base_dir>\plugins\, the same folder HomRec's own plugin
+        // loader reads from - matching "run hom from the same folder as
+        // hr.exe" in tools/hom/README.md, regardless of what HomRec's
+        // own process cwd happens to be.
+        HomResult res;
+        res.hom_path = hom_path;
+        res.started  = RunCapturedProcess(cmdline, base_dir, 30000, &res.output, &res.code);
+        {
+            std::lock_guard<std::mutex> lk(hom_result_mtx_);
+            hom_result_ = std::move(res);
+        }
+        // self_hwnd, not hwnd_ - hwnd_ itself is only ever touched on the
+        // UI thread, but this background thread reading it directly
+        // right as the window might be closing/destroyed would still be
+        // a race. The value was captured up front instead, before
+        // JoinPendingHomThread() in the destructor can run.
+        if (self_hwnd) PostMessageW(self_hwnd, kWmHomDone, 0, 0);
+    });
 }
 
 void ConsoleWindow::CmdSec(const std::wstring &raw) {
@@ -1128,6 +1266,14 @@ void ConsoleWindow::CmdRmSystemFiles(const std::wstring &raw) {
     if (perm != L"core") { PrintWarn(L"rm --system@homrec.files: requires --permission=core"); return; }
     if (!CoreUnlocked()) {
         PrintWarn(L"rm --system@homrec.files: blocked - core protection is ON. Run `sec 0` first.");
+        return;
+    }
+    // -r required on top of --permission=core + sec 0: this deletes
+    // recordings/plugins/logs/cache wholesale, so (like `rm -r`) it
+    // needs an explicit "yes, recursively" rather than firing off of
+    // --type={...} alone.
+    if (!ConsoleParse::ParseFlags(raw).count(L"-r")) {
+        PrintWarn(L"rm --system@homrec.files: requires -r to confirm (e.g. `inwid rm --system@homrec.files --permission=core --type={...} -r`).");
         return;
     }
 
@@ -1181,6 +1327,15 @@ void ConsoleWindow::CmdRmSelfApp(const std::wstring &raw) {
         return;
     }
     auto flags = ConsoleParse::ParseFlags(raw);
+    // -r required on top of sec 0: this uninstalls HomRec entirely, so
+    // (like `rm -r`) it needs an explicit "yes, recursively", same as
+    // rm --system@homrec.files above - -y/-q alone (see below) only
+    // skips the interactive MessageBox, it doesn't mean "and yes I want
+    // to delete everything" on its own.
+    if (!flags.count(L"-r")) {
+        PrintWarn(L"rm @homrec: requires -r to confirm (e.g. `inwid rm @homrec -r -y`).");
+        return;
+    }
     bool quiet = flags.count(L"-q") || flags.count(L"-y");
 
     if (!quiet) {
