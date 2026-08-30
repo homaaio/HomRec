@@ -356,6 +356,13 @@ struct AudioState {
     std::atomic<float>  sys_vol{1.0f};
     std::atomic<bool>   mic_mute{false};
     std::atomic<bool>   sys_mute{false};
+    // Gain actually applied to the last sample of the previous chunk -
+    // each worker's own running state, touched only by that one thread
+    // (unlike mic_vol/sys_vol above, which the UI thread writes and this
+    // thread reads) - see mic_worker()/sys_worker()'s ramp comment for
+    // why this exists.
+    float mic_vol_smooth = 1.0f;
+    float sys_vol_smooth = 1.0f;
 };
 
 static AudioState* g_state = nullptr;
@@ -380,13 +387,34 @@ static void mic_worker(AudioState* st)
         st->mic_stream.read(tmp);
 
         if (!tmp.empty()) {
-            float vol  = st->mic_vol.load();
+            float target_vol = st->mic_vol.load();
             bool  mute = st->mic_mute.load();
             if (mute) {
                 memset(tmp.data(), 0, tmp.size() * 2);
-            } else if (vol != 1.0f) {
+                st->mic_vol_smooth = target_vol; // don't ramp *into* a stale value on unmute
+            } else if (target_vol != st->mic_vol_smooth) {
+                // Ramp linearly from the gain applied to the previous
+                // chunk's last sample up to wherever the slider is *now*,
+                // one step per sample, instead of one flat multiply for
+                // the whole chunk. A slider drag lands its new value
+                // between one ~10ms audio chunk and the next (SLEEP_MS
+                // above) - applying it as a single scalar for the entire
+                // next chunk is an audible step, heard as choppy/
+                // zippering volume changes rather than a smooth fade.
+                // Same per-sample multiply-and-clamp cost as the flat
+                // version below, just an incrementing gain instead of a
+                // constant one - no extra passes, no extra CPU to speak of.
+                float start_vol = st->mic_vol_smooth;
+                size_t n = tmp.size();
+                for (size_t i = 0; i < n; ++i) {
+                    float g = start_vol + (target_vol - start_vol) * ((float)(i + 1) / (float)n);
+                    int v = (int)(tmp[i] * g);
+                    tmp[i] = (int16_t)std::max(-32768, std::min(32767, v));
+                }
+                st->mic_vol_smooth = target_vol;
+            } else if (target_vol != 1.0f) {
                 for (auto& s : tmp) {
-                    int v = (int)(s * vol);
+                    int v = (int)(s * target_vol);
                     s = (int16_t)std::max(-32768, std::min(32767, v));
                 }
             }
@@ -424,13 +452,24 @@ static void sys_worker(AudioState* st)
         st->sys_stream.read(tmp);
 
         if (!tmp.empty()) {
-            float vol  = st->sys_vol.load();
+            float target_vol = st->sys_vol.load();
             bool  mute = st->sys_mute.load();
             if (mute) {
                 memset(tmp.data(), 0, tmp.size() * 2);
-            } else if (vol != 1.0f) {
+                st->sys_vol_smooth = target_vol; // don't ramp *into* a stale value on unmute
+            } else if (target_vol != st->sys_vol_smooth) {
+                // See the matching comment in mic_worker() above.
+                float start_vol = st->sys_vol_smooth;
+                size_t n = tmp.size();
+                for (size_t i = 0; i < n; ++i) {
+                    float g = start_vol + (target_vol - start_vol) * ((float)(i + 1) / (float)n);
+                    int v = (int)(tmp[i] * g);
+                    tmp[i] = (int16_t)std::max(-32768, std::min(32767, v));
+                }
+                st->sys_vol_smooth = target_vol;
+            } else if (target_vol != 1.0f) {
                 for (auto& s : tmp) {
-                    int v = (int)(s * vol);
+                    int v = (int)(s * target_vol);
                     s = (int16_t)std::max(-32768, std::min(32767, v));
                 }
             }
