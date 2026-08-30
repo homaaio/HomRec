@@ -9,18 +9,31 @@
  *
  * Commands:
  *   hom --version            Print the hom version and exit.
- *   hom update                Check the repo's Hom/ folder for a newer
+ *   hom update [-f|--force]    Check the repo's Hom/ folder for a newer
  *                              hom release and, if found, download and
- *                              swap itself in place.
- *   hom install <name>        Download Hom/plugins/<name>.hrp from the
+ *                              swap itself in place. -f/--force re-fetches
+ *                              and reinstalls even if already up to date.
+ *   hom install <name> [-y] [-f|--force]
+ *                              Download Hom/plugins/<name>.hrp from the
  *                              repo into ./plugins/<name>.hrp. HomRec's
  *                              own plugin loader (see lua_engine.h /
  *                              LoadPluginArchive()) is what actually
  *                              extracts and loads a .hrp - hom's job
- *                              ends at "the file is on disk".
- *   hom remove <name>         Delete ./plugins/<name>.hrp plus its
+ *                              ends at "the file is on disk". If the
+ *                              download would grow disk usage by more
+ *                              than kDiskSpaceWarnBytes, asks for
+ *                              confirmation first (Y/n) unless -y or
+ *                              -f/--force is given.
+ *   hom remove <name> -r      Delete ./plugins/<name>.hrp plus its
  *                              extracted copy at ./plugins/.installed/<name>/
  *                              (if lua_engine.cpp already extracted it).
+ *                              -r is required - it's the "yes, actually
+ *                              delete it" confirmation for a destructive
+ *                              command, same idea as `rm -r`. <name> is
+ *                              rejected outright if it contains "..", a
+ *                              path separator, or a drive letter, so this
+ *                              can never resolve to anything outside
+ *                              .\plugins\ - see IsSafePluginName() below.
  *
  * Where plugins come from
  * ------------------------
@@ -40,7 +53,8 @@
  * that folder - no server, no API, no database.
  *
  * Build (MinGW-w64, same toolchain as hr.exe):
- *   g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -o hom.exe hom.cpp -lwinhttp -lshlwapi
+ *   g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++ \
+ *       -o hom.exe hom.cpp -lwinhttp -lshlwapi -ldbghelp
  *
  * No -municode: main() below is a plain narrow int main(argc, argv), not
  * wWinMain/wmain, so -municode would make the linker look for an entry
@@ -54,6 +68,7 @@
   #include <windows.h>
   #include <winhttp.h>
   #include <shlwapi.h>
+  #include <dbghelp.h>
   #if defined(_MSC_VER)
     // #pragma comment(lib, ...) is an MSVC extension; MinGW/GCC ignores it
     // with a warning and links via -lwinhttp -lshlwapi on the command line
@@ -65,9 +80,12 @@
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <cctype>
 #include <string>
 #include <vector>
 #include <sstream>
+#include <iostream>
 #include <algorithm>
 #include <fstream>
 
@@ -76,6 +94,14 @@
 // -----------------------------------------------------------------------
 
 static constexpr char k_hom_version[] = "1.0.0";
+
+// If an install/update would grow disk usage by at least this much,
+// CmdInstall() asks for confirmation first (Y/n) instead of just doing
+// it - unless -y or -f/--force was passed. 1 MiB rather than the "5MB"
+// first floated for this: most real plugins here are a Lua script plus
+// a handful of small image assets, so a 5MB bar would almost never
+// actually fire in practice.
+static constexpr long long kDiskSpaceWarnBytes = 1LL * 1024 * 1024;
 
 // The repo hom's own files and plugin packages are served from.
 // Change these if you fork the repo -- nothing else in this file
@@ -93,16 +119,21 @@ void PrintUsage() {
     std::fprintf(stderr,
         "hom %s -- the HomRec plugin package manager\n\n"
         "Usage:\n"
-        "  hom --version              Show the hom version\n"
-        "  hom update                 Update hom itself from the repo\n"
-        "  hom ping                   Check connectivity to the plugin repo\n"
-        "  hom install <plugin-name>  Download and install a plugin\n"
-        "  hom install update-hrp     Update every already-installed .hrp plugin\n"
-        "  hom remove <plugin-name>   Remove an installed plugin\n\n"
+        "  hom --version                    Show the hom version\n"
+        "  hom update [-f|--force]          Update hom itself from the repo\n"
+        "                                      (-f: reinstall even if already latest)\n"
+        "  hom ping                          Check connectivity to the plugin repo\n"
+        "  hom install <plugin-name> [-y] [-f|--force]\n"
+        "                                     Download and install a plugin\n"
+        "                                      (-y/-f: skip the disk-space prompt)\n"
+        "  hom install update-hrp [-y] [-f]  Update every already-installed .hrp plugin\n"
+        "  hom remove <plugin-name> -r       Remove an installed plugin\n"
+        "                                      (-r is required to confirm)\n\n"
         "Examples:\n"
         "  hom install input-overlay\n"
+        "  hom install input-overlay -y\n"
         "  hom install update-hrp\n"
-        "  hom remove input-overlay\n",
+        "  hom remove input-overlay -r\n",
         k_hom_version);
 }
 
@@ -167,6 +198,78 @@ bool FileExistsA(const std::string &path) {
 bool DirExistsA(const std::string &path) {
     DWORD attrs = GetFileAttributesA(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+std::string Trim(std::string s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+// Size on disk of an existing file, or 0 if it doesn't exist - used to
+// work out how much *additional* disk space an install/update actually
+// costs (an update overwriting a same-size-ish file shouldn't trigger
+// the same warning a brand new multi-MB install does).
+long long FileSizeA(const std::string &path) {
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad)) return 0;
+    ULARGE_INTEGER sz;
+    sz.HighPart = fad.nFileSizeHigh;
+    sz.LowPart = fad.nFileSizeLow;
+    return (long long)sz.QuadPart;
+}
+
+// A plugin name only ever gets joined onto "plugins\" below - reject
+// anything that could climb back out of that folder (".." anywhere,
+// any path separator, or a drive letter like "C:") up front, so a
+// crafted `hom remove ..\..\..\Windows\System32\notepad` (or the same
+// trick played on `install`) can never touch anything outside
+// .\plugins\, no matter what flags are passed.
+bool IsSafePluginName(const std::string &name, std::string *reason) {
+    if (name.empty()) { *reason = "name is empty"; return false; }
+    if (name.find("..") != std::string::npos)  { *reason = "contains '..'"; return false; }
+    if (name.find('/')  != std::string::npos)  { *reason = "contains '/'";  return false; }
+    if (name.find('\\') != std::string::npos)  { *reason = "contains '\\'"; return false; }
+    if (name.find(':')  != std::string::npos)  { *reason = "contains ':'";  return false; }
+    return true;
+}
+
+// Collected command-line switches shared by update/install/remove.
+// Recognizes both "-f" and the long "--force" spelling for force (a
+// single-dash ParseFlags-style scan, like the console's ConsoleParse,
+// wouldn't catch "--force" since it starts with a second dash).
+struct Flags {
+    bool force = false; // -f / --force
+    bool yes   = false; // -y  - auto-answer "yes" to any Y/n prompt
+    bool rflag = false; // -r  - required to confirm a destructive remove
+};
+
+Flags ParseHomFlags(int argc, char **argv, int start, std::string *positional) {
+    Flags f;
+    positional->clear();
+    for (int i = start; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "-f" || a == "--force") f.force = true;
+        else if (a == "-y") f.yes = true;
+        else if (a == "-r") f.rflag = true;
+        else if (positional->empty()) *positional = a; // first non-flag token
+    }
+    return f;
+}
+
+// Prints `prompt` + " (Y/n) " and reads one line from stdin. Empty input
+// (just pressing Enter) counts as yes, matching the usual shell "Y/n"
+// convention where the capital letter is the default.
+bool ConfirmYesNo(const std::string &prompt) {
+    std::printf("%s (Y/n) ", prompt.c_str());
+    std::fflush(stdout);
+    std::string line;
+    if (!std::getline(std::cin, line)) return true; // no stdin (e.g. piped) -> don't block forever
+    line = Trim(line);
+    if (line.empty()) return true;
+    char c = (char)std::tolower((unsigned char)line[0]);
+    return c == 'y';
 }
 
 // -- Networking (WinHTTP, HTTPS GET against raw_host + full_path) ----------
@@ -257,13 +360,6 @@ bool VersionGt(const std::string &a, const std::string &b) {
     return false;
 }
 
-std::string Trim(std::string s) {
-    size_t a = s.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return "";
-    size_t b = s.find_last_not_of(" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
-
 std::string ExeDir() {
     char path[MAX_PATH];
     DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
@@ -340,7 +436,7 @@ int CmdPing() {
 //   4. leave hom.exe.old around (best-effort delete; ignore failure --
 //      it may still be mapped by this very process) so the next
 //      invocation can clean it up
-int CmdUpdate() {
+int CmdUpdate(bool force) {
     std::printf("Checking %ls for updates...\n", (std::wstring(k_raw_path_prefix) + L"version.txt").c_str());
 
     FetchResult vres = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"version.txt");
@@ -355,12 +451,15 @@ int CmdUpdate() {
         return 1;
     }
 
-    if (!VersionGt(latest, k_hom_version)) {
+    if (!VersionGt(latest, k_hom_version) && !force) {
         std::printf("hom is already up to date (%s).\n", k_hom_version);
         return 0;
     }
-
-    std::printf("New hom version available: %s -> %s\n", k_hom_version, latest.c_str());
+    if (!VersionGt(latest, k_hom_version) && force) {
+        std::printf("hom is already up to date (%s), but -f/--force was given -- reinstalling anyway.\n", k_hom_version);
+    } else {
+        std::printf("New hom version available: %s -> %s\n", k_hom_version, latest.c_str());
+    }
     std::printf("Downloading Hom/hom.exe...\n");
 
     FetchResult bres = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"hom.exe");
@@ -403,9 +502,15 @@ int CmdUpdate() {
 // ./plugins/<name>.hrp. HomRec's own plugin loader picks up and extracts
 // .hrp files from plugins/ the next time it starts (see lua_engine.h's
 // LoadPluginArchive()) -- hom doesn't need to unzip anything itself.
-int CmdInstall(const std::string &name) {
+int CmdInstall(const std::string &name, bool yes, bool force) {
     if (name.empty()) {
         std::fprintf(stderr, "hom: install needs a plugin name, e.g. 'hom install input-overlay'\n");
+        return 1;
+    }
+    std::string reason;
+    if (!IsSafePluginName(name, &reason)) {
+        std::fprintf(stderr, "hom: refusing plugin name '%s' (%s) -- this could resolve outside .\\plugins\\.\n",
+                     name.c_str(), reason.c_str());
         return 1;
     }
 
@@ -434,6 +539,22 @@ int CmdInstall(const std::string &name) {
 
     std::string dest = "plugins\\" + name + ".hrp";
     bool already_installed = FileExistsA(dest);
+
+    // Extra disk space this actually costs - an update overwriting a
+    // similar-size file shouldn't re-trigger the same warning a brand
+    // new multi-MB install does.
+    long long delta = (long long)res.body.size() - (already_installed ? FileSizeA(dest) : 0);
+    if (delta >= kDiskSpaceWarnBytes && !yes && !force) {
+        double mb = (double)delta / (1024.0 * 1024.0);
+        char prompt[160];
+        std::snprintf(prompt, sizeof(prompt),
+                      "hom: installing '%s' will use about %.1f MB of additional disk space. Continue?",
+                      name.c_str(), mb);
+        if (!ConfirmYesNo(prompt)) {
+            std::printf("hom: install cancelled.\n");
+            return 1;
+        }
+    }
 
     if (!WriteFileBytes(dest, res.body)) {
         std::fprintf(stderr, "hom: couldn't write '%s'.\n", dest.c_str());
@@ -476,17 +597,34 @@ int CmdUpdateAllPlugins() {
     std::printf("Updating %zu installed plugin(s)...\n", names.size());
     size_t failures = 0;
     for (const auto &name : names) {
-        if (CmdInstall(name) != 0) ++failures;
+        // Already-installed plugins being refreshed: always pass yes=true
+        // here (this is inherently "-y" in spirit - the whole point of
+        // update-hrp is to not stop and ask once per plugin) but leave
+        // force=false so a plugin that's actually unchanged doesn't get
+        // pointlessly rewritten.
+        if (CmdInstall(name, /*yes=*/true, /*force=*/false) != 0) ++failures;
     }
     std::printf("Done: %zu updated, %zu failed.\n", names.size() - failures, failures);
     return failures ? 1 : 0;
 }
 
-// `hom remove <name>` -- deletes plugins/<name>.hrp and, if HomRec has
-// already extracted it, plugins/.installed/<name>/ too.
-int CmdRemove(const std::string &name) {
+// `hom remove <name> -r` -- deletes plugins/<name>.hrp and, if HomRec has
+// already extracted it, plugins/.installed/<name>/ too. -r is required:
+// this is a destructive, irreversible delete, so (like `rm -r`) it has to
+// be asked for explicitly rather than firing off of a bare plugin name.
+int CmdRemove(const std::string &name, bool rflag) {
     if (name.empty()) {
-        std::fprintf(stderr, "hom: remove needs a plugin name, e.g. 'hom remove input-overlay'\n");
+        std::fprintf(stderr, "hom: remove needs a plugin name, e.g. 'hom remove input-overlay -r'\n");
+        return 1;
+    }
+    std::string reason;
+    if (!IsSafePluginName(name, &reason)) {
+        std::fprintf(stderr, "hom: refusing plugin name '%s' (%s) -- this could resolve outside .\\plugins\\.\n",
+                     name.c_str(), reason.c_str());
+        return 1;
+    }
+    if (!rflag) {
+        std::fprintf(stderr, "hom: remove needs -r to confirm deletion, e.g. 'hom remove %s -r'\n", name.c_str());
         return 1;
     }
 
@@ -530,24 +668,93 @@ int CmdRemove(const std::string &name) {
     return 0;
 }
 
+// -----------------------------------------------------------------------
+// Crash handler
+// -----------------------------------------------------------------------
+
+#ifdef _WIN32
+namespace {
+
+typedef BOOL(WINAPI *MiniDumpWriteDump_t)(
+    HANDLE hProcess, DWORD ProcessId, HANDLE hFile, MINIDUMP_TYPE DumpType,
+    PMINIDUMP_EXCEPTION_INFORMATION ExceptionParam,
+    PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
+    PMINIDUMP_CALLBACK_INFORMATION CallbackParam);
+
+LONG WINAPI HomSehFilter(EXCEPTION_POINTERS *info) {
+    DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
+    void *addr = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nullptr;
+
+    std::string crash_dir = ExeDir() + "\\crashes";
+    CreateDirectoryA(crash_dir.c_str(), nullptr); // harmless no-op if it already exists
+
+    time_t t = time(nullptr);
+    tm lt{};
+    localtime_s(&lt, &t);
+    char stamp[32];
+    strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &lt);
+    char dump_path[MAX_PATH];
+    _snprintf_s(dump_path, _TRUNCATE, "%s\\hom_crash_%s.dmp", crash_dir.c_str(), stamp);
+
+    bool dump_written = false;
+    HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
+    if (dbghelp) {
+        auto write_dump = (MiniDumpWriteDump_t)GetProcAddress(dbghelp, "MiniDumpWriteDump");
+        if (write_dump) {
+            HANDLE f = CreateFileA(dump_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f != INVALID_HANDLE_VALUE) {
+                MINIDUMP_EXCEPTION_INFORMATION mei{};
+                mei.ThreadId = GetCurrentThreadId();
+                mei.ExceptionPointers = info;
+                mei.ClientPointers = FALSE;
+                dump_written = write_dump(GetCurrentProcess(), GetCurrentProcessId(), f,
+                                           (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs),
+                                           &mei, nullptr, nullptr) != FALSE;
+                CloseHandle(f);
+            }
+        }
+        FreeLibrary(dbghelp);
+    }
+
+    std::fprintf(stderr, "hom: crashed -- unhandled exception 0x%08lX at %p%s%s\n",
+                 code, addr,
+                 dump_written ? " -- dump written: " : " -- (no dump written)",
+                 dump_written ? dump_path : "");
+    return EXCEPTION_EXECUTE_HANDLER; // let the process die cleanly, don't re-fault into WER
+}
+
+} // namespace
+#endif // _WIN32
+
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(HomSehFilter);
+#endif
     if (argc < 2) { PrintUsage(); return 1; }
 
     std::string cmd = argv[1];
 
     if (cmd == "--version" || cmd == "-v" || cmd == "-V") return CmdVersion();
-    if (cmd == "update")  return CmdUpdate();
+    if (cmd == "update") {
+        std::string positional; // update takes no positional arg, just flags
+        Flags f = ParseHomFlags(argc, argv, 2, &positional);
+        return CmdUpdate(f.force);
+    }
     if (cmd == "ping")    return CmdPing();
 
     if (cmd == "install") {
         if (argc < 3) { std::fprintf(stderr, "hom: missing plugin name.\n\n"); PrintUsage(); return 1; }
-        std::string arg2 = argv[2];
-        if (arg2 == "update-hrp") return CmdUpdateAllPlugins();
-        return CmdInstall(arg2);
+        std::string name;
+        Flags f = ParseHomFlags(argc, argv, 2, &name);
+        if (name == "update-hrp") return CmdUpdateAllPlugins();
+        return CmdInstall(name, f.yes, f.force);
     }
     if (cmd == "remove" || cmd == "uninstall") {
         if (argc < 3) { std::fprintf(stderr, "hom: missing plugin name.\n\n"); PrintUsage(); return 1; }
-        return CmdRemove(argv[2]);
+        std::string name;
+        Flags f = ParseHomFlags(argc, argv, 2, &name);
+        return CmdRemove(name, f.rflag);
     }
     if (cmd == "--help" || cmd == "-h" || cmd == "help") { PrintUsage(); return 0; }
 
