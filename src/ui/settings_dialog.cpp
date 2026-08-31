@@ -132,10 +132,12 @@ wxScrolledWindow *NewTabPage(wxNotebook *nb, wxColour bg) {
 
 class SettingsDialog : public wxDialog {
 public:
-    SettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme)
-        : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(600, 640),
+    SettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme,
+                    const LanguageTable &lang)
+        : wxDialog(parent, wxID_ANY, wxString::FromUTF8(lang.Get("settings_title")),
+                   wxDefaultPosition, wxSize(600, 640),
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
-          state_(state), theme_(theme) {
+          state_(state), theme_(theme), lang_(lang) {
         wxColour bg = FromColorref(theme_.bg);
         wxColour surface = FromColorref(theme_.surface);
         wxColour text = FromColorref(theme_.text);
@@ -145,7 +147,7 @@ public:
 
         auto *root = new wxBoxSizer(wxVERTICAL);
 
-        auto *titleLbl = new wxStaticText(this, wxID_ANY, "Settings");
+        auto *titleLbl = new wxStaticText(this, wxID_ANY, wxString::FromUTF8(lang_.Get("settings_title")));
         wxFont titleFont = titleLbl->GetFont();
         titleFont.SetPointSize(titleFont.GetPointSize() + 3);
         titleFont.SetWeight(wxFONTWEIGHT_BOLD);
@@ -159,44 +161,44 @@ public:
 
         auto *generalPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildGeneralTab(generalPage, r, bg, surface, accent, text, textDim); generalPage->SetSizer(r); }
-        notebook_->AddPage(generalPage, "General");
+        notebook_->AddPage(generalPage, wxString::FromUTF8(lang_.Get("tab_general")));
         kTabGeneral = notebook_->GetPageCount() - 1;
 
         auto *videoPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildVideoCodecTab(videoPage, r, bg, accent, text, textDim); videoPage->SetSizer(r); }
-        notebook_->AddPage(videoPage, "Video && Codec");
+        notebook_->AddPage(videoPage, wxString::FromUTF8(lang_.Get("tab_video")));
         kTabVideo = notebook_->GetPageCount() - 1;
 
         auto *audioPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildAudioTab(audioPage, r, bg, accent, text, textDim); audioPage->SetSizer(r); }
-        notebook_->AddPage(audioPage, "Audio");
+        notebook_->AddPage(audioPage, wxString::FromUTF8(lang_.Get("tab_audio")));
 
         auto *hotkeysPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildHotkeysTab(hotkeysPage, r, bg, text); hotkeysPage->SetSizer(r); }
-        notebook_->AddPage(hotkeysPage, "Hotkeys");
+        notebook_->AddPage(hotkeysPage, wxString::FromUTF8(lang_.Get("tab_hotkeys")));
 
         auto *advancedPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildAdvancedTab(advancedPage, r, bg, text, textDim); advancedPage->SetSizer(r); }
-        notebook_->AddPage(advancedPage, "Advanced");
+        notebook_->AddPage(advancedPage, wxString::FromUTF8(lang_.Get("advanced")));
         kTabAdvanced = notebook_->GetPageCount() - 1;
 
         auto *securityPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildSecurityTab(securityPage, r, bg, surface, accent, text, textDim); securityPage->SetSizer(r); }
-        notebook_->AddPage(securityPage, "Security");
+        notebook_->AddPage(securityPage, wxString::FromUTF8(lang_.Get("tab_security")));
 
         auto *systemPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildSystemTab(systemPage, r, bg, surface, accent, text, textDim); systemPage->SetSizer(r); }
-        notebook_->AddPage(systemPage, "System");
+        notebook_->AddPage(systemPage, wxString::FromUTF8(lang_.Get("tab_system")));
 
         root->Add(notebook_, 1, wxEXPAND | wxLEFT | wxRIGHT, 12);
 
         auto *btnRow = new wxBoxSizer(wxHORIZONTAL);
         btnRow->AddStretchSpacer(1);
-        auto *saveBtn = new ColorButton(this, IDC_SAVE, "Save");
+        auto *saveBtn = new ColorButton(this, IDC_SAVE, wxString::FromUTF8(lang_.Get("save")));
         saveBtn->SetMinSize(wxSize(80, 28));
         saveBtn->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
         btnRow->Add(saveBtn, 0, wxRIGHT, 8);
-        auto *cancelBtn = new ColorButton(this, IDC_CANCEL, "Cancel");
+        auto *cancelBtn = new ColorButton(this, IDC_CANCEL, wxString::FromUTF8(lang_.Get("cancel")));
         cancelBtn->SetMinSize(wxSize(80, 28));
         cancelBtn->SetColours(surface, text);
         btnRow->Add(cancelBtn, 0);
@@ -263,33 +265,33 @@ private:
         auto *grid = new wxFlexGridSizer(2, 10, 10);
         grid->AddGrowableCol(1, 1);
 
-        AddLabel(page, grid, text, bg, "Encoding quality:");
+        AddLabel(page, grid, text, bg, wxString::FromUTF8(lang_.Get("quality_label")));
         quality_slider_ = new LabeledSlider(page, IDC_QUALITY, state_.quality, 0, 100);
         quality_slider_->SetTheme(surface, accent, text, surface, text);
         grid->Add(quality_slider_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
 
-        AddLabel(page, grid, text, bg, "Target FPS (limit):");
+        AddLabel(page, grid, text, bg, wxString::FromUTF8(lang_.Get("target_fps_label")));
         fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
                                     wxSP_ARROW_KEYS, 1, 240, state_.target_fps);
         grid->Add(fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
 
-        AddLabel(page, grid, text, bg, "Monitor:");
+        AddLabel(page, grid, text, bg, wxString::FromUTF8(lang_.Get("monitor")));
         monitor_choice_ = new wxChoice(page, wxID_ANY);
         PopulateMonitorChoice();
         grid->Add(monitor_choice_, 0, wxALIGN_CENTRE_VERTICAL);
 
-        AddLabel(page, grid, text, bg, "Resolution mode:");
+        AddLabel(page, grid, text, bg, wxString::FromUTF8(lang_.Get("resolution_mode_label")));
         resolution_mode_choice_ = new wxChoice(page, wxID_ANY);
-        resolution_mode_choice_->Append("Percent of native");
-        resolution_mode_choice_->Append("Custom (width x height)");
+        resolution_mode_choice_->Append(wxString::FromUTF8(lang_.Get("resolution_mode_percent")));
+        resolution_mode_choice_->Append(wxString::FromUTF8(lang_.Get("resolution_mode_custom")));
         resolution_mode_choice_->SetSelection(
             state_.resolution_mode == ResolutionMode::Absolute ? 1 : 0);
         grid->Add(resolution_mode_choice_, 0, wxALIGN_CENTRE_VERTICAL);
 
-        AddLabel(page, grid, text, bg, "Resolution:");
+        AddLabel(page, grid, text, bg, wxString::FromUTF8(lang_.Get("resolution")));
         auto *resRow = new wxBoxSizer(wxHORIZONTAL);
         resolution_choice_ = new wxChoice(page, wxID_ANY);
-        resolution_choice_->Append("Full screen (Native, 100%)");
+        resolution_choice_->Append(wxString::FromUTF8(lang_.Get("resolution_full")));
         resolution_choice_->Append("75%");
         resolution_choice_->Append("50%");
         resolution_choice_->Append("25%");
@@ -327,7 +329,7 @@ private:
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
-        auto *folderLbl = new wxStaticText(page, wxID_ANY, "Output folder:");
+        auto *folderLbl = new wxStaticText(page, wxID_ANY, wxString::FromUTF8(lang_.Get("output_folder")));
         folderLbl->SetForegroundColour(text);
         folderLbl->SetBackgroundColour(bg);
         pageRoot->Add(folderLbl, 0, wxLEFT | wxRIGHT, 16);
@@ -335,13 +337,13 @@ private:
         auto *folderRow = new wxBoxSizer(wxHORIZONTAL);
         folder_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.output_folder));
         folderRow->Add(folder_edit_, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
-        auto *browseBtn = new ColorButton(page, IDC_BROWSE, "Browse");
+        auto *browseBtn = new ColorButton(page, IDC_BROWSE, wxString::FromUTF8(lang_.Get("browse")));
         browseBtn->SetMinSize(wxSize(70, 26));
         browseBtn->SetColours(surface, text);
         folderRow->Add(browseBtn, 0);
         pageRoot->Add(folderRow, 0, wxEXPAND | wxALL, 16);
 
-        auto *langLbl = new wxStaticText(page, wxID_ANY, "Language:");
+        auto *langLbl = new wxStaticText(page, wxID_ANY, wxString::FromUTF8(lang_.Get("language")));
         langLbl->SetForegroundColour(text);
         langLbl->SetBackgroundColour(bg);
         pageRoot->Add(langLbl, 0, wxLEFT | wxRIGHT | wxTOP, 16);
@@ -350,16 +352,16 @@ private:
         lang_choice_ = new wxChoice(page, wxID_ANY);
         RefreshLanguageChoices();
         langRow->Add(lang_choice_, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
-        auto *langAddBtn = new ColorButton(page, IDC_LANG_ADD, "Add Language...");
+        auto *langAddBtn = new ColorButton(page, IDC_LANG_ADD, wxString::FromUTF8(lang_.Get("add_language")));
         langAddBtn->SetMinSize(wxSize(120, 26));
         langAddBtn->SetColours(surface, text);
         langRow->Add(langAddBtn, 0);
         pageRoot->Add(langRow, 0, wxEXPAND | wxALL, 16);
 
-        countdown_chk_ = AddCheck(page, pageRoot, text, bg, "Countdown (3s)", state_.countdown_enabled);
-        timestamp_chk_ = AddCheck(page, pageRoot, text, bg, "Timestamp", state_.timestamp_enabled);
-        cursor_chk_    = AddCheck(page, pageRoot, text, bg, "Cursor", state_.cursor_enabled);
-        notify_chk_    = AddCheck(page, pageRoot, text, bg, "Show summary", state_.show_summary);
+        countdown_chk_ = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("countdown")), state_.countdown_enabled);
+        timestamp_chk_ = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("timestamp")), state_.timestamp_enabled);
+        cursor_chk_    = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("cursor")), state_.cursor_enabled);
+        notify_chk_    = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("notification")), state_.show_summary);
     }
 
     // Repopulates lang_choice_/lang_codes_ from the built-in "English"
@@ -942,6 +944,7 @@ private:
 
     AppState &state_;
     ThemeColors theme_;
+    const LanguageTable &lang_;
     wxNotebook *notebook_ = nullptr;
     size_t kTabGeneral = 0, kTabVideo = 0, kTabAdvanced = 0;
 
@@ -993,13 +996,15 @@ private:
 
 } // namespace
 
-bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme) {
-    SettingsDialog dlg(parent, state, theme);
+bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme,
+                         const LanguageTable &lang) {
+    SettingsDialog dlg(parent, state, theme, lang);
     return dlg.ShowModal() == wxID_OK;
 }
 
-bool ShowSettingsDialogTab(wxWindow *parent, AppState &state, const ThemeColors &theme, int tab_index) {
-    SettingsDialog dlg(parent, state, theme);
+bool ShowSettingsDialogTab(wxWindow *parent, AppState &state, const ThemeColors &theme,
+                            const LanguageTable &lang, int tab_index) {
+    SettingsDialog dlg(parent, state, theme, lang);
     dlg.SelectTab(tab_index);
     return dlg.ShowModal() == wxID_OK;
 }
