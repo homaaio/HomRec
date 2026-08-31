@@ -63,6 +63,17 @@ HR_EXPORT void hr_rgb_to_yuv420p(
                             : row0;
         int y1 = (y + 1 < height) ? y + 1 : y;
 
+        /* hoist the per-row output bases out of the pixel loop below.
+         * y*width/y1*width/(y/2)*(width/2) used to be recomputed (as a
+         * fresh multiply) for every single pixel; each is now the same
+         * value for the whole row, so it's computed once here and the
+         * inner loop just indexes off these row pointers instead. */
+        uint8_t *Yrow0 = Y + (size_t)y * width;
+        uint8_t *Yrow1 = Y + (size_t)y1 * width;
+        size_t crow = (size_t)(y / 2) * (size_t)(width / 2);
+        uint8_t *Cbrow = Cb + crow;
+        uint8_t *Crrow = Cr + crow;
+
         int x = 0;
         /* Unroll x2: process two chroma blocks per iteration */
         for (; x + 3 < width; x += 4) {
@@ -72,15 +83,15 @@ HR_EXPORT void hr_rgb_to_yuv420p(
             uint8_t r10=row1[x*3+0],   g10=row1[x*3+1],   b10=row1[x*3+2];
             uint8_t r11=row1[(x+1)*3+0],g11=row1[(x+1)*3+1],b11=row1[(x+1)*3+2];
 
-            Y[y *width+x ]=(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Y[y *width+x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Y[y1*width+x ]=(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Y[y1*width+x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            Yrow0[x ]=(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
+            Yrow0[x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
+            Yrow1[x ]=(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Yrow1[x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
             {
                 int ra=((int)r00+r01+r10+r11)>>2, ga=((int)g00+g01+g10+g11)>>2, ba=((int)b00+b01+b10+b11)>>2;
-                size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)(x/2);
-                Cb[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                Cr[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+                size_t ci=(size_t)(x/2);
+                Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+                Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
             }
 
             /* Block 1: x+2, x+3 */
@@ -89,15 +100,15 @@ HR_EXPORT void hr_rgb_to_yuv420p(
             uint8_t r12=row1[(x+2)*3+0],g12=row1[(x+2)*3+1],b12=row1[(x+2)*3+2];
             uint8_t r13=row1[(x+3)*3+0],g13=row1[(x+3)*3+1],b13=row1[(x+3)*3+2];
 
-            Y[y *width+x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
-            Y[y *width+x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
-            Y[y1*width+x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
-            Y[y1*width+x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
+            Yrow0[x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
+            Yrow0[x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
+            Yrow1[x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
+            Yrow1[x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
             {
                 int ra=((int)r02+r03+r12+r13)>>2, ga=((int)g02+g03+g12+g13)>>2, ba=((int)b02+b03+b12+b13)>>2;
-                size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)((x+2)/2);
-                Cb[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                Cr[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+                size_t ci=(size_t)((x+2)/2);
+                Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+                Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
             }
         }
         /* Tail: remaining 0 or 2 pixels */
@@ -107,14 +118,14 @@ HR_EXPORT void hr_rgb_to_yuv420p(
             uint8_t r01=row0[x1*3+0],g01=row0[x1*3+1],b01=row0[x1*3+2];
             uint8_t r10=row1[x*3+0],g10=row1[x*3+1],b10=row1[x*3+2];
             uint8_t r11=row1[x1*3+0],g11=row1[x1*3+1],b11=row1[x1*3+2];
-            Y[y*width+x ]=(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Y[y*width+x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Y[y1*width+x ]=(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Y[y1*width+x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            Yrow0[x ]=(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
+            Yrow0[x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
+            Yrow1[x ]=(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Yrow1[x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
             int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-            size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)(x/2);
-            Cb[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-            Cr[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+            size_t ci=(size_t)(x/2);
+            Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+            Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
         }
     }
 }
@@ -141,6 +152,16 @@ HR_EXPORT void hr_bgra_to_yuv420p_band(
                             : row0;
         int y1r = (y+1 < height) ? y+1 : y;
 
+        /* this is the hot path (called every captured frame, live
+         * during recording) - hoist the per-row Y/Cb/Cr output bases so
+         * the multiply that used to happen for every pixel (y*width,
+         * y1r*width, (y/2)*(width/2)) happens once per row instead. */
+        uint8_t *Yrow0 = Y + (size_t)y * width;
+        uint8_t *Yrow1r = Y + (size_t)y1r * width;
+        size_t crow = (size_t)(y / 2) * (size_t)(width / 2);
+        uint8_t *Cbrow = Cb + crow;
+        uint8_t *Crrow = Cr + crow;
+
         int x = 0;
         for (; x + 3 < width; x += 4) {
             /* BGRA: 0=B,1=G,2=R,3=A */
@@ -148,30 +169,30 @@ HR_EXPORT void hr_bgra_to_yuv420p_band(
             uint8_t r01=row0[(x+1)*4+2],g01=row0[(x+1)*4+1],b01=row0[(x+1)*4+0];
             uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
             uint8_t r11=row1[(x+1)*4+2],g11=row1[(x+1)*4+1],b11=row1[(x+1)*4+0];
-            Y[y*width+x]  =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Y[y*width+x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Y[y1r*width+x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Y[y1r*width+x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            Yrow0[x]  =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
+            Yrow0[x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
+            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Yrow1r[x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
             {
                 int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-                size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)(x/2);
-                Cb[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                Cr[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+                size_t ci=(size_t)(x/2);
+                Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+                Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
             }
 
             uint8_t r02=row0[(x+2)*4+2],g02=row0[(x+2)*4+1],b02=row0[(x+2)*4+0];
             uint8_t r03=row0[(x+3)*4+2],g03=row0[(x+3)*4+1],b03=row0[(x+3)*4+0];
             uint8_t r12=row1[(x+2)*4+2],g12=row1[(x+2)*4+1],b12=row1[(x+2)*4+0];
             uint8_t r13=row1[(x+3)*4+2],g13=row1[(x+3)*4+1],b13=row1[(x+3)*4+0];
-            Y[y*width+x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
-            Y[y*width+x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
-            Y[y1r*width+x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
-            Y[y1r*width+x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
+            Yrow0[x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
+            Yrow0[x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
+            Yrow1r[x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
+            Yrow1r[x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
             {
                 int ra=((int)r02+r03+r12+r13)>>2,ga=((int)g02+g03+g12+g13)>>2,ba=((int)b02+b03+b12+b13)>>2;
-                size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)((x+2)/2);
-                Cb[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                Cr[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+                size_t ci=(size_t)((x+2)/2);
+                Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+                Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
             }
         }
         for (; x < width; x += 2) {
@@ -180,14 +201,14 @@ HR_EXPORT void hr_bgra_to_yuv420p_band(
             uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
             uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
             uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
-            Y[y*width+x] =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Y[y*width+x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Y[y1r*width+x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Y[y1r*width+x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            Yrow0[x] =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
+            Yrow0[x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
+            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Yrow1r[x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
             int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-            size_t ci=(size_t)(y/2)*(size_t)(width/2)+(size_t)(x/2);
-            Cb[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-            Cr[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+            size_t ci=(size_t)(x/2);
+            Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+            Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
         }
     }
 }
@@ -216,15 +237,22 @@ HR_EXPORT void hr_yuv420p_to_rgb(
     const uint8_t *Cr = yuv + frame_sz + frame_sz / 4;
 
     for (int y = 0; y < height; ++y) {
+        /* row bases hoisted out of the x loop (same idea as the
+         * encode-direction functions above) - one multiply per row
+         * instead of one per pixel for both the Y/chroma reads and the
+         * RGB write. */
+        const uint8_t *Yrow  = Y  + (size_t)y * width;
+        const uint8_t *Cbrow = Cb + (size_t)(y/2) * (size_t)(width/2);
+        const uint8_t *Crrow = Cr + (size_t)(y/2) * (size_t)(width/2);
+        uint8_t *outrow = rgb_out + (size_t)y * width * 3;
         for (int x = 0; x < width; ++x) {
-            int luma = (int)Y[(size_t)y * width + x] - 16;
-            size_t ci = (size_t)(y/2) * (size_t)(width/2) + (size_t)(x/2);
-            int cb = (int)Cb[ci] - 128;
-            int cr = (int)Cr[ci] - 128;
+            int luma = (int)Yrow[x] - 16;
+            int cb = (int)Cbrow[x/2] - 128;
+            int cr = (int)Crrow[x/2] - 128;
             int r = (298*luma           + 409*cr + 128) >> 8;
             int g = (298*luma - 100*cb - 208*cr + 128) >> 8;
             int b = (298*luma + 516*cb           + 128) >> 8;
-            uint8_t *out = rgb_out + ((size_t)y * width + x) * 3;
+            uint8_t *out = outrow + (size_t)x * 3;
             out[0] = _clamp8(r); out[1] = _clamp8(g); out[2] = _clamp8(b);
         }
     }
