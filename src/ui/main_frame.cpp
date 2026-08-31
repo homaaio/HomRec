@@ -677,48 +677,67 @@ void HomRecMainFrame::PersistSettings() {
 }
 
 void HomRecMainFrame::BuildMenuBar() {
+    // Every label below now comes from lang_ instead of being a hardcoded
+    // English literal - previously this was the single biggest reason a
+    // dropped .hrl only ever retranslated the recording buttons/stats:
+    // this function (and SettingsDialog) never consulted lang_ at all, so
+    // no amount of language-file content could reach File/View/Settings/
+    // Help. Accelerators (\tF11, \tCtrl+Shift+T) are appended here in code
+    // rather than baked into the translated string, so a translator's .hrl
+    // never has to know about them.
+    //
+    // Called again from ApplyLanguageText() whenever the language changes
+    // (Settings > Language, or importing a .hrl), not just once at
+    // startup - wxFrame::SetMenuBar() detaches but does not delete the
+    // previous menu bar, so the old one is explicitly deleted first to
+    // avoid leaking one wxMenuBar per language switch.
+    if (wxMenuBar *old = GetMenuBar()) {
+        SetMenuBar(nullptr);
+        delete old;
+    }
+
     auto *menuBar = new wxMenuBar();
 
     auto *fileMenu = new wxMenu();
-    fileMenu->Append(ID_FILE_OPEN_RECORDINGS, "Open Recordings Folder");
-    fileMenu->Append(ID_FILE_SELECT_WINDOW, "Select Window to Record...");
-    fileMenu->Append(ID_FILE_HIDE_WINDOW, "Hide Windows From Recording...");
+    fileMenu->Append(ID_FILE_OPEN_RECORDINGS, wxString::FromUTF8(lang_.Get("open_recordings")));
+    fileMenu->Append(ID_FILE_SELECT_WINDOW, wxString::FromUTF8(lang_.Get("select_window")));
+    fileMenu->Append(ID_FILE_HIDE_WINDOW, wxString::FromUTF8(lang_.Get("hide_window")));
     fileMenu->AppendSeparator();
-    fileMenu->Append(ID_FILE_EXPORT_HRC, "Export Settings (.hrc)...");
-    fileMenu->Append(ID_FILE_IMPORT_HRC, "Import Settings (.hrc)...");
+    fileMenu->Append(ID_FILE_EXPORT_HRC, wxString::FromUTF8(lang_.Get("export_hrc")));
+    fileMenu->Append(ID_FILE_IMPORT_HRC, wxString::FromUTF8(lang_.Get("import_hrc")));
     fileMenu->AppendSeparator();
-    fileMenu->Append(ID_FILE_EXIT, "Exit");
-    menuBar->Append(fileMenu, "File");
+    fileMenu->Append(ID_FILE_EXIT, wxString::FromUTF8(lang_.Get("exit")));
+    menuBar->Append(fileMenu, wxString::FromUTF8(lang_.Get("file_menu")));
 
     auto *viewMenu = new wxMenu();
-    viewMenu->Append(ID_VIEW_ALWAYS_ON_TOP, "Always on Top");
-    viewMenu->Append(ID_VIEW_FULLSCREEN, "Fullscreen\tF11");
-    viewMenu->AppendCheckItem(ID_VIEW_OVERLAYS_PANEL, "Overlays Panel");
+    viewMenu->Append(ID_VIEW_ALWAYS_ON_TOP, wxString::FromUTF8(lang_.Get("always_on_top")));
+    viewMenu->Append(ID_VIEW_FULLSCREEN, wxString::FromUTF8(lang_.Get("fullscreen")) + "\tF11");
+    viewMenu->AppendCheckItem(ID_VIEW_OVERLAYS_PANEL, wxString::FromUTF8(lang_.Get("overlays_panel")));
     viewMenu->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
-    viewMenu->AppendCheckItem(ID_VIEW_AUDIO_PANEL, "Audio Mixer");
+    viewMenu->AppendCheckItem(ID_VIEW_AUDIO_PANEL, wxString::FromUTF8(lang_.Get("audio_mixer")));
     viewMenu->Check(ID_VIEW_AUDIO_PANEL, state_.show_audio_panel);
     viewMenu->AppendSeparator();
-    viewMenu->Append(ID_VIEW_PC_ANALYTICS, "PC Analytics");
-    viewMenu->Append(ID_VIEW_LOG, "Show Log");
-    menuBar->Append(viewMenu, "View");
+    viewMenu->Append(ID_VIEW_PC_ANALYTICS, wxString::FromUTF8(lang_.Get("pc_analytics")));
+    viewMenu->Append(ID_VIEW_LOG, wxString::FromUTF8(lang_.Get("show_log")));
+    menuBar->Append(viewMenu, wxString::FromUTF8(lang_.Get("view_menu")));
 
     auto *themeMenu = new wxMenu();
-    themeMenu->Append(ID_THEME_DARK, "Dark");
-    themeMenu->Append(ID_THEME_LIGHT, "Light");
+    themeMenu->Append(ID_THEME_DARK, wxString::FromUTF8(lang_.Get("dark")));
+    themeMenu->Append(ID_THEME_LIGHT, wxString::FromUTF8(lang_.Get("light")));
     auto *settingsMenu = new wxMenu();
-    settingsMenu->Append(ID_SETTINGS_OPEN, "Preferences...");
+    settingsMenu->Append(ID_SETTINGS_OPEN, wxString::FromUTF8(lang_.Get("preferences")));
     // "Overlays..." (ID_OVERLAYS_MANAGE, the full editor window) removed --
     // the OverlaysDockPanel (View > Overlays Panel) is now the only way to
     // manage overlays; see overlays_dock_panel.h's header comment for why.
-    settingsMenu->AppendSubMenu(themeMenu, "Theme");
-    menuBar->Append(settingsMenu, "Settings");
+    settingsMenu->AppendSubMenu(themeMenu, wxString::FromUTF8(lang_.Get("theme")));
+    menuBar->Append(settingsMenu, wxString::FromUTF8(lang_.Get("settings_menu")));
 
     auto *helpMenu = new wxMenu();
-    helpMenu->Append(ID_HELP_CHECK_UPDATES, "Check for Updates");
-    helpMenu->Append(ID_HELP_CONSOLE, "Console\tCtrl+Shift+T");
-    helpMenu->Append(ID_HELP_WELCOME, "Show Welcome Screen");
-    helpMenu->Append(ID_HELP_ABOUT, "About");
-    menuBar->Append(helpMenu, "Help");
+    helpMenu->Append(ID_HELP_CHECK_UPDATES, wxString::FromUTF8(lang_.Get("check_updates")));
+    helpMenu->Append(ID_HELP_CONSOLE, wxString::FromUTF8(lang_.Get("console")) + "\tCtrl+Shift+T");
+    helpMenu->Append(ID_HELP_WELCOME, wxString::FromUTF8(lang_.Get("show_welcome")));
+    helpMenu->Append(ID_HELP_ABOUT, wxString::FromUTF8(lang_.Get("about")));
+    menuBar->Append(helpMenu, wxString::FromUTF8(lang_.Get("help_menu")));
 
     SetMenuBar(menuBar);
 }
@@ -947,9 +966,25 @@ void HomRecMainFrame::ApplyThemeColours() {
 }
 
 void HomRecMainFrame::ApplyLanguageText() {
+    // Previously this only retitled the window - every other piece of
+    // chrome (section headers, Start/Pause buttons, preview title, bottom
+    // bar) was set from lang_ exactly once at startup and never revisited,
+    // so switching languages via Settings (or importing a .hrl) left all
+    // of it stuck in whatever language was active when the window was
+    // built. The only text that ever appeared to "follow" a language
+    // switch was the FPS/resolution readout and the recording/paused word
+    // in the bottom bar - and only while actively recording - because
+    // those happen to re-read lang_.Get() on every OnStatsTimer tick, not
+    // because anything here was actually updating them.
     std::string title = lang_.Get("app_title");
     if (title.empty()) title = std::string("HomRec v") + HR_APP_VERSION;
     SetTitle(wxString::FromUTF8(title));
+
+    // File/View/Settings/Help never followed a language switch before -
+    // BuildMenuBar() reads lang_ now, so rebuilding it here is what
+    // actually retranslates the menu bar (see that function's own comment
+    // for why the old menu bar is deleted rather than just replaced).
+    BuildMenuBar();
 
     if (section_status_lbl_) section_status_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("status")));
     if (section_time_lbl_) section_time_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("time")));
@@ -1317,7 +1352,7 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             PersistSettings();
             break;
         case ID_SETTINGS_OPEN:
-            if (ShowSettingsDialog(this, state_, theme_) && rec_raw_) {
+            if (ShowSettingsDialog(this, state_, theme_, lang_) && rec_raw_) {
                 // Settings dialog's General tab can now change
                 // state_.current_language (including to a language just
                 // imported via "Add Language...") - reload it here so
