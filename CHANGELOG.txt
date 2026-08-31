@@ -1,5 +1,81 @@
 welcome to changelog :D
 
+[Version 2.0.2] - 2026-08-31
+
+Cleanup + small performance/quality-of-life release: no behavior change
+for anything that was actually reachable before, aside from the console
+prompt and two new console commands.
+
+=== Removed ===
+
+- Eight source files that were never part of either build (Makefile's
+  OBJS or CMakeLists.txt's HR_SOURCES) and weren't loaded dynamically by
+  anything either - leftovers from the 1.x Python/ctypes-DLL era and one
+  never-finished staging design, all confirmed dead via a full grep for
+  their exported symbols across the tree before deletion:
+    - src/hr_version.cpp - duplicated the version banner as its own
+      dllexport'd constants; superseded by src/ui/version.h +
+      hr_app_logic.cpp's hr_version_string()/hr_version_gt().
+    - src/hr_update.cpp - staged update-checker implementation, explicitly
+      marked "NOT CURRENTLY BUILT" in its own file header.
+    - src/hr_console.cpp / src/hr_console_pipe_server.cpp - the old
+      Python-bridge console DLL design (forward_to_python() and a
+      Named Pipe IPC server for it), both explicitly marked
+      "NOT CURRENTLY BUILT"; superseded by src/ui/console_window.cpp,
+      the console actually compiled into hr.exe today.
+    - src/hr_framequeue.cpp, src/hr_ringbuf.cpp, src/hr_preview.cpp,
+      src/homrec_core.c - native ctypes extensions from 1.5.0/1.6.0's
+      Python UI (see that entry below). 2.0's C++ rewrite ported the
+      pieces still needed (hr_stopwatch, hr_display_info, hr_dxgi_capture,
+      hr_pipeline, hr_encoder_helpers - all still compiled today) but
+      these four never got a native call site and were left behind.
+  No header files existed for any of these (none were `#include`d
+  anywhere), so nothing else needed touching.
+
+=== Performance ===
+
+- BGRA->YUV420p (hr_bgra_to_yuv420p_band in hr_encoder_helpers.c) - the
+  function actually called every captured frame during recording, on
+  every worker thread in hr_pipeline.cpp's Yuv420pWorkerPool - along with
+  RGB->YUV420p and YUV420p->RGB (used for the live preview thumbnail),
+  used to recompute `y*width`, `y1*width`, and `(y/2)*(width/2)` as a
+  fresh multiply for every single pixel just to find the row it was
+  writing/reading. Hoisted into per-row base pointers computed once per
+  row instead, so the inner per-pixel loop is now pure pointer indexing.
+  Pixel math and output are bit-for-bit identical - this only removes
+  redundant address arithmetic.
+- Same hoist applied to bgra_to_thumb()/bgra_downscale() in
+  hr_pipeline.cpp (the preview-thumbnail box filter and the
+  Settings > Resolution downscale step), both also on the per-frame hot
+  path during recording.
+
+=== Changed ===
+
+- Version bumped to 2.0.2 (src/ui/version.h).
+- tools/homrec_build.py: fully translated to English (prompts, comments,
+  error messages - it was previously a mix of English comments and
+  Russian-language interactive prompts). .7z is now a normal, always-
+  offered archive format in the build menu instead of only appearing
+  when a 7z/7za binary already happened to be on PATH at the time the
+  script started; picking it on a machine without 7-Zip installed now
+  prints a clear "install 7-Zip and try again" message and skips just
+  that one archive instead of the option being invisible.
+- The in-app developer console's prompt is now styled after a Unix
+  user@host:path# prompt - "homrec@1920x1080:60fps# " instead of the
+  previous "1920x1080@60fps # " - while keeping the same at-a-glance
+  resolution/fps info and the root-style trailing "#" (fitting, since
+  this console can run rm/hom update/etc.). Not a literal copy of a real
+  shell prompt, just shaped like one.
+
+=== Added ===
+
+- Two new console built-ins, in the same spirit as the existing
+  Linux-shell-style command set (ls/rm/env/alias/history/echo/clear):
+  `pwd` (prints the folder HomRec resolves its cfg/plugins/log/settings
+  paths from) and `whoami` (prints the console/build version string).
+  Neither reads or writes anything sensitive, so neither needs the
+  "inwid" confirmation gate.
+
 [Version 2.0.1] - 2026-08-30
 
 Bug fixes and hardening, no feature changes.
