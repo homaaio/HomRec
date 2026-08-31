@@ -245,6 +245,13 @@ private:
     wxStaticText *time_lbl_ = nullptr;
     wxStaticText *fps_lbl_ = nullptr;
     wxStaticText *res_lbl_ = nullptr;
+    // "STATUS"/"TIME"/"STATS" section headers built inline by
+    // BuildLeftPanel's addSection() lambda - kept as named members (rather
+    // than discarded, as before) so ApplyLanguageText() can retranslate
+    // them after a language switch instead of only re-theming their colour.
+    wxStaticText *section_status_lbl_ = nullptr;
+    wxStaticText *section_time_lbl_ = nullptr;
+    wxStaticText *section_stats_lbl_ = nullptr;
 
     wxPanel *preview_container_ = nullptr;
     wxPanel *preview_header_ = nullptr;

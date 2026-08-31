@@ -741,13 +741,13 @@ void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
     version_lbl_->SetFont(BodyFont());
     sizer->Add(version_lbl_, 0, wxEXPAND | wxTOP, 4);
 
-    start_color_btn_ = new ColorButton(left_panel_, ID_START_BTN, wxString::FromUTF8("\u25B6 START"));
+    start_color_btn_ = new ColorButton(left_panel_, ID_START_BTN, wxString::FromUTF8(lang_.Get("start")));
     start_color_btn_->SetFont(wxFont(wxFontInfo(11).FaceName("Segoe UI").Bold()));
     start_color_btn_->SetMinSize(wxSize(-1, 48));
     sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 25);
     Bind(wxEVT_BUTTON, &HomRecMainFrame::OnStartClicked, this, ID_START_BTN);
 
-    pause_color_btn_ = new ColorButton(left_panel_, ID_PAUSE_BTN, wxString::FromUTF8("\u23F8 PAUSE"));
+    pause_color_btn_ = new ColorButton(left_panel_, ID_PAUSE_BTN, wxString::FromUTF8(lang_.Get("pause")));
     pause_color_btn_->SetFont(wxFont(wxFontInfo(10).FaceName("Segoe UI").Bold()));
     pause_color_btn_->SetMinSize(wxSize(-1, 32));
     pause_color_btn_->Enable2(false);
@@ -761,7 +761,7 @@ void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
         return lbl;
     };
 
-    addSection(wxString::FromUTF8(lang_.Get("status")));
+    section_status_lbl_ = addSection(wxString::FromUTF8(lang_.Get("status")));
     auto *statusRow = new wxBoxSizer(wxHORIZONTAL);
     status_dot_ = new StatusDot(left_panel_, FromColorref(theme_.text_secondary), 14);
     statusRow->Add(status_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
@@ -770,12 +770,12 @@ void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
     statusRow->Add(status_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
     sizer->Add(statusRow, 0, wxEXPAND | wxTOP, 8);
 
-    addSection(wxString::FromUTF8(lang_.Get("time")));
+    section_time_lbl_ = addSection(wxString::FromUTF8(lang_.Get("time")));
     time_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "00:00:00", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
     time_lbl_->SetFont(wxFont(wxFontInfo(24).FaceName("Consolas").Bold()));
     sizer->Add(time_lbl_, 0, wxEXPAND | wxTOP, 8);
 
-    addSection(wxString::FromUTF8(lang_.Get("stats")));
+    section_stats_lbl_ = addSection(wxString::FromUTF8(lang_.Get("stats")));
     fps_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "");
     fps_lbl_->SetFont(MonoFont());
     sizer->Add(fps_lbl_, 0, wxEXPAND | wxTOP, 4);
@@ -950,6 +950,46 @@ void HomRecMainFrame::ApplyLanguageText() {
     std::string title = lang_.Get("app_title");
     if (title.empty()) title = std::string("HomRec v") + HR_APP_VERSION;
     SetTitle(wxString::FromUTF8(title));
+
+    if (section_status_lbl_) section_status_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("status")));
+    if (section_time_lbl_) section_time_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("time")));
+    if (section_stats_lbl_) section_stats_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("stats")));
+
+    if (preview_title_lbl_) {
+        preview_title_lbl_->SetLabel(wxString::FromUTF8("\u25CF ") + wxString::FromUTF8(lang_.Get("live_preview")));
+    }
+    if (made_by_lbl_) made_by_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("made_by")));
+
+    // Start/Pause button text and the status/file labels are state-
+    // dependent (Ready/Recording/Paused, Start/Stop, Pause/Resume) - redo
+    // whichever branch matches the current state_ instead of just
+    // reapplying a single fixed string, so a language switch mid-recording
+    // (or mid-pause) still lands on the right word for that state.
+    if (state_.recording) {
+        if (start_color_btn_) start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("stop")));
+        if (state_.paused) {
+            if (pause_color_btn_) pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("resume")));
+            SetStatusState(wxString::FromUTF8(lang_.Get("paused")), theme_.warning);
+        } else {
+            if (pause_color_btn_) pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
+            SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
+        }
+        // file_lbl_ during an active recording is overwritten again on the
+        // very next OnStatsTimer tick (500ms), so it isn't touched here -
+        // doing so would just race that tick and occasionally show the
+        // stale state_word for a moment.
+    } else {
+        if (start_color_btn_) start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
+        if (pause_color_btn_) pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
+        SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
+        if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
+    }
+
+    // Translated strings vary a lot in length ("STATISTICS" vs "STATS" vs
+    // a CJK equivalent), so re-layout rather than leaving controls sized
+    // for whatever the previous language's text happened to need.
+    if (left_panel_) left_panel_->Layout();
+    Layout();
 }
 
 void HomRecMainFrame::SetupTrayIcon() {
@@ -1047,7 +1087,7 @@ void HomRecMainFrame::DoStart() {
         wxMessageBox(wxString(err.c_str()), "HomRec", wxOK | wxICON_WARNING, this);
         return;
     }
-    start_color_btn_->SetLabelText2(wxString::FromUTF8("\u25A0 STOP"));
+    start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("stop")));
     start_color_btn_->SetColours(FromColorref(theme_.error), FromColorref(theme_.bg));
     pause_color_btn_->Enable2(true);
     SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
@@ -1069,9 +1109,9 @@ void HomRecMainFrame::DoStop() {
 
     rec_->Stop();
 
-    start_color_btn_->SetLabelText2(wxString::FromUTF8("\u25B6 START"));
+    start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
     start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
-    pause_color_btn_->SetLabelText2(wxString::FromUTF8("\u23F8 PAUSE"));
+    pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
     pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
     pause_color_btn_->Enable2(false);
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
@@ -1138,11 +1178,11 @@ void HomRecMainFrame::DoPause() {
     if (!state_.recording) return;
     rec_->TogglePause();
     if (state_.paused) {
-        pause_color_btn_->SetLabelText2(wxString::FromUTF8("\u25B6 RESUME"));
+        pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("resume")));
         pause_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
         SetStatusState(wxString::FromUTF8(lang_.Get("paused")), theme_.warning);
     } else {
-        pause_color_btn_->SetLabelText2(wxString::FromUTF8("\u23F8 PAUSE"));
+        pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
         pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
         SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
     }
@@ -1278,6 +1318,12 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_) && rec_raw_) {
+                // Settings dialog's General tab can now change
+                // state_.current_language (including to a language just
+                // imported via "Add Language...") - reload it here so
+                // Save takes effect immediately instead of only after
+                // the next restart, same as the theme handlers below do
+                // for state_.current_theme.
                 lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
                 ApplyLanguageText();
 
