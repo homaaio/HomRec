@@ -12,8 +12,8 @@
 //   - The three-tier security fuse (sec/secui/secp) - core/UI/plugin
 //     lock state and the associated unlock-gating logic.
 //   - version, ping, echo, clear, env, alias, history, info, status, log,
-//     hide, hom (forwards to hom.exe, the plugin package manager - see
-//     CmdHom()).
+//     hide, pwd, whoami, hom (forwards to hom.exe, the plugin package
+//     manager - see CmdHom()).
 //   - The "inwid" confirmation gate: a handful of commands that reach
 //     the network and rewrite files (hom update/remove), delete things
 //     (rm), or persist a settings change (any "<setting> <value>", not
@@ -186,6 +186,10 @@ private:
     void CmdRepeat(const std::wstring &raw);
     void CmdBatch(const std::wstring &raw);
     void CmdLs(const std::wstring &raw);
+    // Unix-flavor additions - purely informational, no "inwid" gating
+    // needed since neither reads/writes anything sensitive.
+    void CmdPwd(const std::wstring &raw);
+    void CmdWhoami(const std::wstring &raw);
     // Forwards everything typed after "hom" to hom.exe (the standalone
     // plugin package manager, tools/hom/hom.cpp) as a child process, with
     // its working directory set to HomRec's own folder so "hom install x"

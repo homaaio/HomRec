@@ -430,15 +430,21 @@ void ConsoleWindow::RefreshPrompt() {
     if (w % 2) w--;
     if (h % 2) h--;
 
+    // "homrec@<res>:<fps>fps# " - shaped like a Unix user@host:path#
+    // prompt (root-style trailing "#", fitting since this console can
+    // run rm/hom update/etc.) rather than a literal copy of one; the
+    // "host" slot carries the resolution and the "path" slot carries the
+    // fps, which is the info a person actually wants glanceable here.
     wchar_t buf[64];
-    swprintf(buf, 64, L"%dx%d@%dfps # ", w, h, state_.target_fps);
+    swprintf(buf, 64, L"homrec@%dx%d:%dfps# ", w, h, state_.target_fps);
     SetWindowTextW(prompt_, buf);
 
     // The prompt/input split used to assume a fixed
     // 160px-wide prompt (see OnSize()'s old hardcoded promptW). That's
-    // wide enough for "1920x1080@60fps # ", but a higher-res monitor or a
-    // high refresh-rate target ("3840x2160@144fps # ") renders noticeably
-    // wider than 160px in Consolas, so the tail of the prompt text got
+    // wide enough for "homrec@1920x1080:60fps# ", but a higher-res
+    // monitor or a high refresh-rate target
+    // ("homrec@3840x2160:144fps# ") renders noticeably wider than 160px
+    // in Consolas, so the tail of the prompt text got
     // clipped and ran into the input box. Measure the real string with
     // the font that's actually applied and use that width instead, with
     // a sane floor/ceiling so it never disappears or eats the whole row.
@@ -498,7 +504,8 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
     mono_font_ = monoFont;
     SendMessageW(output_, WM_SETFONT, (WPARAM)monoFont, TRUE);
 
-    // Static "1920x1080@60fps # " prompt, à la a shell prompt ending in a
+    // Static "homrec@1920x1080:60fps# " prompt, à la a Unix
+    // user@host:path# shell prompt ending in a
     // root-style "#" - sits immediately left of the input box instead of
     // the input box just being a bare, unlabeled text field.
     prompt_ = CreateWindowExW(0, L"STATIC", L"",
@@ -626,14 +633,13 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
     }
 
     // "inwid <command...>" - the confirmation prefix (see the class
-    // comment in console_window.h). Only actually consumed as a prefix
-    // when what follows is something CommandNeedsInwid() (or a settings
-    // assignment) would otherwise refuse - "inwid status" and "inwid
-    // settings ..." fall straight through to the `cmd == "inwid"` case
-    // below unchanged, which is whatever a loaded plugin registered
-    // under the literal name "inwid" (bter's own admin prefix, see
-    // Hom/plugins/bter-src/entry.lua) - this keeps that pre-existing
-    // usage working exactly as before.
+    // comment in console_window.h). Consumed as a prefix for anything
+    // except bter's own two reserved subcommands ("inwid status" /
+    // "inwid settings ...", see the comment further down) - those two
+    // fall straight through to the `cmd == "inwid"` case below unchanged,
+    // dispatched to whatever a loaded plugin registered under the
+    // literal name "inwid" (bter's own admin prefix, see
+    // Hom/plugins/bter-src/entry.lua).
     if (!confirmed && cmd == L"inwid") {
         size_t sp = raw.find(L' ');
         std::wstring rest = (sp == std::wstring::npos) ? L"" : Trim(raw.substr(sp + 1));
@@ -648,15 +654,33 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
             bool settingAssignment = !ExtractSettingValue(rest).empty() &&
                                       HrSettingsRegistry::Find(NarrowFromWide(rcmd)) != nullptr;
 
-            if (CommandNeedsInwid(rcmd, rest) || settingAssignment) {
+            // bter's own "inwid" command (Hom/plugins/bter-src/entry.lua's
+            // cmd_inwid) only ever recognizes two subcommands of its own:
+            // a bare "inwid status" and "inwid settings ...". Nothing else
+            // typed after "inwid" can plausibly have meant bter's admin
+            // prefix instead of "please confirm and run this" - there's no
+            // third meaning to preserve. Previously this only stripped
+            // "inwid" when the wrapped command specifically needed
+            // confirming (CommandNeedsInwid()/a settings assignment), so
+            // e.g. "inwid hom install bter" (install was never gated - see
+            // CommandNeedsInwid()'s comment above) fell all the way
+            // through to being dispatched as the literal word "inwid",
+            // which only resolves to anything if bter happens to be
+            // loaded, and produced a confusing "Unknown command: inwid"
+            // otherwise - even though the wrapped command itself was
+            // perfectly valid and never needed confirming in the first
+            // place.
+            bool bterReserved = (rcmd == L"status" || rcmd == L"settings");
+            if (CommandNeedsInwid(rcmd, rest) || settingAssignment || !bterReserved) {
                 RunCommand(rest, /*confirmed=*/true);
                 return;
             }
         }
-        // Bare "inwid", "inwid status", "inwid settings ...", or
-        // anything else that isn't a gated command - fall through below
-        // and dispatch the *original* line starting with "inwid" as an
-        // ordinary command word.
+        // Bare "inwid" (rest.empty()), or "inwid status"/"inwid
+        // settings ..." (bterReserved above) - fall through below and
+        // dispatch the *original* line starting with "inwid" as an
+        // ordinary command word, i.e. to bter's plugin-registered
+        // "inwid" if it's loaded, or "Unknown command: inwid" if not.
     }
 
     if (cmd == L"version") CmdVersion(raw);
@@ -680,6 +704,8 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
     else if (cmd == L"repeat") CmdRepeat(raw);
     else if (cmd == L"batch") CmdBatch(raw);
     else if (cmd == L"ls") CmdLs(raw);
+    else if (cmd == L"pwd") CmdPwd(raw);
+    else if (cmd == L"whoami") CmdWhoami(raw);
     else if (cmd == L"hom") {
         if (!confirmed && CommandNeedsInwid(cmd, raw)) { RefuseNeedsInwid(raw); return; }
         CmdHom(raw);
@@ -1166,6 +1192,25 @@ void ConsoleWindow::CmdLs(const std::wstring &raw) {
     if (showAll) {
         PrintInfo(L"(windows/rules/ae objects aren't in this native port yet)");
     }
+}
+
+// `pwd` - Unix shells resolve this to the process's working directory,
+// but that's just wherever hr.exe happened to be launched from (a
+// desktop shortcut's "Start in" field, Explorer's cwd, etc.) and isn't
+// what a person asking "where does this console read/write files from"
+// actually wants. HomRec always resolves cfg/plugins/log/settings paths
+// relative to the exe's own folder (GetBaseDir(), used throughout this
+// file - CmdHrc, CmdHom, CmdLog, ...), so that's the one shown here.
+void ConsoleWindow::CmdPwd(const std::wstring &) {
+    PrintInfo(GetBaseDir());
+}
+
+// `whoami` - a real shell reports the OS account; here that's less
+// useful than confirming which console/build is answering (handy after
+// `inwid hom update` swaps hom.exe, or when a bug report needs the exact
+// version string). Not gated - purely informational, same as `version`.
+void ConsoleWindow::CmdWhoami(const std::wstring &) {
+    PrintInfo(L"homrec-console v" HR_APP_VERSION_W);
 }
 
 // `hom` -- previously only usable from a separate PowerShell/cmd window
