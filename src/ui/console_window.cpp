@@ -620,6 +620,11 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
     auto aliasIt = aliases_.find(cmd);
     if (aliasIt != aliases_.end()) cmd = aliasIt->second;
 
+    if (cmd != L"batch" && raw.find(L"&&") != std::wstring::npos) {
+        PrintWarn(L"\"&&\" only chains commands inside \"batch\" - run: batch " + raw);
+        return;
+    }
+
     // "inwid <command...>" - the confirmation prefix (see the class
     // comment in console_window.h). Only actually consumed as a prefix
     // when what follows is something CommandNeedsInwid() (or a settings
