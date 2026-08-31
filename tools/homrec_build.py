@@ -34,7 +34,7 @@ def ask(prompt, default=None):
             return val
         if default is not None:
             return default
-        print("  (нужен непустой ответ)")
+        print("  (a non-empty answer is required)")
 
 
 def ask_yes_no(prompt, default_yes=True):
@@ -42,7 +42,7 @@ def ask_yes_no(prompt, default_yes=True):
     val = input(f"{prompt} [{hint}]: ").strip().lower()
     if not val:
         return default_yes
-    return val in ("y", "yes", "д", "да")
+    return val in ("y", "yes")
 
 
 def ask_int(prompt, default, lo, hi):
@@ -53,11 +53,11 @@ def ask_int(prompt, default, lo, hi):
         try:
             n = int(raw)
         except ValueError:
-            print(f"  введите число от {lo} до {hi}")
+            print(f"  enter a number between {lo} and {hi}")
             continue
         if lo <= n <= hi:
             return n
-        print(f"  введите число от {lo} до {hi}")
+        print(f"  enter a number between {lo} and {hi}")
 
 
 def ask_choice(prompt, options):
@@ -70,7 +70,7 @@ def ask_choice(prompt, options):
             raw = "1"
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return options[int(raw) - 1][0]
-        print(f"  введите число от 1 до {len(options)}")
+        print(f"  enter a number between 1 and {len(options)}")
 
 
 def sanitize_label(label):
@@ -105,8 +105,8 @@ def write_version(new_version):
         content,
     )
     if n1 == 0 or n2 == 0:
-        print("  WARNING: не нашёл HR_APP_VERSION/HR_APP_VERSION_W в version.h - "
-              "файл не тронут, поправьте версию вручную.")
+        print("  WARNING: could not find HR_APP_VERSION/HR_APP_VERSION_W in "
+              "version.h - file left untouched, update the version by hand.")
         return False
     with open(VERSION_H, "w", encoding="utf-8") as f:
         f.write(content)
@@ -114,22 +114,22 @@ def write_version(new_version):
 
 
 def step_version():
-    section("Версия")
+    section("Version")
     current = read_current_version()
     if current:
-        print(f"Текущая версия в src/ui/version.h: {current}")
+        print(f"Current version in src/ui/version.h: {current}")
     else:
-        print("Не удалось прочитать текущую версию из src/ui/version.h.")
+        print("Could not read the current version from src/ui/version.h.")
 
-    version = ask("Версия релиза (например, 2.1.0)", default=current)
+    version = ask("Release version (e.g. 2.1.0)", default=current)
     version = version.lstrip("vV")
 
     if current and version != current:
-        if ask_yes_no(f"Обновить src/ui/version.h с {current} на {version}?"):
+        if ask_yes_no(f"Update src/ui/version.h from {current} to {version}?"):
             if write_version(version):
-                print(f"  version.h обновлён -> {version}")
+                print(f"  version.h updated -> {version}")
     elif not current:
-        if ask_yes_no(f"Записать {version} в src/ui/version.h?"):
+        if ask_yes_no(f"Write {version} to src/ui/version.h?"):
             write_version(version)
     return version
 
@@ -144,7 +144,7 @@ def run_cmd(args, cwd):
         result = subprocess.run(args, cwd=cwd)
         return result.returncode == 0
     except FileNotFoundError:
-        print(f"  '{args[0]}' не найден в PATH.")
+        print(f"  '{args[0]}' not found in PATH.")
         return False
 
 
@@ -156,29 +156,29 @@ def find_make():
 
 
 def step_build():
-    section("Сборка")
+    section("Build")
     hr_exe = os.path.join(REPO_ROOT, "hr.exe")
     hom_exe = os.path.join(REPO_ROOT, "hom.exe")
 
-    if ask_yes_no("Пересобрать hr.exe и hom.exe сейчас (make clean && make && make hom)?"):
+    if ask_yes_no("Rebuild hr.exe and hom.exe now (make clean && make && make hom)?"):
         make = find_make()
         if not make:
-            print("  make/mingw32-make не найден в PATH - сборка пропущена, "
-                  "буду использовать то, что уже лежит в корне репозитория.")
+            print("  make/mingw32-make not found in PATH - skipping the build, "
+                  "will use whatever is already sitting in the repo root.")
         else:
             ok = run_cmd([make, "clean"], REPO_ROOT)
             ok = run_cmd([make], REPO_ROOT) and ok
             ok = run_cmd([make, "hom"], REPO_ROOT) and ok
             if not ok:
-                print("  Сборка завершилась с ошибкой.")
-                if not ask_yes_no("Продолжить со старыми hr.exe/hom.exe (если они есть)?", default_yes=False):
+                print("  Build finished with an error.")
+                if not ask_yes_no("Continue with the old hr.exe/hom.exe (if any)?", default_yes=False):
                     sys.exit(1)
 
     if not os.path.isfile(hr_exe):
-        print("  hr.exe не найден в корне репозитория - варианты 'full' и "
-              "'portable' будут собраны без него, если продолжите.")
+        print("  hr.exe not found in the repo root - the 'full' and "
+              "'portable' presets will be built without it if you continue.")
     if not os.path.isfile(hom_exe):
-        print("  hom.exe не найден - будет пропущен в архивах, если продолжите.")
+        print("  hom.exe not found - it will be skipped in the archives if you continue.")
 
     return hr_exe if os.path.isfile(hr_exe) else None, \
         hom_exe if os.path.isfile(hom_exe) else None
@@ -196,17 +196,17 @@ def find_ffmpeg():
             found = which
 
     if found:
-        print(f"Найден: {found}")
-        if ask_yes_no("Использовать этот ffmpeg.exe для 'full' сборки?"):
+        print(f"Found: {found}")
+        if ask_yes_no("Use this ffmpeg.exe for the 'full' build?"):
             return found
 
-    manual = ask("Путь к ffmpeg.exe для бандла (Enter, чтобы пропустить)", default="")
+    manual = ask("Path to the ffmpeg.exe to bundle (Enter to skip)", default="")
     if manual and os.path.isfile(manual):
         return manual
     if manual:
-        print("  Файл не найден по указанному пути - пропускаю ffmpeg.")
+        print("  File not found at that path - skipping ffmpeg.")
     else:
-        print("  ffmpeg пропущен - 'full' архив будет собран как 'portable'.")
+        print("  ffmpeg skipped - the 'full' archive will be built like 'portable'.")
     return None
 
 
@@ -216,9 +216,22 @@ def find_ffmpeg():
 
 BASE_DOCS = [
     "README.md", "LICENSE", "FREE.txt", "SUPPORT.md",
-    "commands.md", "CHANGELOG.txt",
+    "commands.md", "CHANGELOG.txt", "CONTRIBUTORS.md",
 ]
 BASE_DIRS = ["cfg", "plugins"]
+
+# Archive formats offered in the menu. 7z is always listed - not just when
+# a 7z/7za binary happens to already be on PATH - since "add the .7z build
+# variant" should mean an actual, discoverable menu entry, not one that
+# silently vanishes on a fresh machine. make_archive()'s 7z branch still
+# checks for the binary right before it's actually needed and fails with a
+# clear, actionable message if it's missing, instead of the option just
+# not being there in the first place.
+FORMAT_OPTIONS = [
+    ("zip", "zip"),
+    ("tar.gz", "tar.gz"),
+    ("7z", "7z (needs 7-Zip's 7z/7za on PATH)"),
+]
 
 
 def discover_root_dlls():
@@ -259,9 +272,9 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
             # see discover_root_dlls(). hom.exe doesn't need these.
             dlls = discover_root_dlls()
             if not dlls:
-                print("  WARNING: hr.exe включён, но рядом в корне репозитория не найдено ни "
-                      "одной .dll - если сборка динамическая (по умолчанию для этого Makefile), "
-                      "архив без них не запустится на чужой машине.")
+                print("  WARNING: hr.exe is included, but no .dll was found next to it "
+                      "in the repo root - if this is a dynamic build (the default for "
+                      "this Makefile), the archive won't run on another machine without them.")
             for dll in dlls:
                 files.append((os.path.join(REPO_ROOT, dll), dll))
         if hom_exe:
@@ -302,7 +315,10 @@ def make_archive(files, out_path, fmt):
     elif fmt == "7z":
         sevenzip = shutil.which("7z") or shutil.which("7za")
         if not sevenzip:
-            raise RuntimeError("7z.exe не найден в PATH")
+            raise RuntimeError(
+                "7z/7za not found in PATH - install 7-Zip (or the 7za "
+                "command-line build) and make sure it's on PATH, then try again."
+            )
         # 7z can't take arbitrary (src, arcname) pairs directly, so stage
         # into a temp folder mirroring the arcnames, then compress that.
         stage = out_path + ".stage"
@@ -320,41 +336,40 @@ def make_archive(files, out_path, fmt):
 
 
 def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
-    section("Архивы релиза")
+    section("Release archives")
     os.makedirs(DIST_DIR, exist_ok=True)
 
-    count = ask_int("Сколько архивов подготовить", default=1, lo=1, hi=6)
+    count = ask_int("How many archives to prepare", default=1, lo=1, hi=6)
 
     preset_options = [
         ("full", "Full (hr.exe + hom.exe + ffmpeg.exe + docs + cfg + plugins)"),
-        ("portable", "Portable (то же самое, но без ffmpeg.exe)"),
-        ("source", "Source-only (исходники, без бинарников)"),
+        ("portable", "Portable (same, but without ffmpeg.exe)"),
+        ("source", "Source-only (source code, no binaries)"),
     ]
-    format_options = [
-        ("zip", "zip"),
-        ("tar.gz", "tar.gz"),
-    ]
-    if shutil.which("7z") or shutil.which("7za"):
-        format_options.append(("7z", "7z"))
 
     produced = []
     for i in range(1, count + 1):
-        print(f"\n--- Архив {i}/{count} ---")
-        label = sanitize_label(ask(f"Метка для архива #{i} (например win64-full)", default=f"build{i}"))
-        preset = ask_choice("Что положить в архив?", preset_options)
-        fmt = ask_choice("Формат архива?", format_options)
+        print(f"\n--- Archive {i}/{count} ---")
+        label = sanitize_label(ask(f"Label for archive #{i} (e.g. win64-full)", default=f"build{i}"))
+        preset = ask_choice("What should go in the archive?", preset_options)
+        fmt = ask_choice("Archive format?", FORMAT_OPTIONS)
 
         files = collect_files(preset, hr_exe, hom_exe, ffmpeg_path)
         if not files:
-            print("  Нечего архивировать (нет файлов для этого пресета) - пропускаю.")
+            print("  Nothing to archive (no files for this preset) - skipping.")
             continue
 
         out_name = f"HomRec-{version}-{label}.{fmt}"
         out_path = os.path.join(DIST_DIR, out_name)
-        print(f"  Собираю {out_name} ({len(files)} файлов)...")
-        make_archive(files, out_path, fmt)
+        print(f"  Building {out_name} ({len(files)} files)...")
+        try:
+            make_archive(files, out_path, fmt)
+        except RuntimeError as e:
+            print(f"  {e}")
+            print(f"  Skipping {out_name}.")
+            continue
         size_mb = os.path.getsize(out_path) / (1024 * 1024)
-        print(f"  Готово: {out_path} ({size_mb:.1f} MB)")
+        print(f"  Done: {out_path} ({size_mb:.1f} MB)")
         produced.append(out_path)
 
     return produced
@@ -367,7 +382,7 @@ def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
 def write_checksums(produced):
     if not produced:
         return None
-    section("Контрольные суммы")
+    section("Checksums")
     sums_path = os.path.join(DIST_DIR, "SHA256SUMS.txt")
     lines = []
     for path in produced:
@@ -379,7 +394,7 @@ def write_checksums(produced):
         print(f"  {lines[-1]}")
     with open(sums_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"Записано в {sums_path}")
+    print(f"Written to {sums_path}")
     return sums_path
 
 
@@ -411,9 +426,9 @@ def extract_release_notes(version):
 
 
 def suggest_git_commands(version):
-    section("Git (ничего не выполняется автоматически)")
+    section("Git (nothing is run automatically)")
     tag = f"v{version}"
-    print("Когда всё проверено, тег и пуш - вручную:")
+    print("Once everything checks out, tag and push - by hand:")
     print(f'  git tag -a {tag} -m "HomRec {version}"')
     print(f"  git push origin {tag}")
 
@@ -422,8 +437,8 @@ def main():
     print("=" * 60)
     print("  HomRec release builder")
     print("=" * 60)
-    print("Приветствую! Соберём релизные архивы для GitHub/зеркал.")
-    print(f"Репозиторий: {REPO_ROOT}")
+    print("Welcome! Let's put together the release archives for GitHub/mirrors.")
+    print(f"Repository: {REPO_ROOT}")
 
     start_time = time.time()
 
@@ -432,29 +447,29 @@ def main():
     ffmpeg_path = find_ffmpeg()
     produced = step_archives(version, hr_exe, hom_exe, ffmpeg_path)
 
-    section("Другие плюшки")
+    section("Other bits")
     write_checksums(produced)
     notes_path = extract_release_notes(version)
     if notes_path:
-        print(f"Release notes (из CHANGELOG.txt) сохранены в {notes_path}")
+        print(f"Release notes (from CHANGELOG.txt) saved to {notes_path}")
     else:
-        print("Не удалось вытащить секцию из CHANGELOG.txt - release notes не созданы.")
+        print("Could not pull a section out of CHANGELOG.txt - no release notes were created.")
     suggest_git_commands(version)
 
     elapsed = time.time() - start_time
-    section("Готово")
+    section("Done")
     if produced:
-        print(f"Собрано архивов: {len(produced)} за {elapsed:.1f} сек.")
+        print(f"Archives built: {len(produced)} in {elapsed:.1f}s.")
         for p in produced:
             print(f"  - {p}")
-        print(f"\nВсё лежит в {DIST_DIR} - можно заливать на GitHub Releases/зеркала.")
+        print(f"\nEverything is in {DIST_DIR} - ready to upload to GitHub Releases/mirrors.")
     else:
-        print("Ни один архив не был собран.")
+        print("No archive was built.")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nПрервано пользователем.")
+        print("\nInterrupted by user.")
         sys.exit(1)
