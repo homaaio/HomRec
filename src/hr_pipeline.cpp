@@ -232,9 +232,13 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
         int rx = sw / dw, ry = sh / dh;
         int bsz = rx * ry;
         for (int y = 0; y < dh; ++y) {
+            // hoist the destination row base out of the x loop -
+            // was recomputed (y*dw+x)*3 from scratch for every pixel.
+            uint8_t* orow = dst + (size_t)y * dw * 3;
+            int sy0 = y * ry;
             for (int x = 0; x < dw; ++x) {
                 uint32_t r = 0, g = 0, b = 0;
-                int sy0 = y * ry, sx0 = x * rx;
+                int sx0 = x * rx;
                 for (int by = 0; by < ry; ++by) {
                     const uint8_t* row = bgra + ((size_t)(sy0 + by) * sw + sx0) * 4;
                     for (int bx = 0; bx < rx; ++bx) {
@@ -243,7 +247,7 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
                         r += row[bx*4+2];
                     }
                 }
-                uint8_t* o = dst + ((size_t)y * dw + x) * 3;
+                uint8_t* o = orow + (size_t)x * 3;
                 o[0] = (uint8_t)(r / (uint32_t)bsz);
                 o[1] = (uint8_t)(g / (uint32_t)bsz);
                 o[2] = (uint8_t)(b / (uint32_t)bsz);
@@ -301,9 +305,12 @@ static void bgra_downscale(const uint8_t* __restrict src,
         int rx = sw / dw, ry = sh / dh;
         int bsz = rx * ry;
         for (int y = 0; y < dh; ++y) {
+            // same row-base hoist as bgra_to_thumb() above.
+            uint8_t* orow = dst + (size_t)y * dw * 4;
+            int sy0 = y * ry;
             for (int x = 0; x < dw; ++x) {
                 uint32_t b = 0, g = 0, r = 0;
-                int sy0 = y * ry, sx0 = x * rx;
+                int sx0 = x * rx;
                 for (int by = 0; by < ry; ++by) {
                     const uint8_t* row = src + ((size_t)(sy0 + by) * sw + sx0) * 4;
                     for (int bx = 0; bx < rx; ++bx) {
@@ -312,7 +319,7 @@ static void bgra_downscale(const uint8_t* __restrict src,
                         r += row[bx*4+2];
                     }
                 }
-                uint8_t* o = dst + ((size_t)y * dw + x) * 4;
+                uint8_t* o = orow + (size_t)x * 4;
                 o[0] = (uint8_t)(b / (uint32_t)bsz);
                 o[1] = (uint8_t)(g / (uint32_t)bsz);
                 o[2] = (uint8_t)(r / (uint32_t)bsz);
