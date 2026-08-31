@@ -28,6 +28,11 @@ const std::vector<std::string> kLangRequiredKeys = {
     "duration","audio","merged","separate","no_audio","save","cancel","browse",
     "output_folder","settings_title","video_settings","quality","mode","advanced",
     "monitor","output","countdown","timestamp","cursor","notification","made_by","audio_file",
+    "show_log",
+    "hide_window","export_hrc","import_hrc","overlays_panel","console","show_welcome","about",
+    "tab_general","tab_video","tab_audio","tab_hotkeys","tab_security","tab_system",
+    "quality_label","target_fps_label","resolution_mode_label","resolution_mode_percent",
+    "resolution_mode_custom","resolution_full","add_language",
 };
 
 namespace {
@@ -42,11 +47,13 @@ std::unordered_map<std::string, std::string> BuiltinEnglish() {
         {"level", "Level:"}, {"enable_audio", "Enable Audio"}, {"ffmpeg_found", "FFmpeg: \u2705 Found"},
         {"ffmpeg_not_found", "FFmpeg: \u274C Not Found"}, {"file_menu", "File"},
         {"open_recordings", "Open Recordings Folder"}, {"exit", "Exit"}, {"view_menu", "View"},
-        {"always_on_top", "Always on Top"}, {"fullscreen", "Fullscreen  F11"},
+        {"always_on_top", "Always on Top"},
+        {"fullscreen", "Fullscreen"},
         {"pc_analytics", "PC Analytics"}, {"cpu_info", "CPU Info"}, {"ram_info", "RAM Info"},
         {"disk_info", "Disk Info"}, {"help_menu", "Help"}, {"check_updates", "Check for Updates"},
         {"report_issue", "Report Issue"}, {"capture_source", "Capture Source"},
-        {"full_desktop", "Full Desktop"}, {"select_window", "Select Window..."},
+        {"full_desktop", "Full Desktop"},
+        {"select_window", "Select Window to Record..."},
         {"minimize_tray", "Minimize to tray on close"}, {"language", "Language"},
         {"english", "English"}, {"russian", "\u0420\u0443\u0441\u0441\u043A\u0438\u0439"}, {"theme", "Theme"}, {"dark", "Dark"},
         {"light", "Light"}, {"settings_menu", "Settings"}, {"preferences", "Preferences..."},
@@ -68,6 +75,21 @@ std::unordered_map<std::string, std::string> BuiltinEnglish() {
         {"countdown", "Countdown (3s)"}, {"timestamp", "Timestamp"}, {"cursor", "Cursor"},
         {"notification", "Show summary"}, {"made_by", "Homa4ella"}, {"audio_file", "\U0001F3B5 Audio file:"},
         {"show_log", "Show Log"},
+
+        {"hide_window", "Hide Windows From Recording..."},
+        {"export_hrc", "Export Settings (.hrc)..."},
+        {"import_hrc", "Import Settings (.hrc)..."},
+        {"overlays_panel", "Overlays Panel"},
+        {"console", "Console"}, {"show_welcome", "Show Welcome Screen"}, {"about", "About"},
+        {"tab_general", "General"},
+        {"tab_video", "Video && Codec"}, {"tab_audio", "Audio"}, {"tab_hotkeys", "Hotkeys"},
+        {"tab_security", "Security"}, {"tab_system", "System"},
+        {"quality_label", "Encoding quality:"}, {"target_fps_label", "Target FPS (limit):"},
+        {"resolution_mode_label", "Resolution mode:"},
+        {"resolution_mode_percent", "Percent of native"},
+        {"resolution_mode_custom", "Custom (width x height)"},
+        {"resolution_full", "Full screen (Native, 100%)"},
+        {"add_language", "Add Language..."},
     };
 }
 
