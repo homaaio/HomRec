@@ -509,6 +509,7 @@ struct Pipeline {
 
     std::atomic<int64_t> frames_captured{0};
     std::atomic<int64_t> frames_dropped{0};
+    std::atomic<int64_t> frames_stalled{0};
     std::atomic<double>  fps_actual{0.0};
 
     // ====== FRAME QUEUE FOR ASYNC WRITING ======
@@ -1061,6 +1062,7 @@ struct Pipeline {
                         dropped = std::move(pipe_queue.front());
                         pipe_queue.pop();
                         frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                        frames_stalled.fetch_add(1, std::memory_order_relaxed);
                     }
 
                     pipe_queue.push(std::move(yuv_frame));
@@ -1603,7 +1605,7 @@ HR_EXPORT void hr_pl_stats(void* handle,
     if (!handle) return;
     auto* pl = static_cast<Pipeline*>(handle);
     if (out_frames) *out_frames = pl->frames_captured.load(std::memory_order_relaxed);
-    if (out_drops)  *out_drops  = pl->frames_dropped .load(std::memory_order_relaxed);
+    if (out_drops)  *out_drops  = pl->frames_stalled .load(std::memory_order_relaxed);
     if (out_fps)    *out_fps    = pl->fps_actual      .load(std::memory_order_relaxed);
 #else
     if (out_frames) *out_frames = 0;
