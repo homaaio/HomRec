@@ -405,6 +405,11 @@ bool RecordingController::Start(std::wstring &error_out) {
         return false;
     }
 
+    if (state_.audio_out_channels > 0) {
+        hr_audio_reset_buffers();
+        hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
+    }
+
     // Pipeline handles the actual DXGI capture + frame conversion + piping
     // frames into ffmpeg's stdin. pv_w/pv_h come from AppState's preview
     // panel size (set by main_window on layout).
@@ -413,9 +418,12 @@ bool RecordingController::Start(std::wstring &error_out) {
     // the same capture size, just flip it into recording mode instead of
     // destroying and recreating it - keeps the live preview seamless
     // right through Start() instead of it blinking out and back.
+    // ffmpeg expects.
     bool reused_preview_pipeline = false;
     if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h &&
         pipeline_output_idx_ == capture_output_idx_) {
+        hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+        hr_pl_set_output_size(pipeline_, output_w_, output_h_);
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         reused_preview_pipeline = true;
     } else {
@@ -437,12 +445,11 @@ bool RecordingController::Start(std::wstring &error_out) {
         last_overlays_sent_valid_ = false;
     }
     bool pipeline_started = reused_preview_pipeline;
-    if (pipeline_ && !reused_preview_pipeline) pipeline_started = hr_pl_start(pipeline_) != 0;
-    if (pipeline_) hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
-    // Capture-side downscale to the resolved output size - see the big
-    // comment above pipe_w/pipe_h's assignment for why this has to stay
-    // in lockstep with what hr_ff_set_video_params() just told ffmpeg.
-    if (pipeline_) hr_pl_set_output_size(pipeline_, output_w_, output_h_);
+    if (pipeline_ && !reused_preview_pipeline) {
+        hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+        hr_pl_set_output_size(pipeline_, output_w_, output_h_);
+        pipeline_started = hr_pl_start(pipeline_) != 0;
+    }
     if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
     if (!pipeline_ || !pipeline_started) {
         error_out = L"Failed to start the capture pipeline.";
@@ -460,17 +467,11 @@ bool RecordingController::Start(std::wstring &error_out) {
     // guards against either path's default ever silently changing.
     hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
 
-    if (state_.audio_out_channels > 0) {
-        // Audio capture is already running continuously (started once in
-        // Initialize()) - don't call hr_audio_start() again here, that
-        // would delete and recreate the whole WASAPI capture state (and
-        // kill live level metering in the process). Just mark "recording
-        // starts now" so the WAV eventually written on Stop() only
-        // contains audio from this point forward, and push whatever the
-        // mixer's currently set to.
-        hr_audio_reset_buffers();
-        hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
-    }
+    // (Audio capture is already running continuously, started once in
+    // Initialize() - hr_audio_reset_buffers()/hr_audio_set_volumes() for
+    // this recording were already called above, right before the video
+    // pipeline started, to keep the two as close in time as possible; see
+    // that call site's comment for why it moved.)
 
     hr_ctl_set_output_path(ctl_, NarrowFromWide(current_output_path_).c_str());
     hr_ctl_start(ctl_);
