@@ -211,6 +211,7 @@ private:
     void OnStartClicked(wxCommandEvent &evt);
     void OnPauseClicked(wxCommandEvent &evt);
     void OnMenu(wxCommandEvent &evt);
+    void OnCheckForUpdates();
     void OnPreviewTimer(wxTimerEvent &evt);
     void OnStatsTimer(wxTimerEvent &evt);
     void OnClose(wxCloseEvent &evt);

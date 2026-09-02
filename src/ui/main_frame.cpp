@@ -14,6 +14,7 @@
 #include "../hr_log.h"
 #include "../hr_pc_log.h"
 #include "../hr_plugin_log.h"
+#include "../hr_update.h"
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
@@ -1381,6 +1382,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         // ID_OVERLAYS_MANAGE removed along with overlay_manager.cpp's
         // ShowOverlayManager() -- see overlays_dock_panel.h.
+        case ID_HELP_CHECK_UPDATES:
+            OnCheckForUpdates();
+            break;
         case ID_HELP_CONSOLE:
             // console_ is always non-null by this point now (constructed
             // at startup so cfg/autoexec.cfg has somewhere to print to -
@@ -1395,6 +1399,49 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         default: break;
     }
+}
+
+// Help > Check for Updates. Hits GitHub on a background thread (see
+// hr_update.cpp) so the UI never blocks on the network call, then hops
+// back to the UI thread via CallAfter before touching any widgets or
+// showing a message box.
+void HomRecMainFrame::OnCheckForUpdates() {
+    HrUpdate::CheckForUpdateAsync([this](HrUpdate::UpdateInfo info) {
+        CallAfter([this, info]() {
+            if (!info.checked_ok) {
+                wxMessageBox("Couldn't check for updates - check your internet connection and try again.",
+                             "Check for Updates", wxOK | wxICON_WARNING, this);
+                return;
+            }
+            if (!info.available) {
+                wxMessageBox("You're on the latest version (" HR_APP_VERSION ").",
+                             "Check for Updates", wxOK | wxICON_INFORMATION, this);
+                return;
+            }
+
+            wxString msg = wxString::Format(
+                "A new version is available: %s (you have " HR_APP_VERSION ").\n\n",
+                wxString::FromUTF8(info.latest_version));
+            if (!info.download_url.empty()) {
+                msg += "Download and install it now? HomRec will close to finish updating.";
+                int choice = wxMessageBox(msg, "Update Available", wxYES_NO | wxICON_INFORMATION, this);
+                if (choice != wxYES) return;
+                if (HrUpdate::DownloadAndLaunchInstaller(info)) {
+                    Close(true);
+                } else {
+                    wxMessageBox("Couldn't download the update. Try again later, or grab it from the "
+                                 "release page.", "Update Available", wxOK | wxICON_ERROR, this);
+                }
+            } else {
+                msg += "No installer was found in that release - open its page in your browser?";
+                int choice = wxMessageBox(msg, "Update Available", wxYES_NO | wxICON_INFORMATION, this);
+                if (choice == wxYES && !info.html_url.empty()) {
+                    std::wstring urlW = wxString::FromUTF8(info.html_url).ToStdWstring();
+                    ShellExecuteW(nullptr, L"open", urlW.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
+        });
+    });
 }
 
 void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {

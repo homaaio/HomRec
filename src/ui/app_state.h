@@ -127,8 +127,9 @@ struct AppState {
     bool system_logging_enabled = true; // logs/pc.log
     bool plugin_logging_enabled = true; // logs/plugins.log
 
-    // -- Settings > System (also offered on first run in the Welcome
-    // wizard, see welcome_dialog.cpp's new Page::System) --------------------
+    // -- Settings > System (the Welcome wizard no longer has its own copy
+    // of this step - now offered instead as install-time Tasks in
+    // installer/HomRec.iss) ------------------------------------------------
     bool        desktop_shortcut_enabled = false;
     // Empty = "use the real Desktop folder"
     // (HrSystemIntegration::GetDefaultDesktopPath()) - only set to
