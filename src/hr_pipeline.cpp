@@ -461,6 +461,7 @@ struct Pipeline {
     std::vector<uint8_t> pv_buf;
     std::mutex           pv_mtx;
     int  pv_actual_w = 0, pv_actual_h = 0;
+    int  pv_native_w = 0, pv_native_h = 0;
     bool pv_ready    = false;
 
     std::thread       capture_thread;
@@ -684,6 +685,8 @@ struct Pipeline {
         bgra_to_thumb(bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
         pv_actual_w = tw;
         pv_actual_h = th;
+        pv_native_w = eff_w;
+        pv_native_h = eff_h;
         pv_ready    = true;
     }
 
@@ -1594,6 +1597,28 @@ HR_EXPORT int hr_pl_get_preview(void* handle, uint8_t* out_rgb,
     *out_w = pl->pv_actual_w;
     *out_h = pl->pv_actual_h;
     memcpy(out_rgb, pl->pv_buf.data(), pl->pv_buf.size());
+    return 1;
+#endif
+}
+
+// Native (full-resolution, pre-thumbnail-downscale) size the most recent
+// hr_pl_get_preview() thumbnail was generated from -- i.e. the coordinate
+// space OverlayDef::x/y/w/h are actually composited in (see
+// overlay_compositor.Apply(bgra_buf.data(), eff_w, eff_h, ...) in
+// capture_loop()). The overlay placement dialog shows the user the
+// thumbnail from hr_pl_get_preview() but must convert drag positions
+// through *this* size, not the thumbnail's own w/h, or every placement
+// ends up scaled down by however much the thumbnail was downscaled by.
+HR_EXPORT int hr_pl_get_native_size(void* handle, int* out_w, int* out_h) {
+    if (!handle || !out_w || !out_h) return 0;
+#ifndef _WIN32
+    return 0;
+#else
+    auto* pl = static_cast<Pipeline*>(handle);
+    std::lock_guard<std::mutex> lock(pl->pv_mtx);
+    if (!pl->pv_ready || pl->pv_native_w <= 0 || pl->pv_native_h <= 0) return 0;
+    *out_w = pl->pv_native_w;
+    *out_h = pl->pv_native_h;
     return 1;
 #endif
 }
