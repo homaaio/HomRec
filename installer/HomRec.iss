@@ -131,24 +131,11 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; hr.exe writes these itself (see hr_log_paths.cpp / hrc_config.h) - they
-; aren't part of [Files] so a normal uninstall wouldn't otherwise touch
-; them. Recordings are deliberately NOT listed here: whatever the user's
-; output_folder setting points at is left alone no matter where it is.
-; Only removed if the user answers "No" to the keep-my-data prompt in
-; InitializeUninstall below (Check runs after that prompt has already set
-; KeepUserDataChoice).
-Type: files; Name: "{app}\homrec.hrc"; Check: not KeepUserDataChoice
-Type: filesandordirs; Name: "{app}\logs"; Check: not KeepUserDataChoice
-Type: filesandordirs; Name: "{app}\Assets"; Check: not KeepUserDataChoice
+Type: files; Name: "{app}\homrec.hrc"; Check: ShouldDeleteUserData
+Type: filesandordirs; Name: "{app}\logs"; Check: ShouldDeleteUserData
+Type: filesandordirs; Name: "{app}\Assets"; Check: ShouldDeleteUserData
 
 [Code]
-// Offers to keep or remove the things [UninstallDelete] would otherwise
-// always delete (settings + logs + downloaded language files) - a plain
-// [UninstallDelete] entry has no way to ask first, and silently deleting
-// a user's saved output-folder/resolution/fps/etc on every uninstall
-// (including ones that are really just "reinstalling to upgrade") is
-// worse than asking once.
 var
   KeepUserDataChoice: Boolean;
 
@@ -158,4 +145,9 @@ begin
     'Choose No to remove them along with the program. Your recordings are never touched either way.',
     mbConfirmation, MB_YESNO) = IDYES);
   Result := True;
+end;
+
+function ShouldDeleteUserData(): Boolean;
+begin
+  Result := not KeepUserDataChoice;
 end;
