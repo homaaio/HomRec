@@ -16,8 +16,6 @@ prompt and two new console commands.
     - src/hr_version.cpp - duplicated the version banner as its own
       dllexport'd constants; superseded by src/ui/version.h +
       hr_app_logic.cpp's hr_version_string()/hr_version_gt().
-    - src/hr_update.cpp - staged update-checker implementation, explicitly
-      marked "NOT CURRENTLY BUILT" in its own file header.
     - src/hr_console.cpp / src/hr_console_pipe_server.cpp - the old
       Python-bridge console DLL design (forward_to_python() and a
       Named Pipe IPC server for it), both explicitly marked
@@ -66,6 +64,12 @@ prompt and two new console commands.
   resolution/fps info and the root-style trailing "#" (fitting, since
   this console can run rm/hom update/etc.). Not a literal copy of a real
   shell prompt, just shaped like one.
+- welcome_dialog.cpp/.h - removed the first-run wizard's "system options"
+  page (desktop shortcut / launch at startup / tray icon toggles). The
+  wizard is back to its originally-documented three pages (greeting ->
+  basic settings -> finish); those three toggles are still available
+  in Settings > System, and now also as install-time Tasks in the new
+  Windows installer.
 
 === Added ===
 
@@ -75,6 +79,24 @@ prompt and two new console commands.
   paths from) and `whoami` (prints the console/build version string).
   Neither reads or writes anything sensitive, so neither needs the
   "inwid" confirmation gate.
+- Windows installer (installer/HomRec.iss, Inno Setup) - per-user install
+  (no admin/UAC needed, matches HomRec's next-to-the-exe settings/logs),
+  Start Menu + optional desktop shortcut, optional "launch at Windows
+  startup" task, and a real uninstaller that asks once before deleting
+  homrec.hrc/logs (recordings are never touched). See installer/README.md.
+- src/hr_update.cpp / hr_update.h - a real, buildable GitHub-releases
+  update checker + self-updater, replacing the old "NOT CURRENTLY BUILT"
+  staging file of the same name (which also had a stale hardcoded "1.6.1"
+  instead of reading version.h). Wired up to Help > Check for Updates
+  (main_frame.cpp's new OnCheckForUpdates()), which - it turns out - had
+  a menu item and a translated label ("check_updates") but no handler at
+  all; clicking it silently did nothing. Finding an update now offers to
+  download and silently launch the new installer, closing the app for it.
+- tools/homrec_build.py: optional "build the installer" step (finds
+  ISCC.exe, builds installer/HomRec.iss with the release version, drops
+  the result in dist\ alongside the archives) and a reminder to attach
+  the installer exe - not just the archives - to the GitHub release, or
+  auto-update has nothing to find.
 
 [Version 2.0.1] - 2026-08-30
 
