@@ -46,8 +46,25 @@ public:
         Refresh();
     }
 
+    // native_w/native_h is the full-resolution size overlays_' x/y/w/h are
+    // actually measured in (matches what the real recording composites
+    // against - see RecordingController::CaptureSnapshotFrame()'s
+    // comment), which is normally larger than the shot_w_/shot_h_
+    // thumbnail SetScreenshot() just drew. Every place below that used to
+    // scale by shot_w_/shot_h_ now scales by this instead, so a drag maps
+    // screen pixels -> overlay-space pixels correctly regardless of how
+    // much smaller the on-screen screenshot is than the actual recording.
+    void SetNativeSize(int w, int h) {
+        if (w > 0 && h > 0) { native_w_ = w; native_h_ = h; }
+    }
+
 private:
     enum class Corner { kNone, kTopLeft, kBottomRight };
+
+    // Falls back to the thumbnail's own size before the first native size
+    // is known (e.g. mid-construction), rather than dividing by zero.
+    int NativeW() const { return native_w_ > 0 ? native_w_ : shot_w_; }
+    int NativeH() const { return native_h_ > 0 ? native_h_ : shot_h_; }
 
     bool GetImageRect(wxRect &out) const {
         if (!bitmap_src_.IsOk() || shot_w_ <= 0 || shot_h_ <= 0) return false;
@@ -84,8 +101,8 @@ private:
         }
         dc.DrawBitmap(cached_bmp_, imgRect.GetX(), imgRect.GetY());
 
-        double sx = (double)imgRect.GetWidth() / shot_w_;
-        double sy = (double)imgRect.GetHeight() / shot_h_;
+        double sx = (double)imgRect.GetWidth() / NativeW();
+        double sy = (double)imgRect.GetHeight() / NativeH();
         const int handle = 8;
         for (size_t i = 0; i < overlays_.size(); ++i) {
             const auto &ov = overlays_[i];
@@ -116,8 +133,8 @@ private:
     void OnLeftDown(wxMouseEvent &evt) {
         wxRect imgRect;
         if (!GetImageRect(imgRect)) { evt.Skip(); return; }
-        double sx = (double)imgRect.GetWidth() / shot_w_;
-        double sy = (double)imgRect.GetHeight() / shot_h_;
+        double sx = (double)imgRect.GetWidth() / NativeW();
+        double sy = (double)imgRect.GetHeight() / NativeH();
         int mx = evt.GetX(), my = evt.GetY();
         const int handle = 8;
 
@@ -166,13 +183,13 @@ private:
             evt.Skip();
             return;
         }
-        double sx = (double)imgRect.GetWidth() / shot_w_;
-        double sy = (double)imgRect.GetHeight() / shot_h_;
+        double sx = (double)imgRect.GetWidth() / NativeW();
+        double sy = (double)imgRect.GetHeight() / NativeH();
         int dx = (int)std::lround((evt.GetX() - drag_start_mx_) / sx);
         int dy = (int)std::lround((evt.GetY() - drag_start_my_) / sy);
 
         auto &ov = overlays_[(size_t)drag_index_];
-        int cw = shot_w_, ch = shot_h_;
+        int cw = NativeW(), ch = NativeH();
         if (drag_corner_ == Corner::kBottomRight) {
             ov.w = std::max(10, drag_start_w_ + dx);
             ov.h = std::max(10, drag_start_h_ + dy);
@@ -211,6 +228,7 @@ private:
     std::vector<OverlayDef> &overlays_;
     wxBitmap bitmap_src_, cached_bmp_;
     int shot_w_ = 0, shot_h_ = 0;
+    int native_w_ = 0, native_h_ = 0;
     int cached_dst_w_ = -1, cached_dst_h_ = -1;
     int drag_index_ = -1;
     Corner drag_corner_ = Corner::kNone;
@@ -265,9 +283,10 @@ bool ShowOverlayPlacementDialog(wxWindow *parent, AppState &state,
     // briefly for its first frame.
     auto takeScreenshot = [&](bool first_call) -> bool {
         std::vector<uint8_t> buf;
-        int w = 0, h = 0;
-        if (rec->CaptureSnapshotFrame(buf, w, h, first_call)) {
+        int w = 0, h = 0, native_w = 0, native_h = 0;
+        if (rec->CaptureSnapshotFrame(buf, w, h, native_w, native_h, first_call)) {
             canvas->SetScreenshot(buf, w, h);
+            canvas->SetNativeSize(native_w, native_h);
             return true;
         }
         return false;
