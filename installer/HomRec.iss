@@ -75,7 +75,7 @@ SourceDir=..
 ; file's own directory (installer\), hence the "..\" to land back in the
 ; repo-root dist\ that tools/homrec_build.py and its docs both expect.
 OutputDir=..\dist
-OutputBaseFilename=HomRec-Setup-{#MyAppVersion}
+OutputBaseFilename=homrec-setup-win64-{#MyAppVersion}
 SetupIconFile=icons\main.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 LicenseFile=LICENSE
