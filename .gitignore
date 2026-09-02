@@ -259,7 +259,7 @@ desktop.ini
 *.lib
 
 # Executables
-*.exe
+hr.exe
 *.out
 *.app
 
