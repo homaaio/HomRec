@@ -91,7 +91,17 @@ public:
     // pipeline and wait briefly for the first frame); pass false for
     // subsequent "Refresh screenshot" calls, which just re-read the
     // already-running pipeline's latest frame instantly.
-    bool CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h, bool first_call);
+    //
+    // out_w/out_h are the returned thumbnail's own pixel size (what the
+    // dialog should draw the screenshot at). native_w/native_h are the
+    // *full-resolution* capture size that OverlayDef::x/y/w/h are actually
+    // measured in (same space the real recording composites overlays
+    // into) - out_w/out_h is almost always smaller than this, so any
+    // on-screen drag math must convert through native_w/native_h, not
+    // out_w/out_h, or every placement ends up scaled down to match the
+    // thumbnail instead of the recording.
+    bool CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h,
+                               int &native_w, int &native_h, bool first_call);
     // Ends an "Apply with preview off" editing session - tears the
     // preview pipeline back down if Settings > Disable live preview is
     // still on (CaptureSnapshotFrame() only started it for the snapshot,

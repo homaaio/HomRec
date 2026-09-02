@@ -56,6 +56,7 @@ extern "C" {
     void hr_pl_stop(void *handle);
     void hr_pl_pause(void *handle, int flag);
     int hr_pl_get_preview(void *handle, unsigned char *out_rgb, int *out_w, int *out_h);
+    int hr_pl_get_native_size(void *handle, int *out_w, int *out_h);
     void hr_pl_set_recording(void *handle, int active, intptr_t pipe_fd);
     void hr_pl_stats(void *handle, long long *out_frames, long long *out_drops, double *out_fps);
     void hr_pl_set_overlays(void *handle, const HrOverlayDesc *items, int count);
@@ -964,7 +965,7 @@ void RecordingController::SetPreviewVisible(bool visible) {
 }
 
 bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h,
-                                                bool first_call) {
+                                                int &native_w, int &native_h, bool first_call) {
     // This used to be gated on `first_call` too, so if the very
     // first attempt of an editing session failed to get a pipeline going
     // (EnsurePreview() briefly stuck right after e.g. a tray restore),
@@ -996,7 +997,13 @@ bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &o
     const int max_wait_ms = (first_call || just_started) ? 1000 : 0;
     const int step_ms = 25;
     for (int waited = 0; ; waited += step_ms) {
-        if (GetPreviewFrame(out, out_w, out_h)) return true;
+        if (GetPreviewFrame(out, out_w, out_h)) {
+            if (!hr_pl_get_native_size(pipeline_, &native_w, &native_h)) {
+                native_w = out_w;
+                native_h = out_h;
+            }
+            return true;
+        }
         if (waited >= max_wait_ms) return false;
         Sleep(step_ms);
     }
