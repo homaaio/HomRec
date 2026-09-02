@@ -7,6 +7,10 @@
   #include <immintrin.h>
   #include <emmintrin.h>
 #endif
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+  #include <smmintrin.h>  /* SSE4.1 - _mm_mullo_epi32/_mm_packus_epi32, for the Y-channel fast path below */
+  #define HR_HAVE_X86_SIMD 1
+#endif
 
 #ifdef _WIN32
   #define HR_EXPORT __declspec(dllexport)
@@ -130,7 +134,7 @@ HR_EXPORT void hr_rgb_to_yuv420p(
     }
 }
 
-HR_EXPORT void hr_bgra_to_yuv420p_band(
+static void hr_bgra_to_yuv420p_band_scalar(
     const uint8_t * HR_RESTRICT bgra,
     uint8_t       * HR_RESTRICT yuv_out,
     int width, int height, int y0, int y1)
@@ -211,6 +215,109 @@ HR_EXPORT void hr_bgra_to_yuv420p_band(
             Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
         }
     }
+}
+
+#if defined(HR_HAVE_X86_SIMD)
+__attribute__((target("sse4.1")))
+static inline void hr_y8_sse41(const uint8_t *bgra8, uint8_t *out8) {
+    __m128i pixA = _mm_loadu_si128((const __m128i *)(bgra8));
+    __m128i pixB = _mm_loadu_si128((const __m128i *)(bgra8 + 16));
+    __m128i mask = _mm_set1_epi32(0xFF);
+    __m128i coefR = _mm_set1_epi32(YR), coefG = _mm_set1_epi32(YG), coefB = _mm_set1_epi32(YB);
+    __m128i round = _mm_set1_epi32(32768);
+
+    __m128i BA = _mm_and_si128(pixA, mask);
+    __m128i GA = _mm_and_si128(_mm_srli_epi32(pixA, 8), mask);
+    __m128i RA = _mm_and_si128(_mm_srli_epi32(pixA, 16), mask);
+    __m128i sumA = _mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(RA, coefR), _mm_mullo_epi32(GA, coefG)),
+                                  _mm_add_epi32(_mm_mullo_epi32(BA, coefB), round));
+    __m128i yA32 = _mm_srli_epi32(sumA, 16);
+
+    __m128i BB = _mm_and_si128(pixB, mask);
+    __m128i GB = _mm_and_si128(_mm_srli_epi32(pixB, 8), mask);
+    __m128i RB = _mm_and_si128(_mm_srli_epi32(pixB, 16), mask);
+    __m128i sumB = _mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(RB, coefR), _mm_mullo_epi32(GB, coefG)),
+                                  _mm_add_epi32(_mm_mullo_epi32(BB, coefB), round));
+    __m128i yB32 = _mm_srli_epi32(sumB, 16);
+
+    __m128i y16 = _mm_packus_epi32(yA32, yB32);   /* 8x16-bit, values 0..255 */
+    __m128i y8  = _mm_packus_epi16(y16, y16);     /* low 8 bytes valid */
+    _mm_storel_epi64((__m128i *)out8, y8);
+}
+
+__attribute__((target("sse4.1")))
+static void hr_bgra_to_yuv420p_band_sse41(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT yuv_out,
+    int width, int height, int y0, int y1)
+{
+    if (HR_UNLIKELY(!bgra || !yuv_out || width <= 0 || height <= 0)) return;
+    if (y0 < 0) y0 = 0;
+    if (y1 > height) y1 = height;
+    if (y0 >= y1) return;
+
+    size_t frame_sz = (size_t)width * (size_t)height;
+    uint8_t *Y  = yuv_out;
+    uint8_t *Cb = yuv_out + frame_sz;
+    uint8_t *Cr = yuv_out + frame_sz + frame_sz / 4;
+
+    for (int y = y0; y < y1; y += 2) {
+        const uint8_t *row0 = bgra + (size_t)y * width * 4;
+        const uint8_t *row1 = (y + 1 < height)
+                            ? bgra + (size_t)(y+1) * width * 4
+                            : row0;
+        int y1r = (y+1 < height) ? y+1 : y;
+
+        uint8_t *Yrow0 = Y + (size_t)y * width;
+        uint8_t *Yrow1r = Y + (size_t)y1r * width;
+        size_t crow = (size_t)(y / 2) * (size_t)(width / 2);
+        uint8_t *Cbrow = Cb + crow;
+        uint8_t *Crrow = Cr + crow;
+
+        int x = 0;
+        for (; x + 7 < width; x += 8) {
+            hr_y8_sse41(row0 + (size_t)x * 4, Yrow0 + x);
+            hr_y8_sse41(row1 + (size_t)x * 4, Yrow1r + x);
+        }
+        for (; x < width; ++x) {
+            uint8_t b = row0[x*4+0], g = row0[x*4+1], r = row0[x*4+2];
+            Yrow0[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
+            b = row1[x*4+0]; g = row1[x*4+1]; r = row1[x*4+2];
+            Yrow1r[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
+        }
+
+        for (x = 0; x < width; x += 2) {
+            int x1=(x+1<width)?x+1:x;
+            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
+            uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
+            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
+            uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
+            int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
+            size_t ci=(size_t)(x/2);
+            Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+            Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+        }
+    }
+}
+#endif /* HR_HAVE_X86_SIMD */
+
+HR_EXPORT void hr_bgra_to_yuv420p_band(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT yuv_out,
+    int width, int height, int y0, int y1)
+{
+#if defined(HR_HAVE_X86_SIMD)
+    static int has_sse41 = -1;
+    if (HR_UNLIKELY(has_sse41 < 0)) {
+        __builtin_cpu_init();
+        has_sse41 = __builtin_cpu_supports("sse4.1") ? 1 : 0;
+    }
+    if (has_sse41) {
+        hr_bgra_to_yuv420p_band_sse41(bgra, yuv_out, width, height, y0, y1);
+        return;
+    }
+#endif
+    hr_bgra_to_yuv420p_band_scalar(bgra, yuv_out, width, height, y0, y1);
 }
 
 HR_EXPORT void hr_bgra_to_yuv420p(
