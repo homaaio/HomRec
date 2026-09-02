@@ -211,6 +211,56 @@ def find_ffmpeg():
 
 
 # ---------------------------------------------------------------------------
+# Step 3b: Windows installer (Inno Setup)
+# ---------------------------------------------------------------------------
+
+def find_iscc():
+    candidates = [
+        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    ]
+    found = next((c for c in candidates if os.path.isfile(c)), None)
+    if found:
+        return found
+    return shutil.which("iscc") or shutil.which("ISCC")
+
+
+def step_installer(version, hr_exe):
+    section("Windows installer (Inno Setup)")
+    iss_path = os.path.join(REPO_ROOT, "installer", "HomRec.iss")
+    if not os.path.isfile(iss_path):
+        print("  installer\\HomRec.iss not found - skipping.")
+        return None
+    if not hr_exe:
+        print("  hr.exe wasn't built - skipping the installer (it packages "
+              "whatever's already sitting in the repo root).")
+        return None
+    if not ask_yes_no("Build the Windows installer too (installer\\HomRec.iss)?"):
+        return None
+
+    iscc = find_iscc()
+    if not iscc:
+        print("  ISCC.exe (Inno Setup Compiler) not found. Install Inno Setup "
+              "(https://jrsoftware.org/isinfo.php) or put iscc.exe on PATH, then try again.")
+        return None
+
+    os.makedirs(DIST_DIR, exist_ok=True)
+    ok = run_cmd([iscc, f"/DMyAppVersion={version}", iss_path], REPO_ROOT)
+    if not ok:
+        print("  Inno Setup compile failed - see its output above.")
+        return None
+
+    out_path = os.path.join(DIST_DIR, f"HomRec-Setup-{version}.exe")
+    if not os.path.isfile(out_path):
+        print("  ISCC reported success but " + out_path + " wasn't found - "
+              "check OutputDir/OutputBaseFilename in installer/HomRec.iss.")
+        return None
+    size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    print(f"  Done: {out_path} ({size_mb:.1f} MB)")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # Step 4: archives
 # ---------------------------------------------------------------------------
 
@@ -425,12 +475,20 @@ def extract_release_notes(version):
     return notes_path
 
 
-def suggest_git_commands(version):
+def suggest_git_commands(version, installer_path):
     section("Git (nothing is run automatically)")
     tag = f"v{version}"
     print("Once everything checks out, tag and push - by hand:")
     print(f'  git tag -a {tag} -m "HomRec {version}"')
     print(f"  git push origin {tag}")
+    print("\nThen create the GitHub Release for that tag and attach the archives")
+    print(f"from {DIST_DIR} as release assets.")
+    if installer_path:
+        print(f"\nIMPORTANT for auto-update: attach {os.path.basename(installer_path)} itself")
+        print("(not just the zip/tar.gz) to the release. Existing installs' Help > Check")
+        print("for Updates (src/hr_update.cpp) looks at the latest release for an asset")
+        print("whose name ends in .exe and offers to silently install it - skip this and")
+        print("auto-update simply won't find anything to offer.")
 
 
 def main():
@@ -445,22 +503,24 @@ def main():
     version = step_version()
     hr_exe, hom_exe = step_build()
     ffmpeg_path = find_ffmpeg()
+    installer_path = step_installer(version, hr_exe)
     produced = step_archives(version, hr_exe, hom_exe, ffmpeg_path)
 
     section("Other bits")
-    write_checksums(produced)
+    write_checksums(produced + ([installer_path] if installer_path else []))
     notes_path = extract_release_notes(version)
     if notes_path:
         print(f"Release notes (from CHANGELOG.txt) saved to {notes_path}")
     else:
         print("Could not pull a section out of CHANGELOG.txt - no release notes were created.")
-    suggest_git_commands(version)
+    suggest_git_commands(version, installer_path)
 
     elapsed = time.time() - start_time
     section("Done")
-    if produced:
-        print(f"Archives built: {len(produced)} in {elapsed:.1f}s.")
-        for p in produced:
+    all_produced = produced + ([installer_path] if installer_path else [])
+    if all_produced:
+        print(f"Archives built: {len(all_produced)} in {elapsed:.1f}s.")
+        for p in all_produced:
             print(f"  - {p}")
         print(f"\nEverything is in {DIST_DIR} - ready to upload to GitHub Releases/mirrors.")
     else:
