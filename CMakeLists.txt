@@ -73,6 +73,7 @@ set(HR_SOURCES
     src/hr_hotkey.cpp
     src/hr_mic_enum.cpp
     src/hr_settings_registry.cpp
+    src/hr_update.cpp
     resource.rc
 )
 
@@ -108,7 +109,7 @@ target_link_options(hr PRIVATE
 )
 
 target_link_libraries(hr PRIVATE
-    comctl32 comdlg32 gdi32 shell32 user32 psapi wininet
+    comctl32 comdlg32 gdi32 shell32 user32 psapi wininet winhttp
     d3d11 dxgi pdh winmm ole32 uuid lua dwmapi uxtheme
     windowscodecs strmiids oleaut32
     wx_mswu_xrc-3.2 wx_mswu_html-3.2 wx_mswu_qa-3.2
