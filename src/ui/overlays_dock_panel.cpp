@@ -84,6 +84,14 @@ std::wstring RowLabel(const OverlayDef &ov) {
             std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
             name = base.empty() ? L"(no file)" : WideFromNarrow(base);
         }
+    } else if (ov.type == "gif") {
+        icon = L"\U0001F3AC"; // 🎬
+        if (name.empty()) {
+            std::string path = ov.image_path;
+            size_t slash = path.find_last_of("\\/");
+            std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
+            name = base.empty() ? L"(no file)" : WideFromNarrow(base);
+        }
     } else if (ov.type == "input_overlay") {
         icon = L"\u2328"; // ⌨
         if (name.empty()) {
@@ -124,7 +132,7 @@ void PersistState(AppState &state) {
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the "+" menu -- local to
 // this file, never go through WM_COMMAND, so no risk of colliding with the
 // ID_OVDOCK_* control ids.
-enum { kMenuAddText = 1, kMenuAddImage, kMenuAddWebcam, kMenuAddExternal, kMenuAddInputOverlay };
+enum { kMenuAddText = 1, kMenuAddImage, kMenuAddGif, kMenuAddWebcam, kMenuAddExternal, kMenuAddInputOverlay };
 
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the per-row right-click
 // menu -- same reasoning as kMenuAdd* above, a separate numbering space
@@ -271,6 +279,7 @@ void OverlaysDockPanel::ShowAddMenu(HWND parent, HINSTANCE hInst) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, kMenuAddText, L"Text");
     AppendMenuW(menu, MF_STRING, kMenuAddImage, L"Image");
+    AppendMenuW(menu, MF_STRING, kMenuAddGif, L"GIF");
     AppendMenuW(menu, MF_STRING, kMenuAddWebcam, L"Webcam");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuAddExternal, L"External Overlay (.json + .png)\u2026");
@@ -289,6 +298,7 @@ void OverlaysDockPanel::ShowAddMenu(HWND parent, HINSTANCE hInst) {
     switch (cmd) {
         case kMenuAddText:         AddTextOverlay(parent, hInst); break;
         case kMenuAddImage:        AddImageOverlay(parent, hInst); break;
+        case kMenuAddGif:          AddGifOverlay(parent, hInst); break;
         case kMenuAddWebcam:       AddWebcamOverlay(parent, hInst); break;
         case kMenuAddExternal:     AddExternalOverlay(parent, hInst); break;
         case kMenuAddInputOverlay: AddFromInputOverlayRegistry(parent, hInst); break;
@@ -320,6 +330,23 @@ void OverlaysDockPanel::AddImageOverlay(HWND parent, HINSTANCE hInst) {
     OverlayDef ov;
     ov.id = "ov_" + std::to_string(next_id_++);
     ov.type = "image";
+    ov.image_path = path;
+    ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 150;
+    ov.visible = true;
+    state_.overlays.push_back(ov);
+    Refresh();
+}
+
+void OverlaysDockPanel::AddGifOverlay(HWND parent, HINSTANCE hInst) {
+    (void)hInst;
+    std::string path = PickOpenFile(parent,
+        L"GIF files (*.gif)\0*.gif\0All files\0*.*\0",
+        L"Add GIF Overlay");
+    if (path.empty()) return;
+
+    OverlayDef ov;
+    ov.id = "ov_" + std::to_string(next_id_++);
+    ov.type = "gif";
     ov.image_path = path;
     ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 150;
     ov.visible = true;
@@ -455,6 +482,12 @@ void OverlaysDockPanel::EditParametersAt(size_t idx) {
         std::string path = PickOpenFile(parent,
             L"Image files (*.png;*.jpg;*.jpeg;*.bmp)\0*.png;*.jpg;*.jpeg;*.bmp\0All files\0*.*\0",
             L"Change Image");
+        if (path.empty()) return;
+        ov.image_path = path;
+    } else if (ov.type == "gif") {
+        std::string path = PickOpenFile(parent,
+            L"GIF files (*.gif)\0*.gif\0All files\0*.*\0",
+            L"Change GIF");
         if (path.empty()) return;
         ov.image_path = path;
     } else if (ov.type == "webcam") {

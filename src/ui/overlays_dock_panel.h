@@ -11,7 +11,7 @@
 // the separate "Position" popup redundant, not just extra.
 //
 // Since there's no other place left to add/edit overlays, this panel's "+"
-// button now opens a small dropdown itself (Text / Image / Webcam /
+// button now opens a small dropdown itself (Text / Image / GIF / Webcam /
 // External Overlay / Select Input-Overlay - the last one only appears if a
 // plugin has registered any presets, see hr_input_overlay_registry.h) and
 // prompts for whatever it needs up front (see overlay_add_dialogs.h),
@@ -71,6 +71,10 @@ private:
 
     void AddTextOverlay(HWND parent, HINSTANCE hInst);
     void AddImageOverlay(HWND parent, HINSTANCE hInst);
+    // "GIF" -- same idea as AddImageOverlay, but restricted to .gif and
+    // stored with type == "gif" so the capture pipeline (hr_overlay_render)
+    // animates it frame-by-frame instead of treating it as a static image.
+    void AddGifOverlay(HWND parent, HINSTANCE hInst);
     void AddWebcamOverlay(HWND parent, HINSTANCE hInst);
     // "External Overlay" -- the user picks a .json layout file and a .png
     // spritesheet directly (two plain file pickers) -- NOT a .hrp plugin
