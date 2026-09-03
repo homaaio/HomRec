@@ -613,6 +613,14 @@ void ConsoleWindow::Print(const std::wstring &line, COLORREF color) {
         SendMessageW(output_, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
     }
     SendMessageW(output_, EM_REPLACESEL, FALSE, (LPARAM)toAppend.c_str());
+
+    // EM_REPLACESEL leaves the caret at the end of what was just inserted,
+    // but doesn't itself scroll the view to follow it (ES_AUTOVSCROLL only
+    // kicks in for text typed directly into the control) - without this,
+    // running a command whose output overflows the visible area left the
+    // view sitting wherever it was, instead of following along like a
+    // normal terminal.
+    SendMessageW(output_, EM_SCROLLCARET, 0, 0);
 }
 
 void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
