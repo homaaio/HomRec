@@ -41,7 +41,15 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 ## Installation
 
-### Option A - .exe (recommended)
+### Option A - Installer (recommended)
+
+**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `HomRec-Setup-*.exe`     
+**2.** Run it - no admin rights needed, it installs per-user     
+**3.** Optionally tick "Create a desktop shortcut" and/or "Launch HomRec automatically when Windows starts" on the Tasks page - these are the only place system integration is offered before first launch; everything's also available afterward in Settings > System     
+
+> Comes with its own uninstaller (Windows Settings > Apps, or the Start Menu shortcut) and self-updates from within the app via **Help > Check for Updates**.
+
+### Option B - Portable .zip/.7z
 
 **1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip` or `.7z`         
 **2.** Unzip anywhere you want - no installer needed     
@@ -52,7 +60,7 @@ Written from the ground up to use the minimum possible CPU and RAM. No fancy eff
 
 ---
 
-### Option B - Build from source
+### Option C - Build from source
 
 HomRec is a native C++/C project - building it means compiling, not installing a Python environment.
 
@@ -90,6 +98,12 @@ This compiles everything - UI, recording engine, audio, plugin host - directly i
 ```bash
 hr.exe
 ```
+
+**7. (Optional) Build the installer**
+Want to package `hr.exe` into the same `HomRec-Setup-*.exe` from Option A?
+See [`installer/README.md`](installer/README.md) - it's an Inno Setup
+script (`installer/HomRec.iss`), buildable by hand or via
+`tools/homrec_build.py`.
 
 ---
 
