@@ -448,10 +448,14 @@ HR_EXPORT void hr_format_elapsed(double elapsed_sec, char *out, int out_len) {
 /*
  * hr_register_file_types
  *
- * Registers .hrc / .hrl file associations in HKCU (no admin needed).
+ * Registers .hrc / .hrl / .hrp file associations in HKCU (no admin needed).
  *
  * exe_path : full path to the executable that opens these files (UTF-8).
- * icons_dir: directory containing hrc.ico / hrl.ico (UTF-8).
+ * icons_dir: directory containing hrc.ico / hrl.ico / hrp.ico (UTF-8) -
+ *            in practice icons\files_icons under the app root (see
+ *            installer/HomRec.iss, which registers the same two ProgIDs
+ *            for .hrc/.hrp itself at install time so this function and the
+ *            installer never disagree if both ever run for the same user).
  * Returns 1 on success, 0 on error.
  */
 HR_EXPORT int hr_register_file_types(const char *exe_path,
@@ -468,6 +472,7 @@ HR_EXPORT int hr_register_file_types(const char *exe_path,
     static const TypeDef types[] = {
         {".hrc", "HomRec.Profile",  "HomRec Profile",  "hrc.ico"},
         {".hrl", "HomRec.Language", "HomRec Language", "hrl.ico"},
+        {".hrp", "HomRec.Plugin",   "HomRec Plugin Package", "hrp.ico"},
         {nullptr, nullptr, nullptr, nullptr}
     };
 

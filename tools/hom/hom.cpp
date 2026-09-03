@@ -1,5 +1,5 @@
 /*
- * hom.cpp - "hom", the HomRec plugin package manager  (v1.0.0)
+ * hom.cpp - "hom", the HomRec plugin package manager  (v0.3)
  *
  * A small standalone command-line tool, styled the same way as the rest
  * of HomRec (native C++, WinHTTP for networking, no third-party deps).
@@ -93,7 +93,7 @@
 // Constants
 // -----------------------------------------------------------------------
 
-static constexpr char k_hom_version[] = "1.0.0";
+static constexpr char k_hom_version[] = "0.3";
 
 // If an install/update would grow disk usage by at least this much,
 // CmdInstall() asks for confirmation first (Y/n) instead of just doing

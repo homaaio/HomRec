@@ -6,6 +6,7 @@
   #define NOMINMAX
   #include <windows.h>
   #include <wincodec.h>
+  #include <propvarutil.h> // PropVariantInit/PropVariantClear, used by GIF frame-metadata reads below
   #include <wrl/client.h>
   using Microsoft::WRL::ComPtr;
 #endif
@@ -213,6 +214,156 @@ static bool RenderImageBgraNative(const std::wstring &path, std::vector<uint8_t>
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// GIF: decodes every frame via WIC, compositing each one onto a persistent
+// canvas the size of the GIF's logical screen (its "/logscrdesc/..." global
+// metadata), resolving each frame's disposal method (leave in place / clear
+// to background / restore the previous frame) as it goes, so what comes out
+// is a plain list of already-fully-composed canvas-sized BGRA frames, each
+// tagged with its own delay. That keeps playback (GetOrRenderGif() below)
+// as simple as "pick a frame index and scale it", the same as a static
+// image overlay, with no disposal-method bookkeeping needed at render time.
+// ---------------------------------------------------------------------------
+struct GifFrameNative {
+    std::vector<uint8_t> bgra;
+    int delay_ms = 100;
+};
+
+// Defined further below; forward-declared here since DecodeGifFramesNative
+// needs it to composite each decoded frame onto the running canvas.
+static void BlitBgraRect(uint8_t *dst, int dst_w, int dst_h,
+                          const uint8_t *src, int src_stride_w, int src_h,
+                          int src_x, int src_y, int rect_w, int rect_h,
+                          int dst_x, int dst_y);
+
+static bool DecodeGifFramesNative(const std::wstring &path, std::vector<GifFrameNative> &frames,
+                                   int &canvas_w, int &canvas_h)
+{
+    frames.clear();
+    canvas_w = canvas_h = 0;
+
+    ComPtr<IWICImagingFactory> factory;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                   __uuidof(IWICImagingFactory),
+                                   reinterpret_cast<void **>(factory.GetAddressOf()));
+    if (FAILED(hr)) return false;
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                             WICDecodeMetadataCacheOnDemand, &decoder);
+    if (FAILED(hr)) return false;
+
+    UINT frame_count = 0;
+    decoder->GetFrameCount(&frame_count);
+    if (frame_count == 0) return false;
+
+    ComPtr<IWICBitmapFrameDecode> frame0;
+    if (FAILED(decoder->GetFrame(0, &frame0))) return false;
+
+    // The overall canvas size lives in the GIF's logical screen descriptor,
+    // which WIC only exposes through frame 0's metadata reader (not a
+    // decoder-level one). Fall back to frame 0's own pixel size if that
+    // read fails for any reason, so a plain single-frame/malformed-header
+    // GIF still decodes instead of being rejected outright.
+    {
+        ComPtr<IWICMetadataQueryReader> qr;
+        if (SUCCEEDED(frame0->GetMetadataQueryReader(&qr))) {
+            PROPVARIANT pv;
+            PropVariantInit(&pv);
+            if (SUCCEEDED(qr->GetMetadataByName(L"/logscrdesc/Width", &pv)) && pv.vt == VT_UI2) canvas_w = pv.uiVal;
+            PropVariantClear(&pv);
+            PropVariantInit(&pv);
+            if (SUCCEEDED(qr->GetMetadataByName(L"/logscrdesc/Height", &pv)) && pv.vt == VT_UI2) canvas_h = pv.uiVal;
+            PropVariantClear(&pv);
+        }
+    }
+    if (canvas_w <= 0 || canvas_h <= 0) {
+        UINT w = 0, h = 0;
+        if (FAILED(frame0->GetSize(&w, &h)) || w == 0 || h == 0) return false;
+        canvas_w = (int)w; canvas_h = (int)h;
+    }
+
+    std::vector<uint8_t> canvas((size_t)canvas_w * canvas_h * 4, 0); // starts fully transparent
+    std::vector<uint8_t> prev_snapshot; // only populated when a frame needs "restore to previous"
+
+    for (UINT i = 0; i < frame_count; ++i) {
+        ComPtr<IWICBitmapFrameDecode> frame;
+        if (FAILED(decoder->GetFrame(i, &frame))) break;
+
+        UINT fw = 0, fh = 0;
+        if (FAILED(frame->GetSize(&fw, &fh)) || fw == 0 || fh == 0) break;
+
+        int left = 0, top = 0, delay_cs = 10, disposal = 0;
+        ComPtr<IWICMetadataQueryReader> qr;
+        if (SUCCEEDED(frame->GetMetadataQueryReader(&qr))) {
+            PROPVARIANT pv;
+            auto readU2 = [&](const wchar_t *name, int &out) {
+                PropVariantInit(&pv);
+                if (SUCCEEDED(qr->GetMetadataByName(name, &pv)) && pv.vt == VT_UI2) out = pv.uiVal;
+                PropVariantClear(&pv);
+            };
+            auto readU1 = [&](const wchar_t *name, int &out) {
+                PropVariantInit(&pv);
+                if (SUCCEEDED(qr->GetMetadataByName(name, &pv)) && pv.vt == VT_UI1) out = pv.bVal;
+                PropVariantClear(&pv);
+            };
+            readU2(L"/imgdesc/Left", left);
+            readU2(L"/imgdesc/Top", top);
+            readU2(L"/grctlext/Delay", delay_cs);
+            readU1(L"/grctlext/Disposal", disposal);
+        }
+        // GIF spec allows a 0 delay ("as fast as possible"); real-world
+        // encoders use that to mean "let the viewer pick a sane default"
+        // rather than literally 0, so clamp it the same way browsers do.
+        if (delay_cs <= 0) delay_cs = 10;
+
+        ComPtr<IWICFormatConverter> converter;
+        if (FAILED(factory->CreateFormatConverter(&converter))) break;
+        if (FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA,
+                                          WICBitmapDitherTypeNone, nullptr, 0.0,
+                                          WICBitmapPaletteTypeCustom))) {
+            break;
+        }
+        std::vector<uint8_t> frame_bgra((size_t)fw * fh * 4, 0);
+        if (FAILED(converter->CopyPixels(nullptr, (UINT)(fw * 4), (UINT)frame_bgra.size(), frame_bgra.data()))) {
+            break;
+        }
+
+        if (disposal == 3) prev_snapshot = canvas; // "restore to previous" needs a pre-draw copy
+
+        BlitBgraRect(canvas.data(), canvas_w, canvas_h,
+                     frame_bgra.data(), (int)fw, (int)fh,
+                     0, 0, (int)fw, (int)fh, left, top);
+
+        GifFrameNative gf;
+        gf.bgra = canvas; // this frame's fully-composed appearance
+        gf.delay_ms = delay_cs * 10;
+        frames.push_back(std::move(gf));
+
+        // Resolve this frame's disposal *after* capturing its composed
+        // image above, so the canvas is ready for the next frame to draw
+        // onto (disposal 0/"unspecified" and 1/"do not dispose" both just
+        // leave the canvas as-is, so there's no branch needed for them).
+        if (disposal == 2) {
+            for (int row = 0; row < (int)fh; ++row) {
+                int cy = top + row;
+                if (cy < 0 || cy >= canvas_h) continue;
+                uint8_t *r = canvas.data() + (size_t)cy * canvas_w * 4;
+                for (int col = 0; col < (int)fw; ++col) {
+                    int cx = left + col;
+                    if (cx < 0 || cx >= canvas_w) continue;
+                    uint8_t *px = r + (size_t)cx * 4;
+                    px[0] = px[1] = px[2] = px[3] = 0;
+                }
+            }
+        } else if (disposal == 3 && !prev_snapshot.empty()) {
+            canvas = prev_snapshot;
+        }
+    }
+
+    return !frames.empty();
+}
+
 // Alpha-blends a single sub-rect of one BGRA buffer onto another at
 // (dst_x, dst_y), clipping to the destination's bounds -- the input-overlay
 // equivalent of CompositeBgra() above, but copying FROM an arbitrary
@@ -353,6 +504,83 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderImage(size_t
 #endif
 }
 
+const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderGif(size_t idx, const HrOverlayDesc &ov) {
+#ifdef _WIN32
+    GifSourceCache &src = gif_cache_[idx];
+    bool path_changed = src.path != ov.image_path;
+    if (path_changed || (!src.valid && !src.attempted)) {
+        src.path = ov.image_path;
+        src.valid = false;
+        src.attempted = true;
+        src.frames.clear();
+        src.total_duration_ms = 0;
+
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, nullptr, 0);
+        if (wlen > 1) {
+            std::wstring wpath(wlen - 1, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, wpath.data(), wlen);
+
+            std::vector<GifFrameNative> decoded;
+            int cw = 0, ch = 0;
+            if (DecodeGifFramesNative(wpath, decoded, cw, ch)) {
+                src.canvas_w = cw; src.canvas_h = ch;
+                src.frames.reserve(decoded.size());
+                for (auto &f : decoded) {
+                    GifFrameCache gc;
+                    gc.bgra = std::move(f.bgra);
+                    gc.delay_ms = f.delay_ms;
+                    src.total_duration_ms += gc.delay_ms;
+                    src.frames.push_back(std::move(gc));
+                }
+                src.valid = !src.frames.empty() && src.total_duration_ms > 0;
+                // Anchor playback to "now" so the loop always starts from
+                // frame 0 the moment this GIF is (re)loaded, rather than
+                // some arbitrary offset if start_time were left at its
+                // default-constructed epoch value.
+                src.start_time = std::chrono::steady_clock::now();
+            }
+            if (!src.valid) {
+                HrLog::Warn(std::string("Overlay: couldn't decode GIF '") + ov.image_path + "'");
+            }
+        }
+    }
+    if (!src.valid || src.frames.empty() || src.total_duration_ms <= 0) return nullptr;
+
+    // Pick whichever frame is due right now, based on wall-clock time since
+    // this overlay's GIF was (re)loaded -- one shared clock per overlay
+    // instance, not per Apply() call, so playback speed matches the file's
+    // authored frame delays regardless of how often frames get composited.
+    auto now = std::chrono::steady_clock::now();
+    long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - src.start_time).count();
+    long long pos = elapsed_ms % src.total_duration_ms;
+    size_t frame_idx = src.frames.size() - 1;
+    long long acc = 0;
+    for (size_t f = 0; f < src.frames.size(); ++f) {
+        acc += src.frames[f].delay_ms;
+        if (pos < acc) { frame_idx = f; break; }
+    }
+    const GifFrameCache &native_frame = src.frames[frame_idx];
+
+    std::string key = std::string("g|") + ov.image_path + "|" + std::to_string(ov.w) + "x" +
+                       std::to_string(ov.h) + "|" + std::to_string(frame_idx);
+    auto it = cache_.find(idx);
+    if (it != cache_.end() && it->second.key == key) return &it->second;
+
+    CachedLayer layer;
+    layer.w = ov.w; layer.h = ov.h; layer.key = key;
+    if (src.canvas_w == ov.w && src.canvas_h == ov.h) {
+        layer.bgra = native_frame.bgra;
+    } else {
+        ScaleBgraNearest(native_frame.bgra, src.canvas_w, src.canvas_h, layer.bgra, ov.w, ov.h);
+    }
+    cache_[idx] = std::move(layer);
+    return &cache_[idx];
+#else
+    (void)idx; (void)ov;
+    return nullptr;
+#endif
+}
+
 const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay(size_t idx, const HrOverlayDesc &ov) {
 #ifdef _WIN32
     InputOverlayCache &c = input_cache_[idx];
@@ -471,6 +699,7 @@ void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {
     prune(cache_);
     prune(input_cache_);
     prune(image_source_cache_);
+    prune(gif_cache_);
 }
 
 void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
@@ -491,6 +720,8 @@ void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int ba
                 layer = GetOrRenderText(i, ov);
             } else if (std::strcmp(ov.type, "image") == 0) {
                 layer = GetOrRenderImage(i, ov);
+            } else if (std::strcmp(ov.type, "gif") == 0) {
+                layer = GetOrRenderGif(i, ov);
             } else if (std::strcmp(ov.type, "input_overlay") == 0) {
                 layer = GetOrRenderInputOverlay(i, ov);
             } else if (std::strcmp(ov.type, "webcam") == 0) {

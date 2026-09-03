@@ -2,7 +2,7 @@
 // -----------------------------------------------------------------------------
 // hr_overlay_render.h
 //
-// Bakes configured overlays (text / image; webcam is not yet supported -- see
+// Bakes configured overlays (text / image / gif; webcam is not yet supported -- see
 // the warning in hr_overlay_render.cpp) directly into captured frames.
 //
 // Previously overlays only existed as UI state (src/ui/app_state.h's
@@ -20,17 +20,18 @@
 // -----------------------------------------------------------------------------
 #include <cstdint>
 #include <cstddef>
+#include <chrono>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include "hr_input_overlay.h"
 
 struct HrOverlayDesc {
-    char type[16];        // "text" | "image" | "webcam" | "input_overlay"
+    char type[16];        // "text" | "image" | "gif" | "webcam" | "input_overlay"
     int  x, y, w, h;       // position/size in capture-resolution pixels
     char text[256];        // for type == "text"
     unsigned char text_r = 255, text_g = 255, text_b = 255; // for type == "text"
-    char image_path[260];  // for type == "image"
+    char image_path[260];  // for type == "image" or "gif"
     int  visible;           // 0/1
 
     // For type == "input_overlay" -- see hr_input_overlay.h. The JSON
@@ -137,7 +138,31 @@ private:
     };
     std::unordered_map<size_t, ImageSourceCache> image_source_cache_;
 
-    // Drops every entry in the four idx-keyed caches above whose idx is no
+    // One decoded animation for a "gif" overlay: every frame is already
+    // composited to the GIF's full logical-screen canvas size (disposal
+    // methods resolved at decode time - see DecodeGifFramesNative() in the
+    // .cpp), so playback only ever has to pick a frame index and scale it,
+    // the same as a plain static image.
+    struct GifFrameCache {
+        std::vector<uint8_t> bgra; // canvas_w * canvas_h * 4
+        int delay_ms = 100;
+    };
+    struct GifSourceCache {
+        std::string path;
+        std::vector<GifFrameCache> frames;
+        int canvas_w = 0, canvas_h = 0;
+        long long total_duration_ms = 0;
+        bool valid = false;
+        bool attempted = false;
+        // Wall-clock anchor for "what frame is due right now" - set once
+        // when the GIF is (re)loaded, not per Apply() call, so the loop
+        // plays at its authored speed no matter how often frames get
+        // composited.
+        std::chrono::steady_clock::time_point start_time;
+    };
+    std::unordered_map<size_t, GifSourceCache> gif_cache_;
+
+    // Drops every entry in the five idx-keyed caches above whose idx is no
     // longer in range for `overlay_count` -- called at the top of Apply()
     // every frame so removing/reordering overlays actually frees what they
     // were holding instead of leaving it cached forever at a now-unused
@@ -146,5 +171,6 @@ private:
 
     const CachedLayer *GetOrRenderText(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *GetOrRenderImage(size_t idx, const HrOverlayDesc &ov);
+    const CachedLayer *GetOrRenderGif(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *GetOrRenderInputOverlay(size_t idx, const HrOverlayDesc &ov);
 };

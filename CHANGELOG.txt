@@ -1,5 +1,48 @@
 welcome to changelog :D
 
+[Version 2.0.3] - 2026-09-03
+
+=== Added ===
+
+- "Add overlay..." now offers a GIF option alongside Text/Image/Webcam/
+  External Overlay. Unlike a static Image overlay, a GIF overlay is
+  actually animated in both the live preview and the recording: every
+  frame is decoded up front (WIC), each frame's disposal method/position/
+  delay from the file's own metadata is resolved once at load time, and
+  playback picks whichever frame is due based on wall-clock time - so a
+  looping GIF plays at its authored speed regardless of how often the
+  capture pipeline composites a frame (src/hr_overlay_render.h/.cpp,
+  src/ui/overlays_dock_panel.cpp/.h, src/ui/app_state.h). Adding one works
+  the same way Image does - pick a .gif, drag/resize it on the preview
+  like any other overlay.
+- Installer: an opt-in "Associate .hrc and .hrp files with HomRec" task
+  (off by default, alongside the existing desktop-shortcut/autostart
+  toggles) that registers both extensions (as ProgIDs HomRec.Profile /
+  HomRec.Plugin - same names src/hr_app_logic.cpp's own
+  hr_register_file_types() uses, so the two mechanisms can't disagree
+  about what a given extension is registered as) and gives them their own
+  icons (icons\files_icons\hrc.ico / hrp.ico) instead of Explorer's
+  generic file icon (installer/HomRec.iss). hr_register_file_types() also
+  gained a .hrp entry (it previously only covered .hrc/.hrl) for the same
+  reason.
+- Installer: its own icon (icons\hrsetup.ico) instead of reusing hr.exe's
+  main.ico, so HomRec-Setup-*.exe doesn't look like a second copy of the
+  app itself in Explorer/Downloads while it's running.
+
+=== Fixed ===
+
+- Console: running a command whose output overflowed the visible area
+  left the terminal scrolled wherever it happened to be instead of
+  following the new output, unlike every other terminal. ConsoleWindow::
+  Print() now explicitly scrolls to the caret after inserting text
+  (EM_SCROLLCARET) - ES_AUTOVSCROLL alone only covers text typed directly
+  into the control, not text inserted programmatically the way every
+  command echo/response is (src/ui/console_window.cpp).
+
+=== Changed ===
+
+- Version bumped to 2.0.3 (src/ui/version.h, installer/HomRec.iss).
+
 [Version 2.0.2] - 2026-08-31
 
 Cleanup + small performance/quality-of-life release: no behavior change

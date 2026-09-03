@@ -34,7 +34,8 @@ struct OverlayDef {
     int x = 0, y = 0, w = 0, h = 0;
     std::string text;
     std::string text_color = "#FFFFFF";  // "#RRGGBB", used for type == "text"
-    std::string image_path;
+    std::string image_path;              // for type == "image"; also reused for
+                                          // type == "gif"'s .gif file path
     int webcam_index = -1;
     // Friendly device name captured when the webcam was picked from the
     // enumerated device list (see hr_webcam_enum.h / overlays_dock_panel.cpp's
