@@ -1,6 +1,6 @@
 # HomRec (Hardware Optimized Mechanism Recorder)
 
-[![Version](https://img.shields.io/badge/version-2.0.1-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
+[![Version](https://img.shields.io/badge/version-2.0.3-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
 [![Discord](https://img.shields.io/badge/Discord-0047ab?style=flat-square&logo=discord)](https://discord.gg/Gv4t6Xhy7E)
 [![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
 
