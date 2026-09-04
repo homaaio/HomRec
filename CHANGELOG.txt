@@ -4,6 +4,16 @@ welcome to changelog :D
 
 === Added ===
 
+- Webcam overlays are now actually baked into recordings, not just shown
+  positioned in the live preview. New src/hr_webcam_capture.h/.cpp opens
+  the configured device via Media Foundation (IMFSourceReader -- chosen
+  over DirectShow's ISampleGrabber/qedit.dll, which Microsoft deprecated
+  and which isn't reliably registered on modern 64-bit Windows) and reads
+  frames on a dedicated background thread; hr_overlay_render.cpp's new
+  GetOrRenderWebcam() composites whatever's most recent every frame, the
+  same "always latest, never queued" contract hr_dxgi_capture.cpp already
+  uses for screen capture. Previously this overlay type only logged a
+  one-time "not baked into recordings yet" warning and produced nothing.
 - "Add overlay..." now offers a GIF option alongside Text/Image/Webcam/
   External Overlay. Unlike a static Image overlay, a GIF overlay is
   actually animated in both the live preview and the recording: every
@@ -42,6 +52,8 @@ welcome to changelog :D
 === Changed ===
 
 - Version bumped to 2.0.3 (src/ui/version.h, installer/HomRec.iss).
+- Makefile: links -lmfplat -lmfreadwrite -lmf -lmfuuid (Media Foundation,
+  for the webcam capture above) and builds src/hr_webcam_capture.cpp.
 
 [Version 2.0.2] - 2026-08-31
 
