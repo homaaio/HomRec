@@ -24,6 +24,7 @@ CFLAGS := -O2 -Wall
 LDFLAGS := -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bdynamic $(LUA_LDFLAGS) \
            -lcomctl32 -lcomdlg32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet -lwinhttp -ld3d11 -ldxgi -lpdh \
            -lwinmm -lole32 -luuid -llua -ldwmapi -luxtheme -lwindowscodecs -lstrmiids -loleaut32 \
+           -lmfplat -lmfreadwrite -lmf -lmfuuid \
            -LC:/msys64/mingw64/lib -lwx_mswu_xrc-3.2 -lwx_mswu_html-3.2 -lwx_mswu_qa-3.2 \
            -lwx_mswu_core-3.2 -lwx_baseu_xml-3.2 -lwx_baseu_net-3.2 -lwx_baseu-3.2
 
@@ -66,6 +67,7 @@ OBJS := \
 	src/hr_pipeline.o \
 	src/hr_overlay_render.o \
 	src/hr_webcam_enum.o \
+	src/hr_webcam_capture.o \
 	src/hr_ffmpeg_runner.o \
 	src/hr_tools.o \
 	src/hr_ui_utils.o \
