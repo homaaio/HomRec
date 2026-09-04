@@ -760,6 +760,8 @@ void RecordingController::SyncOverlays() {
         std::strncpy(d.image_path, ov.image_path.c_str(), sizeof(d.image_path) - 1);
         std::strncpy(d.input_json_path, ov.input_json_path.c_str(), sizeof(d.input_json_path) - 1);
         std::strncpy(d.input_png_path, ov.input_png_path.c_str(), sizeof(d.input_png_path) - 1);
+        std::strncpy(d.webcam_name, ov.webcam_name.c_str(), sizeof(d.webcam_name) - 1);
+        d.webcam_index = ov.webcam_index;
         d.x = ov.x; d.y = ov.y; d.w = ov.w; d.h = ov.h;
         d.visible = ov.visible ? 1 : 0;
         parseHexColor(ov.text_color, d.text_r, d.text_g, d.text_b);
