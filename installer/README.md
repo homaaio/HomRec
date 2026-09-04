@@ -10,7 +10,7 @@ Install Inno Setup 6 (Windows only - it doesn't cross-compile), then either:
   ```
   make
   make hom
-  iscc /DMyAppVersion=2.0.2 installer\HomRec.iss
+  iscc /DMyAppVersion=2.0.3 installer\HomRec.iss
   ```
   matching `/DMyAppVersion` to `HR_APP_VERSION` in `src/ui/version.h`.
 
@@ -34,6 +34,10 @@ Output: `dist\HomRec-Setup-<version>.exe`.
   (desktop shortcut, launch at Windows startup) as install-time Tasks -
   this is the *only* place those are offered before first launch now; the
   first-run Welcome wizard no longer has its own copy of this step.
+- Optionally associates `.hrc` (settings) and `.hrp` (plugin package) files
+  with HomRec, giving them their own icons (`icons\files_icons\hrc.ico` /
+  `hrp.ico`) instead of Explorer's generic file icon - also an install-time
+  Task, off by default, same as the two above.
 
 ## Auto-update
 

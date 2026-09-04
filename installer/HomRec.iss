@@ -1,7 +1,7 @@
 ; HomRec.iss - Inno Setup script for HomRec's Windows installer/uninstaller.
 ;
 ; Build with the Inno Setup Compiler (iscc.exe), from the repo root:
-;   iscc /DMyAppVersion=2.0.2 installer\HomRec.iss
+;   iscc /DMyAppVersion=2.0.3 installer\HomRec.iss
 ; (MyAppVersion defaults to the value baked in below if you omit /D - keep
 ; that default in sync with src/ui/version.h's HR_APP_VERSION by hand, or
 ; just always pass /D explicitly. tools/homrec_build.py's optional
@@ -26,7 +26,7 @@
 ; running hr.exe instead of failing to overwrite it mid-update.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.2"
+  #define MyAppVersion "2.0.3"
 #endif
 
 #define MyAppName "HomRec"
@@ -76,7 +76,10 @@ SourceDir=..
 ; repo-root dist\ that tools/homrec_build.py and its docs both expect.
 OutputDir=..\dist
 OutputBaseFilename=homrec-setup-win64-{#MyAppVersion}
-SetupIconFile=icons\main.ico
+; Dedicated setup-only icon (separate from icons\main.ico, which is hr.exe's
+; own icon) so the installer .exe doesn't look identical to the app itself
+; in Explorer/the taskbar while it's running.
+SetupIconFile=icons\hrsetup.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 LicenseFile=LICENSE
 Compression=lzma2/max
@@ -97,6 +100,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; copy of this step (see welcome_dialog.cpp).
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 Name: "autostart"; Description: "&Launch HomRec automatically when Windows starts"; GroupDescription: "System integration:"; Flags: unchecked
+; Associates .hrc (settings) and .hrp (plugin package) files with HomRec and
+; gives them their own icons (icons\files_icons\hrc.ico / hrp.ico) instead of
+; Explorer's generic "unknown file type" icon. Off by default, same as the
+; two tasks above - opt-in system integration, not a silent default.
+Name: "fileassoc"; Description: "Associate &.hrc and .hrp files with HomRec"; GroupDescription: "System integration:"; Flags: unchecked
 
 [Files]
 Source: "hr.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -114,6 +122,8 @@ Source: "CHANGELOG.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoes
 Source: "SUPPORT.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "commands.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "icons\files_icons\hrc.ico"; DestDir: "{app}\icons\files_icons"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "icons\files_icons\hrp.ico"; DestDir: "{app}\icons\files_icons"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -126,6 +136,24 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; the app's own "Launch HomRec when Windows starts" checkbox in
 ; Settings > System agrees with what the installer did, either direction.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "HomRec"; ValueData: """{app}\{#MyAppExeName}"""; Tasks: autostart; Flags: uninsdeletevalue
+
+; .hrc / .hrp file association (fileassoc task above) - HKCU, same reasoning
+; as the autostart key: no elevation needed, and it only affects the
+; installing user. ProgIDs/descriptions match hr_register_file_types()'s own
+; table in src/hr_app_logic.cpp exactly (HomRec.Profile / HomRec.Plugin) so
+; the two mechanisms can never register the same extension under two
+; different, conflicting ProgIDs for the same user. Both extensions just
+; launch hr.exe with the file as %1 (see win_main.cpp's command-line
+; handling for what hr.exe does with it).
+Root: HKCU; Subkey: "Software\Classes\.hrc"; ValueType: string; ValueName: ""; ValueData: "HomRec.Profile"; Tasks: fileassoc; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\HomRec.Profile"; ValueType: string; ValueName: ""; ValueData: "HomRec Profile"; Tasks: fileassoc; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\HomRec.Profile\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icons\files_icons\hrc.ico"; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\HomRec.Profile\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: fileassoc
+
+Root: HKCU; Subkey: "Software\Classes\.hrp"; ValueType: string; ValueName: ""; ValueData: "HomRec.Plugin"; Tasks: fileassoc; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Classes\HomRec.Plugin"; ValueType: string; ValueName: ""; ValueData: "HomRec Plugin Package"; Tasks: fileassoc; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\HomRec.Plugin\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icons\files_icons\hrp.ico"; Tasks: fileassoc
+Root: HKCU; Subkey: "Software\Classes\HomRec.Plugin\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: fileassoc
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
@@ -150,4 +178,17 @@ end;
 function ShouldDeleteUserData(): Boolean;
 begin
   Result := not KeepUserDataChoice;
+end;
+
+// Notifies Explorer that file associations changed (same SHChangeNotify
+// call hr_register_file_types() in src/hr_app_logic.cpp makes after
+// registering these itself), so a freshly-associated .hrc/.hrp shows its
+// new icon right away instead of only after the next Explorer restart.
+procedure SHChangeNotify(wEventId: Longint; uFlags: Longint; dwItem1: Longint; dwItem2: Longint);
+  external 'SHChangeNotify@shell32.dll stdcall';
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('fileassoc') then
+    SHChangeNotify($08000000 { SHCNE_ASSOCCHANGED }, 0, 0, 0);
 end;
