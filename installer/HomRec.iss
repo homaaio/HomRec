@@ -116,7 +116,6 @@ Source: "hom.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexis
 Source: "*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "cfg\*"; DestDir: "{app}\cfg"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-Source: "plugins\*"; DestDir: "{app}\plugins"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "CHANGELOG.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "SUPPORT.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
