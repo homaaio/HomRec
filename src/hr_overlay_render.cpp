@@ -581,6 +581,55 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderGif(size_t i
 #endif
 }
 
+const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderWebcam(size_t idx, const HrOverlayDesc &ov) {
+#ifdef _WIN32
+    WebcamSourceCache &src = webcam_cache_[idx];
+    bool device_changed = src.device_name != ov.webcam_name || src.device_index != ov.webcam_index;
+    if (device_changed) {
+        delete src.capture;
+        src.capture = nullptr;
+        src.device_name = ov.webcam_name;
+        src.device_index = ov.webcam_index;
+        src.have_layer = false;
+        src.warned_dead = false;
+    }
+    if (!src.capture) {
+        src.capture = HrWebcamCapture::Open(ov.webcam_name, ov.webcam_index);
+    }
+
+    std::vector<uint8_t> frame_bgra;
+    int fw = 0, fh = 0;
+    bool got_new = src.capture && src.capture->GetLatestFrame(frame_bgra, fw, fh);
+
+    if (!got_new) {
+        // Nothing new this tick (usual case -- camera frame rate is
+        // normally lower than capture frame rate) or the device never
+        // came up at all. Either way, keep showing the last good frame if
+        // there is one instead of vanishing between camera frames.
+        if (!src.have_layer && src.capture && !src.capture->IsAlive() && !src.warned_dead) {
+            src.warned_dead = true;
+            HrLog::Warn(std::string("Overlay: couldn't open webcam '") + ov.webcam_name +
+                        "' (index " + std::to_string(ov.webcam_index) + ")");
+        }
+        return src.have_layer ? &src.layer : nullptr;
+    }
+
+    src.layer.w = ov.w; src.layer.h = ov.h;
+    src.layer.key = std::string("w|") + ov.webcam_name + "|" + std::to_string(ov.webcam_index) +
+                     "|" + std::to_string(ov.w) + "x" + std::to_string(ov.h);
+    if (fw == ov.w && fh == ov.h) {
+        src.layer.bgra = std::move(frame_bgra);
+    } else {
+        ScaleBgraNearest(frame_bgra, fw, fh, src.layer.bgra, ov.w, ov.h);
+    }
+    src.have_layer = true;
+    return &src.layer;
+#else
+    (void)idx; (void)ov;
+    return nullptr;
+#endif
+}
+
 const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay(size_t idx, const HrOverlayDesc &ov) {
 #ifdef _WIN32
     InputOverlayCache &c = input_cache_[idx];
@@ -688,8 +737,11 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
 #endif
 }
 
-void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {
-    auto prune = [overlay_count](auto &map) {
+OverlayCompositor::WebcamSourceCache::~WebcamSourceCache() {
+    delete capture;
+}
+
+void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {    auto prune = [overlay_count](auto &map) {
         for (auto it = map.begin(); it != map.end(); ) {
             if (it->first >= overlay_count) it = map.erase(it);
             else ++it;
@@ -700,6 +752,7 @@ void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {
     prune(input_cache_);
     prune(image_source_cache_);
     prune(gif_cache_);
+    prune(webcam_cache_);
 }
 
 void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
@@ -708,8 +761,6 @@ void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int ba
     if (!base_bgra || base_w <= 0 || base_h <= 0) return;
 
     PruneStaleCaches(overlays.size());
-
-    static bool warned_webcam = false;
 
     for (size_t i = 0; i < overlays.size(); ++i) {
         const HrOverlayDesc &ov = overlays[i];
@@ -725,16 +776,7 @@ void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int ba
             } else if (std::strcmp(ov.type, "input_overlay") == 0) {
                 layer = GetOrRenderInputOverlay(i, ov);
             } else if (std::strcmp(ov.type, "webcam") == 0) {
-                // NOT YET IMPLEMENTED: baking a live webcam feed into the
-                // recording needs its own capture device pipeline (DirectShow/
-                // Media Foundation), which is a separate, larger piece of work
-                // from the text/image compositing done here. Logged once so
-                // it's visible rather than silently doing nothing.
-                if (!warned_webcam) {
-                    HrLog::Warn("Overlay: webcam overlays aren't baked into recordings yet -- text and image overlays are supported.");
-                    warned_webcam = true;
-                }
-                continue;
+                layer = GetOrRenderWebcam(i, ov);
             } else {
                 continue;
             }

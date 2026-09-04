@@ -2,8 +2,7 @@
 // -----------------------------------------------------------------------------
 // hr_overlay_render.h
 //
-// Bakes configured overlays (text / image / gif; webcam is not yet supported -- see
-// the warning in hr_overlay_render.cpp) directly into captured frames.
+// Bakes configured overlays (text / image / gif / webcam) directly into captured frames.
 //
 // Previously overlays only existed as UI state (src/ui/app_state.h's
 // AppState::overlays, edited via the Overlay Manager dialog / drag-on-preview)
@@ -25,6 +24,7 @@
 #include <unordered_map>
 #include <vector>
 #include "hr_input_overlay.h"
+#include "hr_webcam_capture.h"
 
 struct HrOverlayDesc {
     char type[16];        // "text" | "image" | "gif" | "webcam" | "input_overlay"
@@ -33,6 +33,14 @@ struct HrOverlayDesc {
     unsigned char text_r = 255, text_g = 255, text_b = 255; // for type == "text"
     char image_path[260];  // for type == "image" or "gif"
     int  visible;           // 0/1
+
+    // For type == "webcam" -- see hr_webcam_enum.h for how these get set
+    // (device picker) and hr_webcam_capture.h for how they're used to open
+    // the actual device. webcam_name is the primary match key; webcam_index
+    // is the fallback (see hr_webcam_capture.h's Open() for the exact
+    // matching order).
+    char webcam_name[128];
+    int  webcam_index;
 
     // For type == "input_overlay" -- see hr_input_overlay.h. The JSON
     // layout is parsed (and its parse result cached) inside
@@ -162,7 +170,27 @@ private:
     };
     std::unordered_map<size_t, GifSourceCache> gif_cache_;
 
-    // Drops every entry in the five idx-keyed caches above whose idx is no
+    // One live capture session for a "webcam" overlay -- see
+    // hr_webcam_capture.h. `layer` holds the most recently scaled frame at
+    // the overlay's current size and is deliberately *not* cleared when a
+    // given Apply() call has no new frame yet (camera frame rate is
+    // usually lower than capture frame rate) -- the overlay freezes on its
+    // last good frame rather than flickering blank in between.
+    struct WebcamSourceCache {
+        std::string device_name;
+        int device_index = -1;
+        HrWebcamCapture *capture = nullptr;
+        CachedLayer layer;
+        bool have_layer = false;
+        bool warned_dead = false; // log "camera unavailable" once, not every frame
+        WebcamSourceCache() = default;
+        WebcamSourceCache(const WebcamSourceCache &) = delete;
+        WebcamSourceCache &operator=(const WebcamSourceCache &) = delete;
+        ~WebcamSourceCache();
+    };
+    std::unordered_map<size_t, WebcamSourceCache> webcam_cache_;
+
+    // Drops every entry in the six idx-keyed caches above whose idx is no
     // longer in range for `overlay_count` -- called at the top of Apply()
     // every frame so removing/reordering overlays actually frees what they
     // were holding instead of leaving it cached forever at a now-unused
@@ -172,5 +200,6 @@ private:
     const CachedLayer *GetOrRenderText(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *GetOrRenderImage(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *GetOrRenderGif(size_t idx, const HrOverlayDesc &ov);
+    const CachedLayer *GetOrRenderWebcam(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *GetOrRenderInputOverlay(size_t idx, const HrOverlayDesc &ov);
 };
