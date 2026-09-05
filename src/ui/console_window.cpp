@@ -83,8 +83,10 @@ std::wstring ExtractSettingValue(const std::wstring &raw) {
 //
 // Deliberately NOT gated: version/ping/echo/clear/env/alias/history/
 // info/status/log/hide/sec*/hrc/clip/repeat/batch/ls, "hom install"/
+// "hom upgrade"/"hom full-upgrade"/"hom search"/"hom show"/"hom list"/
 // "hom --version"/"hom ping"/bare "hom", and querying a setting (no
-// value). None of those write anything persistent or delete anything.
+// value). None of those write anything persistent or delete anything
+// the person didn't just ask to add/refresh.
 bool CommandNeedsInwid(const std::wstring &cmd, const std::wstring &raw) {
     if (cmd == L"rm") return true;
     if (cmd == L"hom") {
@@ -93,11 +95,8 @@ bool CommandNeedsInwid(const std::wstring &cmd, const std::wstring &raw) {
         iss >> first >> sub;
         std::transform(sub.begin(), sub.end(), sub.begin(), ::towlower);
         // "update" re-downloads and swaps hom.exe itself; "remove"/
-        // "uninstall" delete a plugin. "install" (including the
-        // "update-hrp" special-case) and everything else (--version,
-        // ping, bare help) stay ungated - that's what a package manager
-        // is *for*, it shouldn't need a second confirmation every time.
-        return sub == L"update" || sub == L"remove" || sub == L"uninstall";
+        return sub == L"update" || sub == L"remove" || sub == L"uninstall" ||
+               sub == L"purge" || sub == L"autoremove";
     }
     return false;
 }
