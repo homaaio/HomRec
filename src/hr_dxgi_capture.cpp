@@ -274,8 +274,47 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
 
     if (!have_output) return HR_DX_TIMEOUT;
 
+    // BUGFIX (freeze + growing audio/video desync under heavy GPU load,
+    // e.g. recording a demanding fullscreen 3D game like TF2):
+    //
+    // This used to reuse `timeout_ms` -- the same 8-33ms value derived in
+    // hr_pipeline.cpp as "2/3 of one frame interval" for AcquireNextFrame --
+    // as the deadline for this Map() poll too. Those are two very
+    // different waits and conflating them was the bug:
+    //   - AcquireNextFrame's timeout is *supposed* to be short: a timeout
+    //     there just means "the desktop hasn't changed since last frame",
+    //     which happens constantly and is totally normal.
+    //   - This Map() is reading back the *previous* call's CopyResource
+    //     (see the staging[]/pending_idx pipelining above), i.e. a GPU
+    //     copy that normally has had a full frame interval to finish. It
+    //     only takes noticeably longer than that when the GPU's command
+    //     queue is backed up behind something else demanding -- exactly
+    //     what happens with the GPU maxed out by a fullscreen game.
+    //
+    // With only 8-33ms of slack, any such backlog made Map() return
+    // DXGI_ERROR_WAS_STILL_DRAWING past the deadline on essentially every
+    // call, so hr_dx_capture() kept returning HR_DX_TIMEOUT run after run.
+    // The pipeline's TIMEOUT handling (by design) re-encodes whatever
+    // stale content is already in bgra_buf instead of skipping the output
+    // slot -- correct for the normal "static desktop" case, but here it
+    // meant the recorded video visibly froze on one stale frame for as
+    // long as the backlog lasted, while audio (captured on its own
+    // real-time WASAPI clock, unaffected by GPU load) kept flowing
+    // normally -- which is exactly "recording freezes, audio ends up ~30s
+    // out of sync". Once the GPU backlog cleared, every frame that *would*
+    // have been produced during the freeze finally became mappable in a
+    // burst, which is the "video periodically speeds up" half of the
+    // report: a stretch of real gameplay time getting compressed into far
+    // fewer output frames than it should have had.
+    //
+    // Fix: give this read-back its own, much more generous budget,
+    // independent of AcquireNextFrame's intentionally-short timeout_ms, so
+    // a transient GPU backlog has a real chance to drain before we give up
+    // and repeat a stale frame. Still bounded (not an unbounded wait) so a
+    // genuinely stuck/lost device doesn't hang the capture thread forever.
+    static constexpr DWORD kMapWaitBudgetMs = 250;
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    const DWORD map_deadline = GetTickCount64() + (DWORD)std::max(timeout_ms, 1);
+    const DWORD map_deadline = GetTickCount64() + kMapWaitBudgetMs;
     for (;;) {
         hr = ctx->context->Map(ctx->staging[read_idx].Get(), 0, D3D11_MAP_READ,
                                 D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
