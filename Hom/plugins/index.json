@@ -1,17 +1,19 @@
 {
-    "_comment": "Human/tooling-facing listing of what's in Hom/plugins/. hom.exe itself doesn't read this file -- 'hom install <name>' just requests plugins/<name>.hrp directly -- this is here so people browsing the repo (or a future 'hom search') can see what's available.",
+    "_comment": "Human/tooling-facing listing of what's in Hom/plugins/ -- also now what 'hom search'/'hom show' read (see tools/hom/hom.cpp's FetchIndex()/ParsePluginIndex()). Keep 'version' here in sync with each plugin's own plugin.json -- hom compares this field against a plugin's locally-extracted plugin.json to decide 'hom list --upgradable', so a stale version here will just make hom think there's nothing to upgrade.",
     "plugins": [
         {
             "name": "input-overlay",
             "file": "input-overlay.hrp",
             "description": "Keyboard / mouse / gamepad input overlay presets (WASD, QWERTY, mouse, gamepad).",
-            "version": "1.0.0"
+            "version": "1.0.0",
+            "author": "HomRec"
         },
         {
             "name": "bter",
             "file": "bter.hrp",
             "description": "Grab-bag utility plugin (27 console commands - see commands.md section 19) - harmless, no real dependencies, mainly here as something real for `hom install bter` to fetch when testing the package manager itself.",
-            "version": "1.0.0"
+            "version": "1.0.0",
+            "author": "HomRec"
         }
     ]
 }

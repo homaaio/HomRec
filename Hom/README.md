@@ -1,41 +1,159 @@
-# Hom/
+# hom
 
-This folder is the "package repo" that `hom` (HomRec's plugin package
-manager - see [`tools/hom`](../tools/hom)) reads from. It's not part of
-HomRec itself and isn't shipped inside `hr.exe` - it's just files sitting
-in this GitHub repo that `hom.exe` fetches over plain HTTPS via
-`raw.githubusercontent.com`.
+`hom` is a tiny package manager for HomRec plugins - the same idea as
+`apt`/`pacman`, just aimed at `.hrp` plugin packages instead of system
+packages. It's a separate `hom.exe` you keep next to `hr.exe`, not part
+of HomRec's own build.
+
+## Build
+
+Same toolchain as `hr.exe` (MinGW-w64), but `hom` doesn't need wxWidgets
+or Lua - it's a single file with no dependencies beyond WinHTTP:
+
+```bash
+make hom          # from the repo root -- builds ./hom.exe
+```
+
+or directly:
+
+```bash
+g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -o hom.exe tools/hom/hom.cpp -lwinhttp -lshlwapi
+```
+
+(no `-municode` - `hom.cpp`'s `main()` is a plain narrow `int main(argc, argv)`,
+not `wWinMain`/`wmain`, so `-municode` would make the linker look for an
+entry point that doesn't exist here - see the comment at the top of
+`hom.cpp` and the `HOM_CXXFLAGS` comment in the top-level Makefile.)
+
+## Usage
 
 ```
-Hom/
-  version.txt          current hom version, e.g. "1.0.0" - checked by `hom update`
-  hom.exe              latest prebuilt hom.exe - downloaded by `hom update`
-  plugins/
-    index.json         optional listing of available plugins (for humans/tools browsing)
-    <name>.hrp          a plugin package - `hom install <name>` downloads this
+hom --version                          Show the hom version
+hom update [-f|--force]                Update hom itself from the repo
+                                          (-f: reinstall even if already latest)
+hom ping                               Check connectivity to the plugin repo
+hom upgrade [-y] [-f]                  Update every already-installed plugin
+hom full-upgrade [-y] [-f]             Same as upgrade for now (see hom.cpp header --
+                                          hom has no plugin dependencies to remove yet)
+hom install <plugin-name> [-y] [-f]    Download and install a plugin
+                                          (-y/-f: skip the disk-space prompt)
+hom remove  <plugin-name> -r           Remove a plugin, keep its saved settings
+                                          (-r is required to confirm)
+hom purge   <plugin-name> -r           Remove a plugin and its saved settings
+                                          (-r is required to confirm)
+hom autoremove                         Clean up orphaned auto-installed plugins
+                                          (currently always a no-op -- see hom.cpp header)
+hom search <query>                     Search plugin names/descriptions
+hom show <plugin-name>                 Show details about a plugin
+hom list --installed                   List plugins installed here
+hom list --upgradable                  List installed plugins with a newer version
 ```
 
-## Publishing a new plugin
+```
+> hom search overlay
+input-overlay (1.0.0) - Keyboard / mouse / gamepad input overlay presets (WASD, QWERTY, mouse, gamepad).
 
-1. Build your plugin as a `.hrp` (a `.zip` of the plugin folder - `plugin.json`
-   + entry script + assets - renamed to `.hrp`; see the main [README](../README.md#plugins)).
-2. Drop it in `Hom/plugins/<name>.hrp`.
-3. Commit and push. `hom install <name>` (without the `.hrp`) picks it up
-   immediately - there's no build step or index to regenerate for `hom`
-   itself to find it (`index.json` is just for human browsing).
+> hom show input-overlay
+Name:        input-overlay
+Version:     1.0.0
+Author:      HomRec
+Description: Keyboard / mouse / gamepad input overlay presets (WASD, QWERTY, mouse, gamepad).
+Package:     Hom/plugins/input-overlay.hrp
+Size:        540.0 KB
+Installed:   no
 
-Where the *source* for a packaged `.hrp` lives isn't load-bearing (`hom`
-only ever fetches the `.hrp` itself), but by convention this repo keeps
-it in a `Hom/plugins/<name>-src/` folder right next to the package it
-builds, e.g. [`Hom/plugins/bter-src/`](bter-src) → `Hom/plugins/bter.hrp`
-- so re-packaging after an edit is just re-zipping that folder's contents
-(flat, no wrapping subfolder - `LoadPluginArchive()` in `lua_engine.cpp`
-expects `plugin.json` directly at the archive root) and overwriting the
-`.hrp`.
+> hom install input-overlay
+Fetching plugin 'input-overlay'...
+Installed 'input-overlay' -> plugins\input-overlay.hrp (552854 bytes)
+Restart HomRec (or reload plugins) to pick it up.
 
-## Publishing a hom update
+> hom list --installed
+input-overlay (version unknown)
 
-1. Bump the version and rebuild `hom.exe` (`make hom` at the repo root).
-2. Update `Hom/version.txt` to the new version number.
-3. Replace `Hom/hom.exe` with the new build.
-4. Commit and push. Anyone running `hom update` will pick it up.
+> hom list --upgradable
+hom: no upgrades available.
+hom: 1 plugin(s) skipped -- local version unknown (not yet loaded by HomRec since install;
+run HomRec once, or 'hom upgrade', to find out).
+
+> hom remove input-overlay
+hom: remove needs -r to confirm deletion, e.g. 'hom remove input-overlay -r'
+
+> hom remove input-overlay -r
+Removed plugins\input-overlay.hrp
+hom: plugin removed. Its saved settings (if any) were kept -- use 'hom purge input-overlay -r' to delete those too.
+
+> hom purge input-overlay -r
+Removed plugins\.installed\input-overlay
+
+> hom update
+Checking .../Hom/version.txt for updates...
+hom is already up to date (0.4).
+```
+
+Every plugin name is rejected outright if it contains `..`, a path
+separator, or a drive letter (`C:`) - install/remove/purge/show can never
+resolve to anything outside `.\plugins\`, no matter what's typed.
+
+Run `hom` from the same folder as `hr.exe` - it reads/writes `./plugins/`
+relative to wherever you run it from, same as HomRec itself does. You can
+also run it without leaving HomRec: the in-app developer console (see
+`commands.md`) has a `hom` built-in that forwards to this same `hom.exe`
+as a child process, with its working directory forced to HomRec's own
+folder - so `hom install <name>` behaves identically whether you type it
+in PowerShell/cmd or in the console. From inside the console, the
+destructive subcommands (`hom update`, `hom remove`/`hom uninstall`,
+`hom purge`, `hom autoremove`) additionally need an `inwid` prefix (e.g.
+`inwid hom update`) - see `commands.md`'s Section 21. `install`,
+`upgrade`, `full-upgrade`, `search`, `show`, and `list` don't need it.
+
+## How it works
+
+- **Plugins** live in this repo under [`Hom/plugins/<name>.hrp`](../../Hom).
+  `hom install <name>` just downloads that one file to `plugins/<name>.hrp`.
+  It does *not* unzip anything itself - HomRec's own plugin loader
+  (`lua_engine.cpp`'s `LoadPluginArchive()`) already knows how to extract
+  and load a `.hrp` it finds in `plugins/`, so `hom`'s job stops at "the
+  file is on disk."
+- **`hom` self-updates** by comparing its compiled-in version against
+  [`Hom/version.txt`](../../Hom/version.txt), and if that's newer,
+  downloading [`Hom/hom.exe`](../../Hom) and swapping it in for the
+  running binary (rename-and-replace - this works even on the exe
+  that's currently executing, the same way any self-updating Windows
+  app does it).
+- **`search`/`show`/`list --upgradable`** read
+  [`Hom/plugins/index.json`](../../Hom/plugins/index.json) - the same
+  file that used to be purely for humans browsing the repo. `install`
+  itself still doesn't need it (it just requests `plugins/<name>.hrp`
+  directly), so a plugin missing from `index.json` can still be
+  installed by name - it just won't show up in `search`/`show`, and
+  `list --upgradable` won't know a newer version exists for it.
+- **A local plugin's "known version"** comes from whatever `plugin.json`
+  HomRec has actually extracted for it - `plugins/.installed/<name>/`
+  for a `.hrp`-based plugin, or `plugins/<name>/` directly for one shipped
+  as a bare folder (see `lua_engine.cpp`'s `LoadPluginArchive()`). Right
+  after `hom install`, if HomRec hasn't been run since, there's genuinely
+  no local version yet - `list --upgradable` reports those separately as
+  "can't tell" rather than guessing.
+- Everything is plain HTTPS to `raw.githubusercontent.com` - no GitHub
+  API, no auth, no server to run. Publishing an update is just a commit
+  to `Hom/` (see [`Hom/README.md`](../../Hom/README.md)).
+
+## Notes / things worth discussing
+
+- Right now `hom update` always re-downloads the whole `hom.exe`. If you'd
+  rather ship the plugin repo update mechanism differently (e.g. a
+  git-based `hom update` that just does a shallow pull of `Hom/` for
+  people who already have git, or signed releases instead of a bare
+  `raw.githubusercontent.com` fetch), that's a quick change to
+  `CmdUpdate()` - the plugin install/remove commands don't depend on
+  which approach you pick.
+- `full-upgrade` and `autoremove` are real commands (so scripts/cfg files
+  that always run them don't need to special-case hom), but currently
+  behave as "same as upgrade" and "nothing to do" respectively, since hom
+  has no concept of one plugin depending on another. If plugin
+  dependencies are ever introduced, those are the two places that would
+  need real logic.
+- `search` tries your query as an ECMAScript regex first (case-insensitive,
+  matching `apt-cache search`'s behavior) and falls back to a plain
+  substring match if it isn't valid regex syntax - so `hom search overlay`
+  and `hom search over.ay` both work as expected.
