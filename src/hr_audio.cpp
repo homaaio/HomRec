@@ -89,6 +89,35 @@ static bool wav_read(const char* path,
     fclose(f);
     return true;
 }
+static void resample_linear_stereo(std::vector<int16_t>& buf,
+                                    uint32_t from_rate, uint32_t to_rate)
+{
+    if (from_rate == 0 || to_rate == 0 || from_rate == to_rate || buf.empty())
+        return;
+
+    const size_t frames_in = buf.size() / 2; // stereo
+    const double ratio = (double)to_rate / (double)from_rate;
+    const size_t frames_out = (size_t)((double)frames_in * ratio);
+    if (frames_out == 0) { buf.clear(); return; }
+
+    std::vector<int16_t> out(frames_out * 2);
+    for (size_t i = 0; i < frames_out; ++i) {
+        double src_pos = (double)i / ratio;
+        size_t i0 = (size_t)src_pos;
+        size_t i1 = std::min(i0 + 1, frames_in - 1);
+        double frac = src_pos - (double)i0;
+
+        for (int ch = 0; ch < 2; ++ch) {
+            double s0 = buf[i0 * 2 + ch];
+            double s1 = buf[i1 * 2 + ch];
+            double v = s0 + (s1 - s0) * frac;
+            if (v > 32767.0) v = 32767.0;
+            if (v < -32768.0) v = -32768.0;
+            out[i * 2 + ch] = (int16_t)v;
+        }
+    }
+    buf = std::move(out);
+}
 
 // ---------------------------------------------------------------------------
 // RMS level 0-100
@@ -627,13 +656,13 @@ HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
     if (mic_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->mic_mutex);
         if (!g_state->mic_buf.empty() &&
-            wav_write(mic_wav_path, g_state->mic_buf, 2, 44100))
+            wav_write(mic_wav_path, g_state->mic_buf, 2, g_state->mic_stream.rate))
             result |= 0x1;
     }
     if (sys_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
         if (!g_state->sys_buf.empty() &&
-            wav_write(sys_wav_path, g_state->sys_buf, 2, 44100))
+            wav_write(sys_wav_path, g_state->sys_buf, 2, g_state->sys_stream.rate))
             result |= 0x2;
     }
 
@@ -692,14 +721,14 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
     {
         std::lock_guard<std::mutex> lk(g_state->mic_mutex);
         if (mic_wav_path && !g_state->mic_buf.empty() &&
-            wav_write(mic_wav_path, g_state->mic_buf, 2, 44100))
+            wav_write(mic_wav_path, g_state->mic_buf, 2, g_state->mic_stream.rate))
             result |= 0x1;
         g_state->mic_buf.clear();
     }
     {
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
         if (sys_wav_path && !g_state->sys_buf.empty() &&
-            wav_write(sys_wav_path, g_state->sys_buf, 2, 44100))
+            wav_write(sys_wav_path, g_state->sys_buf, 2, g_state->sys_stream.rate))
             result |= 0x2;
         g_state->sys_buf.clear();
     }
@@ -734,6 +763,23 @@ HR_EXPORT int hr_audio_mix_wav(const char* mic_path,
     to_stereo(mic_pcm, mic_ch);
     to_stereo(sys_pcm, sys_ch);
 
+    // The two WAVs now (post-fix) carry each stream's real native capture
+    // rate, which the mic and system-output endpoints are free to differ
+    // on. Adding samples 1:1 below assumes both buffers already run at
+    // the same rate, so bring the lower-rate one up to the other's rate
+    // first -- otherwise the resulting mix plays back correctly for
+    // neither track. See resample_linear_stereo()'s comment above.
+    uint32_t out_rate = mic_rate;
+    if (mic_rate != sys_rate) {
+        if (mic_rate < sys_rate) {
+            resample_linear_stereo(mic_pcm, mic_rate, sys_rate);
+            out_rate = sys_rate;
+        } else {
+            resample_linear_stereo(sys_pcm, sys_rate, mic_rate);
+            out_rate = mic_rate;
+        }
+    }
+
     size_t n = std::max(mic_pcm.size(), sys_pcm.size());
     mic_pcm.resize(n, 0);
     sys_pcm.resize(n, 0);
@@ -747,7 +793,7 @@ HR_EXPORT int hr_audio_mix_wav(const char* mic_path,
         out[i] = (int16_t)s;
     }
 
-    return wav_write(out_path, out, 2, 44100) ? 0 : -3;
+    return wav_write(out_path, out, 2, out_rate) ? 0 : -3;
 }
 
 /*  hr_audio_rms(buf, n_bytes)  - быстрый RMS для уже захваченного буфера */
