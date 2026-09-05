@@ -1012,6 +1012,18 @@ struct Pipeline {
                 hr_composite_cursor(bgra_buf.data(), eff_w, eff_h,
                                      cap_origin_x + crop_x, cap_origin_y + crop_y);
             }
+            int extra_slots = 0;
+#ifdef _WIN32
+            if (recording && sw_ctx && g_libs.sw_elapsed_ns) {
+                static constexpr int kMaxCatchupFrames = 90; // ~1.5-3s of duplicate frames, whichever fps
+                int64_t now_ns = g_libs.sw_elapsed_ns(sw_ctx);
+                int64_t behind = now_ns - next_frame_ns;
+                if (behind > frame_ns) {
+                    extra_slots = (int)std::min<int64_t>(behind / frame_ns, kMaxCatchupFrames);
+                    next_frame_ns += (int64_t)extra_slots * frame_ns;
+                }
+            }
+#endif
 
             // ====== YUV CONVERSION ======
             // A frame is only dropped when the queue is genuinely full (the
@@ -1028,8 +1040,14 @@ struct Pipeline {
             // is moved -- not copied -- into pipe_queue. This avoids
             // both the per-frame heap allocation and the full-frame memcpy
             // that pipe_queue.push(yuv_buf) used to perform.
+            //
+            // Looped 1 + extra_slots times: the extra reps re-encode the
+            // exact same bgra_buf content (see the catch-up comment above)
+            // so the muxed timeline's frame count keeps pace with real
+            // elapsed time instead of quietly falling behind it.
 #ifdef _WIN32
             if (recording && g_libs.bgra_to_yuv) {
+                for (int rep = 0; rep <= extra_slots; ++rep) {
                 int req_w = out_w.load(std::memory_order_relaxed);
                 int req_h = out_h.load(std::memory_order_relaxed);
                 const uint8_t* enc_src = bgra_buf.data();
@@ -1077,9 +1095,20 @@ struct Pipeline {
                     if (free_bufs.size() < MAX_FREE_BUFS)
                         free_bufs.push(std::move(dropped));
                 }
+                } // for rep
             }
 #endif
-            frames_captured.fetch_add(1, std::memory_order_relaxed);
+            // Catch-up reps count as captured (they keep the timeline
+            // correct) but are also counted as "stalled" duplicates in the
+            // stats, same bucket the TIMEOUT/LOST paths above already use
+            // for a duplicated frame -- so this shows up in
+            // hr_pl_stats()'s existing counters instead of silently
+            // inflating frames_captured with no visible trace.
+            frames_captured.fetch_add(1 + extra_slots, std::memory_order_relaxed);
+            if (extra_slots > 0) {
+                frames_dropped.fetch_add(extra_slots, std::memory_order_relaxed);
+                frames_stalled.fetch_add(extra_slots, std::memory_order_relaxed);
+            }
 
             // Preview: dynamic frequency, driven by the Preview FPS setting
             // (see last_preview_ns's declaration above for why time-based).
