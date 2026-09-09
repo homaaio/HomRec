@@ -34,6 +34,17 @@ struct OverlayDef {
     int x = 0, y = 0, w = 0, h = 0;
     std::string text;
     std::string text_color = "#FFFFFF";  // "#RRGGBB", used for type == "text"
+    // Font family for type == "text" - see hr_overlay_render.cpp's
+    // RenderTextBgra(). If the named font isn't actually installed,
+    // Windows' GDI silently substitutes its own default rather than
+    // failing, so an unavailable choice here degrades gracefully instead
+    // of breaking the overlay.
+    std::string font_family = "Segoe UI";
+    // 0-100, applies to every overlay type (text/image/gif/webcam/
+    // input_overlay) on top of whatever per-pixel alpha the overlay
+    // content already has - see hr_overlay_render.cpp's CompositeBgra().
+    // 100 = fully opaque (the old, only, behavior before this existed).
+    int opacity = 100;
     std::string image_path;              // for type == "image"; also reused for
                                           // type == "gif"'s .gif file path
     int webcam_index = -1;
@@ -82,6 +93,7 @@ struct AppState {
     std::string hotkey_start_stop = "F9";
     std::string hotkey_pause      = "F10";
     std::string hotkey_fullscreen = "F11";
+    std::string hotkey_save_replay = "F8"; // Instant Replay - see recording_controller.h's SaveReplay()
     bool        notify_sound      = true;
     bool        notify_flash      = true;
     bool        auto_save_profile = false;
@@ -100,6 +112,11 @@ struct AppState {
     std::string filename_template = "HomRec_{date}_{time}";
     int         auto_stop_min      = 0;
     int         replay_buffer_sec  = 0;
+    // Whether Instant Replay's background buffer should be running -
+    // RecordingController::EnableInstantReplay()/DisableInstantReplay()
+    // are the actual on/off switch; this is just the persisted "user
+    // wants it on" choice, applied once at startup (see main_frame.cpp).
+    bool        instant_replay_enabled = false;
     VideoFormat video_format       = VideoFormat::Mp4;
     bool        separate_audio_mp3 = false;
 
