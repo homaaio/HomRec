@@ -684,13 +684,16 @@ HR_EXPORT int hr_path_exists(const char *path) {
 /*
  * hr_filename_from_template
  *
- * Expands a filename template like "HomRec_{date}_{time}" to a concrete name
- * using the current local time.  Appends ".mp4" extension.
+ * Expands a filename template like "HomRec_{date}_{time}_{app}" to a concrete
+ * name using the current local time plus the caller-resolved app_name (see
+ * RecordingController::ResolveCaptureAppName() - "Desktop" in desktop-capture
+ * mode, or the captured window's process name with no ".exe" in window-capture
+ * mode). Appends ".mp4" extension.
  *
  * out must be at least 256 bytes.
  */
 HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
-                                         char *out, int out_len) {
+                                         const char *app_name, char *out, int out_len) {
     if (!out || out_len < 8) return;
     out[0] = '\0';
 
@@ -714,6 +717,7 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
     };
     _replace(expanded, "{date}", date_str);
     _replace(expanded, "{time}", time_str);
+    _replace(expanded, "{app}", (app_name && app_name[0]) ? app_name : "Desktop");
 
     std::string result;
     if (folder && folder[0]) {
