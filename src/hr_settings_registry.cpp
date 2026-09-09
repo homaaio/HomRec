@@ -166,11 +166,13 @@ const std::vector<SettingDef> &All() {
         v.push_back(StrField("hotkey_start_stop", "hotkeys", &AppState::hotkey_start_stop));
         v.push_back(StrField("hotkey_pause", "hotkeys", &AppState::hotkey_pause));
         v.push_back(StrField("hotkey_fullscreen", "hotkeys", &AppState::hotkey_fullscreen));
+        v.push_back(StrField("hotkey_save_replay", "hotkeys", &AppState::hotkey_save_replay));
 
         // -- [recording_extra] -------------------------------------------------
         v.push_back(StrField("filename_template", "recording_extra", &AppState::filename_template));
         v.push_back(IntField("auto_stop_min", "recording_extra", &AppState::auto_stop_min));
         v.push_back(IntField("replay_buffer_sec", "recording_extra", &AppState::replay_buffer_sec));
+        v.push_back(BoolField("instant_replay_enabled", "recording_extra", &AppState::instant_replay_enabled));
 
         // -- [ui_toggles] ------------------------------------------------------
         v.push_back(BoolField("always_on_top", "ui_toggles", &AppState::always_on_top));
