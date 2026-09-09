@@ -18,6 +18,8 @@
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
+#include <thread> 
+#include <sstream>
 #include <wx/msgdlg.h>
 #include <functional>
 #include <algorithm>
@@ -28,8 +30,8 @@
 extern "C" {
     void *hr_hk_create();
     void hr_hk_destroy(void *handle);
-    void hr_hk_set_callbacks(void *handle, void (*start_stop)(), void (*pause)(), void (*fullscreen)());
-    void hr_hk_configure(void *handle, const char *start_stop_str, const char *pause_str, const char *fullscreen_str);
+    void hr_hk_set_callbacks(void *handle, void (*start_stop)(), void (*pause)(), void (*fullscreen)(), void (*save_replay)());
+    void hr_hk_configure(void *handle, const char *start_stop_str, const char *pause_str, const char *fullscreen_str, const char *save_replay_str);
     int hr_hk_start(void *handle);
     void hr_hk_stop(void *handle);
 
@@ -135,10 +137,13 @@ constexpr int kLeftPanelW = 240;
 wxDEFINE_EVENT(EVT_HOTKEY_START_STOP, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOTKEY_PAUSE, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOTKEY_FULLSCREEN, wxThreadEvent);
+wxDEFINE_EVENT(EVT_HOTKEY_SAVE_REPLAY, wxThreadEvent);
+wxDEFINE_EVENT(EVT_HOM_UPDATES_CHECKED, wxThreadEvent);
 
 void HotkeyStartStopThunk() { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_START_STOP)); }
 void HotkeyPauseThunk()     { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_PAUSE)); }
 void HotkeyFullscreenThunk(){ if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
+void HotkeySaveReplayThunk(){ if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_SAVE_REPLAY)); }
 
 class TrayIcon : public wxTaskBarIcon {
 public:
@@ -595,6 +600,16 @@ HomRecMainFrame::HomRecMainFrame()
     SetupTrayIcon();
     SetupHotkeys();
 
+    if (state_.instant_replay_enabled) {
+        std::wstring err;
+        if (!rec_->EnableInstantReplay(err)) {
+            HrLog::Error(std::string("Instant Replay: failed to start at launch - ") +
+                         std::string(err.begin(), err.end()));
+        }
+    }
+
+    CheckHomUpdatesAsync();
+
     plugins_ = std::make_unique<LuaPluginEngine>("plugins");
     plugins_->SetContext(rec_.get(), &theme_);
     plugins_->LoadAll();
@@ -641,6 +656,8 @@ HomRecMainFrame::HomRecMainFrame()
     Bind(EVT_HOTKEY_START_STOP, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOTKEY_PAUSE, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOTKEY_FULLSCREEN, &HomRecMainFrame::OnHotkeyEvent, this);
+    Bind(EVT_HOTKEY_SAVE_REPLAY, &HomRecMainFrame::OnHotkeyEvent, this);
+    Bind(EVT_HOM_UPDATES_CHECKED, &HomRecMainFrame::OnHomUpdatesChecked, this);
 
     if (state_.first_launch) {
         ShowWelcomeDialog(GetHWND(), wxGetInstance(), state_);
@@ -903,6 +920,17 @@ void HomRecMainFrame::BuildBottomBar(wxWindow *parent, wxSizer *parentSizer) {
     file_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI")));
     sizer->Add(file_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
 
+    // Empty (and therefore invisible - wxStaticText with no text takes no
+    // visible space) until CheckHomUpdatesAsync() finds something to
+    // report. Deliberately just a clickable label + a details popup, not
+    // a plugin browser - hom itself already has search/show/install for
+    // that; this is only meant to be "something told me updates exist".
+    plugin_updates_lbl_ = new wxStaticText(bottom_bar_, wxID_ANY, wxEmptyString);
+    plugin_updates_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI").Bold()));
+    plugin_updates_lbl_->SetCursor(wxCursor(wxCURSOR_HAND));
+    plugin_updates_lbl_->Bind(wxEVT_LEFT_DOWN, &HomRecMainFrame::OnPluginUpdatesClick, this);
+    sizer->Add(plugin_updates_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
+
     made_by_lbl_ = new wxStaticText(bottom_bar_, wxID_ANY, wxString::FromUTF8(lang_.Get("made_by")));
     made_by_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI").Bold()));
     sizer->Add(made_by_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
@@ -1057,7 +1085,7 @@ void HomRecMainFrame::RestoreFromTray() {
 
 void HomRecMainFrame::SetupHotkeys() {
     hotkey_handle_ = hr_hk_create();
-    hr_hk_set_callbacks(hotkey_handle_, &HotkeyStartStopThunk, &HotkeyPauseThunk, &HotkeyFullscreenThunk);
+    hr_hk_set_callbacks(hotkey_handle_, &HotkeyStartStopThunk, &HotkeyPauseThunk, &HotkeyFullscreenThunk, &HotkeySaveReplayThunk);
     ConfigureHotkeysFromState();
     if (!hr_hk_start(hotkey_handle_)) {
         wxLogDebug("HomRec: global hotkeys failed to register.");
@@ -1067,7 +1095,8 @@ void HomRecMainFrame::SetupHotkeys() {
 void HomRecMainFrame::ConfigureHotkeysFromState() {
     if (!hotkey_handle_) return;
     hr_hk_configure(hotkey_handle_, state_.hotkey_start_stop.c_str(),
-                     state_.hotkey_pause.c_str(), state_.hotkey_fullscreen.c_str());
+                     state_.hotkey_pause.c_str(), state_.hotkey_fullscreen.c_str(),
+                     state_.hotkey_save_replay.c_str());
 }
 
 void HomRecMainFrame::SetStatusState(const wxString &text, COLORREF dotColor) {
@@ -1222,6 +1251,147 @@ void HomRecMainFrame::DoPause() {
         pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
         SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
     }
+}
+
+void HomRecMainFrame::DoSaveReplay() {
+    if (!rec_->instant_replay_active()) {
+        SetStatusState(wxString::FromUTF8("Instant Replay isn't running right now"), theme_.warning);
+        return;
+    }
+    std::wstring err, saved_path;
+    if (!rec_->SaveReplay(err, &saved_path)) {
+        wxMessageBox(wxString(err.c_str()), "HomRec", wxOK | wxICON_WARNING, this);
+        return;
+    }
+    std::wstring filename = saved_path;
+    size_t slash = filename.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) filename = filename.substr(slash + 1);
+    if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Replay saved: ") + wxString(filename.c_str()));
+    if (plugins_) plugins_->EmitHook("on_replay_saved");
+}
+
+namespace {
+std::wstring MainFrameExeDir() {
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring full = path;
+    size_t pos = full.find_last_of(L"\\/");
+    return pos == std::wstring::npos ? full : full.substr(0, pos);
+}
+
+bool RunCapturedProcessForBadge(const std::wstring &cmdline, const std::wstring &cwd,
+                                 DWORD timeout_ms, std::wstring *out_text) {
+    SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE hRead = nullptr, hWrite = nullptr;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return false;
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.hStdOutput = hWrite;
+    si.hStdError  = hWrite;
+    si.dwFlags    = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> mut_cmd(cmdline.begin(), cmdline.end());
+    mut_cmd.push_back(L'\0');
+    if (!CreateProcessW(nullptr, mut_cmd.data(), nullptr, nullptr, TRUE,
+                         CREATE_NO_WINDOW, nullptr,
+                         cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return false;
+    }
+    CloseHandle(hWrite);
+
+    std::string raw;
+    std::thread reader([&]() {
+        char buf[4096];
+        DWORD br = 0;
+        while (ReadFile(hRead, buf, sizeof(buf) - 1, &br, nullptr) && br) {
+            buf[br] = '\0';
+            raw += buf;
+        }
+    });
+
+    DWORD wait = WaitForSingleObject(pi.hProcess, timeout_ms);
+    if (wait == WAIT_TIMEOUT) TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    reader.join();
+    CloseHandle(hRead);
+
+    int wl = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, nullptr, 0);
+    std::wstring w(wl > 0 ? wl - 1 : 0, L'\0');
+    if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, w.data(), wl);
+    *out_text = w;
+    return true;
+}
+} // namespace
+
+// Runs `hom.exe list --upgradable` on a background thread (this shells
+// out and hits the network - hom's search/show/list all fetch
+// Hom/plugins/index.json live, see tools/hom/hom.cpp - so it must not
+// block the UI thread) and posts EVT_HOM_UPDATES_CHECKED back with the
+// result. Silently does nothing if hom.exe isn't sitting next to this
+// exe (an unmodified/portable install without it is a normal, expected
+// case, not an error worth surfacing).
+void HomRecMainFrame::CheckHomUpdatesAsync() {
+    std::wstring hom_path = MainFrameExeDir() + L"\\hom.exe";
+    if (GetFileAttributesW(hom_path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+
+    std::thread([hom_path]() {
+        std::wstring cmdline = L"\"" + hom_path + L"\" list --upgradable";
+        std::wstring out;
+        if (!RunCapturedProcessForBadge(cmdline, MainFrameExeDir(), 15000, &out)) return;
+
+        // hom prints one "name: old -> new" line per upgradable plugin
+        // (see tools/hom/hom.cpp's CmdList()) and nothing else useful to
+        // this badge - everything else it might print ("hom: no
+        // upgrades available.", the "N plugin(s) skipped..." note, a
+        // connection error) starts with "hom:" and isn't a plugin line.
+        int count = 0;
+        wxString summary;
+        std::wistringstream iss(out);
+        std::wstring line;
+        while (std::getline(iss, line)) {
+            if (line.empty() || line.rfind(L"hom:", 0) == 0) continue;
+            if (line.find(L" -> ") == std::wstring::npos) continue;
+            ++count;
+            if (!summary.empty()) summary += "\n";
+            summary += wxString(line.c_str());
+        }
+
+        if (g_frame) {
+            auto *evt = new wxThreadEvent(EVT_HOM_UPDATES_CHECKED);
+            evt->SetInt(count);
+            evt->SetString(summary);
+            wxQueueEvent(g_frame, evt);
+        }
+    }).detach();
+}
+
+void HomRecMainFrame::OnHomUpdatesChecked(wxThreadEvent &evt) {
+    int count = evt.GetInt();
+    plugin_updates_summary_ = evt.GetString();
+    if (!plugin_updates_lbl_) return;
+    if (count <= 0) {
+        plugin_updates_lbl_->SetLabel(wxEmptyString);
+    } else {
+        plugin_updates_lbl_->SetLabel(wxString::Format("\u2B06 %d plugin update%s", count, count == 1 ? "" : "s"));
+        plugin_updates_lbl_->SetForegroundColour(FromColorref(theme_.success));
+    }
+    if (bottom_bar_) bottom_bar_->Layout();
+}
+
+void HomRecMainFrame::OnPluginUpdatesClick(wxMouseEvent & /*evt*/) {
+    wxString body = plugin_updates_summary_.IsEmpty()
+        ? wxString("No plugin updates found.")
+        : ("Updates available:\n\n" + plugin_updates_summary_ +
+           "\n\nRun 'hom upgrade' in the console (or 'inwid hom upgrade' - "
+           "upgrade itself doesn't need the prefix, see commands.md) to install them.");
+    wxMessageBox(body, "Plugin Updates", wxOK | wxICON_INFORMATION, this);
 }
 
 void HomRecMainFrame::ToggleFullscreenNative() {
@@ -1379,6 +1549,21 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             // Settings" entry used to do.
             if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
             SetupHotkeys();
+            // Instant Replay's on/off checkbox and buffer-size spinner also
+            // live on this dialog - apply whichever way it changed. Calling
+            // both Enable/Disable unconditionally is harmless either way:
+            // each is a no-op if already in the requested state (see their
+            // header comments in recording_controller.h).
+            if (rec_) {
+                if (state_.instant_replay_enabled) {
+                    std::wstring err;
+                    if (!rec_->EnableInstantReplay(err)) {
+                        wxMessageBox(wxString(err.c_str()), "HomRec", wxOK | wxICON_WARNING, this);
+                    }
+                } else {
+                    rec_->DisableInstantReplay();
+                }
+            }
             break;
         // ID_OVERLAYS_MANAGE removed along with overlay_manager.cpp's
         // ShowOverlayManager() -- see overlays_dock_panel.h.
@@ -1546,4 +1731,5 @@ void HomRecMainFrame::OnHotkeyEvent(wxThreadEvent &evt) {
     if (t == EVT_HOTKEY_START_STOP) { if (state_.recording) DoStop(); else RequestStart(); }
     else if (t == EVT_HOTKEY_PAUSE) { DoPause(); }
     else if (t == EVT_HOTKEY_FULLSCREEN) { ToggleFullscreenNative(); }
+    else if (t == EVT_HOTKEY_SAVE_REPLAY) { DoSaveReplay(); }
 }

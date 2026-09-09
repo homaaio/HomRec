@@ -180,6 +180,7 @@ private:
     void DoStart();
     void DoStop();
     void DoPause();
+    void DoSaveReplay(); // Instant Replay hotkey/menu action - see recording_controller.h's SaveReplay()
     // Wraps DoStart() with the "Countdown (3s)" setting: if
     // state_.countdown_enabled is on, shows a 3-2-1 countdown in the
     // status label (cancellable by clicking Start again) before actually
@@ -218,6 +219,13 @@ private:
     void OnIconize(wxIconizeEvent &evt);
     void OnShowEvent(wxShowEvent &evt);
     void OnHotkeyEvent(wxThreadEvent &evt); // posted from hr_hotkey.cpp's background thread
+
+    // hom plugin-update badge (bottom bar) - see CheckHomUpdatesAsync()'s
+    // comment for why this is a plain background `hom list --upgradable`
+    // check plus a click-for-details message box, not a plugin browser.
+    void CheckHomUpdatesAsync();
+    void OnHomUpdatesChecked(wxThreadEvent &evt); // posted from CheckHomUpdatesAsync()'s background thread
+    void OnPluginUpdatesClick(wxMouseEvent &evt);
 
     AppState state_;
     LanguageTable lang_;
@@ -264,6 +272,12 @@ private:
     StatusDot *bottom_dot_ = nullptr;
     wxStaticText *file_lbl_ = nullptr;
     wxStaticText *made_by_lbl_ = nullptr;
+    // Bottom-bar "N plugin update(s)" badge - hidden (empty label) until
+    // CheckHomUpdatesAsync()'s background `hom list --upgradable` finds
+    // something. plugin_updates_summary_ holds the full per-plugin detail
+    // text shown when the badge is clicked.
+    wxStaticText *plugin_updates_lbl_ = nullptr;
+    wxString plugin_updates_summary_;
     wxStaticText *version_bar_lbl_ = nullptr;
 
     wxTimer preview_timer_;
