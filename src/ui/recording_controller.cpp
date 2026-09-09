@@ -2,7 +2,8 @@
 #include "window_picker_dialog.h"  // HR_ResolveCaptureWindow()
 #include "../hr_log.h"
 #include "../hr_overlay_render.h"
-#include <windows.h>
+#include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
+                      // QueryFullProcessImageNameA (kernel32) - ResolveCaptureAppName()'s {app} lookup
 #include <vector>
 #include <thread>
 #include <exception>

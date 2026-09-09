@@ -19,6 +19,7 @@
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
 #include <thread> 
+#include <atomic>
 #include <sstream>
 #include <wx/msgdlg.h>
 #include <functional>
@@ -129,7 +130,7 @@ std::wstring WideFromNarrow(const std::string &s) {
 // (hr_hotkey.cpp's HR_HK_CB is a plain no-arg function pointer, see its
 // header comment) fire on a background thread and need a way back to "the"
 // frame to wxQueueEvent() onto the UI thread; this is it.
-HomRecMainFrame *g_frame = nullptr;
+std::atomic<HomRecMainFrame *> g_frame{nullptr};
 
 constexpr int kOuterPad   = 15;
 constexpr int kLeftPanelW = 240;
@@ -140,10 +141,10 @@ wxDEFINE_EVENT(EVT_HOTKEY_FULLSCREEN, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOTKEY_SAVE_REPLAY, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOM_UPDATES_CHECKED, wxThreadEvent);
 
-void HotkeyStartStopThunk() { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_START_STOP)); }
-void HotkeyPauseThunk()     { if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_PAUSE)); }
-void HotkeyFullscreenThunk(){ if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
-void HotkeySaveReplayThunk(){ if (g_frame) wxQueueEvent(g_frame, new wxThreadEvent(EVT_HOTKEY_SAVE_REPLAY)); }
+void HotkeyStartStopThunk() { if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_START_STOP)); }
+void HotkeyPauseThunk()     { if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_PAUSE)); }
+void HotkeyFullscreenThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
+void HotkeySaveReplayThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_SAVE_REPLAY)); }
 
 class TrayIcon : public wxTaskBarIcon {
 public:
@@ -1363,11 +1364,11 @@ void HomRecMainFrame::CheckHomUpdatesAsync() {
             summary += wxString(line.c_str());
         }
 
-        if (g_frame) {
+        if (HomRecMainFrame *frame = g_frame.load()) {
             auto *evt = new wxThreadEvent(EVT_HOM_UPDATES_CHECKED);
             evt->SetInt(count);
             evt->SetString(summary);
-            wxQueueEvent(g_frame, evt);
+            wxQueueEvent(frame, evt);
         }
     }).detach();
 }
@@ -1697,6 +1698,13 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
         evt.Veto();
         return;
     }
+    // Clear g_frame here, on the real-close path, rather than waiting for
+    // ~HomRecMainFrame() - Destroy() below only *schedules* the actual C++
+    // destruction, which can happen several event-loop turns later. Doing
+    // it now closes (most of) the window where CheckHomUpdatesAsync()'s
+    // background thread could still wxQueueEvent() onto a frame that's
+    // about to be freed. See the comment on g_frame's declaration.
+    if (g_frame == this) g_frame = nullptr;
     if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
     HrLog::Info("HomRec closing");
     Destroy();
