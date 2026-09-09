@@ -539,7 +539,10 @@ private:
         AddLabel(page, hkGrid, text, bg, "Fullscreen:");
         hk_fullscreen_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_fullscreen));
         hkGrid->Add(hk_fullscreen_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-        for (HotkeyButton *hk : {hk_startstop_btn_, hk_pause_btn_, hk_fullscreen_btn_})
+        AddLabel(page, hkGrid, text, bg, "Save Replay:");
+        hk_save_replay_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_save_replay));
+        hkGrid->Add(hk_save_replay_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+        for (HotkeyButton *hk : {hk_startstop_btn_, hk_pause_btn_, hk_fullscreen_btn_, hk_save_replay_btn_})
             hk->SetColours(bg, text, wxColour(120, 170, 250));
         pageRoot->Add(hkGrid, 0, wxEXPAND | wxALL, 16);
     }
@@ -549,7 +552,7 @@ private:
         auto *grid = new wxFlexGridSizer(2, 10, 10);
         grid->AddGrowableCol(1, 1);
 
-        AddLabel(page, grid, text, bg, "Filename template:");
+        AddLabel(page, grid, text, bg, "Filename template ({date}/{time}/{app}):");
         fname_template_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.filename_template));
         grid->Add(fname_template_edit_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
 
@@ -564,6 +567,25 @@ private:
         grid->Add(replay_buf_spin_, 0, wxALIGN_CENTRE_VERTICAL);
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
+
+        // Instant Replay - a continuous background buffer of the last
+        // "Replay buffer" seconds above, saved out on demand with the
+        // Save Replay hotkey (see the Hotkeys tab) without you having had
+        // to be recording already. It can't run at the same time as a
+        // manual recording (they share the one capture pipeline) - it
+        // just pauses for the duration and picks back up, with a fresh
+        // buffer, once you stop.
+        instant_replay_check_ = new wxCheckBox(page, wxID_ANY, "Enable Instant Replay");
+        instant_replay_check_->SetForegroundColour(text);
+        instant_replay_check_->SetBackgroundColour(bg);
+        instant_replay_check_->SetValue(state_.instant_replay_enabled);
+        pageRoot->Add(instant_replay_check_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+        auto *replayNote = new wxStaticText(page, wxID_ANY,
+            "Uses the replay buffer size above. Set the Save Replay hotkey\n"
+            "on the Hotkeys tab.");
+        replayNote->SetForegroundColour(textDim);
+        replayNote->SetBackgroundColour(bg);
+        pageRoot->Add(replayNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
 
         // -- Settings file path (Phase 1 storage migration, see
         // commands.md) - the app's own auto-managed settings file, an
@@ -784,6 +806,8 @@ private:
         fname_template_edit_->SetValue("HomRec_{date}_{time}");
         autostop_spin_->SetValue(0);
         replay_buf_spin_->SetValue(0);
+        instant_replay_check_->SetValue(false);
+        hk_save_replay_btn_->SetValue("F8");
 
         sys_log_chk_->SetValue(hr_settings_get_flag(def, "system_logging_enabled") != 0);
         plugin_log_chk_->SetValue(hr_settings_get_flag(def, "plugin_logging_enabled") != 0);
@@ -867,6 +891,8 @@ private:
         state_.filename_template = fname_template_edit_->GetValue().ToUTF8().data();
         state_.auto_stop_min = autostop_spin_->GetValue();
         state_.replay_buffer_sec = replay_buf_spin_->GetValue();
+        state_.instant_replay_enabled = instant_replay_check_->GetValue();
+        state_.hotkey_save_replay = hk_save_replay_btn_->GetValue().ToUTF8().data();
 
         // -- Security -------------------------------------------------------
         state_.system_logging_enabled = sys_log_chk_->GetValue();
@@ -975,10 +1001,12 @@ private:
 
     // Hotkeys
     HotkeyButton *hk_startstop_btn_ = nullptr, *hk_pause_btn_ = nullptr, *hk_fullscreen_btn_ = nullptr;
+    HotkeyButton *hk_save_replay_btn_ = nullptr;
 
     // Advanced
     wxTextCtrl *fname_template_edit_ = nullptr;
     wxSpinCtrl *autostop_spin_ = nullptr, *replay_buf_spin_ = nullptr;
+    wxCheckBox *instant_replay_check_ = nullptr;
 
     // Security
     wxCheckBox *sys_log_chk_ = nullptr, *plugin_log_chk_ = nullptr;
