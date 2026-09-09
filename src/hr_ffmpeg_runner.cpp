@@ -51,6 +51,7 @@ struct FfmpegCtx {
     std::string audio_path;
     std::string input_path;  /* only used when pipe_input == false, see below */
     std::string codec_args;  /* space-separated ffmpeg codec flags */
+    std::string extra_output_args;
 
     /* process */
 #ifdef _WIN32
@@ -229,6 +230,15 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         ss << L" -vf scale=" << ctx->output_width << L":" << ctx->output_height;
     }
 
+    /* Extra output-side flags (Instant Replay's segment muxer, etc.) -
+       must land after codec/scale args and before -y/output_path, same
+       position ffmpeg itself expects "-f segment ..." in on a real
+       command line. */
+    if (!ctx->extra_output_args.empty()) {
+        std::wstring wea(ctx->extra_output_args.begin(), ctx->extra_output_args.end());
+        ss << L" " << wea;
+    }
+
     /* Output */
     ss << L" -y " << Q(ctx->output_path);
 
@@ -282,6 +292,11 @@ HR_EXPORT void hr_ff_set_input_path(void *h, const char *path) {
 HR_EXPORT void hr_ff_set_codec_args(void *h, const char *args) {
     if (!h || !args) return;
     static_cast<FfmpegCtx *>(h)->codec_args = args;
+}
+
+HR_EXPORT void hr_ff_set_extra_output_args(void *h, const char *args) {
+    if (!h) return;
+    static_cast<FfmpegCtx *>(h)->extra_output_args = args ? args : "";
 }
 
 HR_EXPORT void hr_ff_set_video_params(void *h, int w, int h2, int fps) {

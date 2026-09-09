@@ -5,6 +5,7 @@
  *   F9  = Start / Stop recording toggle
  *   F10 = Pause / Resume recording toggle
  *   F11 = Fullscreen toggle
+ *   F8  = Save Replay (Instant Replay - see recording_controller.h)
  *
  * On Windows uses RegisterHotKey / WM_HOTKEY via a hidden message window.
  * On other platforms the stubs are no-ops.
@@ -32,6 +33,7 @@
 static constexpr int HK_START_STOP  = 1;   /* default F9  */
 static constexpr int HK_PAUSE       = 2;   /* default F10 */
 static constexpr int HK_FULLSCREEN  = 3;   /* default F11 */
+static constexpr int HK_SAVE_REPLAY = 4;   /* default F8  */
 
 /* -- Callback types -------------------------------------------------------- */
 typedef void (*HR_HK_CB)();  /* no-arg callback for each hotkey action */
@@ -41,6 +43,7 @@ struct HotkeyCtx {
     HR_HK_CB cb_start_stop{nullptr};
     HR_HK_CB cb_pause{nullptr};
     HR_HK_CB cb_fullscreen{nullptr};
+    HR_HK_CB cb_save_replay{nullptr};
 
     std::atomic<bool> running{false};
 
@@ -51,6 +54,7 @@ struct HotkeyCtx {
     UINT mod_start_stop{0}, vk_start_stop{0x78 /* VK_F9 */};
     UINT mod_pause{0},      vk_pause{0x79 /* VK_F10 */};
     UINT mod_fullscreen{0}, vk_fullscreen{0x7A /* VK_F11 */};
+    UINT mod_save_replay{0}, vk_save_replay{0x77 /* VK_F8 */};
 
 #ifdef _WIN32
     HWND   hwnd{nullptr};
@@ -73,6 +77,7 @@ static LRESULT CALLBACK _WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if      (wp == HK_START_STOP && ctx->cb_start_stop) ctx->cb_start_stop();
             else if (wp == HK_PAUSE      && ctx->cb_pause)      ctx->cb_pause();
             else if (wp == HK_FULLSCREEN && ctx->cb_fullscreen) ctx->cb_fullscreen();
+            else if (wp == HK_SAVE_REPLAY && ctx->cb_save_replay) ctx->cb_save_replay();
         }
         return 0;
     }
@@ -100,6 +105,7 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     RegisterHotKey(ctx->hwnd, HK_START_STOP, ctx->mod_start_stop, ctx->vk_start_stop);
     RegisterHotKey(ctx->hwnd, HK_PAUSE,      ctx->mod_pause,      ctx->vk_pause);
     RegisterHotKey(ctx->hwnd, HK_FULLSCREEN, ctx->mod_fullscreen, ctx->vk_fullscreen);
+    RegisterHotKey(ctx->hwnd, HK_SAVE_REPLAY, ctx->mod_save_replay, ctx->vk_save_replay);
 
     /* Signal ready */
     ctx->running = true;
@@ -114,6 +120,7 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     UnregisterHotKey(ctx->hwnd, HK_START_STOP);
     UnregisterHotKey(ctx->hwnd, HK_PAUSE);
     UnregisterHotKey(ctx->hwnd, HK_FULLSCREEN);
+    UnregisterHotKey(ctx->hwnd, HK_SAVE_REPLAY);
     DestroyWindow(ctx->hwnd);
     ctx->hwnd    = nullptr;
     ctx->running = false;
@@ -144,12 +151,14 @@ HR_EXPORT void hr_hk_destroy(void *handle) {
 HR_EXPORT void hr_hk_set_callbacks(void *handle,
                                     HR_HK_CB start_stop,
                                     HR_HK_CB pause,
-                                    HR_HK_CB fullscreen) {
+                                    HR_HK_CB fullscreen,
+                                    HR_HK_CB save_replay) {
     if (!handle) return;
     auto *ctx = static_cast<HotkeyCtx *>(handle);
     ctx->cb_start_stop = start_stop;
     ctx->cb_pause      = pause;
     ctx->cb_fullscreen = fullscreen;
+    ctx->cb_save_replay = save_replay;
 }
 
 /*
@@ -235,7 +244,8 @@ HR_EXPORT int hr_hk_parse_keystring(const char *s, unsigned int *mod_out, unsign
 HR_EXPORT void hr_hk_configure(void *handle,
                                 const char *start_stop_str,
                                 const char *pause_str,
-                                const char *fullscreen_str) {
+                                const char *fullscreen_str,
+                                const char *save_replay_str) {
     if (!handle) return;
     auto *ctx = static_cast<HotkeyCtx *>(handle);
     UINT mod, vk;
@@ -247,6 +257,9 @@ HR_EXPORT void hr_hk_configure(void *handle,
     }
     if (hr_hk_parse_keystring(fullscreen_str, &mod, &vk)) {
         ctx->mod_fullscreen = mod; ctx->vk_fullscreen = vk;
+    }
+    if (hr_hk_parse_keystring(save_replay_str, &mod, &vk)) {
+        ctx->mod_save_replay = mod; ctx->vk_save_replay = vk;
     }
 }
 
