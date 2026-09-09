@@ -35,3 +35,12 @@ bool HrPromptForInputOverlaySource(HWND parent, HINSTANCE hInst,
 bool HrPromptForWebcamDevice(HWND parent, HINSTANCE hInst,
                               const std::vector<HrWebcamDevice> &devices,
                               size_t &out_index);
+
+// Generic version of the same listbox-picker pattern above, for any small
+// fixed list of plain-text choices (currently: the overlay editor's font
+// picker - see overlays_dock_panel.cpp's EditParametersAt()). `out_index`
+// is read on entry to preselect that row, and written on a confirmed OK.
+// Returns false if cancelled or `choices` is empty.
+bool HrPromptForChoice(HWND parent, HINSTANCE hInst, const std::wstring &title,
+                       const std::wstring &prompt_label,
+                       const std::vector<std::wstring> &choices, size_t &out_index);

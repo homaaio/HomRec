@@ -160,7 +160,124 @@ LRESULT CALLBACK WebcamPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     }
 }
 
+// ---------------------------------------------------------------------------
+// Generic choice picker (currently: the overlay editor's font dropdown -
+// see overlays_dock_panel.cpp) -- same listbox pattern as the two pickers
+// above, just with caller-supplied title/label/choices instead of each
+// being hardcoded to one specific list type.
+// ---------------------------------------------------------------------------
+enum { IDC_CHP_LIST = 6301, IDC_CHP_OK, IDC_CHP_CANCEL };
+
+struct ChoicePickerCtx {
+    HWND list = nullptr;
+    int selected = -1;
+    bool confirmed = false;
+};
+
+LRESULT CALLBACK ChoicePickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto *ctx = reinterpret_cast<ChoicePickerCtx *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_NCCREATE: {
+            auto *cs = reinterpret_cast<CREATESTRUCTW *>(lParam);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            return 0;
+        case WM_CTLCOLORSTATIC:
+            return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
+        case WM_CTLCOLORLISTBOX:
+            return (LRESULT)HrWin32Theme::ColorEdit((HDC)wParam);
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            int notify = HIWORD(wParam);
+            if (id == IDC_CHP_LIST && notify == LBN_DBLCLK) {
+                ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
+                if (ctx->selected >= 0) { ctx->confirmed = true; DestroyWindow(hwnd); }
+                return 0;
+            }
+            if (id == IDC_CHP_OK) {
+                ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
+                if (ctx->selected >= 0) ctx->confirmed = true;
+                DestroyWindow(hwnd);
+            } else if (id == IDC_CHP_CANCEL) {
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        }
+        default:
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}
+
 } // namespace
+
+bool HrPromptForChoice(HWND parent, HINSTANCE hInst, const std::wstring &title,
+                       const std::wstring &prompt_label,
+                       const std::vector<std::wstring> &choices, size_t &out_index)
+{
+    if (choices.empty()) return false;
+
+    static bool registered = false;
+    static const wchar_t kClass[] = L"HomRecChoicePicker";
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = ChoicePickerProc;
+        wc.hInstance = hInst;
+        wc.lpszClassName = kClass;
+        wc.hbrBackground = HrWin32Theme::BgBrush();
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassW(&wc);
+        registered = true;
+    }
+
+    ChoicePickerCtx ctx;
+
+    int ex, ey, ew, eh;
+    HrWin32Theme::CenteredWindowRect(340, 320, WS_POPUP | WS_CAPTION | WS_SYSMENU, ex, ey, ew, eh);
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kClass, title.c_str(),
+                                 WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                                 ex, ey, ew, eh, parent, nullptr, hInst, &ctx);
+    HrWin32Theme::ApplyDarkTitleBar(hwnd);
+
+    CreateWindowExW(0, L"STATIC", prompt_label.c_str(),
+                     WS_CHILD | WS_VISIBLE, 12, 12, 300, 20, hwnd, nullptr, hInst, nullptr);
+    ctx.list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP,
+                                12, 36, 300, 200, hwnd, (HMENU)IDC_CHP_LIST, hInst, nullptr);
+    for (const auto &c : choices) {
+        SendMessageW(ctx.list, LB_ADDSTRING, 0, (LPARAM)c.c_str());
+    }
+    // Preselect whatever out_index came in with (the overlay's current
+    // font, etc.), clamped to a valid row instead of always defaulting
+    // back to the first choice.
+    int preselect = (out_index < choices.size()) ? (int)out_index : 0;
+    SendMessageW(ctx.list, LB_SETCURSEL, preselect, 0);
+
+    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                     144, 250, 80, 26, hwnd, (HMENU)IDC_CHP_OK, hInst, nullptr));
+    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                     232, 250, 80, 26, hwnd, (HMENU)IDC_CHP_CANCEL, hInst, nullptr));
+
+    EnableWindow(parent, FALSE);
+    ShowWindow(hwnd, SW_SHOW);
+    MSG msg;
+    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(hwnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        if (!IsWindow(hwnd)) break;
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+
+    if (ctx.confirmed && ctx.selected >= 0 && (size_t)ctx.selected < choices.size()) {
+        out_index = (size_t)ctx.selected;
+        return true;
+    }
+    return false;
+}
 
 bool HrPromptForText(HWND parent, HINSTANCE hInst, const std::wstring &title,
                      const std::wstring &label, std::wstring &value)
