@@ -54,6 +54,46 @@ public:
     // just copies a handful of small structs unless overlays are empty.
     void SyncOverlays();
 
+    // -- Instant Replay -----------------------------------------------
+    //
+    // A continuous background recording into a short rolling buffer,
+    // independent of the manual Start()/Stop() above - "Save Replay"
+    // writes out whatever's currently in the last AppState.replay_buffer_sec
+    // seconds without you having had to be recording already.
+    //
+    // Shares this same class's single capture pipeline_ rather than
+    // opening a second one (hr_pl_create() -> dx_create() only supports
+    // one DXGI duplication handle per monitor at a time - a second
+    // pipeline for the same monitor would just fail to create), and
+    // hr_pl_set_recording() only ever has one active pipe_fd consumer -
+    // so Instant Replay and a manual recording can't literally run at
+    // the same time. Starting a manual recording while Instant Replay is
+    // on pauses it for the duration (Start() takes the pipe over); Stop()
+    // resumes it afterward with a fresh buffer.
+    //
+    // Enables the background buffer now (if not already recording
+    // manually - if it's currently within Start()/Stop() it just
+    // remembers to resume when Stop() runs).
+    bool EnableInstantReplay(std::wstring &error_out);
+    // Turns Instant Replay off entirely (not just pausing it) - the
+    // background buffer stops and its temp segment files are abandoned
+    // (cleaned up lazily: EnableInstantReplay() always starts into a
+    // fresh subfolder, so nothing accumulates across sessions except
+    // whatever's in the *current* run, which the OS temp folder isn't
+    // expected to keep forever anyway).
+    void DisableInstantReplay();
+    bool instant_replay_active() const { return instant_replay_active_; }
+    bool instant_replay_enabled() const { return instant_replay_enabled_; }
+    // Saves the buffer's current contents to a real file (via the same
+    // filename template - {date}/{time}/{app} - as a manual recording),
+    // trimmed to approximately AppState.replay_buffer_sec (accurate to
+    // within kReplaySegmentSec, the segment granularity). Restarts the
+    // background segment writer immediately afterward so the next Save
+    // Replay doesn't re-save clips that were already saved - that
+    // restart briefly gaps the *background* buffer (not the clip just
+    // saved), logged rather than surfaced as this call's own failure.
+    bool SaveReplay(std::wstring &error_out, std::wstring *out_saved_path = nullptr);
+
     // Runs a preview-only capture pipeline (frames captured + thumbnailed
     // for the UI, nothing written to disk) independent of whether an
     // actual recording is in progress - previously the pipeline only
@@ -176,6 +216,24 @@ private:
     // software x264 path if the probed GPU encoder fails to actually start
     // - same fallback behavior recording_mixin.py has).
     std::wstring BuildOutputPath();
+    // Resolves the {app} filename-template placeholder: in window-capture
+    // mode, the process name (no ".exe") of whatever state_.capture_window_title
+    // currently points at, via the same HR_ResolveCaptureWindow() ResolveCaptureSize()
+    // uses; "Desktop" in desktop-capture mode, or if the window can't be
+    // resolved (closed since the profile was saved, etc.) - {app} should
+    // always expand to *something* filename-safe rather than leaving a
+    // literal "{app}" in the output path.
+    std::string ResolveCaptureAppName() const;
+    // Shared by EnableInstantReplay()/SaveReplay(): (re)starts the
+    // background segment-writer ffmpeg process into a fresh run
+    // subfolder and points pipeline_'s recording pipe at it. Assumes
+    // pipeline_ already exists and is sized/cropped correctly.
+    bool StartInstantReplayEncoder(std::wstring &error_out);
+    // Stops+destroys replay_ff_ (blocking briefly so its last segment
+    // finalizes) without touching pipeline_ - callers decide what the
+    // pipeline should do next (redirect to a manual recording, go back
+    // to preview-only, or immediately restart a fresh replay encoder).
+    void StopInstantReplayEncoder();
     std::wstring BuildCodecArgs(const std::wstring &codec);
     // Resolves capture_w_/capture_h_ from the selected monitor + scale
     // factor (was inline in Start() only; EnsurePreview() needs the same
@@ -205,6 +263,14 @@ private:
     AppState &state_;
 
     void *pipeline_ = nullptr;   // hr_pl_create() handle
+
+    // -- Instant Replay state -------------------------------------------
+    bool   instant_replay_enabled_ = false; // user turned it on - survives being paused for a manual recording
+    bool   instant_replay_active_  = false; // actually buffering right now (false while state_.recording is true)
+    void  *replay_ff_ = nullptr;            // hr_ff_create() handle for the background segment-writer process
+    std::wstring replay_dir_;               // current run's segment subfolder (see StartInstantReplayEncoder())
+    int    replay_run_seq_ = 0;             // bumped per StartInstantReplayEncoder() call - keeps each run's folder unique
+    static constexpr int kReplaySegmentSec = 5; // segment length - Save Replay's trim is accurate to within this many seconds
 
     // TeardownPreview() hands the actual hr_pl_destroy() off to a background
     // thread (see its own comment for why - avoids freezing the UI while a

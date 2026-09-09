@@ -2,13 +2,14 @@
 #include "window_picker_dialog.h"  // HR_ResolveCaptureWindow()
 #include "../hr_log.h"
 #include "../hr_overlay_render.h"
-#include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame
+#include <windows.h>
 #include <vector>
 #include <thread>
 #include <exception>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <fstream>
 
 extern "C" {
     // hr_tools.cpp (wide-string API)
@@ -18,11 +19,12 @@ extern "C" {
                              wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
     int hr_merge_av(const wchar_t *ffpath, const wchar_t *video_file, const wchar_t *audio_file);
     int hr_export_mp3(const wchar_t *ffpath, const wchar_t *wav_path, const wchar_t *mp3_path);
+    int hr_concat_segments(const wchar_t *ffpath, const wchar_t *list_path, const wchar_t *out_path);
 
     // hr_ui_utils.cpp (narrow-string API - see README audit note: the core
     // is split between wide- and narrow-string exports depending on which
     // file it landed in; this class just calls each the way it expects).
-    void hr_filename_from_template(const char *tmpl, const char *folder, char *out, int out_len);
+    void hr_filename_from_template(const char *tmpl, const char *folder, const char *app_name, char *out, int out_len);
     int hr_make_output_dir(const char *path);
     int hr_path_exists(const char *path);
     float hr_file_size_mb(const char *path);
@@ -71,6 +73,7 @@ extern "C" {
     void hr_ff_set_ffmpeg_path(void *h, const char *path);
     void hr_ff_set_output_path(void *h, const char *path);
     void hr_ff_set_codec_args(void *h, const char *args);
+    void hr_ff_set_extra_output_args(void *h, const char *args);
     void hr_ff_set_video_params(void *h, int w, int h2, int fps);
     void hr_ff_set_output_size(void *h, int out_w, int out_h);
     void hr_ff_set_pipe_input(void *h, int enable);
@@ -128,6 +131,7 @@ RecordingController::RecordingController(AppState &state) : state_(state) {
 
 RecordingController::~RecordingController() {
     if (state_.recording) Stop();
+    if (instant_replay_active_) StopInstantReplayEncoder();
     JoinPendingPreviewTeardown();
     if (ctl_) hr_ctl_destroy(ctl_);
     if (ffproc_) hr_ff_destroy(ffproc_);
@@ -197,9 +201,57 @@ std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
     return buf;
 }
 
+// Resolves the {app} filename-template placeholder - see the header
+// comment on the declaration for what this falls back to and why.
+std::string RecordingController::ResolveCaptureAppName() const {
+    if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) {
+        return "Desktop";
+    }
+
+    HWND hwnd = nullptr;
+    RECT r{};
+    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r) || !hwnd) {
+        return "Desktop"; // window's gone (closed, title changed) - fall back rather than emit "{app}" literally
+    }
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (!pid) return "Desktop";
+
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) return "Desktop";
+
+    char path[MAX_PATH] = {};
+    DWORD path_len = MAX_PATH;
+    bool ok = QueryFullProcessImageNameA(hProc, 0, path, &path_len) != 0;
+    CloseHandle(hProc);
+    if (!ok) return "Desktop";
+
+    // path -> just the base name, no directory, no ".exe" - "notepad.exe"
+    // at "C:\Windows\notepad.exe" becomes "notepad".
+    std::string name = path;
+    size_t slash = name.find_last_of("\\/");
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    if (name.size() > 4) {
+        std::string ext = name.substr(name.size() - 4);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".exe") name = name.substr(0, name.size() - 4);
+    }
+
+    // Filenames can't contain \ / : * ? " < > | on Windows - a process
+    // name shouldn't ever contain these, but a well-behaved fallback
+    // beats a failed hr_ff_start() over one that theoretically could.
+    for (char &c : name) {
+        if (strchr("\\/:*?\"<>|", c)) c = '_';
+    }
+    return name.empty() ? "Desktop" : name;
+}
+
 std::wstring RecordingController::BuildOutputPath() {
     char buf[256] = {};
-    hr_filename_from_template(state_.filename_template.c_str(), state_.output_folder.c_str(), buf, 256);
+    std::string app_name = ResolveCaptureAppName();
+    hr_filename_from_template(state_.filename_template.c_str(), state_.output_folder.c_str(),
+                               app_name.c_str(), buf, 256);
     return WideFromNarrow(buf);
 }
 
@@ -323,6 +375,19 @@ void RecordingController::ResolveCaptureSize() {
 
 bool RecordingController::Start(std::wstring &error_out) {
     if (state_.recording) { error_out = L"Already recording."; return false; }
+
+    // Instant Replay and a manual recording share this class's one
+    // pipeline_ and hr_pl_set_recording()'s one active pipe_fd (see the
+    // header comment on EnableInstantReplay()) - if the background
+    // buffer is currently running, stop its segment writer so Start()
+    // below is free to redirect pipeline_'s pipe to the manual recording
+    // instead. instant_replay_enabled_ (the user's "I want this on"
+    // choice) stays true; Stop() resumes it once this recording ends.
+    if (instant_replay_active_) {
+        StopInstantReplayEncoder();
+        instant_replay_active_ = false;
+        HrLog::Info("Instant Replay: paused for a manual recording.");
+    }
 
     if (!hr_path_exists(state_.output_folder.c_str())) {
         if (!hr_make_output_dir(state_.output_folder.c_str())) {
@@ -645,7 +710,21 @@ void RecordingController::Stop() {
     // disabled, just switch the same (still-running) pipeline back to
     // preview-only mode so the live preview keeps working right after the
     // recording ends.
-    if (keep_for_preview) {
+    if (instant_replay_enabled_) {
+        // Resume Instant Replay's background buffer (paused, if it was
+        // running, at the top of Start() above) rather than falling back
+        // to plain preview-only mode - a fresh buffer, same as any other
+        // StartInstantReplayEncoder() call.
+        std::wstring resume_err;
+        if (StartInstantReplayEncoder(resume_err)) {
+            instant_replay_active_ = true;
+            HrLog::Info("Instant Replay: resumed buffering after the recording stopped.");
+        } else {
+            HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume after the recording stopped - " + resume_err));
+            if (keep_for_preview) hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
+            else if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+        }
+    } else if (keep_for_preview) {
         hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
     } else if (pipeline_) {
         hr_pl_destroy(pipeline_);
@@ -765,6 +844,11 @@ void RecordingController::SyncOverlays() {
         d.x = ov.x; d.y = ov.y; d.w = ov.w; d.h = ov.h;
         d.visible = ov.visible ? 1 : 0;
         parseHexColor(ov.text_color, d.text_r, d.text_g, d.text_b);
+        std::strncpy(d.font_name, ov.font_family.c_str(), sizeof(d.font_name) - 1);
+        // ov.opacity is 0-100 (the UI slider's own units); HrOverlayDesc
+        // wants 0-255 (what CompositeBgra actually multiplies alpha by).
+        int pct = ov.opacity < 0 ? 0 : (ov.opacity > 100 ? 100 : ov.opacity);
+        d.opacity = (unsigned char)((pct * 255 + 50) / 100);
         descs.push_back(d);
     }
 
@@ -784,6 +868,214 @@ void RecordingController::SyncOverlays() {
     hr_pl_set_overlays(pipeline_, descs.empty() ? nullptr : descs.data(), (int)descs.size());
     last_overlays_sent_ = std::move(descs);
     last_overlays_sent_valid_ = true;
+}
+
+bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    // A fresh, uniquely-numbered subfolder per run rather than reusing/
+    // clearing one folder - guarantees a stale segment from a previous
+    // run (or a previous app session, if the temp folder was never
+    // cleaned) can never end up in a concat list built from replay_dir_.
+    std::wstring base_dir = std::wstring(tmp) + L"HomRec_replay\\";
+    CreateDirectoryW(base_dir.c_str(), nullptr); // fine if it already exists
+    replay_dir_ = base_dir + std::to_wstring(++replay_run_seq_) + L"\\";
+    CreateDirectoryW(replay_dir_.c_str(), nullptr);
+
+    int buf_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
+    // +1 segment of slack so the oldest segment still needed for a
+    // full-length Save Replay isn't wrapped-over right as it's about to
+    // be read, and a sane hard ceiling (720 * 5s = 1hr) so a huge/typo'd
+    // buffer-seconds setting can't make the writer wrap through an
+    // unbounded number of segment files.
+    int wrap = (buf_sec + kReplaySegmentSec - 1) / kReplaySegmentSec + 1;
+    if (wrap > 720) wrap = 720;
+    if (wrap < 2) wrap = 2;
+
+    std::wstring codec = state_.video_codec == "libx264" && !hw_encoder_.empty()
+                              ? hw_encoder_ : WideFromNarrow(state_.video_codec);
+    std::wstring codec_args = BuildCodecArgs(codec);
+
+    replay_ff_ = hr_ff_create();
+    hr_ff_set_ffmpeg_path(replay_ff_, NarrowFromWide(ffmpeg_path_).c_str());
+    hr_ff_set_output_path(replay_ff_, NarrowFromWide(replay_dir_ + L"seg_%03d.mp4").c_str());
+    hr_ff_set_codec_args(replay_ff_, NarrowFromWide(codec_args).c_str());
+    hr_ff_set_video_params(replay_ff_, output_w_, output_h_, state_.target_fps);
+    hr_ff_set_output_size(replay_ff_, output_w_, output_h_);
+    hr_ff_set_pipe_input(replay_ff_, 1);
+    std::string seg_args = "-f segment -segment_time " + std::to_string(kReplaySegmentSec) +
+                            " -segment_wrap " + std::to_string(wrap) + " -reset_timestamps 1";
+    hr_ff_set_extra_output_args(replay_ff_, seg_args.c_str());
+
+    if (hr_ff_start(replay_ff_) != 0) {
+        error_out = L"Failed to start the Instant Replay encoder.";
+        HrLog::Error("Instant Replay: ffmpeg segment-writer process didn't start");
+        hr_ff_destroy(replay_ff_);
+        replay_ff_ = nullptr;
+        return false;
+    }
+    intptr_t stdin_h = hr_ff_get_stdin_handle(replay_ff_);
+    if (stdin_h == 0) {
+        error_out = L"Failed to start the Instant Replay encoder.";
+        HrLog::Error("Instant Replay: ffmpeg stdin pipe handle unavailable");
+        hr_ff_kill(replay_ff_);
+        hr_ff_destroy(replay_ff_);
+        replay_ff_ = nullptr;
+        return false;
+    }
+    hr_pl_set_recording(pipeline_, /*active=*/1, stdin_h);
+    return true;
+}
+
+// Stops+destroys replay_ff_ (waiting briefly so its last, currently-open
+// segment gets finalized rather than left mid-write) without touching
+// pipeline_ itself - callers decide what the pipeline's recording pipe
+// should point at next.
+void RecordingController::StopInstantReplayEncoder() {
+    if (!replay_ff_) return;
+    hr_ff_stop_graceful(replay_ff_);
+    if (hr_ff_wait(replay_ff_, 3000) != 0 && hr_ff_is_running(replay_ff_)) {
+        HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
+    }
+    hr_ff_destroy(replay_ff_);
+    replay_ff_ = nullptr;
+}
+
+bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
+    instant_replay_enabled_ = true;
+    if (instant_replay_active_) return true; // already running
+    if (state_.recording) return true;       // Stop() will start it once the manual recording ends
+
+    if (!ffmpeg_found_) {
+        error_out = L"FFmpeg not found.";
+        return false;
+    }
+
+    int prev_w = capture_w_, prev_h = capture_h_;
+    ResolveCaptureSize();
+
+    if (!pipeline_ || capture_w_ != prev_w || capture_h_ != prev_h ||
+        pipeline_output_idx_ != capture_output_idx_) {
+        if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+        JoinPendingPreviewTeardown();
+        int pvw = 0, pvh = 0;
+        ScaledPreviewSize(pvw, pvh);
+        pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
+                                 pvw, pvh, capture_output_idx_);
+        pipeline_output_idx_ = capture_output_idx_;
+        last_overlays_sent_valid_ = false;
+        if (pipeline_) {
+            hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+            hr_pl_set_output_size(pipeline_, output_w_, output_h_);
+            if (!hr_pl_start(pipeline_)) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+        }
+    }
+    if (!pipeline_) {
+        error_out = L"Failed to start the capture pipeline.";
+        return false;
+    }
+    hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+
+    if (!StartInstantReplayEncoder(error_out)) return false;
+    instant_replay_active_ = true;
+    HrLog::Info("Instant Replay: buffering started (" + std::to_string(state_.replay_buffer_sec) + "s buffer).");
+    return true;
+}
+
+void RecordingController::DisableInstantReplay() {
+    instant_replay_enabled_ = false;
+    if (!instant_replay_active_) return;
+    StopInstantReplayEncoder();
+    instant_replay_active_ = false;
+    if (pipeline_ && !state_.recording) {
+        if (state_.disable_preview) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+        else hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
+    }
+    HrLog::Info("Instant Replay: stopped.");
+}
+
+bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_saved_path) {
+    if (!instant_replay_active_ || !replay_ff_) {
+        error_out = L"Instant Replay isn't running.";
+        return false;
+    }
+    std::wstring dir_to_read = replay_dir_;
+
+    // Stop the current segment writer so its last (possibly still-open)
+    // segment gets finalized on disk, then immediately start a fresh one
+    // into a new folder - the gap this leaves is in the *background*
+    // buffer, not in the clip being saved right now, and starting the
+    // replacement first (before the slower concat below) means the
+    // background buffer is covering new ground again as soon as possible.
+    StopInstantReplayEncoder();
+    std::wstring restart_err;
+    bool restarted = StartInstantReplayEncoder(restart_err);
+
+    std::vector<std::wstring> segs;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir_to_read + L"seg_*.mp4").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do { segs.push_back(dir_to_read + fd.cFileName); } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (segs.empty()) {
+        error_out = L"Instant Replay buffer is empty (nothing captured yet).";
+        instant_replay_active_ = restarted;
+        if (!restarted) HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering - " + restart_err));
+        return false;
+    }
+
+    // segment_wrap reuses filenames (seg_000 can be newer than seg_005
+    // once the writer has wrapped around once), so chronological order
+    // has to come from last-write-time, not the filename itself.
+    std::sort(segs.begin(), segs.end(), [](const std::wstring &a, const std::wstring &b) {
+        auto mtime = [](const std::wstring &p) -> uint64_t {
+            WIN32_FILE_ATTRIBUTE_DATA d{};
+            if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &d)) return 0;
+            return (uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32) | d.ftLastWriteTime.dwLowDateTime;
+        };
+        return mtime(a) < mtime(b);
+    });
+
+    int buf_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
+    int want = (buf_sec + kReplaySegmentSec - 1) / kReplaySegmentSec;
+    if (want < 1) want = 1;
+    if ((int)segs.size() > want) segs.erase(segs.begin(), segs.end() - want);
+
+    std::wstring list_path = dir_to_read + L"concat_list.txt";
+    {
+        std::wofstream out(list_path.c_str(), std::ios::binary);
+        for (const auto &s : segs) {
+            // ffmpeg concat-demuxer lines are single-quoted; escape any
+            // literal single quote the format's own way ('\'') - not
+            // expected in a temp-folder path, but cheap to handle.
+            std::wstring esc = s;
+            size_t pos = 0;
+            while ((pos = esc.find(L'\'', pos)) != std::wstring::npos) {
+                esc.replace(pos, 1, L"'\\''");
+                pos += 4;
+            }
+            out << L"file '" << esc << L"'\n";
+        }
+    }
+
+    current_output_path_ = BuildOutputPath();
+    bool ok = hr_concat_segments(ffmpeg_path_.c_str(), list_path.c_str(),
+                                  current_output_path_.c_str()) != 0;
+
+    instant_replay_active_ = restarted;
+    if (!restarted) {
+        HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering after Save Replay - " + restart_err));
+    }
+
+    if (!ok) {
+        error_out = L"Couldn't save the replay (ffmpeg concat failed).";
+        HrLog::Error("Instant Replay: hr_concat_segments failed");
+        return false;
+    }
+    if (out_saved_path) *out_saved_path = current_output_path_;
+    HrLog::Info("Instant Replay: saved -> " + NarrowFromWide(current_output_path_));
+    return true;
 }
 
 bool RecordingController::GetPreviewFrame(std::vector<uint8_t> &out, int &out_w, int &out_h) {
