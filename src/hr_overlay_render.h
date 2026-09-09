@@ -31,8 +31,14 @@ struct HrOverlayDesc {
     int  x, y, w, h;       // position/size in capture-resolution pixels
     char text[256];        // for type == "text"
     unsigned char text_r = 255, text_g = 255, text_b = 255; // for type == "text"
+    char font_name[64] = "Segoe UI"; // for type == "text" - see RenderTextBgra()
     char image_path[260];  // for type == "image" or "gif"
     int  visible;           // 0/1
+    // 0-255, applies on top of whatever per-pixel alpha the rendered
+    // layer already has (text coverage, an image's own alpha channel,
+    // etc.) - see CompositeBgra(). 255 = fully opaque, matching every
+    // overlay's behavior before this field existed.
+    unsigned char opacity = 255;
 
     // For type == "webcam" -- see hr_webcam_enum.h for how these get set
     // (device picker) and hr_webcam_capture.h for how they're used to open
@@ -87,6 +93,7 @@ private:
         int   w = 0, h = 0;
         unsigned char text_r = 0, text_g = 0, text_b = 0;
         char  text[256] = {0};
+        char  font_name[64] = {0};
         char  image_path[260] = {0};
     };
     std::unordered_map<size_t, TextImageSnapshot> snapshots_;

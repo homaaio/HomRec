@@ -36,9 +36,9 @@ void _scopy_local(char *dst, size_t dstlen, const char *src) {
 // ---------------------------------------------------------------------------
 static void CompositeBgra(uint8_t *base, int base_w, int base_h, int base_stride,
                            const uint8_t *overlay, int ov_w, int ov_h,
-                           int dst_x, int dst_y)
+                           int dst_x, int dst_y, uint8_t extra_opacity = 255)
 {
-    if (!base || !overlay || ov_w <= 0 || ov_h <= 0) return;
+    if (!base || !overlay || ov_w <= 0 || ov_h <= 0 || extra_opacity == 0) return;
 
     int src_x0 = 0, src_y0 = 0;
     int dx0 = dst_x, dy0 = dst_y;
@@ -55,6 +55,13 @@ static void CompositeBgra(uint8_t *base, int base_w, int base_h, int base_stride
             const uint8_t *o = src_row + (size_t)col * 4;
             uint8_t *d = dst_row + (size_t)col * 4;
             uint32_t a = o[3];
+            // The overlay's own opacity slider (OverlayDef::opacity, 0-100
+            // in the UI -> 0-255 here) stacks on top of whatever per-pixel
+            // alpha the rendered layer already has (text coverage, an
+            // image's real alpha channel, etc.) rather than replacing it -
+            // a half-transparent PNG at 50% overlay opacity should still
+            // end up at roughly quarter strength, not full strength.
+            if (extra_opacity != 255) a = (a * extra_opacity + 127u) / 255u;
             if (a == 0) continue;               // fully transparent
             if (a == 255) {                      // fully opaque
                 d[0] = o[0]; d[1] = o[1]; d[2] = o[2];
@@ -106,7 +113,7 @@ static void ScaleBgraNearest(const std::vector<uint8_t> &src, int sw, int sh,
 // cleanly over whatever's under it.
 // ---------------------------------------------------------------------------
 static bool RenderTextBgra(const std::wstring &text, int w, int h, COLORREF color,
-                            std::vector<uint8_t> &out)
+                            const std::wstring &font_name, std::vector<uint8_t> &out)
 {
     if (w <= 0 || h <= 0 || text.empty()) return false;
     out.assign((size_t)w * h * 4, 0);
@@ -137,9 +144,16 @@ static bool RenderTextBgra(const std::wstring &text, int w, int h, COLORREF colo
     // a little padding, matching how the drag-resize handle on the preview
     // implies "this box is roughly how big the text will be".
     int pointSize = std::max(8, (int)(h * 0.65));
+    // font_name is whatever the overlay editor's font dropdown has picked
+    // (see OverlayDef::font_family) - if that family isn't actually
+    // installed on this machine, GDI silently substitutes its own default
+    // rather than failing, so an unavailable choice degrades gracefully
+    // instead of breaking the overlay. Empty falls back to the original
+    // hardcoded "Segoe UI" (overlays saved before this field existed).
+    const wchar_t *face = font_name.empty() ? L"Segoe UI" : font_name.c_str();
     HFONT font = CreateFontW(-pointSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, face);
     HFONT oldFont = (HFONT)SelectObject(memDC, font);
     SetBkMode(memDC, TRANSPARENT);
     SetTextColor(memDC, RGB(255, 255, 255));
@@ -412,18 +426,21 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderText(size_t 
                       snap.w == ov.w && snap.h == ov.h &&
                       snap.text_r == ov.text_r && snap.text_g == ov.text_g &&
                       snap.text_b == ov.text_b &&
-                      std::strncmp(snap.text, ov.text, sizeof(snap.text)) == 0;
+                      std::strncmp(snap.text, ov.text, sizeof(snap.text)) == 0 &&
+                      std::strncmp(snap.font_name, ov.font_name, sizeof(snap.font_name)) == 0;
     auto it0 = cache_.find(idx);
     if (unchanged && it0 != cache_.end()) return &it0->second;
 
     std::string key = std::string("t|") + ov.text + "|" + std::to_string(ov.w) + "x" + std::to_string(ov.h)
-                     + "|" + std::to_string(ov.text_r) + "," + std::to_string(ov.text_g) + "," + std::to_string(ov.text_b);
+                     + "|" + std::to_string(ov.text_r) + "," + std::to_string(ov.text_g) + "," + std::to_string(ov.text_b)
+                     + "|" + ov.font_name;
     auto it = cache_.find(idx);
     if (it != cache_.end() && it->second.key == key) {
         snap.valid = true; _scopy_local(snap.type, sizeof(snap.type), "text");
         snap.w = ov.w; snap.h = ov.h;
         snap.text_r = ov.text_r; snap.text_g = ov.text_g; snap.text_b = ov.text_b;
         _scopy_local(snap.text, sizeof(snap.text), ov.text);
+        _scopy_local(snap.font_name, sizeof(snap.font_name), ov.font_name);
         return &it->second;
     }
 
@@ -433,14 +450,19 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderText(size_t 
     std::wstring wtext(wlen > 0 ? wlen - 1 : 0, L'\0');
     if (wlen > 1) MultiByteToWideChar(CP_UTF8, 0, ov.text, -1, wtext.data(), wlen);
 
+    int flen = MultiByteToWideChar(CP_UTF8, 0, ov.font_name, -1, nullptr, 0);
+    std::wstring wfont(flen > 0 ? flen - 1 : 0, L'\0');
+    if (flen > 1) MultiByteToWideChar(CP_UTF8, 0, ov.font_name, -1, wfont.data(), flen);
+
     CachedLayer layer;
     layer.w = ov.w; layer.h = ov.h; layer.key = key;
-    if (!RenderTextBgra(wtext, ov.w, ov.h, RGB(ov.text_r, ov.text_g, ov.text_b), layer.bgra)) return nullptr;
+    if (!RenderTextBgra(wtext, ov.w, ov.h, RGB(ov.text_r, ov.text_g, ov.text_b), wfont, layer.bgra)) return nullptr;
     cache_[idx] = std::move(layer);
     snap.valid = true; _scopy_local(snap.type, sizeof(snap.type), "text");
     snap.w = ov.w; snap.h = ov.h;
     snap.text_r = ov.text_r; snap.text_g = ov.text_g; snap.text_b = ov.text_b;
     _scopy_local(snap.text, sizeof(snap.text), ov.text);
+    _scopy_local(snap.font_name, sizeof(snap.font_name), ov.font_name);
     return &cache_[idx];
 #else
     (void)idx; (void)ov;
@@ -783,7 +805,7 @@ void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int ba
 
             if (layer) {
                 CompositeBgra(base_bgra, base_w, base_h, base_stride,
-                              layer->bgra.data(), layer->w, layer->h, ov.x, ov.y);
+                              layer->bgra.data(), layer->w, layer->h, ov.x, ov.y, ov.opacity);
             }
         } catch (const std::exception &e) {
             static bool warned_exc = false;
