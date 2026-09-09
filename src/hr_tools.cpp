@@ -333,3 +333,17 @@ HR_EXPORT int hr_export_mp3(const wchar_t* ffpath, const wchar_t* wav_path, cons
     run_cmd(cmd, 60000);
     return fexists(mp3_path) ? 1 : 0;
 }
+
+HR_EXPORT int hr_concat_segments(const wchar_t* ffpath, const wchar_t* list_path, const wchar_t* out_path)
+{
+    if (!ffpath || !list_path || !out_path) return 0;
+
+    std::wstring cmd =
+        L"\"" + std::wstring(ffpath) + L"\""
+        L" -f concat -safe 0 -i \"" + std::wstring(list_path) + L"\""
+        L" -c copy -y"
+        L" \"" + std::wstring(out_path) + L"\"";
+
+    run_cmd(cmd, 60000);
+    return fexists(out_path) ? 1 : 0;
+}
