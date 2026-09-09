@@ -530,6 +530,48 @@ void OverlaysDockPanel::EditParametersAt(size_t idx) {
     } else {
         return;
     }
+
+    // Opacity applies to every overlay type - prompted last so cancelling
+    // it doesn't discard whatever type-specific edit above already
+    // succeeded. Reuses the plain text prompt rather than a dedicated
+    // slider dialog; a non-numeric or out-of-range entry just leaves
+    // ov.opacity unchanged instead of erroring.
+    {
+        std::wstring opacity_str = std::to_wstring(ov.opacity);
+        if (HrPromptForText(parent, hInst, L"Overlay Opacity",
+                             L"Opacity, 0-100 (100 = fully opaque):", opacity_str)) {
+            try {
+                int v = std::stoi(NarrowFromWide(opacity_str));
+                if (v < 0) v = 0;
+                if (v > 100) v = 100;
+                ov.opacity = v;
+            } catch (...) {
+                // not a plain number - leave the existing opacity alone
+                // rather than silently zeroing it out.
+            }
+        }
+    }
+
+    if (ov.type == "text") {
+        // "Segoe UI" is the original hardcoded default (still the
+        // fallback if a saved overlay's font_family is empty or the
+        // named font isn't installed - see hr_overlay_render.cpp's
+        // RenderTextBgra()). Open Sans and Roboto are the two free/
+        // open-license additions requested - both very commonly already
+        // present (bundled with a lot of other software), and if either
+        // genuinely isn't installed on a given machine, GDI just falls
+        // back to its own default font rather than failing.
+        static const std::vector<std::wstring> kFonts = { L"Segoe UI", L"Open Sans", L"Roboto" };
+        size_t cur = 0;
+        for (size_t i = 0; i < kFonts.size(); ++i) {
+            if (NarrowFromWide(kFonts[i]) == ov.font_family) { cur = i; break; }
+        }
+        size_t chosen = cur;
+        if (HrPromptForChoice(parent, hInst, L"Text Font", L"Choose a font:", kFonts, chosen)) {
+            ov.font_family = NarrowFromWide(kFonts[chosen]);
+        }
+    }
+
     Refresh();
     SendMessageW(list_, LB_SETCURSEL, (WPARAM)idx, 0);
 }
