@@ -1,5 +1,36 @@
 welcome to changelog :D
 
+[Version 2.1] - 2026-09-09
+
+=== Added ===
+- Instant Replay: a continuous background recording of the last N seconds
+  (Settings > Advanced > "Replay buffer" + "Enable Instant Replay"),
+  saved out on demand with a new hotkey (default F8, Settings > Hotkeys >
+  "Save Replay") without having to already be recording. Runs on the same
+  capture pipeline as a manual recording, so the two can't run at the
+  same time - starting a manual recording pauses Instant Replay for its
+  duration and resumes it, with a fresh buffer, once you stop.
+- Filename template: added an {app} placeholder alongside the existing
+  {date}/{time} - expands to the name of the recorded application (no
+  ".exe") in window-capture mode, or "Desktop" otherwise.
+- Overlays: added an opacity setting (0-100), on top of whatever
+  transparency the overlay's own content already has (an image's alpha
+  channel, etc.) - available for every overlay type via Edit Parameters.
+- Text overlays: added a font picker (Edit Parameters) - Segoe UI
+  (previous default) plus two free/open-license additions, Open Sans and
+  Roboto. Falls back to Segoe UI if the chosen font isn't installed.
+- hom (the plugin package manager): added `search`, `show`,
+  `list --installed`, `list --upgradable`, `upgrade`, `full-upgrade`,
+  `autoremove`, and `purge` (existing `remove` now keeps a plugin's saved
+  settings; `purge` is the old "delete everything" behavior) - see
+  Hom/tools/hom/README.md for the full command list.
+- Added a small "N plugin update(s)" badge to the bottom bar, from a
+  background `hom list --upgradable` check at startup - click it for
+  details. (No in-app plugin browser - `hom search`/`show`/`install`
+  from the console cover that without the extra weight of one.)
+- Website documentation updated to match the above (hom's command
+  reference, in particular, was previously several versions out of date).
+
 [Version 2.0.3] - 2026-09-04
 
 === Added ===
