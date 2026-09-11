@@ -190,6 +190,7 @@ void HrWebcamCaptureThreadMain(HrWebcamCapture::Impl *impl) {
                     : data + (size_t)(h - 1 - row) * abs_stride; // bottom-up: read back to front
                 std::memcpy(scratch.data() + (size_t)row * row_bytes, src_row, (size_t)row_bytes);
             }
+            for (size_t px = 3; px < scratch.size(); px += 4) scratch[px] = 0xFF;
             std::lock_guard<std::mutex> lk(impl->frame_mtx);
             impl->latest_bgra.swap(scratch);
             impl->latest_w = w;
