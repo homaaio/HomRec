@@ -65,6 +65,7 @@ enum MenuCommandId {
     ID_FILE_IMPORT_HRC      = 1023,
     ID_VIEW_AUDIO_PANEL     = 1024,
     ID_FILE_HIDE_WINDOW     = 1025,
+    ID_FILE_SET_PRESET      = 1026,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
@@ -179,6 +180,11 @@ private:
 
     void DoStart();
     void DoStop();
+    // Runs on the UI thread (via CallAfter from RecordingController's
+    // background finalize thread) once StopAsync()'s tail is fully done -
+    // the rest of what DoStop() used to do synchronously right after
+    // rec_->Stop() returned. See DoStop()'s comment.
+    void OnRecordingFinalized();
     void DoPause();
     void DoSaveReplay(); // Instant Replay hotkey/menu action - see recording_controller.h's SaveReplay()
     // Wraps DoStart() with the "Countdown (3s)" setting: if
@@ -215,6 +221,12 @@ private:
     void OnCheckForUpdates();
     void OnPreviewTimer(wxTimerEvent &evt);
     void OnStatsTimer(wxTimerEvent &evt);
+    // Own timer for the Audio Mixer's VU meter bars (see the .cpp for why
+    // this isn't just piggybacked on stats_timer_ anymore) - also
+    // (re)started from ID_SETTINGS_OPEN's handler whenever
+    // state_.level_meter_fps changes.
+    void OnLevelMeterTimer(wxTimerEvent &evt);
+    void RestartLevelMeterTimer();
     void OnClose(wxCloseEvent &evt);
     void OnIconize(wxIconizeEvent &evt);
     void OnShowEvent(wxShowEvent &evt);
@@ -282,6 +294,7 @@ private:
 
     wxTimer preview_timer_;
     wxTimer stats_timer_;
+    wxTimer level_meter_timer_;
     wxTimer restore_topmost_timer_;
 
     wxTaskBarIcon *tray_icon_ = nullptr;

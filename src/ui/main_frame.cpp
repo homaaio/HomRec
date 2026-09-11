@@ -1,6 +1,7 @@
 #include "main_frame.h"
 #include "version.h"
 #include "settings_dialog.h"
+#include "preset_dialog.h"
 // (overlay_manager.h removed - see overlays_dock_panel.h)
 #include "welcome_dialog.h"
 #include "overlay_placement_dialog.h"
@@ -479,7 +480,7 @@ void PreviewPanel::ExitSnapshotMode() {
 HomRecMainFrame::HomRecMainFrame()
     : wxFrame(nullptr, wxID_ANY, "HomRec", wxDefaultPosition, wxSize(1300, 750)),
       countdown_timer_(this),
-      preview_timer_(this), stats_timer_(this), restore_topmost_timer_(this) {
+      preview_timer_(this), stats_timer_(this), level_meter_timer_(this), restore_topmost_timer_(this) {
     g_frame = this;
     SetIcon(wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE));
 
@@ -641,16 +642,18 @@ HomRecMainFrame::HomRecMainFrame()
 
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnPreviewTimer, this, preview_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnStatsTimer, this, stats_timer_.GetId());
+    Bind(wxEVT_TIMER, &HomRecMainFrame::OnLevelMeterTimer, this, level_meter_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnRestoreTopmostTimer, this, restore_topmost_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnCountdownTimer, this, countdown_timer_.GetId());
     preview_timer_.Start(1000 / 20);
     stats_timer_.Start(500);
+    RestartLevelMeterTimer();
 
-    // Upper bound extended to ID_FILE_HIDE_WINDOW (1025) - it's the
+    // Upper bound extended to ID_FILE_SET_PRESET (1026) - it's the
     // newest menu ID and this Bind() is an inclusive ID *range*, so
-    // adding an ID after ID_VIEW_AUDIO_PANEL without updating this bound
+    // adding an ID after ID_FILE_HIDE_WINDOW without updating this bound
     // would silently leave its menu item's clicks unhandled.
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_HIDE_WINDOW);
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_SET_PRESET);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
     Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
@@ -724,6 +727,7 @@ void HomRecMainFrame::BuildMenuBar() {
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXPORT_HRC, wxString::FromUTF8(lang_.Get("export_hrc")));
     fileMenu->Append(ID_FILE_IMPORT_HRC, wxString::FromUTF8(lang_.Get("import_hrc")));
+    fileMenu->Append(ID_FILE_SET_PRESET, wxString::FromUTF8(lang_.Get("set_preset")));
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXIT, wxString::FromUTF8(lang_.Get("exit")));
     menuBar->Append(fileMenu, wxString::FromUTF8(lang_.Get("file_menu")));
@@ -1171,10 +1175,20 @@ void HomRecMainFrame::DoStop() {
     SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
+    start_color_btn_->Enable2(false);
+    pause_color_btn_->Enable2(false);
     Update();
 
-    rec_->Stop();
+    rec_->StopAsync([this]() {
+        // Running on RecordingController's background finalize thread -
+        // every line below touches wx widgets, so it all has to get back
+        // to the UI thread first.
+        CallAfter([this]() { OnRecordingFinalized(); });
+    });
+}
 
+void HomRecMainFrame::OnRecordingFinalized() {
+    start_color_btn_->Enable2(true);
     start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
     start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
     pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
@@ -1487,6 +1501,17 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             }
             break;
         }
+        case ID_FILE_SET_PRESET: {
+            if (ShowPresetDialog(this, state_, theme_, lang_)) {
+                ApplyThemeColours();
+                ApplyLanguageText();
+                if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
+                SetupHotkeys();
+                RestartLevelMeterTimer();
+                if (rec_raw_) rec_raw_->RefreshPreviewSettings();
+            }
+            break;
+        }
         case ID_VIEW_ALWAYS_ON_TOP: {
             long style = GetWindowStyleFlag();
             SetWindowStyleFlag(style ^ wxSTAY_ON_TOP);
@@ -1550,6 +1575,12 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             // Settings" entry used to do.
             if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
             SetupHotkeys();
+            // Level meter refresh rate (Settings > Audio) also lives on
+            // this dialog - resync the timer so a change takes effect
+            // immediately instead of only after a restart. Harmless
+            // no-op restart if the dialog was cancelled or the rate
+            // wasn't touched, same reasoning as SetupHotkeys() above.
+            RestartLevelMeterTimer();
             // Instant Replay's on/off checkbox and buffer-size spinner also
             // live on this dialog - apply whichever way it changed. Calling
             // both Enable/Disable unconditionally is harmless either way:
@@ -1650,7 +1681,6 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
 
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
-    if (audio_panel_) audio_panel_->PollLevels();
 
     // logs\pc.log - throttles itself internally to ~once every 10s, so
     // piggybacking on this existing 500ms tick (rather than adding a
@@ -1690,6 +1720,17 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
         }
     }
     left_panel_->Layout();
+}
+
+void HomRecMainFrame::OnLevelMeterTimer(wxTimerEvent &) {
+    if (audio_panel_) audio_panel_->PollLevels();
+}
+
+void HomRecMainFrame::RestartLevelMeterTimer() {
+    int fps = state_.level_meter_fps;
+    if (fps < 10) fps = 10;
+    if (fps > 60) fps = 60;
+    level_meter_timer_.Start(1000 / fps);
 }
 
 void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
