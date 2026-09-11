@@ -516,6 +516,21 @@ private:
         separate_mp3_chk_ = AddCheck(page, pageRoot, text, bg,
                                       "Also save audio as a separate MP3", state_.separate_audio_mp3);
 
+        auto *meterGrid = new wxFlexGridSizer(2, 10, 10);
+        AddLabel(page, meterGrid, text, bg, "Level meter refresh rate (Hz):");
+        int meter_fps = state_.level_meter_fps > 0 ? state_.level_meter_fps : 30;
+        meter_fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                          wxSP_ARROW_KEYS, 10, 60, meter_fps);
+        meterGrid->Add(meter_fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+        pageRoot->Add(meterGrid, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
+        auto *meterNote = new wxStaticText(page, wxID_ANY,
+            "How often the Microphone/Desktop Audio level bars redraw. Higher =\n"
+            "smoother-looking meters; lower saves a little CPU. Doesn't affect\n"
+            "the recorded audio itself, only the on-screen bars.");
+        meterNote->SetForegroundColour(textDim);
+        meterNote->SetBackgroundColour(bg);
+        pageRoot->Add(meterNote, 0, wxLEFT | wxRIGHT | wxTOP, 16);
+
         auto *note = new wxStaticText(page, wxID_ANY,
             "Note: sample rate/bitrate/channels apply for this session and\n"
             "round-trip through .hrc profiles, but aren't written to the\n"
@@ -798,6 +813,7 @@ private:
         aac_bitrate_edit_->SetValue("192k");
         channels_spin_->SetValue(2);
         separate_mp3_chk_->SetValue(false);
+        meter_fps_spin_->SetValue(30);
 
         hk_startstop_btn_->SetValue("F9");
         hk_pause_btn_->SetValue("F10");
@@ -881,6 +897,7 @@ private:
         state_.audio_aac_bitrate = aac_bitrate_edit_->GetValue().ToUTF8().data();
         state_.audio_out_channels = channels_spin_->GetValue();
         state_.separate_audio_mp3 = separate_mp3_chk_->GetValue();
+        state_.level_meter_fps = meter_fps_spin_->GetValue();
 
         // -- Hotkeys -------------------------------------------------------
         state_.hotkey_start_stop = hk_startstop_btn_->GetValue().ToUTF8().data();
@@ -998,6 +1015,7 @@ private:
     wxSpinCtrl *sample_rate_spin_ = nullptr, *channels_spin_ = nullptr;
     wxTextCtrl *aac_bitrate_edit_ = nullptr;
     wxCheckBox *separate_mp3_chk_ = nullptr;
+    wxSpinCtrl *meter_fps_spin_ = nullptr;
 
     // Hotkeys
     HotkeyButton *hk_startstop_btn_ = nullptr, *hk_pause_btn_ = nullptr, *hk_fullscreen_btn_ = nullptr;
