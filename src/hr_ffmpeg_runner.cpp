@@ -187,13 +187,27 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
  * it to ffmpeg's stdin, matching the "-pixel_format yuv420p" below - ffmpeg
  * never sees the original BGRA capture buffer.
  */
+#ifdef _WIN32
+static std::wstring _utf8_to_wide(const std::string &s) {
+    if (s.empty()) return std::wstring();
+    int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (needed <= 0) return std::wstring();
+    std::wstring ws((size_t)needed, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), ws.data(), needed);
+    return ws;
+}
+#else
+static std::wstring _utf8_to_wide(const std::string &s) {
+    return std::wstring(s.begin(), s.end());
+}
+#endif
+
 static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     std::wostringstream ss;
 
     /* quote helper */
     auto Q = [](const std::string &s) -> std::wstring {
-        std::wstring ws(s.begin(), s.end());
-        return L"\"" + ws + L"\"";
+        return L"\"" + _utf8_to_wide(s) + L"\"";
     };
 
     ss << Q(ctx->ffmpeg_path);
@@ -212,8 +226,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
 
     /* Codec args (already formatted, e.g. "-c:v libx264 -preset ultrafast …") */
     if (!ctx->codec_args.empty()) {
-        std::wstring wca(ctx->codec_args.begin(), ctx->codec_args.end());
-        ss << L" " << wca;
+        ss << L" " << _utf8_to_wide(ctx->codec_args);
     }
 
     /* Pixel format for H.264 compatibility */
@@ -235,8 +248,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
        position ffmpeg itself expects "-f segment ..." in on a real
        command line. */
     if (!ctx->extra_output_args.empty()) {
-        std::wstring wea(ctx->extra_output_args.begin(), ctx->extra_output_args.end());
-        ss << L" " << wea;
+        ss << L" " << _utf8_to_wide(ctx->extra_output_args);
     }
 
     /* Output */
