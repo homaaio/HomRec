@@ -139,7 +139,11 @@ void HrWebcamCaptureThreadMain(HrWebcamCapture::Impl *impl) {
     if (FAILED(hr) || !media_source) { give_up(); return; }
 
     ComPtr<IMFSourceReader> reader;
-    if (FAILED(MFCreateSourceReaderFromMediaSource(media_source.Get(), nullptr, &reader)) || !reader) {
+    ComPtr<IMFAttributes> reader_attr;
+    if (SUCCEEDED(MFCreateAttributes(&reader_attr, 1))) {
+        reader_attr->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    }
+    if (FAILED(MFCreateSourceReaderFromMediaSource(media_source.Get(), reader_attr.Get(), &reader)) || !reader) {
         give_up(); return;
     }
 
