@@ -37,6 +37,7 @@ OBJS := \
 	src/ui/recording_controller.o \
 	src/ui/audio_panel.o \
 	src/ui/settings_dialog.o \
+	src/ui/preset_dialog.o \
 	src/ui/hrc_config.o \
 	src/ui/win32_theme.o \
 	src/ui/overlay_add_dialogs.o \

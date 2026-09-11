@@ -33,6 +33,7 @@ set(HR_SOURCES
     src/ui/recording_controller.cpp
     src/ui/audio_panel.cpp
     src/ui/settings_dialog.cpp
+    src/ui/preset_dialog.cpp
     src/ui/hrc_config.cpp
     src/ui/win32_theme.cpp
     src/ui/overlay_add_dialogs.cpp
