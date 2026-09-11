@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <chrono>
 #include <thread>
+#include <atomic>
+#include <functional>
 #include "app_state.h"
 #include "../hr_overlay_render.h"
 
@@ -34,8 +36,34 @@ public:
     // Start/stop/pause - return false with `error_out` populated on failure
     // (folder missing, ffmpeg missing, pipeline create failed, etc.).
     bool Start(std::wstring &error_out);
-    void Stop();          // matches "stop_recording()" - merges audio, updates AppState.recording
+    void Stop();          // matches "stop_recording()" - merges audio, updates AppState.recording; blocks until fully done, see StopAsync()
     void TogglePause();
+
+    // Same work as Stop(), minus the blocking: the slow tail (waiting for
+    // ffmpeg to flush/finalize - up to ~30s, see the comment in the .cpp -
+    // plus mixing/merging/mp3-exporting audio) runs on a background thread
+    // instead of the caller. AppState.recording only flips to false once
+    // that thread finishes (so Start() called too soon still correctly
+    // sees "already recording" instead of racing pipeline_/ffproc_ teardown
+    // against a still-in-flight finalize); on_done is invoked from that
+    // background thread once everything's done, so a caller that touches
+    // UI from it must marshal back to the UI thread itself (e.g.
+    // wxEvtHandler::CallAfter). A no-op (on_done not called) if a
+    // finalize from a previous StopAsync()/Stop() is already in flight or
+    // nothing is recording.
+    void StopAsync(std::function<void()> on_done);
+
+private:
+    // The actual slow work described in StopAsync()'s comment above -
+    // waiting for ffmpeg to finish, mixing/merging/exporting audio,
+    // switching pipeline_ out of recording mode (or destroying it), and
+    // flipping state_.recording back to false. Runs on finalize_thread_;
+    // split out to its own method only so StopAsync() itself stays short
+    // and the thread-lambda doesn't have to duplicate this. Not meant to
+    // be called from anywhere but that lambda.
+    void StopFinalizeTail(bool keep_for_preview);
+
+public:
 
     // Called on a timer (e.g. every 250-500ms) to refresh AppState.frame_count and pull
     // stats for the status bar / console.
@@ -307,6 +335,20 @@ private:
     void JoinPendingPreviewTeardown() {
         if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
     }
+
+    // StopAsync()'s background tail (see its .cpp comment) and its
+    // re-entrancy guard - same tracked-thread-plus-join pattern as
+    // preview_teardown_thread_ above, for the same reason: an untracked/
+    // detached finalize thread still running when the app closes would be
+    // touching the logger, ffmpeg process handle, etc. out from under the
+    // CRT/DLL shutdown sequence. finalizing_ is checked (not just
+    // state_.recording) so a second StopAsync()/Stop() call arriving while
+    // one is already finishing (e.g. the user manages to click Stop twice,
+    // or OnClose() runs while a Stop() from the UI is still finalizing)
+    // doesn't run the whole tail a second time over the same ffproc_/
+    // pipeline_.
+    std::thread finalize_thread_;
+    std::atomic<bool> finalizing_{false};
 
     void *ctl_ = nullptr;        // hr_ctl_create() handle
     void *ffproc_ = nullptr;     // hr_ff_create() handle

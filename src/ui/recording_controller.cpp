@@ -35,6 +35,7 @@ extern "C" {
     void *hr_di_create();
     void hr_di_destroy(void *handle);
     void hr_di_refresh(void *handle);
+    int hr_di_count(void *handle);
     int hr_di_get(void *handle, int index, int *x, int *y, int *w, int *h, float *dpi);
     int hr_di_primary(void *handle, int *x, int *y, int *w, int *h, float *dpi);
 
@@ -132,6 +133,7 @@ RecordingController::RecordingController(AppState &state) : state_(state) {
 
 RecordingController::~RecordingController() {
     if (state_.recording) Stop();
+    if (finalize_thread_.joinable()) finalize_thread_.join();
     if (instant_replay_active_) StopInstantReplayEncoder();
     JoinPendingPreviewTeardown();
     if (ctl_) hr_ctl_destroy(ctl_);
@@ -292,14 +294,34 @@ void RecordingController::ComputeOutputDims(int src_w, int src_h, int &out_w, in
 }
 
 void RecordingController::ResolveCaptureSize() {
-    // Resolve real capture resolution from the selected monitor.
-    // state_.monitor_id is 1-based (matches the Settings dialog's
-    // "Monitor:" field); hr_di_get is 0-based, hence the -1.
     void *di = hr_di_create();
     hr_di_refresh(di);
     int mx = 0, my = 0, mw = 1920, mh = 1080;
     float dpi = 96.0f;
     int idx = state_.monitor_id > 0 ? state_.monitor_id - 1 : 0;
+
+    HWND capture_hwnd = nullptr;
+    RECT capture_win_rect{};
+    bool have_window = false;
+    if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
+        have_window = HR_ResolveCaptureWindow(state_.capture_window_title, capture_hwnd, capture_win_rect);
+        if (have_window) {
+            int wcx = (capture_win_rect.left + capture_win_rect.right) / 2;
+            int wcy = (capture_win_rect.top + capture_win_rect.bottom) / 2;
+            int count = hr_di_count(di);
+            for (int i = 0; i < count; ++i) {
+                int tx = 0, ty = 0, tw = 0, th = 0; float td = 96.0f;
+                if (!hr_di_get(di, i, &tx, &ty, &tw, &th, &td)) continue;
+                if (wcx >= tx && wcx < tx + tw && wcy >= ty && wcy < ty + th) {
+                    idx = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Resolve real capture resolution from the selected monitor
+    // (hr_di_get is 0-based, hence the state_.monitor_id -1 above).
     if (!hr_di_get(di, idx, &mx, &my, &mw, &mh, &dpi)) {
         idx = 0; // fell back to primary just below - keep the DXGI output index in sync with it
         hr_di_primary(di, &mx, &my, &mw, &mh, &dpi); // fall back to primary if the index is out of range
@@ -332,12 +354,19 @@ void RecordingController::ResolveCaptureSize() {
     // itself captures.
     ComputeOutputDims(mw, mh, output_w_, output_h_);
 
-    // ====== WINDOW CAPTURE ======
+    // ====== WINDOW CAPTURE: crop the now-correctly-selected monitor's
+    // frame down to the window's rect ======
+    // Reuses the resolve done above (have_window/capture_win_rect)
+    // instead of calling HR_ResolveCaptureWindow() a second time - besides
+    // the redundant EnumWindows() pass, re-resolving here could in theory
+    // hit a narrow window between the two calls where the window closed
+    // and its title got reused by something else, cropping to the wrong
+    // window's rect. One resolve, used consistently for both which
+    // monitor to capture and where to crop it.
     crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
     if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
-        HWND hwnd = nullptr;
-        RECT r{};
-        if (HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r)) {
+        if (have_window) {
+            RECT r = capture_win_rect;
             // Window rect is in virtual-desktop coordinates; crop_x_/y_
             // need to be relative to the captured monitor's own frame
             // (monitor_left/top, set above), matching what bgra_buf
@@ -557,7 +586,20 @@ bool RecordingController::Start(std::wstring &error_out) {
 }
 
 void RecordingController::Stop() {
-    if (!state_.recording) return;
+    // Old synchronous behavior, kept for callers that genuinely want to
+    // block until everything's done (e.g. the app closing, where there's
+    // nothing useful to do except wait anyway). See StopAsync() for what
+    // actually does the work and why DoStop() (main_frame.cpp) uses that
+    // instead - this used to be the whole implementation, freezing
+    // whichever thread called it (in practice, the UI thread) for up to
+    // ~30s.
+    StopAsync(nullptr);
+    if (finalize_thread_.joinable()) finalize_thread_.join();
+}
+
+void RecordingController::StopAsync(std::function<void()> on_done) {
+    if (!state_.recording || finalizing_) return;
+    finalizing_ = true;
 
     // If we're keeping the pipeline alive afterward for continued live
     // preview, don't call hr_pl_stop() here - that joins the capture
@@ -570,6 +612,14 @@ void RecordingController::Stop() {
     }
     hr_ff_stop_graceful(ffproc_);
 
+    finalize_thread_ = std::thread([this, keep_for_preview, on_done]() {
+    StopFinalizeTail(keep_for_preview);
+    finalizing_ = false;
+    if (on_done) on_done();
+    });
+}
+
+void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second
     // budget for ffmpeg to receive EOF on stdin, flush libx264's internal
     // frame buffer, and write the moov atom (mp4) / cues (mkv) that make the
