@@ -1,35 +1,105 @@
 welcome to changelog :D
 
-[Version 2.1] - 2026-09-09
+[Version 2.1.0] - 2026-09-10
+
+=== Fixed ===
+
+- Window capture (File > Select Window to Record / the window picker
+  dialog) silently recorded the wrong thing whenever the target window
+  lived on a different monitor than Settings > Monitor happened to be
+  set to: RecordingController::ResolveCaptureSize() (src/ui/
+  recording_controller.cpp) always captured state_.monitor_id's monitor
+  first and only tried to crop the window's rect out of *that* frame
+  afterwards, so a window on any other monitor had little/no overlap
+  with what was actually captured, tripped the "entirely off the
+  selected monitor" fallback, and quietly recorded that other monitor's
+  full desktop instead - with no error, so it looked like "record just
+  this window" simply didn't work. ResolveCaptureSize() now resolves the
+  target window first and picks whichever monitor its center point
+  falls on, so window capture works regardless of what Settings >
+  Monitor is set to; desktop-only recordings are unaffected. Also
+  reuses that one window resolve for both the monitor pick and the crop
+  rect instead of re-resolving the window a second time.
+- Webcam overlays showed as an empty box with nothing in it - even
+  though the same camera worked fine in every other app, and even in
+  the final recorded video, not just the live preview.
+  hr_webcam_capture.cpp created its IMFSourceReader with no attributes
+  and then requested RGB32 frames; almost no consumer webcam natively
+  streams RGB32 (most do YUY2/NV12/MJPG), so that SetCurrentMediaType
+  call silently failed, the capture thread gave up, and
+  GetOrRenderWebcam() (hr_overlay_render.cpp) just kept returning
+  nothing to composite, forever, with only a single one-time log
+  warning to show for it. Now creates the reader with
+  MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING enabled, which makes Media
+  Foundation insert the color-conversion MFT it needs automatically, so
+  the RGB32 request succeeds regardless of the camera's native format.
+- Audio Mixer level meters (Microphone/Desktop Audio bars) visibly
+  stepped instead of sliding, with a noticeable lag and a peak-hold dot
+  that stuck around far too long. They were being redrawn from
+  OnStatsTimer's 500ms/2Hz tick even though hr_peak_decay()
+  (hr_ui_utils.cpp) is written assuming ~50ms/20Hz calls - at 2Hz the
+  peak-hold sat for ~10s instead of ~1s and then fell off in big jumps
+  instead of a smooth slide. The meters now run on their own timer,
+  decoupled from the stats tick (main_frame.cpp's new
+  OnLevelMeterTimer()/RestartLevelMeterTimer()).
+- Closing the app (the titlebar X, or File > Exit) could crash with
+  HomRec's own "ran into a problem and needs to close" dialog,
+  especially when closing shortly after launch. Cause: g_frame
+  (main_frame.cpp) was a plain pointer only cleared in
+  ~HomRecMainFrame() - which Destroy() merely *schedules*, possibly
+  several event-loop turns later - while CheckHomUpdatesAsync()'s
+  detached background thread (the startup plugin-update check, which
+  can run for up to 15s) reads g_frame with no synchronization at all
+  and calls wxQueueEvent(g_frame, ...). Closing while that thread was
+  still in flight could queue an event onto a frame that was already
+  (or about to be) freed. g_frame is now std::atomic<HomRecMainFrame*>
+  and is cleared at the top of OnClose()'s real-close path instead of
+  only in the destructor; the hotkey thunks and the update-check
+  handler now read it once via .load() instead of check-then-use.
+- Clicking Stop froze the entire app - preview included - for up to
+  ~30 seconds (occasionally longer with a slow audio mix/merge), and
+  any clicks/drags made during that freeze only visibly landed the
+  moment it ended, which read as "it fixes itself after ~30 seconds".
+  Cause: DoStop() (main_frame.cpp) called RecordingController::Stop()
+  synchronously on the UI thread, and Stop() itself blocked on
+  hr_ff_wait()'s up-to-30s ffmpeg-finalize budget plus audio mixing/
+  merging - none of which pumped window messages in the meantime, so
+  Windows just queued input until the thread came back. That slow tail
+  now runs on a background thread (RecordingController::StopAsync(),
+  used in place of the old blocking Stop() from DoStop() only - other
+  callers like closing the app while recording still use the
+  synchronous Stop(), which now just waits for that same background
+  thread instead of duplicating the work); state_.recording stays true
+  for the whole tail so a second Stop click or a Start click issued
+  before it's done is correctly ignored instead of racing pipeline_/
+  ffproc_ teardown, and the Start/Stop button is disabled for the same
+  window. DoStop()'s post-stop UI work (button reset, the "recording
+  saved" summary popup) moved to a new OnRecordingFinalized(), invoked
+  via CallAfter once the background thread finishes.
 
 === Added ===
-- Instant Replay: a continuous background recording of the last N seconds
-  (Settings > Advanced > "Replay buffer" + "Enable Instant Replay"),
-  saved out on demand with a new hotkey (default F8, Settings > Hotkeys >
-  "Save Replay") without having to already be recording. Runs on the same
-  capture pipeline as a manual recording, so the two can't run at the
-  same time - starting a manual recording pauses Instant Replay for its
-  duration and resumes it, with a fresh buffer, once you stop.
-- Filename template: added an {app} placeholder alongside the existing
-  {date}/{time} - expands to the name of the recorded application (no
-  ".exe") in window-capture mode, or "Desktop" otherwise.
-- Overlays: added an opacity setting (0-100), on top of whatever
-  transparency the overlay's own content already has (an image's alpha
-  channel, etc.) - available for every overlay type via Edit Parameters.
-- Text overlays: added a font picker (Edit Parameters) - Segoe UI
-  (previous default) plus two free/open-license additions, Open Sans and
-  Roboto. Falls back to Segoe UI if the chosen font isn't installed.
-- hom (the plugin package manager): added `search`, `show`,
-  `list --installed`, `list --upgradable`, `upgrade`, `full-upgrade`,
-  `autoremove`, and `purge` (existing `remove` now keeps a plugin's saved
-  settings; `purge` is the old "delete everything" behavior) - see
-  Hom/tools/hom/README.md for the full command list.
-- Added a small "N plugin update(s)" badge to the bottom bar, from a
-  background `hom list --upgradable` check at startup - click it for
-  details. (No in-app plugin browser - `hom search`/`show`/`install`
-  from the console cover that without the extra weight of one.)
-- Website documentation updated to match the above (hom's command
-  reference, in particular, was previously several versions out of date).
+
+- File > "Set Preset..." - a small profile manager for .hrc config
+  files (src/ui/preset_dialog.h/.cpp), built on the existing HrcConfig
+  Save()/Load() Export/Import Settings already used. Presets live in a
+  new "presets\" folder next to the exe; the app's own auto-managed
+  config is always listed first as the "main config" and can't be
+  removed, matching the previous default of just having homrec.hrc.
+  From the dialog you can: switch to a preset (loads it and re-saves it
+  as the active config, so the switch survives a restart); save the
+  current in-session settings as a new named preset; add an existing
+  .hrc file (copies it into presets\); or remove one. Overlay-only .hrc
+  files (e.g. a copy of the auto-saved homrec_overlays.hrc) work fine as
+  presets too - HrcConfig::Load() only touches whichever fields are
+  actually present in a file, so one of those just layers its overlay
+  list on top of whatever else is currently loaded instead of
+  overwriting every other setting; the dialog labels these "Overlays
+  only" vs "Full config" in its list.
+- Settings > Audio > "Level meter refresh rate (Hz)" (AppState::
+  level_meter_fps, 10-60, default 30) - controls the new VU-meter timer
+  above; takes effect immediately on Save, and round-trips through
+  .hrc profiles and homrec_settings.json like the rest of the Audio
+  tab's fields (hr_settings_registry.cpp).
 
 [Version 2.0.3] - 2026-09-04
 
