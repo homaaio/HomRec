@@ -160,6 +160,7 @@ const std::vector<SettingDef> &All() {
         v.push_back(StrField("audio_aac_bitrate", "audio", &AppState::audio_aac_bitrate));
         v.push_back(IntField("audio_out_channels", "audio", &AppState::audio_out_channels));
         v.push_back(BoolField("separate_audio_mp3", "audio", &AppState::separate_audio_mp3));
+        v.push_back(IntField("level_meter_fps", "audio", &AppState::level_meter_fps));
         v.push_back(StrField("mic_device_id", "audio", &AppState::mic_device_id));
 
         // -- [hotkeys] -------------------------------------------------------
