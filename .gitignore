@@ -308,3 +308,4 @@ plugins/
 tools/*.hrl
 tools/*.json
 crashes/*.dmp
+*.orig
