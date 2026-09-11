@@ -119,6 +119,7 @@ struct AppState {
     bool        instant_replay_enabled = false;
     VideoFormat video_format       = VideoFormat::Mp4;
     bool        separate_audio_mp3 = false;
+    int         level_meter_fps    = 30;
 
     // -- UI toggles -------------------------------------------------------
     bool always_on_top      = false;
