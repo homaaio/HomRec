@@ -1078,8 +1078,7 @@ struct Pipeline {
                 {
                     std::lock_guard<std::mutex> lock(pipe_queue_mtx);
 
-                    // Only drop when the writer is genuinely behind (queue full)
-                    if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
+                    if (rep == 0 && pipe_queue.size() >= MAX_QUEUE_SIZE) {
                         dropped = std::move(pipe_queue.front());
                         pipe_queue.pop();
                         frames_dropped.fetch_add(1, std::memory_order_relaxed);
