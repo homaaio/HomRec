@@ -1,5 +1,56 @@
 welcome to changelog :D
 
+[Version 2.1.1] - 2026-09-12
+
+=== Added ===
+
+- Custom action hotkeys. Settings > Hotkeys now has a "Custom Hotkeys"
+  section: add any number of rows, each binding a global hotkey to an
+  action string - exactly what you'd type into the console or put in a
+  .cfg file (a built-in command, a "setting = value" assignment like
+  "disable_preview = true", or anything a plugin registered via
+  homrec.register_command()/register_setting()). Coexists with the four
+  fixed hotkeys (Start/Stop, Pause, Fullscreen, Save Replay). Persisted
+  in homrec.hrc as a new [custom_hotkeys] section, same pattern
+  [overlays] already used.
+- 10 new Lua plugins in Hom/plugins/ (source in <id>-src/, packaged as
+  <id>.hrp, listed in plugins/index.json for `hom install <id>`):
+  watermark, rec-info, webhook-notify, soundboard, clip-organizer,
+  now-playing, profiles, diag-tools, twitch-info, backup-config. All
+  written against the existing homrec.* Lua API (register_command,
+  register_setting, settings_get/set, store_get/set, show_toast,
+  http_get/post, print/log, and the on_load/on_recording_start/
+  on_recording_stop/on_replay_saved hooks) - no new engine-side API
+  surface was added to support them.
+
+=== Fixed ===
+
+- FFmpeg could fail to launch with a bare "Failed to start the ffmpeg
+  process" and no further explanation, on machines where the ffmpeg
+  path, output path, or a Windows username anywhere in those paths
+  contained non-ASCII characters. _build_cmdline() in
+  hr_ffmpeg_runner.cpp converted those std::string (UTF-8) args to
+  std::wstring with a plain std::wstring(s.begin(), s.end()), which
+  widens each byte 1:1 instead of decoding UTF-8 - correct only for
+  pure ASCII input. Any multi-byte UTF-8 sequence came out as garbled
+  wide characters, so CreateProcessW either couldn't find the exe or
+  choked on a corrupted command line and failed outright.
+  _build_cmdline() now decodes every one of these args with
+  MultiByteToWideChar(CP_UTF8, ...), matching the conversion already
+  used everywhere else in the app (see hr_app_logic.cpp's
+  WideCharToMultiByte(CP_UTF8, ...) for the mirror-image direction).
+- Webcam overlays could render as a fully transparent/blank square even
+  though the fix in 2.1.0 had frames arriving correctly.
+  hr_webcam_capture.cpp copies frames straight out of the source
+  reader's RGB32 buffer, but that format's 4th byte per pixel is
+  padding, not a real alpha channel, and consumer webcam drivers
+  routinely leave it at 0. The overlay compositor's CompositeBgra()
+  (hr_overlay_render.cpp) treats every layer's 4th byte as genuine
+  per-pixel alpha, so a 0 there made the whole webcam layer invisible
+  regardless of what the camera was actually seeing. Capture now forces
+  that byte to 0xFF (fully opaque) right after each frame is copied out
+  of the reader, before it ever reaches the compositor.
+
 [Version 2.1.0] - 2026-09-10
 
 === Fixed ===
