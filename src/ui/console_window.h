@@ -82,6 +82,21 @@ public:
     // commands actually run (0 if the file doesn't exist or is empty).
     int RunCfgFile(const std::wstring &name);
 
+    // Public entry point for callers outside ConsoleWindow that need to
+    // run exactly one line through the same dispatcher RunCfgFile() and
+    // the console's own input box use (built-ins, "setting = value"
+    // assignments, plugin-registered commands - see RunCommand()'s own
+    // doc comment). Used by custom action hotkeys (main_frame.cpp's
+    // OnHotkeyEvent, EVT_HOTKEY_CUSTOM case): a hotkey fires with no
+    // console window necessarily open for it to type into, so
+    // `confirmed` defaults to true here, same as RunCfgFile()'s own
+    // internal calls. RunCommand() itself stays private so the only way
+    // to run an arbitrary line from outside is through this one,
+    // deliberately narrow, entry point.
+    void RunSingleCommand(const std::wstring &raw, bool confirmed = true) {
+        RunCommand(raw, confirmed);
+    }
+
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandleMessage(HWND, UINT, WPARAM, LPARAM);
