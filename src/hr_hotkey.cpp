@@ -24,6 +24,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
+#include <vector>
+#include <mutex>
 #include <string>
 #include <atomic>
 #include <thread>
