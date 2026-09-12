@@ -7,7 +7,7 @@
 // and was never part of either build - removed as dead code.)
 #pragma once
 
-#define HR_APP_VERSION      "2.1.1"
-#define HR_APP_VERSION_W    L"2.1.1"
+#define HR_APP_VERSION      "2.2"
+#define HR_APP_VERSION_W    L"2.2-beta"
 
 #define HR_SINGLE_INSTANCE_MUTEX_NAME "HomRec_SingleInstance_150"
