@@ -24,12 +24,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
-#include <vector>
-#include <mutex>
 #include <string>
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <vector>
 
 /* -- Hotkey IDs ------------------------------------------------------------ */
 static constexpr int HK_START_STOP  = 1;   /* default F9  */
