@@ -38,6 +38,7 @@
 #include <wx/choice.h>
 #include <wx/notebook.h>
 #include <wx/scrolwin.h>
+#include <wx/statline.h>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -560,6 +561,95 @@ private:
         for (HotkeyButton *hk : {hk_startstop_btn_, hk_pause_btn_, hk_fullscreen_btn_, hk_save_replay_btn_})
             hk->SetColours(bg, text, wxColour(120, 170, 250));
         pageRoot->Add(hkGrid, 0, wxEXPAND | wxALL, 16);
+
+        // --- Custom action hotkeys ---
+        // Each row is "action string -> key combo", where the action is
+        // whatever you'd type into the console or put in a .cfg line -
+        // a built-in command, a "setting = value" assignment (e.g.
+        // "disable_preview = true"), or a plugin-registered command/
+        // setting. See ConfigureHotkeysFromState() (main_frame.cpp) for
+        // how this list turns into real OS hotkeys, and
+        // AppState::custom_hotkeys for the storage format.
+        custom_hk_page_ = page;
+        custom_hk_bg_ = bg;
+        custom_hk_text_ = text;
+
+        auto *sep = new wxStaticLine(page);
+        pageRoot->Add(sep, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 16);
+
+        auto *hdr = new wxStaticText(page, wxID_ANY, "Custom Hotkeys");
+        hdr->SetForegroundColour(text);
+        hdr->SetBackgroundColour(bg);
+        pageRoot->Add(hdr, 0, wxLEFT | wxRIGHT | wxTOP, 16);
+
+        auto *note = new wxStaticText(page, wxID_ANY,
+            "Bind a key combo to any console command or \"setting = value\" line,\n"
+            "e.g. action \"disable_preview\" -> Ctrl+B.");
+        note->SetForegroundColour(text);
+        note->SetBackgroundColour(bg);
+        pageRoot->Add(note, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+
+        custom_hk_list_sizer_ = new wxBoxSizer(wxVERTICAL);
+        pageRoot->Add(custom_hk_list_sizer_, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
+
+        for (const auto &hkPair : state_.custom_hotkeys)
+            AddCustomHotkeyRow(wxString::FromUTF8(hkPair.first), wxString::FromUTF8(hkPair.second));
+
+        auto *addBtn = new wxButton(page, wxID_ANY, "+ Add Hotkey");
+        pageRoot->Add(addBtn, 0, wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 16);
+        addBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+            AddCustomHotkeyRow("", "");
+            custom_hk_page_->Layout();
+            custom_hk_page_->GetParent()->Layout();
+        });
+    }
+
+    // One row = one custom_hotkeys entry: a free-text action field plus a
+    // HotkeyButton (same capture control the four fixed hotkeys above
+    // use) for the combo, and a small remove button. Kept as flat
+    // wxWindow children of the Hotkeys page (not a sub-panel) so they lay
+    // out with the rest of the tab via custom_hk_list_sizer_.
+    void AddCustomHotkeyRow(const wxString &action, const wxString &keys) {
+        auto *row = new wxBoxSizer(wxHORIZONTAL);
+
+        auto *actionEdit = new wxTextCtrl(custom_hk_page_, wxID_ANY, action, wxDefaultPosition,
+                                           wxSize(220, -1));
+        actionEdit->SetHint("action, e.g. disable_preview");
+        row->Add(actionEdit, 1, wxEXPAND | wxRIGHT | wxALIGN_CENTRE_VERTICAL, 8);
+
+        auto *keysBtn = new HotkeyButton(custom_hk_page_, wxID_ANY, keys);
+        keysBtn->SetColours(custom_hk_bg_, custom_hk_text_, wxColour(120, 170, 250));
+        row->Add(keysBtn, 0, wxRIGHT | wxALIGN_CENTRE_VERTICAL, 8);
+
+        auto *removeBtn = new wxButton(custom_hk_page_, wxID_ANY, "Remove", wxDefaultPosition,
+                                        wxSize(80, -1));
+        row->Add(removeBtn, 0, wxALIGN_CENTRE_VERTICAL);
+
+        custom_hk_list_sizer_->Add(row, 0, wxEXPAND | wxBOTTOM, 6);
+        custom_hk_rows_.push_back({row, actionEdit, keysBtn, removeBtn});
+
+        // Captured by raw sizer pointer, not index - rows can be removed
+        // out of order, so an index captured at Add-time would go stale
+        // the moment an earlier row is removed.
+        removeBtn->Bind(wxEVT_BUTTON, [this, row, actionEdit, keysBtn, removeBtn](wxCommandEvent &) {
+            for (size_t i = 0; i < custom_hk_rows_.size(); ++i) {
+                if (custom_hk_rows_[i].row == row) {
+                    custom_hk_list_sizer_->Detach(row);
+                    actionEdit->Destroy();
+                    keysBtn->Destroy();
+                    // removeBtn destroys itself via CallAfter - wx defers a
+                    // widget's own destruction when triggered from inside
+                    // its own click handler, so we schedule rather than
+                    // Destroy() it inline here.
+                    removeBtn->GetEventHandler()->CallAfter([removeBtn]() { removeBtn->Destroy(); });
+                    delete row;
+                    custom_hk_rows_.erase(custom_hk_rows_.begin() + i);
+                    break;
+                }
+            }
+            custom_hk_page_->Layout();
+            custom_hk_page_->GetParent()->Layout();
+        });
     }
 
     // -- Advanced: filename template, auto-stop, replay buffer ------------
@@ -825,6 +915,19 @@ private:
         instant_replay_check_->SetValue(false);
         hk_save_replay_btn_->SetValue("F8");
 
+        // Defaults = no custom hotkeys.
+        while (!custom_hk_rows_.empty()) {
+            auto &r = custom_hk_rows_.back();
+            custom_hk_list_sizer_->Detach(r.row);
+            r.action->Destroy();
+            r.keys->Destroy();
+            r.remove->Destroy();
+            delete r.row;
+            custom_hk_rows_.pop_back();
+        }
+        custom_hk_page_->Layout();
+        custom_hk_page_->GetParent()->Layout();
+
         sys_log_chk_->SetValue(hr_settings_get_flag(def, "system_logging_enabled") != 0);
         plugin_log_chk_->SetValue(hr_settings_get_flag(def, "plugin_logging_enabled") != 0);
         disable_preview_chk_->SetValue(hr_settings_get_flag(def, "disable_preview") != 0);
@@ -903,6 +1006,15 @@ private:
         state_.hotkey_start_stop = hk_startstop_btn_->GetValue().ToUTF8().data();
         state_.hotkey_pause = hk_pause_btn_->GetValue().ToUTF8().data();
         state_.hotkey_fullscreen = hk_fullscreen_btn_->GetValue().ToUTF8().data();
+
+        // Custom hotkeys - blank-action rows (e.g. one just added and not
+        // yet filled in) are skipped rather than saved as a dead binding.
+        state_.custom_hotkeys.clear();
+        for (const auto &r : custom_hk_rows_) {
+            std::string action = r.action->GetValue().ToUTF8().data();
+            if (action.empty()) continue;
+            state_.custom_hotkeys.emplace_back(action, std::string(r.keys->GetValue().ToUTF8().data()));
+        }
 
         // -- Advanced -------------------------------------------------------
         state_.filename_template = fname_template_edit_->GetValue().ToUTF8().data();
@@ -1020,6 +1132,18 @@ private:
     // Hotkeys
     HotkeyButton *hk_startstop_btn_ = nullptr, *hk_pause_btn_ = nullptr, *hk_fullscreen_btn_ = nullptr;
     HotkeyButton *hk_save_replay_btn_ = nullptr;
+
+    // -- Custom action hotkeys (see BuildHotkeysTab/AddCustomHotkeyRow) --
+    struct CustomHotkeyRow {
+        wxSizer *row = nullptr;
+        wxTextCtrl *action = nullptr;
+        HotkeyButton *keys = nullptr;
+        wxButton *remove = nullptr;
+    };
+    std::vector<CustomHotkeyRow> custom_hk_rows_;
+    wxWindow *custom_hk_page_ = nullptr;
+    wxBoxSizer *custom_hk_list_sizer_ = nullptr;
+    wxColour custom_hk_bg_, custom_hk_text_;
 
     // Advanced
     wxTextCtrl *fname_template_edit_ = nullptr;
