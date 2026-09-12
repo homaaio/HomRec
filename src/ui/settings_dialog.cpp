@@ -562,7 +562,7 @@ private:
             hk->SetColours(bg, text, wxColour(120, 170, 250));
         pageRoot->Add(hkGrid, 0, wxEXPAND | wxALL, 16);
 
-        // --- Custom action hotkeys ---
+        // -- Custom action hotkeys ---------------------------------------
         // Each row is "action string -> key combo", where the action is
         // whatever you'd type into the console or put in a .cfg line -
         // a built-in command, a "setting = value" assignment (e.g.
