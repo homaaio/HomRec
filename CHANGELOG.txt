@@ -1,6 +1,6 @@
 welcome to changelog :D
 
-[Version 2.1.1] - 2026-09-12
+[Version 2.2 beta] - 2026-09-12
 
 === Added ===
 
@@ -22,9 +22,49 @@ welcome to changelog :D
   http_get/post, print/log, and the on_load/on_recording_start/
   on_recording_stop/on_replay_saved hooks) - no new engine-side API
   surface was added to support them.
+- Settings > Video & Codec: a "Test Recording (5s)" button. Runs a short,
+  disposable recording of the selected monitor using whatever codec/
+  encoder preset is currently picked in the tab (even if you haven't hit
+  Save yet), then deletes the file and shows the results in a popup:
+  encoder actually used (after GPU-encoder fallback), resolution,
+  average FPS, frames captured/dropped, and a plain-language verdict on
+  whether the machine kept up. Lets you sanity-check a codec/hardware
+  encoder before committing to a real recording. Uses its own capture
+  pipeline/ffmpeg process (never the real recording's), so it can't be
+  confused with an actual recording elsewhere in the app; briefly pauses
+  the live preview for the 5 seconds if it's running (DXGI only allows
+  one capture handle per monitor at a time) and restores it automatically
+  afterward.
 
 === Fixed ===
 
+- Build: src/hr_hotkey.cpp used std::vector (for the new Custom Hotkeys
+  storage above) without including <vector>, so it failed to compile on
+  its own (everything depending on HotkeyCtx::customs cascaded into
+  further errors right behind it). Added the missing #include <vector>.
+- Recordings could finish several times shorter than the actual time
+  spent recording (e.g. a 44s take saved as an 11s file) on hardware too
+  weak to sustain the requested resolution/fps. The pipeline's rawvideo
+  pipe to ffmpeg has no per-frame timestamps - the muxed duration is
+  just frame_count/declared_fps - and the existing catch-up mechanism
+  meant to compensate for a falling-behind encoder was defeated by the
+  same MAX_QUEUE_SIZE backpressure it was supposed to work around: its
+  duplicate "catch-up" frames got evicted from the queue just as fast as
+  the live ones whenever the writer genuinely couldn't keep up, so they
+  never actually reached ffmpeg. Catch-up reps now bypass that backpressure
+  cap instead of being dropped, so a chronically overloaded recording
+  takes longer to finalize after Stop rather than silently losing
+  timeline length.
+- h264_amf recordings could come out visibly washed-out/faded compared
+  to the same recording with libx264. The app's own BGRA->YUV conversion
+  (hr_encoder_helpers.c) produces full-range (PC, 0-255) BT.601 data, but
+  nothing ever told ffmpeg/the encoder that, so decoders had to guess -
+  libx264's output happened to look right by luck of default player
+  behavior, but h264_amf's own range signaling made the mismatch visible.
+  hr_ffmpeg_runner.cpp now explicitly declares
+  "-color_range pc -colorspace smpte170m -color_primaries smpte170m
+  -color_trc smpte170m" so both encoders are told the truth instead of
+  guessing.
 - FFmpeg could fail to launch with a bare "Failed to start the ffmpeg
   process" and no further explanation, on machines where the ffmpeg
   path, output path, or a Windows username anywhere in those paths
@@ -50,6 +90,22 @@ welcome to changelog :D
   regardless of what the camera was actually seeing. Capture now forces
   that byte to 0xFF (fully opaque) right after each frame is copied out
   of the reader, before it ever reaches the compositor.
+- If the ffmpeg process ended unexpectedly mid-recording (crashed, was
+  closed externally, hit a fatal encode error, etc.), nothing ever
+  noticed: RecordingController::PollStats() never checked whether ffmpeg
+  was actually still alive, so AppState.recording just stayed true
+  forever. The bottom-left status dot, elapsed-time readout, and
+  "Recording"/"Paused" label are all driven off that flag (and off a
+  wall-clock timer that keeps ticking regardless of whether anything's
+  actually being encoded), so they'd carry on looking like a perfectly
+  normal in-progress recording indefinitely - nothing was left running
+  or being written, but the UI never said so. PollStats() now detects
+  this (hr_ff_is_running() already existed for exactly this, but nothing
+  called it) and main_frame.cpp automatically runs the same stop/
+  finalize sequence a manual Stop() would, resets the status bar back to
+  Ready, and shows a "Recording Interrupted" popup explaining what
+  happened - instead of leaving the last few seconds of recording state
+  stuck on screen until you noticed and hit Stop yourself.
 
 [Version 2.1.0] - 2026-09-10
 
