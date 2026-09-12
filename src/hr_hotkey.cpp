@@ -34,9 +34,28 @@ static constexpr int HK_START_STOP  = 1;   /* default F9  */
 static constexpr int HK_PAUSE       = 2;   /* default F10 */
 static constexpr int HK_FULLSCREEN  = 3;   /* default F11 */
 static constexpr int HK_SAVE_REPLAY = 4;   /* default F8  */
+/* Custom (user-defined action) hotkeys start at 100 so they never collide
+ * with the four fixed IDs above, however many get added over time. */
+static constexpr int HK_CUSTOM_BASE = 100;
 
 /* -- Callback types -------------------------------------------------------- */
 typedef void (*HR_HK_CB)();  /* no-arg callback for each hotkey action */
+typedef void (*HR_HK_CUSTOM_CB)(int id); /* fired for any registered custom hotkey */
+
+/* One user-defined binding: RegisterHotKey's (mod, vk) plus the numeric id
+ * the caller chose for it (caller maps id -> action string on its side -
+ * this module doesn't know or care what an "action" is). */
+struct CustomHotkeyBinding {
+    int id;
+    UINT mod;
+    UINT vk;
+};
+
+/* Forward-declared here since hr_hk_add_custom() (below) needs to call it
+ * before its own definition later in this file; both are HR_EXPORT'd with
+ * matching signatures so this is just the one declaration moved earlier,
+ * not a second copy. */
+HR_EXPORT int hr_hk_parse_keystring(const char *s, unsigned int *mod_out, unsigned int *vk_out);
 
 /* -- Context --------------------------------------------------------------- */
 struct HotkeyCtx {
@@ -44,6 +63,11 @@ struct HotkeyCtx {
     HR_HK_CB cb_pause{nullptr};
     HR_HK_CB cb_fullscreen{nullptr};
     HR_HK_CB cb_save_replay{nullptr};
+    HR_HK_CUSTOM_CB cb_custom{nullptr};
+
+    /* Set via hr_hk_add_custom() before hr_hk_start(), same "configure
+     * before starting the message thread" rule as the fixed four. */
+    std::vector<CustomHotkeyBinding> customs;
 
     std::atomic<bool> running{false};
 
@@ -78,6 +102,7 @@ static LRESULT CALLBACK _WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp == HK_PAUSE      && ctx->cb_pause)      ctx->cb_pause();
             else if (wp == HK_FULLSCREEN && ctx->cb_fullscreen) ctx->cb_fullscreen();
             else if (wp == HK_SAVE_REPLAY && ctx->cb_save_replay) ctx->cb_save_replay();
+            else if (wp >= HK_CUSTOM_BASE && ctx->cb_custom) ctx->cb_custom(static_cast<int>(wp));
         }
         return 0;
     }
@@ -106,6 +131,7 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     RegisterHotKey(ctx->hwnd, HK_PAUSE,      ctx->mod_pause,      ctx->vk_pause);
     RegisterHotKey(ctx->hwnd, HK_FULLSCREEN, ctx->mod_fullscreen, ctx->vk_fullscreen);
     RegisterHotKey(ctx->hwnd, HK_SAVE_REPLAY, ctx->mod_save_replay, ctx->vk_save_replay);
+    for (const auto &c : ctx->customs) RegisterHotKey(ctx->hwnd, c.id, c.mod, c.vk);
 
     /* Signal ready */
     ctx->running = true;
@@ -121,6 +147,7 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     UnregisterHotKey(ctx->hwnd, HK_PAUSE);
     UnregisterHotKey(ctx->hwnd, HK_FULLSCREEN);
     UnregisterHotKey(ctx->hwnd, HK_SAVE_REPLAY);
+    for (const auto &c : ctx->customs) UnregisterHotKey(ctx->hwnd, c.id);
     DestroyWindow(ctx->hwnd);
     ctx->hwnd    = nullptr;
     ctx->running = false;
@@ -159,6 +186,44 @@ HR_EXPORT void hr_hk_set_callbacks(void *handle,
     ctx->cb_pause      = pause;
     ctx->cb_fullscreen = fullscreen;
     ctx->cb_save_replay = save_replay;
+}
+
+/*
+ * hr_hk_set_custom_callback / hr_hk_clear_custom / hr_hk_add_custom
+ *
+ * The dynamic counterpart to hr_hk_configure()'s fixed four. A caller
+ * (main_frame.cpp) that wants N user-defined "run this action string"
+ * hotkeys:
+ *   1. hr_hk_clear_custom(handle)                      -- wipe old list
+ *   2. hr_hk_add_custom(handle, id, "Control+B")  * N   -- one per binding,
+ *      id chosen by the caller (>= 100 recommended, see HK_CUSTOM_BASE)
+ *      and remembered on the caller's side to map back to an action
+ *      string - this module only ever hands the id back via cb_custom.
+ *   3. hr_hk_set_custom_callback(handle, fn)
+ *   4. hr_hk_start(handle) as usual.
+ * Same ordering rule as hr_hk_configure(): all of this must happen
+ * *before* hr_hk_start(), since RegisterHotKey only happens once at
+ * message-thread startup (see _MsgThread above).
+ */
+HR_EXPORT void hr_hk_set_custom_callback(void *handle, HR_HK_CUSTOM_CB cb) {
+    if (!handle) return;
+    static_cast<HotkeyCtx *>(handle)->cb_custom = cb;
+}
+
+HR_EXPORT void hr_hk_clear_custom(void *handle) {
+    if (!handle) return;
+    static_cast<HotkeyCtx *>(handle)->customs.clear();
+}
+
+/* Returns 1 if `keystring` parsed and the binding was queued, 0 if the
+ * string was empty/unrecognized (same "just skip it" contract as
+ * hr_hk_configure() - a bad custom binding doesn't take down the others). */
+HR_EXPORT int hr_hk_add_custom(void *handle, int id, const char *keystring) {
+    if (!handle) return 0;
+    UINT mod = 0, vk = 0;
+    if (!hr_hk_parse_keystring(keystring, &mod, &vk)) return 0;
+    static_cast<HotkeyCtx *>(handle)->customs.push_back(CustomHotkeyBinding{id, mod, vk});
+    return 1;
 }
 
 /*
