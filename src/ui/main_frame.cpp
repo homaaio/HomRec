@@ -26,6 +26,7 @@
 #include <functional>
 #include <algorithm>
 #include <string>
+#include <cctype>
 #include <cstring>
 #include <cmath>
 
@@ -36,6 +37,10 @@ extern "C" {
     void hr_hk_configure(void *handle, const char *start_stop_str, const char *pause_str, const char *fullscreen_str, const char *save_replay_str);
     int hr_hk_start(void *handle);
     void hr_hk_stop(void *handle);
+    // Custom action hotkeys - see hr_hotkey.cpp's own doc comment on these.
+    void hr_hk_set_custom_callback(void *handle, void (*cb)(int id));
+    void hr_hk_clear_custom(void *handle);
+    int hr_hk_add_custom(void *handle, int id, const char *keystring);
 
     void *hr_settings_create();
     void hr_settings_destroy(void *handle);
@@ -140,12 +145,31 @@ wxDEFINE_EVENT(EVT_HOTKEY_START_STOP, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOTKEY_PAUSE, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOTKEY_FULLSCREEN, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOTKEY_SAVE_REPLAY, wxThreadEvent);
+wxDEFINE_EVENT(EVT_HOTKEY_CUSTOM, wxThreadEvent);
 wxDEFINE_EVENT(EVT_HOM_UPDATES_CHECKED, wxThreadEvent);
 
 void HotkeyStartStopThunk() { if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_START_STOP)); }
 void HotkeyPauseThunk()     { if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_PAUSE)); }
 void HotkeyFullscreenThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
 void HotkeySaveReplayThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_SAVE_REPLAY)); }
+
+// Custom (user-defined) hotkeys: hr_hotkey.cpp only ever hands us back the
+// numeric id we picked when registering the binding (see
+// ConfigureHotkeysFromState() below) - g_custom_hotkey_actions maps that id
+// (offset from HK_CUSTOM_BASE=100) back to the action string the user typed
+// in Settings > Hotkeys, so OnHotkeyEvent's EVT_HOTKEY_CUSTOM case knows
+// what to actually run. Same single-frame-per-process assumption as
+// g_frame above.
+constexpr int kCustomHotkeyBase = 100;
+std::vector<std::string> g_custom_hotkey_actions;
+
+void HotkeyCustomThunk(int id) {
+    if (auto *f = g_frame.load()) {
+        auto *evt = new wxThreadEvent(EVT_HOTKEY_CUSTOM);
+        evt->SetInt(id);
+        wxQueueEvent(f, evt);
+    }
+}
 
 class TrayIcon : public wxTaskBarIcon {
 public:
@@ -661,6 +685,7 @@ HomRecMainFrame::HomRecMainFrame()
     Bind(EVT_HOTKEY_PAUSE, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOTKEY_FULLSCREEN, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOTKEY_SAVE_REPLAY, &HomRecMainFrame::OnHotkeyEvent, this);
+    Bind(EVT_HOTKEY_CUSTOM, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOM_UPDATES_CHECKED, &HomRecMainFrame::OnHomUpdatesChecked, this);
 
     if (state_.first_launch) {
@@ -1091,6 +1116,7 @@ void HomRecMainFrame::RestoreFromTray() {
 void HomRecMainFrame::SetupHotkeys() {
     hotkey_handle_ = hr_hk_create();
     hr_hk_set_callbacks(hotkey_handle_, &HotkeyStartStopThunk, &HotkeyPauseThunk, &HotkeyFullscreenThunk, &HotkeySaveReplayThunk);
+    hr_hk_set_custom_callback(hotkey_handle_, &HotkeyCustomThunk);
     ConfigureHotkeysFromState();
     if (!hr_hk_start(hotkey_handle_)) {
         wxLogDebug("HomRec: global hotkeys failed to register.");
@@ -1102,6 +1128,23 @@ void HomRecMainFrame::ConfigureHotkeysFromState() {
     hr_hk_configure(hotkey_handle_, state_.hotkey_start_stop.c_str(),
                      state_.hotkey_pause.c_str(), state_.hotkey_fullscreen.c_str(),
                      state_.hotkey_save_replay.c_str());
+
+    // Custom action hotkeys (Settings > Hotkeys > "Add Hotkey"). Slot i's
+    // OS-level id is kCustomHotkeyBase+i regardless of whether its combo
+    // actually parsed, so g_custom_hotkey_actions[id-base] always lines up
+    // with state_.custom_hotkeys[i] - a bad combo just never fires, it
+    // doesn't shift every binding after it.
+    hr_hk_clear_custom(hotkey_handle_);
+    g_custom_hotkey_actions.clear();
+    g_custom_hotkey_actions.reserve(state_.custom_hotkeys.size());
+    for (size_t i = 0; i < state_.custom_hotkeys.size(); ++i) {
+        const std::string &action = state_.custom_hotkeys[i].first;
+        std::string keys;
+        for (char c : state_.custom_hotkeys[i].second)
+            if (!std::isspace(static_cast<unsigned char>(c))) keys += c; // "Ctrl + B" -> "Ctrl+B"
+        g_custom_hotkey_actions.push_back(action);
+        hr_hk_add_custom(hotkey_handle_, kCustomHotkeyBase + static_cast<int>(i), keys.c_str());
+    }
 }
 
 void HomRecMainFrame::SetStatusState(const wxString &text, COLORREF dotColor) {
@@ -1781,4 +1824,17 @@ void HomRecMainFrame::OnHotkeyEvent(wxThreadEvent &evt) {
     else if (t == EVT_HOTKEY_PAUSE) { DoPause(); }
     else if (t == EVT_HOTKEY_FULLSCREEN) { ToggleFullscreenNative(); }
     else if (t == EVT_HOTKEY_SAVE_REPLAY) { DoSaveReplay(); }
+    else if (t == EVT_HOTKEY_CUSTOM) {
+        int idx = evt.GetInt() - kCustomHotkeyBase;
+        if (idx >= 0 && idx < static_cast<int>(g_custom_hotkey_actions.size()) && console_) {
+            // Run the exact same line a user could type into the console or
+            // put in autoexec.cfg - built-in commands, "setting = value"
+            // assignments (e.g. "disable_preview = true"), and anything a
+            // plugin registered via homrec.register_command/register_setting
+            // all go through this one parser, so a hotkey is just another
+            // way of "typing" the action. `true` = pre-confirmed, since
+            // there's no console window open for a hotkey to prompt in.
+            console_->RunSingleCommand(WideFromNarrow(g_custom_hotkey_actions[idx]), true);
+        }
+    }
 }
