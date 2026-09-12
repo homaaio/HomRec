@@ -15,6 +15,8 @@
 #include "theme.h"
 #include "language.h"
 
+class RecordingController;
+
 // Shows the modal dialog on the General tab. Returns true if the user
 // clicked Save (in which case `state` has been updated and persisted
 // via hr_settings_save).
@@ -25,8 +27,14 @@
 // need to live-retranslate itself if the user changes the Language
 // dropdown and hasn't hit Save yet (matches how the dialog doesn't
 // live-preview theme changes either).
+//
+// `rec` is main_frame's RecordingController (rec_raw_) - used only by
+// the Video & Codec tab's "Test Recording" button (StartQuickTest() /
+// PollQuickTest() / FinishQuickTest()). May be nullptr (defensively -
+// main_frame always has one by the time Settings can be opened), in
+// which case that button is disabled instead of crashing on a null deref.
 bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme,
-                         const LanguageTable &lang);
+                         const LanguageTable &lang, RecordingController *rec = nullptr);
 
 // Same dialog, but pass one of the old tab indices (1 = former "Video/
 // Codec", 4 = former "Advanced") to open on that tab directly - used by
@@ -34,4 +42,4 @@ bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &th
 // user on the codec/CRF/etc. fields instead of the General tab. Any
 // other index leaves the dialog on the General tab.
 bool ShowSettingsDialogTab(wxWindow *parent, AppState &state, const ThemeColors &theme,
-                            const LanguageTable &lang, int tab_index);
+                            const LanguageTable &lang, int tab_index, RecordingController *rec = nullptr);

@@ -26,6 +26,7 @@
 #include "settings_dialog.h"
 #include "themed_widgets.h"
 #include "language.h"
+#include "recording_controller.h"
 #include "../hr_mic_enum.h"
 #include "../hr_system_integration.h"
 #include "../hr_pc_log.h"
@@ -39,6 +40,7 @@
 #include <wx/notebook.h>
 #include <wx/scrolwin.h>
 #include <wx/statline.h>
+#include <wx/timer.h>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -134,11 +136,11 @@ wxScrolledWindow *NewTabPage(wxNotebook *nb, wxColour bg) {
 class SettingsDialog : public wxDialog {
 public:
     SettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme,
-                    const LanguageTable &lang)
+                    const LanguageTable &lang, RecordingController *rec)
         : wxDialog(parent, wxID_ANY, wxString::FromUTF8(lang.Get("settings_title")),
                    wxDefaultPosition, wxSize(600, 640),
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
-          state_(state), theme_(theme), lang_(lang) {
+          state_(state), theme_(theme), lang_(lang), rec_(rec), test_timer_(this) {
         wxColour bg = FromColorref(theme_.bg);
         wxColour surface = FromColorref(theme_.surface);
         wxColour text = FromColorref(theme_.text);
@@ -195,14 +197,14 @@ public:
 
         auto *btnRow = new wxBoxSizer(wxHORIZONTAL);
         btnRow->AddStretchSpacer(1);
-        auto *saveBtn = new ColorButton(this, IDC_SAVE, wxString::FromUTF8(lang_.Get("save")));
-        saveBtn->SetMinSize(wxSize(80, 28));
-        saveBtn->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
-        btnRow->Add(saveBtn, 0, wxRIGHT, 8);
-        auto *cancelBtn = new ColorButton(this, IDC_CANCEL, wxString::FromUTF8(lang_.Get("cancel")));
-        cancelBtn->SetMinSize(wxSize(80, 28));
-        cancelBtn->SetColours(surface, text);
-        btnRow->Add(cancelBtn, 0);
+        save_btn_ = new ColorButton(this, IDC_SAVE, wxString::FromUTF8(lang_.Get("save")));
+        save_btn_->SetMinSize(wxSize(80, 28));
+        save_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
+        btnRow->Add(save_btn_, 0, wxRIGHT, 8);
+        cancel_btn_ = new ColorButton(this, IDC_CANCEL, wxString::FromUTF8(lang_.Get("cancel")));
+        cancel_btn_->SetMinSize(wxSize(80, 28));
+        cancel_btn_->SetColours(surface, text);
+        btnRow->Add(cancel_btn_, 0);
         root->Add(btnRow, 0, wxEXPAND | wxALL, 16);
 
         SetSizer(root);
@@ -216,7 +218,17 @@ public:
         Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_CANCEL); }, IDC_CANCEL);
     }
 
-    ~SettingsDialog() override {}
+    ~SettingsDialog() override {
+        // Safety net for however the dialog ends up closing mid-test
+        // (Save/Cancel are disabled while testing, but the system close
+        // box / Alt+F4 aren't) - leaving qt_pipeline_/qt_ffproc_ running
+        // and the live preview permanently torn down would otherwise
+        // outlive the dialog entirely.
+        if (test_running_ && rec_) {
+            test_timer_.Stop();
+            rec_->FinishQuickTest();
+        }
+    }
 
     // Old call sites (the "Advanced Settings..." menu item) used to pick
     // a page by index in the old 5-tab layout; map those onto this
@@ -462,6 +474,25 @@ private:
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
+        // "Test Recording" - runs a short, disposable recording with
+        // whatever's currently picked above (even if not Saved yet) so a
+        // user can tell whether a codec actually works on this machine,
+        // and at what fps, before committing to it for a real recording.
+        // See RecordingController::StartQuickTest()'s doc comment for why
+        // this is entirely separate from a real recording under the hood.
+        auto *testRow = new wxBoxSizer(wxHORIZONTAL);
+        test_btn_ = new wxButton(page, wxID_ANY, "Test Recording (5s)");
+        test_btn_->Enable(rec_ != nullptr);
+        testRow->Add(test_btn_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
+        test_status_lbl_ = new wxStaticText(page, wxID_ANY, wxEmptyString);
+        test_status_lbl_->SetForegroundColour(textDim);
+        test_status_lbl_->SetBackgroundColour(bg);
+        testRow->Add(test_status_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
+        pageRoot->Add(testRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 16);
+
+        test_btn_->Bind(wxEVT_BUTTON, &SettingsDialog::OnTestRecording, this);
+        Bind(wxEVT_TIMER, &SettingsDialog::OnTestTimer, this, test_timer_.GetId());
+
         auto *argsLbl = new wxStaticText(page, wxID_ANY, "Custom FFmpeg args:");
         argsLbl->SetForegroundColour(text);
         argsLbl->SetBackgroundColour(bg);
@@ -476,6 +507,56 @@ private:
         note->SetForegroundColour(textDim);
         note->SetBackgroundColour(bg);
         pageRoot->Add(note, 0, wxALL, 16);
+    }
+
+    void OnTestRecording(wxCommandEvent &) {
+        if (!rec_ || test_running_) return;
+
+        std::string codec = codec_combo_->GetValue().ToUTF8().data();
+        std::string preset = preset_combo_->GetValue().ToUTF8().data();
+
+        std::wstring err;
+        if (!rec_->StartQuickTest(codec, preset, /*duration_sec=*/5, err)) {
+            wxMessageBox(wxString(err.c_str()), "Test Recording", wxOK | wxICON_WARNING, this);
+            return;
+        }
+
+        test_running_ = true;
+        test_btn_->Enable(false);
+        save_btn_->Enable(false);
+        cancel_btn_->Enable(false);
+        test_status_lbl_->SetLabel("Testing \u2014 recording the screen for 5 seconds\u2026");
+        Layout();
+        // 200ms is frequent enough to catch drop bursts for the overload
+        // verdict without adding any real overhead over 5 short seconds.
+        test_timer_.Start(200);
+    }
+
+    void OnTestTimer(wxTimerEvent &) {
+        if (rec_->PollQuickTest()) return; // still running - wait for the next tick
+
+        test_timer_.Stop();
+        RecordingController::QuickTestResult r = rec_->FinishQuickTest();
+        test_running_ = false;
+        test_btn_->Enable(true);
+        save_btn_->Enable(true);
+        cancel_btn_->Enable(true);
+        wxString encoder = wxString::FromUTF8(r.encoder_used);
+        test_status_lbl_->SetLabel(wxString::Format("Last test: %.1f fps avg, %dx%d, ",
+                                                      r.avg_fps, r.width, r.height) + encoder);
+        Layout();
+
+        wxString msg = "Encoder: " + encoder +
+            wxString::Format("\nResolution: %dx%d\nAverage FPS: %.1f\n"
+                              "Frames captured: %lld\nFrames dropped: %lld\n\n",
+                              r.width, r.height, r.avg_fps, r.frames, r.drops) +
+            (r.overloaded
+                 ? wxString::FromUTF8(
+                       "\u26A0 This machine struggled to keep up (sustained frame drops) - "
+                       "consider a faster preset, a hardware encoder, or a lower resolution/fps.")
+                 : wxString("No sustained frame drops - this codec looks fine for this machine."));
+        wxMessageBox(msg, "Test Recording Results",
+                     wxOK | (r.overloaded ? wxICON_WARNING : wxICON_INFORMATION), this);
     }
 
     // -- Audio ----------------------------------------------------------
@@ -1100,6 +1181,7 @@ private:
     AppState &state_;
     ThemeColors theme_;
     const LanguageTable &lang_;
+    RecordingController *rec_ = nullptr; // see settings_dialog.h's doc comment - may be null
     wxNotebook *notebook_ = nullptr;
     size_t kTabGeneral = 0, kTabVideo = 0, kTabAdvanced = 0;
 
@@ -1120,6 +1202,11 @@ private:
                *pixfmt_combo_ = nullptr;
     wxTextCtrl *custom_args_edit_ = nullptr;
     wxSpinCtrl *crf_spin_ = nullptr;
+    wxButton *test_btn_ = nullptr;
+    wxStaticText *test_status_lbl_ = nullptr;
+    wxTimer test_timer_;
+    bool test_running_ = false;
+    ColorButton *save_btn_ = nullptr, *cancel_btn_ = nullptr;
 
     // Audio
     wxChoice *mic_choice_ = nullptr;
@@ -1167,14 +1254,14 @@ private:
 } // namespace
 
 bool ShowSettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme,
-                         const LanguageTable &lang) {
-    SettingsDialog dlg(parent, state, theme, lang);
+                         const LanguageTable &lang, RecordingController *rec) {
+    SettingsDialog dlg(parent, state, theme, lang, rec);
     return dlg.ShowModal() == wxID_OK;
 }
 
 bool ShowSettingsDialogTab(wxWindow *parent, AppState &state, const ThemeColors &theme,
-                            const LanguageTable &lang, int tab_index) {
-    SettingsDialog dlg(parent, state, theme, lang);
+                            const LanguageTable &lang, int tab_index, RecordingController *rec) {
+    SettingsDialog dlg(parent, state, theme, lang, rec);
     dlg.SelectTab(tab_index);
     return dlg.ShowModal() == wxID_OK;
 }
