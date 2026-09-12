@@ -11,6 +11,7 @@
 
 #include <string>
 #include <vector>
+#include <utility>
 #include <unordered_map>
 #include <windows.h>
 
@@ -94,6 +95,7 @@ struct AppState {
     std::string hotkey_pause      = "F10";
     std::string hotkey_fullscreen = "F11";
     std::string hotkey_save_replay = "F8"; // Instant Replay - see recording_controller.h's SaveReplay()
+    std::vector<std::pair<std::string, std::string>> custom_hotkeys;
     bool        notify_sound      = true;
     bool        notify_flash      = true;
     bool        auto_save_profile = false;
