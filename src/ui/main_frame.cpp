@@ -1230,6 +1230,26 @@ void HomRecMainFrame::DoStop() {
     });
 }
 
+void HomRecMainFrame::HandleRecordingCrashed() {
+    HrLog::Error("Recording: stopping after the ffmpeg process ended unexpectedly.");
+
+    // Same UI-side sequence DoStop() runs - the status dot/time/file label
+    // otherwise stay stuck on whatever they last showed (see rec_->
+    // crashed()'s doc comment for why that used to happen forever, not
+    // just until the next tick).
+    SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
+    if (time_lbl_) time_lbl_->SetLabel("00:00:00");
+    if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
+    start_color_btn_->Enable2(false);
+    pause_color_btn_->Enable2(false);
+    Update();
+
+    recording_crashed_pending_notice_ = true;
+    rec_->StopAsync([this]() {
+        CallAfter([this]() { OnRecordingFinalized(); });
+    });
+}
+
 void HomRecMainFrame::OnRecordingFinalized() {
     start_color_btn_->Enable2(true);
     start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
@@ -1240,6 +1260,23 @@ void HomRecMainFrame::OnRecordingFinalized() {
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
     if (plugins_) plugins_->EmitHook("on_recording_stop");
+
+    // Came from HandleRecordingCrashed() rather than a normal DoStop() -
+    // let the user know *why* recording just stopped on its own instead
+    // of silently landing back on Ready as if they'd clicked Stop
+    // themselves. Shown before the normal "recording saved" summary below
+    // (still worth showing - whatever was captured up to the crash was
+    // still finalized and kept).
+    if (recording_crashed_pending_notice_) {
+        recording_crashed_pending_notice_ = false;
+        wxMessageBox(
+            wxString::FromUTF8(
+                "Recording stopped unexpectedly \u2014 the encoder process ended on its "
+                "own (it may have crashed, been closed externally, or hit a fatal "
+                "error).\n\nWhatever was captured up to that point has been finalized "
+                "and saved."),
+            "HomRec - Recording Interrupted", wxOK | wxICON_WARNING, this);
+    }
 
     // "Show summary" setting: the "recording saved, open folder?" popup.
     // Ported from custom_messagebox.h (already used elsewhere in this
@@ -1592,7 +1629,7 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             PersistSettings();
             break;
         case ID_SETTINGS_OPEN:
-            if (ShowSettingsDialog(this, state_, theme_, lang_) && rec_raw_) {
+            if (ShowSettingsDialog(this, state_, theme_, lang_, rec_raw_) && rec_raw_) {
                 // Settings dialog's General tab can now change
                 // state_.current_language (including to a language just
                 // imported via "Add Language...") - reload it here so
@@ -1724,6 +1761,18 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
 
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
+
+    // See rec_->crashed()'s doc comment - PollStats() just flagged this,
+    // it doesn't stop anything itself (that touches wx UI state, which
+    // belongs here, not in RecordingController). Bail out of the rest of
+    // this tick immediately - state_.recording is still true until
+    // HandleRecordingCrashed()'s StopAsync() finishes, but there's nothing
+    // useful left to poll from the now-dead ffmpeg process.
+    if (rec_ && rec_->crashed()) {
+        rec_->AcknowledgeCrash();
+        HandleRecordingCrashed();
+        return;
+    }
 
     // logs\pc.log - throttles itself internally to ~once every 10s, so
     // piggybacking on this existing 500ms tick (rather than adding a

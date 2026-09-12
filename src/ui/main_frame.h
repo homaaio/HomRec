@@ -185,6 +185,12 @@ private:
     // the rest of what DoStop() used to do synchronously right after
     // rec_->Stop() returned. See DoStop()'s comment.
     void OnRecordingFinalized();
+    // Called from OnStatsTimer() the moment rec_->crashed() comes back
+    // true - runs the same stop/finalize sequence DoStop() does (so the
+    // status dot/elapsed time/Recording label don't stay stuck showing a
+    // recording that's no longer actually happening - see rec_->crashed()'s
+    // doc comment), then tells the user what happened once it's done.
+    void HandleRecordingCrashed();
     void DoPause();
     void DoSaveReplay(); // Instant Replay hotkey/menu action - see recording_controller.h's SaveReplay()
     // Wraps DoStart() with the "Countdown (3s)" setting: if
@@ -202,6 +208,12 @@ private:
     // this ports from. state_.show_summary (the actual settings toggle)
     // is what's persisted.
     bool summary_dont_show_again_ = false;
+    // Set by HandleRecordingCrashed() right before it kicks off the same
+    // StopAsync()->OnRecordingFinalized() path DoStop() uses - lets
+    // OnRecordingFinalized() tell the difference between "the user clicked
+    // Stop" and "ffmpeg died and we're cleaning up after it" so it can
+    // show the right message.
+    bool recording_crashed_pending_notice_ = false;
     void SetStatusState(const wxString &text, COLORREF dotColor);
     void ToggleFullscreenNative();
     // Un-minimizes + un-hides the window from the tray, in that order -
