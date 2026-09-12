@@ -99,6 +99,37 @@ void ReadOverlaysSection(const std::unordered_map<std::string, std::string> &kv,
     }
 }
 
+// Same pattern as Write/ReadOverlaysSection above, for
+// AppState::custom_hotkeys (see its declaration in app_state.h and
+// ConfigureHotkeysFromState() in main_frame.cpp for how these get turned
+// into actual OS hotkeys). Also not part of HrSettingsRegistry for the
+// same reason overlays aren't: it's a vector of records, not one scalar
+// field.
+void WriteHotkeysSection(std::ofstream &f, const std::vector<std::pair<std::string, std::string>> &hotkeys) {
+    f << "[custom_hotkeys]\n"
+      << "custom_hotkey_count=" << hotkeys.size() << "\n\n";
+    for (size_t i = 0; i < hotkeys.size(); ++i) {
+        std::string p = "custom_hotkey_" + std::to_string(i) + "_";
+        f << p << "action=" << OneLine(hotkeys[i].first) << "\n"
+          << p << "keys=" << OneLine(hotkeys[i].second) << "\n\n";
+    }
+}
+
+void ReadHotkeysSection(const std::unordered_map<std::string, std::string> &kv,
+                         std::vector<std::pair<std::string, std::string>> &hotkeys) {
+    auto has = [&](const std::string &k) { return kv.find(k) != kv.end(); };
+    auto get = [&](const std::string &k) -> std::string { auto it = kv.find(k); return it == kv.end() ? std::string() : it->second; };
+
+    hotkeys.clear();
+    if (!has("custom_hotkey_count")) return;
+    int n = atoi(get("custom_hotkey_count").c_str());
+    for (int i = 0; i < n; ++i) {
+        std::string p = "custom_hotkey_" + std::to_string(i) + "_";
+        if (!has(p + "action")) continue; // tolerate a hand-edited/corrupt file
+        hotkeys.emplace_back(get(p + "action"), get(p + "keys"));
+    }
+}
+
 } // namespace
 
 namespace HrcConfig {
@@ -142,6 +173,7 @@ bool Save(const AppState &state, const std::wstring &path) {
     // of the registry above since it's a vector of records, not a scalar
     // field - see hr_settings_registry.h's "deliberately excludes" note.
     WriteOverlaysSection(f, state.overlays);
+    WriteHotkeysSection(f, state.custom_hotkeys);
 
     return true;
 }
@@ -179,6 +211,7 @@ bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields
     // See the matching comment in Save() -- overlays weren't
     // persisted at all before.
     ReadOverlaysSection(kv, state.overlays);
+    ReadHotkeysSection(kv, state.custom_hotkeys);
 
     return true;
 }
