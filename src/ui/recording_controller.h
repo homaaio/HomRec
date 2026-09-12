@@ -53,6 +53,46 @@ public:
     // nothing is recording.
     void StopAsync(std::function<void()> on_done);
 
+    // -- Quick codec test (Settings > Video & Codec > "Test Recording") --
+    //
+    // A short, disposable recording of the currently selected monitor,
+    // using whatever codec/preset the Settings dialog currently has
+    // picked (which may not be Saved yet) - exists purely to answer
+    // "does this codec actually work on this machine, and what fps does
+    // it get" without committing to a real recording or overwriting
+    // anything. Uses its own local pipeline/ffmpeg process (never
+    // pipeline_/ffproc_, and never touches state_.recording) so it can't
+    // be confused with an actual recording by the rest of the app - it's
+    // refused outright if one is already in progress.
+    //
+    // The live preview pipeline (if running) is torn down for the
+    // duration, same as Start() would take it over for a real recording -
+    // DXGI Desktop Duplication only allows one active duplication handle
+    // per monitor, so the test and the preview can't run at once.
+    // FinishQuickTest() brings preview back automatically.
+    //
+    // StartQuickTest() kicks it off; the caller (a wxTimer on whatever UI
+    // owns this) should call PollQuickTest() every ~200-300ms. Once it
+    // returns false (the duration elapsed), call FinishQuickTest() exactly
+    // once to get the result, tear everything down, and restore preview.
+    struct QuickTestResult {
+        double avg_fps = 0.0;
+        long long frames = 0;
+        long long drops = 0;
+        int width = 0, height = 0;
+        std::string encoder_used; // UTF-8, e.g. "libx264" or "h264_nvenc"
+        bool overloaded = false; // 3+ consecutive ticks with new drops
+    };
+    bool StartQuickTest(const std::string &codec, const std::string &preset,
+                         int duration_sec, std::wstring &error_out);
+    // Returns false once the test's duration has elapsed - the caller
+    // should stop polling and call FinishQuickTest() the moment this
+    // returns false. A no-op returning false if no test is running (e.g.
+    // StartQuickTest() failed) so a caller that always polls once after
+    // Start regardless of its return value can't spin forever.
+    bool PollQuickTest();
+    QuickTestResult FinishQuickTest();
+
 private:
     // The actual slow work described in StopAsync()'s comment above -
     // waiting for ffmpeg to finish, mixing/merging/exporting audio,
@@ -194,6 +234,15 @@ public:
     // going either way. Clears itself as soon as drops stop, no separate
     // reset call needed.
     bool overloaded() const { return overloaded_; }
+
+    // True once PollStats() notices the ffmpeg process is gone while
+    // state_.recording is still true - it crashed, was closed externally,
+    // or hit a fatal encode error, none of which went through Stop().
+    // Stays true until the caller (main_frame's OnStatsTimer) reacts to
+    // it and calls AcknowledgeCrash(), so it can't fire twice for the
+    // same crash while the resulting StopAsync() finalize is in flight.
+    bool crashed() const { return crashed_; }
+    void AcknowledgeCrash() { crashed_ = false; }
 
     // True once the preview-only pipeline has failed to (re)start several
     // times in a row (e.g. DXGI dx_create() keeps returning null - RDP,
@@ -457,4 +506,28 @@ private:
     long long last_drops_seen_ = 0;
     int overload_streak_ = 0;
     bool overloaded_ = false;
+    bool crashed_ = false; // see crashed()/AcknowledgeCrash() above
+
+    // -- Quick codec test state (see StartQuickTest() above) ------------
+    // Entirely separate from pipeline_/ffproc_ (the real recording/
+    // preview pipeline) so a test can never be mistaken for, or collide
+    // with, an actual recording.
+    void *qt_pipeline_ = nullptr;
+    void *qt_ffproc_ = nullptr;
+    std::wstring qt_output_path_;
+    bool qt_running_ = false;
+    std::chrono::steady_clock::time_point qt_end_time_{};
+    double qt_fps_sum_ = 0.0;
+    int qt_fps_samples_ = 0;
+    long long qt_last_drops_ = 0;
+    int qt_overload_streak_ = 0;
+    bool qt_overloaded_ = false;
+    long long qt_frames_ = 0, qt_drops_ = 0;
+    int qt_w_ = 0, qt_h_ = 0;
+    std::string qt_encoder_used_;
+    // Preview was actually torn down by StartQuickTest() and should be
+    // restored by FinishQuickTest() - false if preview was already off
+    // (state_.disable_preview) or wasn't running, so Finish doesn't
+    // start it up when it wasn't the test's place to.
+    bool qt_preview_was_torn_down_ = false;
 };

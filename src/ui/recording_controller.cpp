@@ -801,6 +801,14 @@ void RecordingController::TogglePause() {
 
 void RecordingController::PollStats() {
     if (!state_.recording) return;
+    if (ffproc_ && !finalizing_ && !hr_ff_is_running(ffproc_)) {
+        HrLog::Error("Recording: the ffmpeg process ended unexpectedly mid-recording "
+                     "(crashed, was closed externally, or hit a fatal error) - flagging "
+                     "this as a crash so the UI can stop and finalize what was captured.");
+        crashed_ = true;
+        return;
+    }
+
     long long frames = 0, drops = 0;
     double fps = 0.0;
     if (pipeline_) hr_pl_stats(pipeline_, &frames, &drops, &fps);
@@ -1222,6 +1230,206 @@ void RecordingController::TeardownPreview() {
             HrLog::Error("Preview teardown thread: uncaught unknown exception");
         }
     });
+}
+
+bool RecordingController::StartQuickTest(const std::string &codec_in, const std::string &preset,
+                                          int duration_sec, std::wstring &error_out) {
+    if (state_.recording) {
+        error_out = L"Can't run a test while a recording is already in progress.";
+        return false;
+    }
+    if (qt_running_) {
+        error_out = L"A test is already running.";
+        return false;
+    }
+    if (!ffmpeg_found_) {
+        error_out = L"FFmpeg not found.";
+        return false;
+    }
+
+    // Resolve the selected monitor exactly like ResolveCaptureSize()'s
+    // desktop-capture branch (same state_.monitor_id -1 convention), but
+    // kept entirely local - this must NOT touch capture_w_/h_/output_w_/
+    // h_/capture_output_idx_, since those belong to the real recording/
+    // preview pipeline_ and a test can run without a real recording ever
+    // starting.
+    void *di = hr_di_create();
+    hr_di_refresh(di);
+    int mx = 0, my = 0, mw = 1920, mh = 1080;
+    float dpi = 96.0f;
+    int idx = state_.monitor_id > 0 ? state_.monitor_id - 1 : 0;
+    if (!hr_di_get(di, idx, &mx, &my, &mw, &mh, &dpi)) {
+        idx = 0;
+        hr_di_primary(di, &mx, &my, &mw, &mh, &dpi);
+    }
+    hr_di_destroy(di);
+    if (mw <= 0 || mh <= 0) { mw = 1920; mh = 1080; }
+    if (mw % 2) mw--;
+    if (mh % 2) mh--;
+    qt_w_ = mw;
+    qt_h_ = mh;
+
+    // DXGI Desktop Duplication only allows one active duplication handle
+    // per monitor at a time - if the live preview is currently capturing
+    // this same monitor, creating a second pipeline for the test would
+    // just fail. Tear it down for the test's duration (JoinPendingPreviewTeardown()
+    // makes sure that's actually finished, not just kicked off, before the
+    // create below runs); FinishQuickTest() brings it back.
+    qt_preview_was_torn_down_ = (pipeline_ != nullptr);
+    TeardownPreview();
+    JoinPendingPreviewTeardown();
+
+    wchar_t tmp_dir[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmp_dir);
+    qt_output_path_ = std::wstring(tmp_dir) + L"homrec_test_" +
+                       std::to_wstring(GetTickCount()) + L".mp4";
+
+    std::wstring codec = codec_in == "libx264" && !hw_encoder_.empty()
+                              ? hw_encoder_
+                              : WideFromNarrow(codec_in);
+    qt_encoder_used_ = NarrowFromWide(codec);
+
+    // Same args-building hr_build_codec_args() call BuildCodecArgs() makes,
+    // just with the Settings dialog's live (possibly-unsaved) preset
+    // instead of state_.enc_preset - BuildCodecArgs() itself isn't
+    // parameterized on preset, so it's inlined here rather than mutating
+    // state_ (which a background timer/preview tick could be reading
+    // concurrently) to borrow it temporarily.
+    std::wstring codec_args;
+    if (!state_.custom_ffmpeg_args.empty()) {
+        codec_args = L"-c:v " + codec + L" " + WideFromNarrow(state_.custom_ffmpeg_args);
+    } else {
+        wchar_t buf[512] = {};
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        std::wstring wpreset = WideFromNarrow(preset);
+        hr_build_codec_args(codec.c_str(), state_.quality, state_.target_fps,
+                             (int)si.dwNumberOfProcessors, buf, 512, wpreset.c_str());
+        codec_args = buf;
+    }
+
+    qt_ffproc_ = hr_ff_create();
+    hr_ff_set_ffmpeg_path(qt_ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
+    hr_ff_set_output_path(qt_ffproc_, NarrowFromWide(qt_output_path_).c_str());
+    hr_ff_set_codec_args(qt_ffproc_, NarrowFromWide(codec_args).c_str());
+    hr_ff_set_video_params(qt_ffproc_, mw, mh, state_.target_fps);
+    hr_ff_set_output_size(qt_ffproc_, mw, mh);
+    hr_ff_set_pipe_input(qt_ffproc_, 1);
+    if (hr_ff_start(qt_ffproc_) != 0) {
+        error_out = L"Failed to start the ffmpeg process for the test.";
+        HrLog::Error("Quick test: ffmpeg process didn't start");
+        hr_ff_destroy(qt_ffproc_);
+        qt_ffproc_ = nullptr;
+        if (qt_preview_was_torn_down_) EnsurePreview();
+        return false;
+    }
+
+    intptr_t ff_stdin = hr_ff_get_stdin_handle(qt_ffproc_);
+    if (ff_stdin == 0) {
+        error_out = L"Failed to start the ffmpeg process for the test.";
+        HrLog::Error("Quick test: ffmpeg stdin pipe handle unavailable");
+        hr_ff_kill(qt_ffproc_);
+        hr_ff_destroy(qt_ffproc_);
+        qt_ffproc_ = nullptr;
+        if (qt_preview_was_torn_down_) EnsurePreview();
+        return false;
+    }
+
+    qt_pipeline_ = hr_pl_create(mw, mh, state_.target_fps, ff_stdin, 0, 0, idx);
+    if (!qt_pipeline_ || !hr_pl_start(qt_pipeline_)) {
+        error_out = L"Failed to start the capture pipeline for the test.";
+        HrLog::Error("Quick test: capture pipeline didn't start");
+        hr_ff_kill(qt_ffproc_);
+        hr_ff_destroy(qt_ffproc_);
+        qt_ffproc_ = nullptr;
+        if (qt_pipeline_) { hr_pl_destroy(qt_pipeline_); qt_pipeline_ = nullptr; }
+        if (qt_preview_was_torn_down_) EnsurePreview();
+        return false;
+    }
+    hr_pl_set_recording(qt_pipeline_, /*active=*/1, ff_stdin);
+
+    qt_fps_sum_ = 0.0;
+    qt_fps_samples_ = 0;
+    qt_last_drops_ = 0;
+    qt_overload_streak_ = 0;
+    qt_overloaded_ = false;
+    qt_frames_ = 0;
+    qt_drops_ = 0;
+    if (duration_sec < 1) duration_sec = 1;
+    qt_end_time_ = std::chrono::steady_clock::now() + std::chrono::seconds(duration_sec);
+    qt_running_ = true;
+    HrLog::Info("Quick test: recording " + std::to_string(duration_sec) + "s at " +
+                std::to_string(mw) + "x" + std::to_string(mh) + " with " +
+                NarrowFromWide(codec));
+    return true;
+}
+
+bool RecordingController::PollQuickTest() {
+    if (!qt_running_) return false;
+
+    long long frames = 0, drops = 0;
+    double fps = 0.0;
+    if (qt_pipeline_) hr_pl_stats(qt_pipeline_, &frames, &drops, &fps);
+    qt_frames_ = frames;
+    qt_drops_ = drops;
+    if (fps > 0.0) { qt_fps_sum_ += fps; ++qt_fps_samples_; }
+
+    long long delta = drops - qt_last_drops_;
+    qt_last_drops_ = drops;
+    if (delta > 0) {
+        if (qt_overload_streak_ < 3) ++qt_overload_streak_;
+    } else {
+        qt_overload_streak_ = 0;
+    }
+    if (qt_overload_streak_ >= 3) qt_overloaded_ = true;
+
+    if (std::chrono::steady_clock::now() >= qt_end_time_) {
+        qt_running_ = false;
+        return false;
+    }
+    return true;
+}
+
+RecordingController::QuickTestResult RecordingController::FinishQuickTest() {
+    QuickTestResult result;
+    result.width = qt_w_;
+    result.height = qt_h_;
+    result.frames = qt_frames_;
+    result.drops = qt_drops_;
+    result.avg_fps = qt_fps_samples_ > 0 ? qt_fps_sum_ / qt_fps_samples_ : 0.0;
+    result.encoder_used = qt_encoder_used_;
+    result.overloaded = qt_overloaded_;
+
+    if (qt_pipeline_) {
+        hr_pl_stop(qt_pipeline_);
+        hr_pl_destroy(qt_pipeline_);
+        qt_pipeline_ = nullptr;
+    }
+    if (qt_ffproc_) {
+        // Same generous wait Stop()'s finalize tail gives a real
+        // recording (see StopFinalizeTail()'s comment) would be overkill
+        // for a few seconds of test footage that's about to be deleted
+        // anyway - a shorter budget before force-stopping is fine here.
+        hr_ff_stop_graceful(qt_ffproc_);
+        if (hr_ff_wait(qt_ffproc_, 5000) != 0) {
+            HrLog::Warn("Quick test: ffmpeg didn't finish on its own after 5s - stopping it.");
+        }
+        hr_ff_destroy(qt_ffproc_);
+        qt_ffproc_ = nullptr;
+    }
+    // Disposable by design - it was never meant to be kept, regardless
+    // of whether it finalized cleanly.
+    if (!qt_output_path_.empty()) {
+        DeleteFileW(qt_output_path_.c_str());
+        qt_output_path_.clear();
+    }
+    qt_running_ = false;
+
+    if (qt_preview_was_torn_down_) {
+        qt_preview_was_torn_down_ = false;
+        EnsurePreview();
+    }
+    return result;
 }
 
 void RecordingController::ResetPreviewRetryState() {
