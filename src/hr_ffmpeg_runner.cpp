@@ -231,6 +231,8 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
 
     /* Pixel format for H.264 compatibility */
     ss << L" -pix_fmt yuv420p";
+    ss << L" -color_range pc -colorspace smpte170m"
+          L" -color_primaries smpte170m -color_trc smpte170m";
 
     /* Encode-time downscale (AppState's Settings > Resolution, e.g. 75%/
        50%/25% of native) - applied here via ffmpeg's own scaler rather
