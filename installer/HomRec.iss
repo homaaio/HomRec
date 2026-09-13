@@ -26,7 +26,7 @@
 ; running hr.exe instead of failing to overwrite it mid-update.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.3"
+  #define MyAppVersion "2.2.0"
 #endif
 
 #define MyAppName "HomRec"
