@@ -161,11 +161,20 @@ HR_EXPORT int hr_get_dshow_devices(const wchar_t* ffpath,
 // -------------------------------------------------------------
 // hr_probe_gpu  (run on a background thread)
 // -------------------------------------------------------------
+// The probe clip's size has to be at least as big as the smallest
+// resolution these hardware encoders will actually accept - 32x32 (the
+// previous size here) is below the minimum coded size several NVENC/QSV/
+// AMF driver versions enforce, so the probe would report "failed" even on
+// machines where the encoder works perfectly fine at real capture
+// resolutions. That false negative silently forced every recording onto
+// software libx264 (much heavier on the CPU) despite a working GPU
+// encoder sitting right there. 1280x720 is comfortably above every known
+// per-vendor minimum while still encoding a 0.1s clip near-instantly.
 struct GpuCand { const wchar_t* name; const wchar_t* extra_args; };
 static const GpuCand k_gpu[] = {
-    { L"h264_nvenc", L" -f lavfi -i nullsrc=s=32x32:d=0.1 -c:v h264_nvenc -f null -" },
-    { L"h264_amf",   L" -f lavfi -i nullsrc=s=32x32:d=0.1 -c:v h264_amf   -f null -" },
-    { L"h264_qsv",   L" -f lavfi -i nullsrc=s=32x32:d=0.1 -c:v h264_qsv   -f null -" },
+    { L"h264_nvenc", L" -f lavfi -i nullsrc=s=1280x720:d=0.1 -c:v h264_nvenc -f null -" },
+    { L"h264_amf",   L" -f lavfi -i nullsrc=s=1280x720:d=0.1 -c:v h264_amf   -f null -" },
+    { L"h264_qsv",   L" -f lavfi -i nullsrc=s=1280x720:d=0.1 -c:v h264_qsv   -f null -" },
     { nullptr, nullptr }
 };
 
