@@ -1398,7 +1398,23 @@ RecordingController::QuickTestResult RecordingController::FinishQuickTest() {
     result.drops = qt_drops_;
     result.avg_fps = qt_fps_samples_ > 0 ? qt_fps_sum_ / qt_fps_samples_ : 0.0;
     result.encoder_used = qt_encoder_used_;
-    result.overloaded = qt_overloaded_;
+
+    // qt_overloaded_ (PollQuickTest) only fires on a *sustained* rise --
+    // three consecutive 200ms polls where the drop count went up. A codec
+    // that's hopelessly behind for this machine usually falls behind hard
+    // once (a single big catch-up burst that adds dozens of dropped/
+    // duplicated frames between two polls) and then goes quiet because
+    // there's nothing left to catch up on, or the pipeline simply can't
+    // produce more - that shows up as one poll with a huge delta
+    // surrounded by flat ones, which never reaches a streak of 3 and so
+    // never sets qt_overloaded_, even though the codec is clearly not
+    // fine (see: a test reporting 242 of 317 frames dropped and still
+    // claiming "no sustained frame drops"). Back the verdict with the
+    // actual drop ratio too, so a single catastrophic burst can't hide
+    // behind the streak check.
+    const bool ratio_bad = result.frames > 0 &&
+        (double)result.drops / (double)result.frames > 0.15;
+    result.overloaded = qt_overloaded_ || ratio_bad;
 
     if (qt_pipeline_) {
         hr_pl_stop(qt_pipeline_);
