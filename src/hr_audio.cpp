@@ -724,13 +724,16 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
             wav_write(mic_wav_path, g_state->mic_buf, 2, g_state->mic_stream.rate))
             result |= 0x1;
         g_state->mic_buf.clear();
+        g_state->mic_buf.shrink_to_fit();
     }
     {
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
         if (sys_wav_path && !g_state->sys_buf.empty() &&
             wav_write(sys_wav_path, g_state->sys_buf, 2, g_state->sys_stream.rate))
             result |= 0x2;
+        // See matching comment on mic_buf above.
         g_state->sys_buf.clear();
+        g_state->sys_buf.shrink_to_fit();
     }
 
     return result;
