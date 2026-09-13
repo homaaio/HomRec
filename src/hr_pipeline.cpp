@@ -1078,7 +1078,7 @@ struct Pipeline {
                 {
                     std::lock_guard<std::mutex> lock(pipe_queue_mtx);
 
-                    if (rep == 0 && pipe_queue.size() >= MAX_QUEUE_SIZE) {
+                    if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
                         dropped = std::move(pipe_queue.front());
                         pipe_queue.pop();
                         frames_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -1519,6 +1519,19 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     // straight through to its own `if (pl->handed_off.load()) leak_pl =
     // true;` and return without touching pl again, exactly as if it had
     // done the detaching itself. Safe to keep going here either way.
+    //
+    // BUT: this function must apply that exact same rule to ITSELF. Once
+    // handed_off is true, the detached thread(s) above own `pl` and may
+    // call finish_thread() -> delete this the instant their own work
+    // finishes, on another thread, with no further synchronization back
+    // to us. The code below used to keep touching pl->pipe_queue_mtx/
+    // pl->pipe_queue unconditionally after the detach - a straight
+    // use-after-free (and occasionally a use-after-free of the mutex
+    // itself) racing against that detached thread's delete this, which is
+    // exactly the access violation seen right after "capture thread did
+    // not stop in time" in the crash logs. Bail out here, the same way
+    // hr_pl_destroy() already does, instead of touching pl again.
+    if (pl->handed_off.load(std::memory_order_acquire)) return;
 
     // Clear queue
     {
