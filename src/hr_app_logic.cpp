@@ -373,9 +373,9 @@ HR_EXPORT int hr_probe_gpu_encoder(const char *ffmpeg_path,
         const char *args;  /* space-separated ffmpeg args after the ffmpeg binary */
     };
     static const Probe probes[] = {
-        {"h264_nvenc", "-y -f lavfi -i nullsrc=s=32x32:d=0.1 -c:v h264_nvenc -f null -"},
-        {"h264_amf",   "-y -f lavfi -i nullsrc=s=32x32:d=0.1 -c:v h264_amf   -f null -"},
-        {"h264_qsv",   "-y -f lavfi -i nullsrc=s=32x32:d=0.1 -c:v h264_qsv   -f null -"},
+        {"h264_nvenc", "-y -f lavfi -i nullsrc=s=1280x720:d=0.1 -c:v h264_nvenc -f null -"},
+        {"h264_amf",   "-y -f lavfi -i nullsrc=s=1280x720:d=0.1 -c:v h264_amf   -f null -"},
+        {"h264_qsv",   "-y -f lavfi -i nullsrc=s=1280x720:d=0.1 -c:v h264_qsv   -f null -"},
         {nullptr, nullptr}
     };
 
