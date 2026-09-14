@@ -651,6 +651,14 @@ struct Pipeline {
             HrLog::Error("Writer thread: uncaught unknown exception -- this pipeline is "
                          "stopping instead of crashing the app.");
         }
+        if (pipe_handle != 0 && pipe_handle != -1) {
+#ifdef _WIN32
+            CloseHandle(reinterpret_cast<HANDLE>(pipe_handle));
+#else
+            ::close(static_cast<int>(pipe_handle));
+#endif
+            pipe_handle = 0;
+        }
 
         // Portable completion signal - see writer_thread_done's declaration
         // for why this replaced a WaitForSingleObject-on-native_handle()
