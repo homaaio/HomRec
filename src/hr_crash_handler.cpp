@@ -81,7 +81,7 @@ void WriteCrashArtifacts(EXCEPTION_POINTERS *dump_ctx, const wchar_t *reason) {
     swprintf_s(dump_path, L"%s\\crash_%s.dmp", crash_dir, stamp);
 
     bool dump_written = false;
-    if (dump_ctx) {
+    {
         HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
         if (dbghelp) {
             auto write_dump = (MiniDumpWriteDump_t)GetProcAddress(dbghelp, "MiniDumpWriteDump");
@@ -90,8 +90,23 @@ void WriteCrashArtifacts(EXCEPTION_POINTERS *dump_ctx, const wchar_t *reason) {
                                         FILE_ATTRIBUTE_NORMAL, nullptr);
                 if (f != INVALID_HANDLE_VALUE) {
                     MINIDUMP_EXCEPTION_INFORMATION mei{};
+                    EXCEPTION_POINTERS self_ep{};
+                    EXCEPTION_RECORD self_er{};
+                    CONTEXT self_ctx{};
+                    PEXCEPTION_POINTERS ep_to_use = dump_ctx;
+                    if (!ep_to_use) {
+                        // No real exception record (the terminate() path) -
+                        // synthesize one from this thread's own current
+                        // context so dbghelp still has something to walk.
+                        self_ctx.ContextFlags = CONTEXT_FULL;
+                        RtlCaptureContext(&self_ctx);
+                        self_er.ExceptionCode = 0; // not a real exception - see reason string in the log line instead
+                        self_ep.ExceptionRecord = &self_er;
+                        self_ep.ContextRecord = &self_ctx;
+                        ep_to_use = &self_ep;
+                    }
                     mei.ThreadId = GetCurrentThreadId();
-                    mei.ExceptionPointers = dump_ctx;
+                    mei.ExceptionPointers = ep_to_use;
                     mei.ClientPointers = FALSE;
                     // WithDataSegs: includes global/static variable state
                     // (helpful for AppState-style bugs) without the much
