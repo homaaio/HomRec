@@ -64,6 +64,8 @@ set(HR_SOURCES
     src/hr_pipeline.cpp
     src/hr_overlay_render.cpp
     src/hr_webcam_enum.cpp
+    src/hr_webcam_capture.cpp
+    src/hr_encoder_helpers.c
     src/hr_ffmpeg_runner.cpp
     src/hr_tools.cpp
     src/hr_ui_utils.cpp
@@ -113,6 +115,7 @@ target_link_libraries(hr PRIVATE
     comctl32 comdlg32 gdi32 shell32 user32 psapi wininet winhttp
     d3d11 dxgi pdh winmm ole32 uuid lua dwmapi uxtheme
     windowscodecs strmiids oleaut32
+    mfplat mfreadwrite mf mfuuid
     wx_mswu_xrc-3.2 wx_mswu_html-3.2 wx_mswu_qa-3.2
     wx_mswu_core-3.2 wx_baseu_xml-3.2 wx_baseu_net-3.2 wx_baseu-3.2
 )
