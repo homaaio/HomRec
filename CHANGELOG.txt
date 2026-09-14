@@ -1,5 +1,62 @@
 welcome to changelog :D
 
+[Version 2.2 beta2] - 2026-09-14
+
+- Improved: crash reports for "unhandled C++ exception / std::terminate()"
+  crashes (several users have hit these, always logged as "no dump
+  written") now actually get a minidump. hr_crash_handler.cpp only
+  wrote a dump when it had a real EXCEPTION_POINTERS record from the
+  SEH filter, which the terminate() path never has by definition -
+  every one of these crashes was previously undiagnosable from the
+  outside. MiniDumpWriteDump's exception-info argument is optional, so
+  the terminate handler now synthesizes one from its own thread's
+  current context (via RtlCaptureContext) when there's no real
+  exception record, giving a real dump with the crashing thread's call
+  stack instead of a bare log line. Still investigating the actual
+  overload-adjacent crash itself (all reported cases so far follow a
+  "Recording overloaded: dropping frames" warning within seconds) -
+  this at least makes the next occurrence debuggable.
+- In welcome_dialog.cpp, the bounding box for the text on the welcome page (msgRect) 
+  had a hardcoded height range of 168–300, which wasn't enough to fit 
+  the entire two-paragraph text—without the DT_NOCLIP flag, DrawTextW simply
+  clips whatever extends beyond the rectangle's boundaries (#5)
+- Fixed: Stop could finalize a recording to a broken ~1KB placeholder
+  file (just the ftyp/moov header, nothing playable). Root cause: the
+  raw video pipe to ffmpeg shares its OS handle with ffmpeg's stdin, and
+  the graceful-stop path (hr_ff_stop_graceful() in
+  hr_ffmpeg_runner.cpp) closed that handle itself the instant Stop was
+  pressed - including while the writer thread could still be detached
+  and mid-write, draining a queued frame backlog in the background (see
+  hr_pl_stop()'s handed-off path). That truncated the raw video stream
+  and sent ffmpeg an early EOF before more than a few frames had gone
+  out. In pipe-input mode, closing this handle is now solely the writer
+  thread's job, done exactly once right after its loop actually ends
+  (hr_pipeline.cpp); the stop path just drops its own reference instead
+  of touching the handle. Non-pipe-input mode (stdin as ffmpeg's real
+  interactive control channel) is unaffected and still gets the "q\n"
+  graceful-stop keystroke.
+- Fixed: on an overloaded machine (e.g. recording heavy screen content
+  like a video playing back), the finished recording could come out
+  drastically sped up with most of the audio missing - a 16-second
+  recording could turn into a ~1-second, tiny (~100KB) file. Root cause:
+  frames are piped to ffmpeg with a fixed nominal framerate and no real
+  per-frame timestamps, so when the writer/encoder falls behind and
+  hr_pipeline.cpp's pipe_queue backpressure drops more frames than it
+  can duplicate to compensate, the encoded video.mp4's real duration
+  silently shrinks to (frames actually written / nominal fps) - which
+  can be a small fraction of how long the recording actually ran. The
+  final merge step (hr_merge_av in hr_tools.cpp) then used a flat
+  "-shortest", which cut the accurate, wall-clock-captured audio down
+  to match that broken short video instead of fixing the real problem.
+  Now hr_merge_av() compares the video's own encoded duration against
+  the real elapsed recording time (passed in by
+  RecordingController::StopFinalizeTail()) and, if the video is
+  significantly shorter, re-encodes it with a "setpts" filter to
+  stretch it back to real speed before merging - so the output plays at
+  the correct speed with the full audio intact instead of losing audio
+  to a "-shortest" trim. A normal recording (no such gap) still takes
+  the old, fast stream-copy merge path unchanged.
+
 [Version 2.2 beta] - 2026-09-12
 
 === Added ===
