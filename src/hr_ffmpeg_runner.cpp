@@ -395,10 +395,49 @@ HR_EXPORT int hr_ff_stop_graceful(void *handle) {
 
 #ifdef _WIN32
     if (ctx->hStdin) {
-        DWORD written = 0;
-        WriteFile(ctx->hStdin, "q\n", 2, &written, nullptr);
-        CloseHandle(ctx->hStdin);
-        ctx->hStdin = nullptr;
+        if (ctx->pipe_input) {
+            // BUGFIX (recording finalizes to a broken ~1KB placeholder
+            // file): ctx->hStdin here is the exact same HANDLE the
+            // Pipeline's writer thread has open as its raw video pipe
+            // (see hr_pl_set_recording()/hr_ff_get_stdin_handle()) - in
+            // pipe_input mode stdin *is* the raw frame stream, not an
+            // interactive console. Writing "q\n" into it doesn't tell
+            // ffmpeg to finish gracefully (that keystroke handling isn't
+            // wired to a redirected pipe that's already declared as
+            // "-i pipe:0" video input) - it just splices 2 garbage bytes
+            // into the middle of whatever frame comes next, desyncing
+            // every raw frame that follows since rawvideo has no framing
+            // markers to resync on.
+            //
+            // Worse, closing the handle here unconditionally raced the
+            // writer thread: if hr_pl_stop() had to hand this recording's
+            // writer thread off (still draining a backlog in the
+            // background - see hr_pl_stop()'s handed_off path), that
+            // thread could still be mid-WriteFile() on this very handle
+            // when CloseHandle() ran here from a completely different
+            // thread. The pipe would then see a truncated/garbled stream
+            // followed by an abrupt EOF before more than a few frames had
+            // actually gone out, so ffmpeg finalized (or errored out)
+            // almost immediately: just the initial ftyp/moov placeholder,
+            // nothing playable.
+            //
+            // The writer thread is the only thing that actually knows
+            // when every real frame has been written, so it - not this
+            // function - now owns closing this handle exactly once, right
+            // after its loop naturally ends (see writer_loop() in
+            // hr_pipeline.cpp). Here we just drop our own reference to it
+            // without touching the OS handle.
+            ctx->hStdin = nullptr;
+        } else {
+            // Non-pipe-input mode: stdin genuinely is ffmpeg's interactive
+            // control channel here (no raw video sharing the same fd), so
+            // the "q\n" graceful-stop keystroke is legitimate and this is
+            // the only owner of the handle.
+            DWORD written = 0;
+            WriteFile(ctx->hStdin, "q\n", 2, &written, nullptr);
+            CloseHandle(ctx->hStdin);
+            ctx->hStdin = nullptr;
+        }
     }
 #else
     if (ctx->pid > 0) kill(ctx->pid, SIGINT);
