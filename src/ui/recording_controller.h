@@ -311,6 +311,7 @@ private:
     // pipeline should do next (redirect to a manual recording, go back
     // to preview-only, or immediately restart a fresh replay encoder).
     void StopInstantReplayEncoder();
+    void StopInstantReplayEncoderAsync();
     std::wstring BuildCodecArgs(const std::wstring &codec);
     // Resolves capture_w_/capture_h_ from the selected monitor + scale
     // factor (was inline in Start() only; EnsurePreview() needs the same
