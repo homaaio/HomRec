@@ -18,7 +18,8 @@ extern "C" {
     int hr_probe_gpu(const wchar_t *ffpath, wchar_t *out_enc, int out_len);
     int hr_build_codec_args(const wchar_t *codec, int quality, int fps, int cpu_count,
                              wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
-    int hr_merge_av(const wchar_t *ffpath, const wchar_t *video_file, const wchar_t *audio_file);
+    int hr_merge_av(const wchar_t *ffpath, const wchar_t *video_file, const wchar_t *audio_file,
+                     double real_elapsed_sec);
     int hr_export_mp3(const wchar_t *ffpath, const wchar_t *wav_path, const wchar_t *mp3_path);
     int hr_concat_segments(const wchar_t *ffpath, const wchar_t *list_path, const wchar_t *out_path);
 
@@ -706,7 +707,8 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     if (have_audio_file && state_.audio_out_channels > 0 && ffmpeg_found_ &&
         hr_path_exists(base.c_str())) {
         merged = hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
-                              WideFromNarrow(audio_wav).c_str()) != 0;
+                              WideFromNarrow(audio_wav).c_str(),
+                              elapsed_seconds()) != 0;
         if (!merged) {
             HrLog::Error("Recording: merging the captured audio into the video failed -- "
                         "keeping '" + audio_wav + "' next to the (silent) video instead "
