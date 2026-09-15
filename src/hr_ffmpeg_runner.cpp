@@ -530,7 +530,10 @@ HR_EXPORT void hr_ff_kill(void *handle) {
         WaitForSingleObject(ctx->hProcess, 3000);
         CloseHandle(ctx->hProcess);
         CloseHandle(ctx->hThread);
-        if (ctx->hStdin) { CloseHandle(ctx->hStdin); ctx->hStdin = nullptr; }
+        if (ctx->hStdin) {
+            if (!ctx->pipe_input) CloseHandle(ctx->hStdin);
+            ctx->hStdin = nullptr;
+        }
         ctx->hProcess = nullptr;
         ctx->hThread  = nullptr;
     }
