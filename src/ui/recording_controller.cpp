@@ -63,6 +63,7 @@ extern "C" {
     int hr_pl_get_preview(void *handle, unsigned char *out_rgb, int *out_w, int *out_h);
     int hr_pl_get_native_size(void *handle, int *out_w, int *out_h);
     void hr_pl_set_recording(void *handle, int active, intptr_t pipe_fd);
+    void hr_pl_set_priority_boost(void *handle, int flag);
     void hr_pl_stats(void *handle, long long *out_frames, long long *out_drops, double *out_fps);
     void hr_pl_set_overlays(void *handle, const HrOverlayDesc *items, int count);
     void hr_pl_set_include_cursor(void *handle, int flag);
@@ -91,6 +92,8 @@ extern "C" {
     // hr_audio.cpp
     int hr_audio_init();
     int hr_audio_start(float mic_vol, float sys_vol, int mic_mute, int sys_mute, const wchar_t *mic_device_id);
+    void hr_audio_set_max_buffer_sec(int seconds);
+    int hr_audio_snapshot_to_wav(const char *mic_wav_path, const char *sys_wav_path);
     int hr_audio_stop(const char *mic_wav_path, const char *sys_wav_path);
     void hr_audio_set_volumes(float mic_vol, float sys_vol, int mic_mute, int sys_mute);
     void hr_audio_get_levels(int *out_mic, int *out_sys);
@@ -415,7 +418,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     // instead. instant_replay_enabled_ (the user's "I want this on"
     // choice) stays true; Stop() resumes it once this recording ends.
     if (instant_replay_active_) {
-        StopInstantReplayEncoder();
+        StopInstantReplayEncoderAsync();
         instant_replay_active_ = false;
         HrLog::Info("Instant Replay: paused for a manual recording.");
     }
@@ -503,6 +506,12 @@ bool RecordingController::Start(std::wstring &error_out) {
     }
 
     if (state_.audio_out_channels > 0) {
+        // A manual recording needs every sample from here to Stop() kept -
+        // undo whatever rolling-window cap Instant Replay's background
+        // buffering left in place (see hr_audio_set_max_buffer_sec()'s own
+        // comment) before hr_audio_reset_buffers() starts this recording's
+        // accumulation.
+        hr_audio_set_max_buffer_sec(0);
         hr_audio_reset_buffers();
         hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
     }
@@ -564,6 +573,13 @@ bool RecordingController::Start(std::wstring &error_out) {
     // guards against either path's default ever silently changing.
     hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
 
+    // A manual recording is genuinely happening now (as opposed to just
+    // Instant Replay's background buffer, which also sets `recording` via
+    // hr_pl_set_recording() above but should stay at ordinary priority -
+    // see boost_priority's comment in hr_pipeline.cpp / bug #5) - this is
+    // the one place that's actually true, so bump the capture thread.
+    hr_pl_set_priority_boost(pipeline_, 1);
+
     // (Audio capture is already running continuously, started once in
     // Initialize() - hr_audio_reset_buffers()/hr_audio_set_volumes() for
     // this recording were already called above, right before the video
@@ -608,12 +624,24 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // instead of leaving it live. Just stop ffmpeg; the pipeline gets
     // switched out of recording mode (not stopped) further down.
     bool keep_for_preview = pipeline_ && !state_.disable_preview;
-    if (!keep_for_preview) {
-        hr_pl_stop(pipeline_);
-    }
+
+    // BUGFIX (Stop button freezes the whole app for a second or two):
+    // hr_pl_stop() itself waits (with a timeout) for the capture thread
+    // and then the writer thread to each signal that they've actually
+    // stopped - up to ~1s per thread, by design (see its own comment in
+    // hr_pipeline.cpp). This function is StopAsync() - callers (the Stop
+    // button's DoStop()) call it directly on the UI thread specifically
+    // so they *don't* have to block - but this call used to run right
+    // here, before finalize_thread_ below even existed, so every one of
+    // those waits still happened synchronously on whichever thread called
+    // StopAsync(). Move it inside the background thread instead, right
+    // alongside the rest of the (already-async) finalize work.
     hr_ff_stop_graceful(ffproc_);
 
     finalize_thread_ = std::thread([this, keep_for_preview, on_done]() {
+    if (!keep_for_preview) {
+        hr_pl_stop(pipeline_);
+    }
     StopFinalizeTail(keep_for_preview);
     finalizing_ = false;
     if (on_done) on_done();
@@ -706,6 +734,11 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     bool merged = false;
     if (have_audio_file && state_.audio_out_channels > 0 && ffmpeg_found_ &&
         hr_path_exists(base.c_str())) {
+        // real_elapsed_sec is the actual wall-clock recording time (still
+        // live here - hr_ctl_stop() below is what zeroes it), used by
+        // hr_merge_av() to detect and correct a video that came out much
+        // shorter than the recording actually ran (dropped-frame
+        // overload) instead of cutting the accurate audio down to match.
         merged = hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
                               WideFromNarrow(audio_wav).c_str(),
                               elapsed_seconds()) != 0;
@@ -763,6 +796,17 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     // disabled, just switch the same (still-running) pipeline back to
     // preview-only mode so the live preview keeps working right after the
     // recording ends.
+
+    // The manual recording that justified boosting the capture thread's
+    // priority (see Start()'s hr_pl_set_priority_boost(pipeline_, 1) call
+    // and boost_priority's comment in hr_pipeline.cpp / bug #5) is over -
+    // every branch below either drops back to plain preview or resumes
+    // Instant Replay's background buffer, neither of which should run
+    // boosted. StartInstantReplayEncoder() below only ever calls
+    // hr_pl_set_recording() (never touches priority), so this needs to
+    // happen unconditionally here rather than in just one branch.
+    if (pipeline_) hr_pl_set_priority_boost(pipeline_, 0);
+
     if (instant_replay_enabled_) {
         // Resume Instant Replay's background buffer (paused, if it was
         // running, at the top of Start() above) rather than falling back
@@ -985,6 +1029,22 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
         return false;
     }
     hr_pl_set_recording(pipeline_, /*active=*/1, stdin_h);
+
+    // Instant Replay's segment writer above only ever piped raw video -
+    // a saved replay clip came out completely silent regardless of the
+    // mic/system-audio settings, which from the outside looks the same
+    // as "audio and video got saved separately" (here, audio just never
+    // existed at all). Keep a rolling window of mic/system audio the same
+    // length as the video buffer (+1 segment slack, matching `wrap`
+    // above) so SaveReplay() has real audio to mux in instead of none.
+    // Gated on the same "audio enabled" setting manual recording uses, and
+    // skipped while a manual recording is running (it owns the buffer
+    // uncapped from Start() to Stop() - see hr_audio_set_max_buffer_sec()).
+    if (state_.audio_out_channels > 0 && !state_.recording) {
+        hr_audio_set_max_buffer_sec(wrap * kReplaySegmentSec);
+        hr_audio_reset_buffers();
+        hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
+    }
     return true;
 }
 
@@ -1000,6 +1060,35 @@ void RecordingController::StopInstantReplayEncoder() {
     }
     hr_ff_destroy(replay_ff_);
     replay_ff_ = nullptr;
+}
+
+// BUGFIX (preview freezes for a second or two right after clicking
+// Start/Record): Start() below pauses a running Instant Replay buffer by
+// calling StopInstantReplayEncoder() - which used to be this same
+// synchronous function, called directly on whichever thread called
+// Start() (the UI thread, via RequestStart()). hr_ff_wait(replay_ff_,
+// 3000) there blocks for up to a full 3 seconds waiting for the segment
+// writer to finish gracefully, which is exactly the freeze users saw the
+// instant they pressed the button. The replay buffer being paused for a
+// manual recording doesn't need to be waited on synchronously - it's a
+// background feature the user isn't actively looking at output from, and
+// losing at most a fraction of a second off its last (in-progress)
+// segment is a fine trade for not freezing the UI. Hand the same
+// stop/wait/kill/destroy sequence off to a detached background thread
+// instead, and clear replay_ff_ immediately so nothing else touches it
+// while that thread finishes up.
+void RecordingController::StopInstantReplayEncoderAsync() {
+    if (!replay_ff_) return;
+    void *h = replay_ff_;
+    replay_ff_ = nullptr;
+    std::thread([h]() {
+        hr_ff_stop_graceful(h);
+        if (hr_ff_wait(h, 3000) != 0 && hr_ff_is_running(h)) {
+            HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
+            hr_ff_kill(h);
+        }
+        hr_ff_destroy(h);
+    }).detach();
 }
 
 bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
@@ -1052,6 +1141,15 @@ void RecordingController::DisableInstantReplay() {
         if (state_.disable_preview) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
         else hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
     }
+    // Instant Replay's rolling audio window (see StartInstantReplayEncoder())
+    // was only ever meant to run while the feature is active. If a manual
+    // recording is what's actually running right now, leave it alone -
+    // that recording owns audio buffering uncapped until its own Stop()
+    // (Start() already reconfigured it via hr_audio_set_max_buffer_sec(0)).
+    if (!state_.recording) {
+        hr_audio_capture_to_wav(nullptr, nullptr); // stop buffering, discard the window
+        hr_audio_set_max_buffer_sec(0);
+    }
     HrLog::Info("Instant Replay: stopped.");
 }
 
@@ -1103,6 +1201,42 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
     if (want < 1) want = 1;
     if ((int)segs.size() > want) segs.erase(segs.begin(), segs.end() - want);
 
+    // Instant Replay's segment writer only ever piped raw video (see
+    // StartInstantReplayEncoder()), so a saved clip used to come out
+    // completely silent - snapshot the rolling mic/system-audio window
+    // that same function now keeps (non-destructively: the buffer keeps
+    // accumulating for the *next* Save Replay) and mux it into the clip
+    // below, the same mix-then-merge path a manual recording's Stop()
+    // uses.
+    std::string mic_wav_a = NarrowFromWide(dir_to_read + L"replay_mic_tmp.wav");
+    std::string sys_wav_a = NarrowFromWide(dir_to_read + L"replay_sys.wav");
+    std::string audio_wav_a = NarrowFromWide(dir_to_read + L"replay_audio.wav");
+    bool want_mic = !mic_muted_;
+    bool want_sys = !sys_muted_;
+    bool have_replay_audio = false;
+    if (state_.audio_out_channels > 0 && (want_mic || want_sys)) {
+        int ar = hr_audio_snapshot_to_wav(want_mic ? mic_wav_a.c_str() : nullptr,
+                                           want_sys ? sys_wav_a.c_str() : nullptr);
+        bool mic_written = want_mic && (ar & 0x1) && hr_path_exists(mic_wav_a.c_str());
+        bool sys_written = want_sys && (ar & 0x2) && hr_path_exists(sys_wav_a.c_str());
+        if (mic_written && sys_written) {
+            if (hr_audio_mix_wav(mic_wav_a.c_str(), sys_wav_a.c_str(), audio_wav_a.c_str()) == 0) {
+                std::remove(mic_wav_a.c_str());
+                std::remove(sys_wav_a.c_str());
+            } else {
+                std::remove(sys_wav_a.c_str());
+                std::rename(mic_wav_a.c_str(), audio_wav_a.c_str());
+            }
+            have_replay_audio = true;
+        } else if (mic_written) {
+            std::rename(mic_wav_a.c_str(), audio_wav_a.c_str());
+            have_replay_audio = true;
+        } else if (sys_written) {
+            std::rename(sys_wav_a.c_str(), audio_wav_a.c_str());
+            have_replay_audio = true;
+        }
+    }
+
     std::wstring list_path = dir_to_read + L"concat_list.txt";
     {
         std::wofstream out(list_path.c_str(), std::ios::binary);
@@ -1123,6 +1257,23 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
     current_output_path_ = BuildOutputPath();
     bool ok = hr_concat_segments(ffmpeg_path_.c_str(), list_path.c_str(),
                                   current_output_path_.c_str()) != 0;
+
+    if (ok && have_replay_audio) {
+        // real_elapsed_sec = 0.0 deliberately skips hr_merge_av()'s
+        // dropped-frame "stretch" correction (see its own comment) - that
+        // logic needs a genuine wall-clock recording duration to compare
+        // against, which doesn't apply to an already-concatenated set of
+        // fixed-length segments. Just mux the audio in at the fast
+        // stream-copy path.
+        if (hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
+                         WideFromNarrow(audio_wav_a).c_str(), 0.0) != 0) {
+            std::remove(audio_wav_a.c_str());
+        } else {
+            HrLog::Error("Instant Replay: merging the captured audio into the saved replay "
+                         "failed -- keeping '" + audio_wav_a + "' next to the (silent) clip "
+                         "instead of losing the audio entirely.");
+        }
+    }
 
     instant_replay_active_ = restarted;
     if (!restarted) {
