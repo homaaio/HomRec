@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cctype>
 #include <thread>
+#include "hr_log.h"
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
@@ -283,11 +284,33 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
 }
 
 // -------------------------------------------------------------
+// probe_duration_sec
+// Runs "ffmpeg -i <path>" with no output and reads the
+// "Duration: HH:MM:SS.xx" line ffmpeg prints for any input on
+// stderr - the standard way to get a file's duration without
+// bundling ffprobe separately (this project only ships
+// ffmpeg.exe). Returns -1.0 if the file couldn't be probed or no
+// Duration line was found (e.g. "N/A" for a still-being-written
+// or malformed file).
+// -------------------------------------------------------------
+static double probe_duration_sec(const std::wstring& ffpath, const std::wstring& path)
+{
+    std::wstring out = run_cmd(L"\"" + ffpath + L"\" -i \"" + path + L"\"", 6000);
+    size_t pos = out.find(L"Duration: ");
+    if (pos == std::wstring::npos) return -1.0;
+    pos += 10; // skip "Duration: "
+    int h = 0, m = 0; double s = 0.0;
+    if (swscanf_s(out.c_str() + pos, L"%d:%d:%lf", &h, &m, &s) != 3) return -1.0;
+    return h * 3600.0 + m * 60.0 + s;
+}
+
+// -------------------------------------------------------------
 // hr_merge_av
 // -------------------------------------------------------------
 HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
                            const wchar_t* video_file,
-                           const wchar_t* audio_file)
+                           const wchar_t* audio_file,
+                           double real_elapsed_sec)
 {
     if (!ffpath || !video_file || !audio_file) return 0;
 
@@ -300,15 +323,40 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
     else
         tmp += L"_mrgtmp.mp4";
 
-    std::wstring cmd =
-        L"\"" + std::wstring(ffpath) + L"\""
-        L" -i \"" + vf + L"\""
-        L" -i \"" + std::wstring(audio_file) + L"\""
-        L" -c:v copy -c:a aac"
-        L" -af aresample=async=1000"
-        L" -map 0:v:0 -map 1:a:0"
-        L" -shortest -y"
-        L" \"" + tmp + L"\"";
+    double video_dur = probe_duration_sec(ffpath, vf);
+    bool stretch = real_elapsed_sec > 0.5 && video_dur > 0.05 &&
+                   video_dur < real_elapsed_sec * 0.9;
+
+    std::wstring cmd;
+    if (stretch) {
+        double ratio = real_elapsed_sec / video_dur;
+        wchar_t ratio_buf[64];
+        swprintf_s(ratio_buf, L"%.6f", ratio);
+        HrLog::Warn("Recording: the encoded video came out much shorter than the "
+                    "real recording time (likely dropped frames from an overloaded "
+                    "machine) - stretching it back to real speed before merging "
+                    "audio, instead of cutting the audio down to match.");
+        cmd =
+            L"\"" + std::wstring(ffpath) + L"\""
+            L" -i \"" + vf + L"\""
+            L" -i \"" + std::wstring(audio_file) + L"\""
+            L" -vf \"setpts=" + std::wstring(ratio_buf) + L"*PTS\""
+            L" -c:v libx264 -preset veryfast -crf 20 -c:a aac"
+            L" -af aresample=async=1000"
+            L" -map 0:v:0 -map 1:a:0"
+            L" -shortest -y"
+            L" \"" + tmp + L"\"";
+    } else {
+        cmd =
+            L"\"" + std::wstring(ffpath) + L"\""
+            L" -i \"" + vf + L"\""
+            L" -i \"" + std::wstring(audio_file) + L"\""
+            L" -c:v copy -c:a aac"
+            L" -af aresample=async=1000"
+            L" -map 0:v:0 -map 1:a:0"
+            L" -shortest -y"
+            L" \"" + tmp + L"\"";
+    }
 
     run_cmd(cmd, 180000);
 
