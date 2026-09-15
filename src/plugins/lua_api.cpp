@@ -350,10 +350,16 @@ int L_http_post(lua_State *L) {
     }
 
     HINTERNET hInet = InternetOpenA("HomRecPlugin/1.0", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+    if (!hInet) { lua_pushnil(L); lua_pushstring(L, "InternetOpen failed"); return 2; }
     HINTERNET hConn = InternetConnectA(hInet, host, uc.nPort, nullptr, nullptr, INTERNET_SERVICE_HTTP, 0, 0);
+    if (!hConn) { InternetCloseHandle(hInet); lua_pushnil(L); lua_pushstring(L, "InternetConnect failed"); return 2; }
     bool https = (uc.nScheme == INTERNET_SCHEME_HTTPS);
     DWORD flags = https ? (INTERNET_FLAG_SECURE | INTERNET_FLAG_RELOAD) : INTERNET_FLAG_RELOAD;
     HINTERNET hReq = HttpOpenRequestA(hConn, "POST", path, nullptr, nullptr, nullptr, flags, 0);
+    if (!hReq) {
+        InternetCloseHandle(hConn); InternetCloseHandle(hInet);
+        lua_pushnil(L); lua_pushstring(L, "HttpOpenRequest failed"); return 2;
+    }
 
     std::string headers = std::string("Content-Type: ") + content_type + "\r\n";
     BOOL ok = HttpSendRequestA(hReq, headers.c_str(), (DWORD)headers.size(),
