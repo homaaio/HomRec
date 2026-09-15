@@ -385,6 +385,23 @@ struct Pipeline {
     intptr_t pipe_handle = 0;
     bool recording = false;   // pipe open → encode YUV; false → preview only
 
+    // Separate from `recording` above on purpose: `recording` just means
+    // "a pipe is open, encode YUV for it" and is also true while Instant
+    // Replay's background segment buffer is running with no manual
+    // recording active (see RecordingController::StartInstantReplayEncoder()).
+    // The capture thread used to bump itself to THREAD_PRIORITY_HIGHEST
+    // any time `recording` was true, which meant simply having Instant
+    // Replay's passive background buffer turned on - a feature explicitly
+    // designed to sit there unnoticed - ran the capture thread at the same
+    // elevated, system-wide-contending priority as an actively-requested
+    // recording, indefinitely, for as long as the app was open. On a
+    // laptop or a machine with a small cooler, that reads as "the fan
+    // spins up/PC gets loud" from a screen recorder that, as far as the
+    // user can tell, isn't even doing anything. This flag is only set
+    // while a *manual* recording (or an Instant Replay clip actually being
+    // saved) is genuinely in progress - see hr_pl_set_priority_boost().
+    std::atomic<bool> boost_priority{false};
+
     // ====== WINDOW CAPTURE (crop rect) ======
     // src_w/src_h above MUST stay the full monitor's native resolution --
     // that's what DXGI Desktop Duplication actually hands back per frame
@@ -651,6 +668,22 @@ struct Pipeline {
             HrLog::Error("Writer thread: uncaught unknown exception -- this pipeline is "
                          "stopping instead of crashing the app.");
         }
+
+        // BUGFIX (broken ~1KB output file): pipe_handle is the same OS
+        // handle as ffmpeg's stdin. hr_ff_stop_graceful() (hr_ffmpeg_runner.cpp)
+        // used to close that handle itself, unconditionally, the moment
+        // Stop was pressed - including while this thread might still be
+        // detached and mid-flight writing real queued frames to it (see
+        // hr_pl_stop()'s handed_off path). That truncated the raw video
+        // stream and sent ffmpeg an EOF before it had received more than a
+        // few frames, so it finalized (or errored out) almost immediately:
+        // just the initial ftyp/moov placeholder, nothing playable.
+        // This thread is the only thing that actually knows when every
+        // queued frame has genuinely been written, so it alone closes the
+        // handle now, exactly once, right here - whether that's a few
+        // milliseconds after Stop (the common case) or well after being
+        // handed off to run detached in the background (the case that was
+        // triggering the broken file).
         if (pipe_handle != 0 && pipe_handle != -1) {
 #ifdef _WIN32
             CloseHandle(reinterpret_cast<HANDLE>(pipe_handle));
@@ -744,6 +777,7 @@ struct Pipeline {
         int64_t frame_ns_idle = compute_frame_ns_idle();
         int64_t frame_ns = frame_ns_recording;
         bool was_recording = recording;
+        bool was_boosted = boost_priority.load(std::memory_order_relaxed);
 #ifdef _WIN32
         // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
         // the moment recording started (both here and in the is_recording_now
@@ -758,8 +792,9 @@ struct Pipeline {
         // idle-process-class threads (enough to keep capture timing tight
         // under load) without reserving the CPU ahead of literally
         // everything else, including our own UI thread.
-        SetThreadPriority(GetCurrentThread(), was_recording ? THREAD_PRIORITY_HIGHEST
-                                                             : THREAD_PRIORITY_ABOVE_NORMAL);
+        SetThreadPriority(GetCurrentThread(), boost_priority.load(std::memory_order_relaxed)
+                                                  ? THREAD_PRIORITY_HIGHEST
+                                                  : THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
 
         // Dynamic preview frequency: driven by the "Preview FPS" setting
@@ -827,19 +862,31 @@ struct Pipeline {
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
 #ifdef _WIN32
-                    // See the matching comment above (~line 702) -
-                    // TIME_CRITICAL here starved the UI thread the moment
-                    // recording started on an already-running preview
-                    // pipeline, which is the more common of the two cases
-                    // (see RecordingController::Start()'s reused_preview_pipeline
-                    // path) and so the more common way to see the freeze.
-                    SetThreadPriority(GetCurrentThread(), is_recording_now
-                                          ? THREAD_PRIORITY_HIGHEST
-                                          : THREAD_PRIORITY_ABOVE_NORMAL);
                     if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
 #endif
                 }
             }
+
+#ifdef _WIN32
+            // Checked every iteration (not just on the is_recording_now
+            // edge above) since boost_priority can now change - via
+            // hr_pl_set_priority_boost() - independently of `recording`:
+            // Instant Replay's background buffer sets `recording` true
+            // without setting boost_priority, so its capture thread runs
+            // at plain ABOVE_NORMAL (see boost_priority's own comment)
+            // until/unless a real manual recording actually starts. See
+            // the matching comment above (~line 702) for why HIGHEST, not
+            // TIME_CRITICAL - starving the UI thread is exactly the
+            // "preview freezes" report this priority scheme already had
+            // to fix once.
+            bool want_boost = boost_priority.load(std::memory_order_relaxed);
+            if (want_boost != was_boosted) {
+                was_boosted = want_boost;
+                SetThreadPriority(GetCurrentThread(), want_boost
+                                      ? THREAD_PRIORITY_HIGHEST
+                                      : THREAD_PRIORITY_ABOVE_NORMAL);
+            }
+#endif
 
 #ifdef _WIN32
             if (sw_ctx && g_libs.sw_sleep_until) {
@@ -1086,6 +1133,25 @@ struct Pipeline {
                 {
                     std::lock_guard<std::mutex> lock(pipe_queue_mtx);
 
+                    // BUGFIX (freeze + memory growth after Stop on a long
+                    // recording): this eviction used to only run when
+                    // rep == 0. A catch-up burst (extra_slots, up to
+                    // kMaxCatchupFrames == 90) pushes every one of its reps
+                    // into pipe_queue below regardless -- with the check
+                    // gated to rep == 0, up to 90 frames per capture tick
+                    // (~3 MB each at 1080p) bypassed MAX_QUEUE_SIZE
+                    // completely. On hardware that's chronically behind for
+                    // a good stretch of a long recording, that ran every
+                    // tick for as long as recording continued: pipe_queue
+                    // grew without any real bound (steadily climbing memory
+                    // -- the "leak"), and the writer thread then had to
+                    // drain that multi-GB backlog frame-by-frame before
+                    // hr_pl_stop()/hr_pl_destroy()'s join() could ever see
+                    // it finish (the "freeze" right after pressing Stop).
+                    // Evicting on every rep instead keeps pipe_queue capped
+                    // at MAX_QUEUE_SIZE no matter how many catch-up reps ran
+                    // this tick, while the reps themselves still keep the
+                    // muxed timeline on pace (unchanged from before).
                     if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
                         dropped = std::move(pipe_queue.front());
                         pipe_queue.pop();
@@ -1631,6 +1697,19 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
     pl->pipe_handle = pipe_fd;
     pl->recording   = (active != 0) && (pipe_fd != 0) && (pipe_fd != -1);
     // YUV conversion buffers are lazily sized from the free-list pool.
+#endif
+}
+
+// See Pipeline::boost_priority's own comment. Call with flag=1 exactly
+// while a manual recording (or an Instant Replay clip actively being
+// saved) is genuinely in progress, and flag=0 the rest of the time -
+// including while Instant Replay's background buffer is otherwise
+// running via hr_pl_set_recording(handle, 1, ...), which on its own
+// should stay at ordinary preview-level thread priority.
+HR_EXPORT void hr_pl_set_priority_boost(void* handle, int flag) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->boost_priority.store(flag != 0, std::memory_order_relaxed);
 #endif
 }
 
