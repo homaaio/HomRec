@@ -786,7 +786,12 @@ void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int ba
 
     for (size_t i = 0; i < overlays.size(); ++i) {
         const HrOverlayDesc &ov = overlays[i];
-        if (!ov.visible || ov.w <= 0 || ov.h <= 0) continue;
+        if (!ov.visible || ov.w <= 0 || ov.h <= 0) {
+            if (std::strcmp(ov.type, "webcam") == 0) {
+                webcam_cache_.erase(i);
+            }
+            continue;
+        }
         try {
             const CachedLayer *layer = nullptr;
             if (std::strcmp(ov.type, "text") == 0) {
