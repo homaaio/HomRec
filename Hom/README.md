@@ -108,25 +108,32 @@ destructive subcommands (`hom update`, `hom remove`/`hom uninstall`,
 
 ## How it works
 
-- **Plugins** live in this repo under [`Hom/plugins/<name>.hrp`](../../Hom).
-  `hom install <name>` just downloads that one file to `plugins/<name>.hrp`.
-  It does *not* unzip anything itself - HomRec's own plugin loader
+- **Plugins** live on this repo's `plugins-registry` branch, under
+  `Hom/plugins/<name>.hrp` - a separate branch from the one you actually
+  check out and build (`main`), so a normal `git clone`/`git pull` of the
+  app doesn't also pull down every `.hrp` in the registry. `hom install
+  <name>` just downloads that one file to `plugins/<name>.hrp`. It does
+  *not* unzip anything itself - HomRec's own plugin loader
   (`lua_engine.cpp`'s `LoadPluginArchive()`) already knows how to extract
   and load a `.hrp` it finds in `plugins/`, so `hom`'s job stops at "the
   file is on disk."
 - **`hom` self-updates** by comparing its compiled-in version against
-  [`Hom/version.txt`](../../Hom/version.txt), and if that's newer,
-  downloading [`Hom/hom.exe`](../../Hom) and swapping it in for the
-  running binary (rename-and-replace - this works even on the exe
+  [`Hom/version.txt`](../../Hom/version.txt) *on `main`*, and if that's
+  newer, downloading [`Hom/hom.exe`](../../Hom) and swapping it in for
+  the running binary (rename-and-replace - this works even on the exe
   that's currently executing, the same way any self-updating Windows
   app does it).
-- **`search`/`show`/`list --upgradable`** read
-  [`Hom/plugins/index.json`](../../Hom/plugins/index.json) - the same
-  file that used to be purely for humans browsing the repo. `install`
-  itself still doesn't need it (it just requests `plugins/<name>.hrp`
-  directly), so a plugin missing from `index.json` can still be
-  installed by name - it just won't show up in `search`/`show`, and
-  `list --upgradable` won't know a newer version exists for it.
+- **`search`/`show`/`list --upgradable`** read `Hom/plugins/index.json`
+  off the `plugins-registry` branch - the same file that used to be
+  purely for humans browsing the repo. `install` itself still doesn't
+  need it (it just requests `plugins/<name>.hrp` directly), so a plugin
+  missing from `index.json` can still be installed by name - it just
+  won't show up in `search`/`show`, and `list --upgradable` won't know a
+  newer version exists for it.
+- Publishing a new plugin or bumping a version is a commit to the
+  `plugins-registry` branch, *not* `main` - `main`'s history stays clean
+  of binary `.hrp` churn. See `k_plugins_path_prefix` in `hom.cpp` if
+  you're forking this and want your own registry branch/repo.
 - **A local plugin's "known version"** comes from whatever `plugin.json`
   HomRec has actually extracted for it - `plugins/.installed/<name>/`
   for a `.hrp`-based plugin, or `plugins/<name>/` directly for one shipped
