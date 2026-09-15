@@ -176,12 +176,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 TextOutW(hdc, 28, 132, L"Hello, and thanks for choosing HomRec!", 39);
                 SelectObject(hdc, oldFont);
 
-                // Bottom was 300, too tight for the full two-paragraph
-                // message at default font size - it clipped mid-sentence
-                // (last line "...available later in Settings > System."
-                // never drew). Nav buttons start at H-66 (=404), so there's
-                // plenty of room to extend down to 390 without overlapping.
-                RECT msgRect = { 28, 168, client.right - 28, 390 };
+                RECT msgRect = { 28, 168, client.right - 28, client.bottom - 20 };
                 SetTextColor(hdc, RGB(0xa6, 0xad, 0xc8));
                 std::wstring msg =
                     L"This quick setup takes a few seconds and helps HomRec "
@@ -191,7 +186,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     L"skip straight past and just use the defaults. Desktop "
                     L"shortcut, startup, and tray options are always "
                     L"available later in Settings > System.";
-                DrawTextW(hdc, msg.c_str(), -1, &msgRect, DT_LEFT | DT_WORDBREAK);
+                DrawTextW(hdc, msg.c_str(), -1, &msgRect, DT_LEFT | DT_WORDBREAK | DT_NOCLIP);
             }
 
             EndPaint(hwnd, &ps);
