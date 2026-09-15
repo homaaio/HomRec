@@ -168,7 +168,7 @@
 // Constants
 // -----------------------------------------------------------------------
 
-static constexpr char k_hom_version[] = "0.5.1";
+static constexpr char k_hom_version[] = "0.5.2";
 
 // If an install/update would grow disk usage by at least this much,
 // CmdInstall() asks for confirmation first (Y/n) instead of just doing
