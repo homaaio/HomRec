@@ -379,6 +379,7 @@ struct AudioState {
     // hr_audio_reset_buffers() (Start()), false by
     // hr_audio_capture_to_wav()/hr_audio_stop() (Stop()/app exit).
     std::atomic<bool>   buffering{false};
+    std::atomic<int>    max_buffer_sec{0};
 
     // Volume/mute (written from the UI thread, read from the audio threads)
     std::atomic<float>  mic_vol{1.0f};
@@ -451,6 +452,12 @@ static void mic_worker(AudioState* st)
             if (st->buffering.load()) {
                 std::lock_guard<std::mutex> lk(st->mic_mutex);
                 st->mic_buf.insert(st->mic_buf.end(), tmp.begin(), tmp.end());
+                int cap_sec = st->max_buffer_sec.load();
+                if (cap_sec > 0 && st->mic_stream.rate > 0) {
+                    size_t max_samples = (size_t)cap_sec * st->mic_stream.rate * 2; // stereo int16
+                    if (st->mic_buf.size() > max_samples)
+                        st->mic_buf.erase(st->mic_buf.begin(), st->mic_buf.end() - (ptrdiff_t)max_samples);
+                }
             }
         }
         // No trailing Sleep here anymore -- the wait at the top of the loop
@@ -506,6 +513,12 @@ static void sys_worker(AudioState* st)
             if (st->buffering.load()) {
                 std::lock_guard<std::mutex> lk(st->sys_mutex);
                 st->sys_buf.insert(st->sys_buf.end(), tmp.begin(), tmp.end());
+                int cap_sec = st->max_buffer_sec.load();
+                if (cap_sec > 0 && st->sys_stream.rate > 0) {
+                    size_t max_samples = (size_t)cap_sec * st->sys_stream.rate * 2; // stereo int16
+                    if (st->sys_buf.size() > max_samples)
+                        st->sys_buf.erase(st->sys_buf.begin(), st->sys_buf.end() - (ptrdiff_t)max_samples);
+                }
             }
         }
         // See matching comment in mic_worker() above.
@@ -723,6 +736,15 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
         if (mic_wav_path && !g_state->mic_buf.empty() &&
             wav_write(mic_wav_path, g_state->mic_buf, 2, g_state->mic_stream.rate))
             result |= 0x1;
+        // BUGFIX (memory "leak" after stopping a long recording):
+        // clear() only resets size() to 0 -- it does NOT release the
+        // vector's capacity. mic_buf/sys_buf grow for the entire length of
+        // the recording (raw 16-bit PCM, both channels, appended every
+        // ~10ms - see AudioState::buffering's comment), so a long take
+        // leaves this vector holding tens/hundreds of MB of reserved-but-
+        // unused capacity for the rest of the app session (it's only ever
+        // reused, never freed, until the app actually exits). shrink_to_fit()
+        // actually gives that memory back once the WAV has been written.
         g_state->mic_buf.clear();
         g_state->mic_buf.shrink_to_fit();
     }
@@ -736,6 +758,46 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
         g_state->sys_buf.shrink_to_fit();
     }
 
+    return result;
+}
+
+/*  hr_audio_set_max_buffer_sec(seconds)
+    See AudioState::max_buffer_sec's own comment. Pass 0 before/at every
+    manual-recording Start() (unlimited - the whole recording must be kept),
+    and replay_buffer_sec (plus a little slack) whenever Instant Replay is
+    buffering with no manual recording running, so its background audio
+    capture doesn't grow unbounded for as long as the app is left open. */
+HR_EXPORT void hr_audio_set_max_buffer_sec(int seconds)
+{
+    if (!g_state) return;
+    g_state->max_buffer_sec.store(seconds > 0 ? seconds : 0);
+}
+
+/*  hr_audio_snapshot_to_wav(mic_wav_path, sys_wav_path)
+    Same WAV-writing behavior as hr_audio_capture_to_wav(), but does NOT
+    clear the buffers or touch `buffering` afterward - used by Instant
+    Replay's "Save Replay" so the rolling audio window keeps accumulating
+    for the *next* save instead of being reset to empty (a manual
+    recording's Stop() wants the destructive version; a background replay
+    buffer being sampled does not - see hr_audio_capture_to_wav()'s own
+    comment for that case). */
+HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
+                                         const char* sys_wav_path)
+{
+    if (!g_state) return 0;
+    int result = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_state->mic_mutex);
+        if (mic_wav_path && !g_state->mic_buf.empty() &&
+            wav_write(mic_wav_path, g_state->mic_buf, 2, g_state->mic_stream.rate))
+            result |= 0x1;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_state->sys_mutex);
+        if (sys_wav_path && !g_state->sys_buf.empty() &&
+            wav_write(sys_wav_path, g_state->sys_buf, 2, g_state->sys_stream.rate))
+            result |= 0x2;
+    }
     return result;
 }
 
