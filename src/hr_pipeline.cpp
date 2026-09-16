@@ -490,6 +490,9 @@ struct Pipeline {
     std::atomic<bool>       writer_thread_done{false};
     std::atomic<bool>       capture_thread_done{false};
 
+    std::atomic<bool>       pending_close_requested{false};
+    std::atomic<bool>       pending_close_done{false};
+
 #ifdef _WIN32
     // Manual-reset event for overlapped writes to ffmpeg's stdin pipe - see
     // write_pipe()'s own comment for why this exists. Created lazily (only
@@ -635,6 +638,22 @@ struct Pipeline {
                 }
                 
                 if (pipe_queue.empty()) {
+                    if (pending_close_requested.load(std::memory_order_acquire)) {
+                        if (pipe_handle != 0 && pipe_handle != -1) {
+#ifdef _WIN32
+                            CloseHandle(reinterpret_cast<HANDLE>(pipe_handle));
+#else
+                            ::close(static_cast<int>(pipe_handle));
+#endif
+                            pipe_handle = 0;
+                        }
+                        pending_close_requested.store(false, std::memory_order_release);
+                        {
+                            std::lock_guard<std::mutex> lk(finish_mtx);
+                            pending_close_done.store(true, std::memory_order_release);
+                        }
+                        finish_cv.notify_all();
+                    }
                     continue;
                 }
                 
@@ -1697,6 +1716,68 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
     pl->pipe_handle = pipe_fd;
     pl->recording   = (active != 0) && (pipe_fd != 0) && (pipe_fd != -1);
     // YUV conversion buffers are lazily sized from the free-list pool.
+#endif
+}
+
+// BUGFIX (a manual recording, or an Instant Replay segment, never
+// finalizes on its own whenever the pipeline stays alive afterward -
+// i.e. almost always, since that's exactly what happens when live
+// preview is left on, the default, and it's *also* what always happens
+// to Instant Replay's segment writer since it shares this same
+// long-lived pipeline_ with everything else - see EnableInstantReplay()'s
+// header comment in recording_controller.h):
+//
+// RecordingController used to just call hr_pl_set_recording(handle, 0, 0)
+// (or, for Instant Replay, simply overwrite pipe_handle with the next
+// segment's handle) and separately tell that recording's ffmpeg process
+// to stop gracefully (hr_ff_stop_graceful() + hr_ff_wait()). But
+// hr_ff_stop_graceful() in pipe_input mode deliberately does NOT close
+// ffmpeg's stdin itself (see its own comment) - the writer thread above
+// is the only thing that knows when every real queued frame has actually
+// gone out, so it alone closes that handle, and only ever did so as part
+// of its own full shutdown (writer_running -> false, e.g. hr_pl_stop()/
+// hr_pl_destroy()). Whenever the pipeline *wasn't* being fully stopped -
+// preview staying up, or Instant Replay handing off to its next segment -
+// that shutdown path never ran, so the handle was simply overwritten/
+// forgotten while ffmpeg sat blocked reading pipe:0, never seeing an EOF.
+// hr_ff_wait()'s 3s/10s/30s budgets elsewhere in this codebase then always
+// ran out (there was nothing to finish waiting for) and fell back to
+// TerminateProcess()-ing ffmpeg mid-write: the "still finalizing" /
+// "didn't finish gracefully - killing it" warnings, a needlessly slow
+// Stop (waiting out a timeout that could never succeed), and a
+// truncated/corrupt output file every single time, not just under load.
+//
+// This function asks the writer thread itself to close whatever pipe it
+// currently holds (once its queue drains - see writer_loop()) without
+// touching writer_running, so the pipeline/preview/Instant Replay's next
+// segment keeps running right through it, and blocks the caller (which
+// should NOT be the UI thread - the finalize thread StopAsync() already
+// runs on, or an already-background/detached Instant Replay thread, are
+// both fine) for up to timeout_ms for confirmation, so the caller's own
+// subsequent hr_ff_wait() on that ffmpeg process sees a real EOF instead
+// of a doomed-from-the-start wait. Call this BEFORE hr_pl_set_recording()
+// (or before overwriting pipe_handle for a new segment) - it reads the
+// current pipe_handle itself and also flips `recording` off so no further
+// frames get queued for the segment being closed.
+HR_EXPORT int hr_pl_end_recording_segment(void* handle, int timeout_ms) {
+    if (!handle) return 1;
+#ifndef _WIN32
+    return 1;
+#else
+    auto* pl = static_cast<Pipeline*>(handle);
+    if (pl->pipe_handle == 0 || pl->pipe_handle == -1) return 1; // nothing to close
+    pl->recording = false; // stop the capture thread queuing more frames for this segment
+    pl->pending_close_done.store(false, std::memory_order_relaxed);
+    pl->pending_close_requested.store(true, std::memory_order_release);
+    pl->pipe_queue_cv.notify_all(); // wake the writer thread now instead of its next 10ms poll
+    std::unique_lock<std::mutex> lk(pl->finish_mtx);
+    bool done = pl->finish_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 3000),
+        [pl] { return pl->pending_close_done.load(std::memory_order_acquire); });
+    if (!done) {
+        HrLog::Warn("Pipeline: writer thread didn't close the previous recording's pipe in time "
+                    "(it may be stuck writing) - the ffmpeg process for it likely won't finalize cleanly.");
+    }
+    return done ? 1 : 0;
 #endif
 }
 
