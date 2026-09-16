@@ -1826,6 +1826,8 @@ void HomRecMainFrame::RestartLevelMeterTimer() {
 }
 
 void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
+    if (IsBeingDeleted()) { evt.Skip(); return; }
+
     if (state_.minimize_to_tray && tray_icon_ && evt.CanVeto()) {
         Show(false);
         evt.Veto();
