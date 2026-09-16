@@ -363,6 +363,7 @@ private:
     // one) keeps every pipeline teardown finished before anything it
     // depends on goes away.
     std::thread preview_teardown_thread_;
+    std::thread instant_replay_stop_thread_;
 
     // DXGI Desktop Duplication only allows one active duplication
     // handle per output at a time - hr_pl_create() (via dx_create()) fails
@@ -384,6 +385,10 @@ private:
     // nothing pending.
     void JoinPendingPreviewTeardown() {
         if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
+    }
+
+    void JoinPendingInstantReplayStop() {
+        if (instant_replay_stop_thread_.joinable()) instant_replay_stop_thread_.join();
     }
 
     // StopAsync()'s background tail (see its .cpp comment) and its
