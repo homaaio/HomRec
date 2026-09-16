@@ -70,6 +70,7 @@ extern "C" {
     void hr_pl_set_capture_rect(void *handle, int x, int y, int w, int h);
     void hr_pl_set_output_size(void *handle, int w, int h);
     void hr_pl_set_preview_fps(void *handle, int fps);
+    int hr_pl_end_recording_segment(void *handle, int timeout_ms);
 
     // hr_ffmpeg_runner.cpp
     void *hr_ff_create();
@@ -139,6 +140,7 @@ RecordingController::~RecordingController() {
     if (state_.recording) Stop();
     if (finalize_thread_.joinable()) finalize_thread_.join();
     if (instant_replay_active_) StopInstantReplayEncoder();
+    JoinPendingInstantReplayStop();
     JoinPendingPreviewTeardown();
     if (ctl_) hr_ctl_destroy(ctl_);
     if (ffproc_) hr_ff_destroy(ffproc_);
@@ -533,6 +535,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         reused_preview_pipeline = true;
     } else {
+        JoinPendingInstantReplayStop();
         if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
         // See JoinPendingPreviewTeardown()'s comment
         // (recording_controller.h) - without this, starting a recording
@@ -641,6 +644,20 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     finalize_thread_ = std::thread([this, keep_for_preview, on_done]() {
     if (!keep_for_preview) {
         hr_pl_stop(pipeline_);
+    } else {
+        // BUGFIX (recordings always took ~30s to "finalize" and came out
+        // corrupt whenever preview was left on - see
+        // hr_pl_end_recording_segment()'s comment for the full story):
+        // hr_pl_stop() above is what used to be the *only* thing that
+        // ever actually closed ffmpeg's stdin pipe (as part of fully
+        // tearing the pipeline's threads down) - skipped here specifically
+        // so the pipeline survives for continued preview, which also
+        // meant nothing closed the pipe, so StopFinalizeTail()'s
+        // hr_ff_wait() below could never see the EOF it needs and always
+        // ran out its full timeout before force-killing ffmpeg mid-write.
+        // Ask the still-running writer thread to close just this
+        // recording's pipe instead.
+        hr_pl_end_recording_segment(pipeline_, 3000);
     }
     StopFinalizeTail(keep_for_preview);
     finalizing_ = false;
@@ -649,6 +666,16 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
 }
 
 void RecordingController::StopFinalizeTail(bool keep_for_preview) {
+    // Belt-and-suspenders alongside the two call sites in Start()/
+    // EnableInstantReplay() that actually race this: this function can
+    // go on to destroy pipeline_ below (the !keep_for_preview / Instant-
+    // Replay-resume-failed branches) - vanishingly unlikely but possible
+    // for Start()'s own instant_replay_stop_thread_ (see
+    // JoinPendingInstantReplayStop()'s comment) to still be running if
+    // Stop() is pressed within a couple seconds of Start(). Cheap no-op
+    // in the overwhelmingly common case where it already finished.
+    JoinPendingInstantReplayStop();
+
     // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second
     // budget for ffmpeg to receive EOF on stdin, flush libx264's internal
     // frame buffer, and write the moov atom (mp4) / cues (mkv) that make the
@@ -1054,9 +1081,11 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
 // should point at next.
 void RecordingController::StopInstantReplayEncoder() {
     if (!replay_ff_) return;
+    hr_pl_end_recording_segment(pipeline_, 3000);
     hr_ff_stop_graceful(replay_ff_);
     if (hr_ff_wait(replay_ff_, 3000) != 0 && hr_ff_is_running(replay_ff_)) {
         HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
+        hr_ff_kill(replay_ff_);
     }
     hr_ff_destroy(replay_ff_);
     replay_ff_ = nullptr;
@@ -1074,21 +1103,58 @@ void RecordingController::StopInstantReplayEncoder() {
 // background feature the user isn't actively looking at output from, and
 // losing at most a fraction of a second off its last (in-progress)
 // segment is a fine trade for not freezing the UI. Hand the same
-// stop/wait/kill/destroy sequence off to a detached background thread
-// instead, and clear replay_ff_ immediately so nothing else touches it
-// while that thread finishes up.
+// stop/wait/kill/destroy sequence off to a background thread instead
+// (tracked via instant_replay_stop_thread_ rather than detached - see
+// JoinPendingInstantReplayStop()'s comment), and clear replay_ff_
+// immediately so nothing else touches it while that thread finishes up.
 void RecordingController::StopInstantReplayEncoderAsync() {
     if (!replay_ff_) return;
     void *h = replay_ff_;
     replay_ff_ = nullptr;
-    std::thread([h]() {
-        hr_ff_stop_graceful(h);
-        if (hr_ff_wait(h, 3000) != 0 && hr_ff_is_running(h)) {
-            HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
-            hr_ff_kill(h);
+    void *pl = pipeline_;
+    // See JoinPendingInstantReplayStop()'s comment (recording_controller.h)
+    // - joins whatever the *previous* call to this function started
+    // (normally already finished; this is just the same defensive
+    // pattern JoinPendingPreviewTeardown() uses) before overwriting the
+    // member with this call's thread.
+    JoinPendingInstantReplayStop();
+    instant_replay_stop_thread_ = std::thread([h, pl]() {
+        // BUGFIX (std::terminate() crash a moment after "Instant Replay:
+        // segment writer didn't finish gracefully in time - killing it"):
+        // this is a bare std::thread with no exception handler anywhere
+        // above it on the call stack (tracked/joined now instead of
+        // detached - see JoinPendingInstantReplayStop() - but that alone
+        // doesn't catch anything thrown *inside* it) - every other bare
+        // std::thread lambda in this codebase (capture_loop()/
+        // writer_loop() in hr_pipeline.cpp) got wrapped in a try/catch
+        // specifically because an uncaught throw in one of these calls
+        // std::terminate() and takes the whole app down with it; this one
+        // was missed. Whatever the actual trigger (hr_ff_wait()/
+        // hr_ff_kill()/hr_ff_destroy() hitting an edge case under load),
+        // catching it here turns a full crash into a logged, recoverable
+        // failure - same tradeoff those other two threads already made.
+        try {
+            // See hr_pl_end_recording_segment()'s comment in
+            // hr_pipeline.cpp - without this, hr_ff_wait() below can
+            // never see the EOF it's waiting for (pipeline_'s pipe is
+            // shared with everything else this class does with it), so
+            // this branch was hitting the timeout/kill path on basically
+            // every call instead of only under genuine load.
+            hr_pl_end_recording_segment(pl, 3000);
+            hr_ff_stop_graceful(h);
+            if (hr_ff_wait(h, 3000) != 0 && hr_ff_is_running(h)) {
+                HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
+                hr_ff_kill(h);
+            }
+            hr_ff_destroy(h);
+        } catch (const std::exception &e) {
+            HrLog::Error(std::string("Instant Replay: stopping the segment writer threw (") +
+                         e.what() + ") -- this pipeline is stopping instead of crashing the app.");
+        } catch (...) {
+            HrLog::Error("Instant Replay: stopping the segment writer threw an unknown exception "
+                         "-- this pipeline is stopping instead of crashing the app.");
         }
-        hr_ff_destroy(h);
-    }).detach();
+    });
 }
 
 bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
@@ -1106,6 +1172,7 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
 
     if (!pipeline_ || capture_w_ != prev_w || capture_h_ != prev_h ||
         pipeline_output_idx_ != capture_output_idx_) {
+        JoinPendingInstantReplayStop();
         if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
         JoinPendingPreviewTeardown();
         int pvw = 0, pvh = 0;
@@ -1138,6 +1205,10 @@ void RecordingController::DisableInstantReplay() {
     StopInstantReplayEncoder();
     instant_replay_active_ = false;
     if (pipeline_ && !state_.recording) {
+        // See JoinPendingInstantReplayStop()'s comment - belt-and-suspenders
+        // in case an earlier pause/resume cycle's async stop thread hasn't
+        // actually finished (and been joined) yet.
+        JoinPendingInstantReplayStop();
         if (state_.disable_preview) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
         else hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
     }
