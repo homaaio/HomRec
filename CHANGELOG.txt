@@ -1,5 +1,124 @@
 welcome to changelog :D
 
+[Version 2.2 beta3] - 2026-09-15
+- Fixed: a recording almost always took ~20-30s to "save" after pressing
+  Stop, and the resulting file was frequently corrupt/unplayable -
+  reported as "a 10 second recording saves in about 20 seconds." Root
+  cause: StopAsync() deliberately keeps the capture pipeline's writer
+  thread alive after Stop() when live preview is left on (the default),
+  so the preview keeps working instead of going dark - but the writer
+  thread is also the only thing allowed to close ffmpeg's stdin pipe
+  (hr_ff_stop_graceful() doesn't, by design - see its own comment), and
+  it only ever did that as part of its own full shutdown, which this
+  path intentionally skips. So ffmpeg sat blocked reading pipe:0,
+  StopFinalizeTail()'s hr_ff_wait() (3s/10s/30s budget) could never see
+  the EOF it needed and always ran out its full timeout, and the file
+  got TerminateProcess()'d mid-write instead of finalized. This wasn't
+  occasional/under-load behavior - it happened on every single Stop with
+  preview enabled. Added hr_pl_end_recording_segment() (hr_pipeline.cpp):
+  asks the writer thread to close whatever pipe it currently holds once
+  its queue drains, without stopping the thread or the pipeline, and
+  blocks the caller briefly for confirmation. StopAsync() now calls this
+  before waiting on ffmpeg instead of skipping straight to the wait.
+- Fixed: Instant Replay's segment writer logged "didn't finish
+  gracefully in time - killing it" on essentially every handoff (pausing
+  for a manual recording, "Save Replay," turning the feature off) instead
+  of only under genuine load, and the segment being closed at that moment
+  came out truncated/corrupt. Same root cause as above - the segment
+  writer's ffmpeg shares the same pipeline_/pipe_handle as everything
+  else this class does with it, and nothing was ever closing that pipe
+  on a segment handoff either. StopInstantReplayEncoder() and
+  StopInstantReplayEncoderAsync() now both call
+  hr_pl_end_recording_segment() before stopping/waiting on that segment's
+  ffmpeg process.
+- Fixed: a crash ("unhandled C++ exception / std::terminate()") that
+  could occur about a second after the "Instant Replay: segment writer
+  didn't finish gracefully in time - killing it" warning.
+  StopInstantReplayEncoderAsync() runs its stop/wait/kill/destroy
+  sequence on a bare std::thread with no exception handler anywhere
+  above it on the call stack - every other bare-thread lambda in this
+  codebase (Pipeline::capture_loop()/writer_loop()) was already wrapped
+  in a try/catch specifically because an uncaught throw there calls
+  std::terminate() and takes the whole app down; this one thread was
+  missed. Wrapped it the same way.
+- Fixed (found while fixing the above): StopInstantReplayEncoderAsync()'s
+  background thread now also has to call hr_pl_end_recording_segment(),
+  which touches the pipeline_ pointer - but that thread used to be fully
+  detached, and Start()/EnableInstantReplay() can destroy and replace
+  pipeline_ (a fresh hr_pl_create()) almost immediately after pausing
+  Instant Replay if the capture size or monitor changed, racing the
+  detached thread's use of the now-freed pointer. Changed the thread to
+  be tracked (instant_replay_stop_thread_) instead of detached, same
+  pattern preview_teardown_thread_/JoinPendingPreviewTeardown() already
+  use for the analogous DXGI-duplication-handle race; added
+  JoinPendingInstantReplayStop(), called at every point pipeline_ is
+  about to be destroyed/replaced and in the destructor.
+  Investigated but NOT changed: high idle/AFK CPU and memory use (~15MB /
+  5-8%) with preview and the audio mixer both off. This traces to Instant
+  Replay's background buffer actually being on (EnableInstantReplay()) -
+  it's a real, continuous rolling recording (full capture rate + live
+  encode to disk), which is inherently more expensive than idle preview
+  regardless of the preview/audio-mixer settings; those two are unrelated
+  knobs. This isn't a discrete bug the way the three fixes above were, so
+  it wasn't touched this round - happy to look at cheaper ways to run
+  Instant Replay (e.g. a lower dedicated buffer fps/quality separate from
+  manual-recording settings) as a followup if that's wanted.
+  RecordingController::StopAsync() exists specifically so the Stop
+  button doesn't have to block the UI thread, but it still called
+  hr_pl_stop() directly - which waits (with a timeout) for the capture
+  thread and then the writer thread to each confirm they've actually
+  stopped, up to ~1s per thread by design - before ever spawning the
+  background finalize thread. Every one of those waits was still
+  happening synchronously on the UI thread. Moved hr_pl_stop() inside
+  finalize_thread_, alongside the rest of the already-async finalize
+  work.
+- Fixed: the live preview would freeze for up to 3 seconds right after
+  clicking Start, if Instant Replay's background buffer happened to be
+  running. Start() paused it by calling StopInstantReplayEncoder(),
+  which does hr_ff_wait(replay_ff_, 3000) - a synchronous wait, on the
+  UI thread, for the segment writer to finish gracefully. Added
+  StopInstantReplayEncoderAsync(), which hands the same stop/wait/kill/
+  destroy sequence off to a detached background thread instead; Start()
+  now uses that. Losing at most a fraction of a second off Instant
+  Replay's last in-progress segment is a fine trade for not freezing
+  the UI on every single recording.
+- Fixed: turning off (hiding) a webcam overlay didn't release the
+  actual camera device - the LED stayed on and other apps still saw it
+  as "in use" for as long as the app was running, however long the
+  overlay stayed hidden. OverlayCompositor::Apply() skipped hidden
+  overlays entirely, so their cache entry (and the HrWebcamCapture
+  inside it - a live background thread plus an open Media Foundation
+  device handle) never got released the way an actual device change or
+  overlay deletion already did. Hidden webcam overlays now have their
+  cache entry released immediately; it reopens lazily and cheaply if
+  the overlay is shown again.
+- Fixed: Instant Replay's "Save Replay" clips came out with no audio at
+  all, regardless of mic/system-audio settings - the segment writer
+  only ever piped raw video. From the outside this looked the same as
+  "video and audio saved separately," since the actual manual-recording
+  Stop() path (mic+sys WAV -> mix -> hr_merge_av) was already working
+  correctly and had nothing wrong with it. Added a rolling audio buffer
+  (hr_audio_set_max_buffer_sec()/hr_audio_snapshot_to_wav() in
+  hr_audio.cpp) that runs only while Instant Replay's background buffer
+  is active with no manual recording in progress, and wired SaveReplay()
+  to snapshot/mix/merge it into the saved clip via the same hr_merge_av()
+  path manual recordings use - non-destructively, so the rolling window
+  keeps accumulating for the next Save Replay instead of being reset to
+  empty. A manual Start() explicitly resets the cap back to "unlimited"
+  first, so this can't ever truncate an actual recording's audio.
+- Fixed: the capture thread ran at THREAD_PRIORITY_HIGHEST any time
+  Instant Replay's background buffer was on, even with no manual
+  recording running - because that also flips the same internal
+  `recording` flag a real recording does. A feature explicitly meant to
+  sit in the background unnoticed was, in practice, running at an
+  elevated, system-wide-contending thread priority indefinitely for as
+  long as the app was open, which is a very plausible source of "the PC
+  is loud" on anything with a small cooler (laptops especially).
+  Decoupled thread-priority boosting from the `recording` flag into its
+  own boost_priority flag (hr_pl_set_priority_boost() in
+  hr_pipeline.cpp), set only while a manual recording (or a replay
+  clip actively being saved) is genuinely in progress.
+
 [Version 2.2 beta2] - 2026-09-14
 
 - Improved: crash reports for "unhandled C++ exception / std::terminate()"
