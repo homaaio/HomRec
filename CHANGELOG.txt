@@ -1,7 +1,6 @@
 welcome to changelog :D
 
-[Version 2.2 beta4] - 2026-09-16
-
+[Version 2.2 beta3] - 2026-09-15
 - Fixed: adding a custom hotkey (Settings > Hotkeys > "+ Add Hotkey", or
   just opening that tab with any custom hotkeys already saved) popped a
   "wxWidgets Debug Alert" dialog every time. Cause: AddCustomHotkeyRow()
@@ -108,7 +107,6 @@ welcome to changelog :D
   Instant Replay (e.g. a lower dedicated buffer fps/quality separate from
   manual-recording settings) as a followup if that's wanted.
 
-[Version 2.2 beta3] - 2026-09-15
   RecordingController::StopAsync() exists specifically so the Stop
   button doesn't have to block the UI thread, but it still called
   hr_pl_stop() directly - which waits (with a timeout) for the capture
