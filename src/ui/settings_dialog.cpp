@@ -696,7 +696,7 @@ private:
         auto *actionEdit = new wxTextCtrl(custom_hk_page_, wxID_ANY, action, wxDefaultPosition,
                                            wxSize(220, -1));
         actionEdit->SetHint("action, e.g. disable_preview");
-        row->Add(actionEdit, 1, wxEXPAND | wxRIGHT | wxALIGN_CENTRE_VERTICAL, 8);
+        row->Add(actionEdit, 1, wxEXPAND | wxRIGHT, 8);
 
         auto *keysBtn = new HotkeyButton(custom_hk_page_, wxID_ANY, keys);
         keysBtn->SetColours(custom_hk_bg_, custom_hk_text_, wxColour(120, 170, 250));
