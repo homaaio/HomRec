@@ -1,6 +1,49 @@
 welcome to changelog :D
 
-[Version 2.2 beta3] - 2026-09-15
+[Version 2.2 beta4] - 2026-09-16
+
+- Fixed: adding a custom hotkey (Settings > Hotkeys > "+ Add Hotkey", or
+  just opening that tab with any custom hotkeys already saved) popped a
+  "wxWidgets Debug Alert" dialog every time. Cause: AddCustomHotkeyRow()
+  (settings_dialog.cpp) added its action-text field to a
+  wxBoxSizer(wxHORIZONTAL) row with `wxEXPAND | wxALIGN_CENTRE_VERTICAL`
+  - wxBoxSizer::DoInsert() asserts (debug builds only) on wxEXPAND
+  combined with any alignment flag, since wxEXPAND already fills that
+  cell and the alignment flag is a no-op at best. Dropped the redundant
+  wxALIGN_CENTRE_VERTICAL; layout is unchanged since wxEXPAND already did
+  the job. Checked the rest of the codebase for the same pattern - this
+  was the only instance.
+- Fixed: the hotkey "Bind"/capture button (the (none)/F9/etc. box you
+  click then press a key into - HotkeyButton, themed_widgets.h/.cpp) was
+  almost invisibly small on the custom-hotkey rows, making it hard to
+  even click to start capture. Cause: HotkeyButton is a bare wxPanel that
+  draws itself (no child sizer of its own) and never overrode its best
+  size, so any sizer cell that doesn't force a size onto it directly
+  (proportion 0, no wxEXPAND - which is how AddCustomHotkeyRow() adds it,
+  unlike the four fixed hotkeys' growable-column grid) collapsed it down
+  to whatever the platform's bare-minimum panel size is. Added
+  HotkeyButton::DoGetBestSize(), sized off a realistic combo string
+  ("Control+Shift+PageDown") with a floor under both dimensions, so it's
+  a sensible clickable size everywhere it's used.
+- Hardened HomRecMainFrame::OnClose() against closing via Alt+F4
+  specifically crashing. Alt+F4 is a system accelerator Windows can
+  re-deliver as a second WM_CLOSE while the first is still unwinding
+  (Destroy() only *schedules* the real destruction, same "several
+  event-loop turns later" gap as the g_frame race fixed in beta4 below) -
+  a second entry to OnClose() would re-run every teardown step
+  (hr_hk_stop/hr_hk_destroy on an already-torn-down hotkey handle,
+  tray_icon_ cleanup, etc.) a second time. Added an IsBeingDeleted()
+  guard at the top of OnClose() - wx's own idempotency flag for this,
+  set synchronously by Destroy() before the object is actually freed -
+  so a re-entrant close bails out instead of repeating the teardown.
+  Investigated but could not fully confirm against a real crash log:
+  logs.7z couldn't be opened in this environment (no 7z/p7zip available
+  and no network access to install one), so this fix is based on static
+  review of the shutdown path, not a captured stack trace. Everything
+  else checked there (RecordingController's destructor thread-joins, the
+  update-check thread, the hotkey thunks) already looked correctly
+  guarded. If this crash recurs, a plain-text crash log/dump (not .7z)
+  would help pin down the exact stack.
 - Fixed: a recording almost always took ~20-30s to "save" after pressing
   Stop, and the resulting file was frequently corrupt/unplayable -
   reported as "a 10 second recording saves in about 20 seconds." Root
@@ -53,6 +96,7 @@ welcome to changelog :D
   use for the analogous DXGI-duplication-handle race; added
   JoinPendingInstantReplayStop(), called at every point pipeline_ is
   about to be destroyed/replaced and in the destructor.
+
   Investigated but NOT changed: high idle/AFK CPU and memory use (~15MB /
   5-8%) with preview and the audio mixer both off. This traces to Instant
   Replay's background buffer actually being on (EnableInstantReplay()) -
@@ -63,6 +107,8 @@ welcome to changelog :D
   it wasn't touched this round - happy to look at cheaper ways to run
   Instant Replay (e.g. a lower dedicated buffer fps/quality separate from
   manual-recording settings) as a followup if that's wanted.
+
+[Version 2.2 beta3] - 2026-09-15
   RecordingController::StopAsync() exists specifically so the Stop
   button doesn't have to block the UI thread, but it still called
   hr_pl_stop() directly - which waits (with a timeout) for the capture
