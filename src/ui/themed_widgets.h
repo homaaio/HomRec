@@ -124,6 +124,9 @@ public:
     wxString GetValue() const { return value_; }
     void SetValue(const wxString &v) { value_ = v; Refresh(); }
 
+protected:
+    wxSize DoGetBestSize() const override;
+
 private:
     void OnPaint(wxPaintEvent &evt);
     void OnLeftUp(wxMouseEvent &evt);
