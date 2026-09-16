@@ -381,6 +381,15 @@ void HotkeyButton::SetColours(wxColour bg, wxColour fg, wxColour accent) {
     Refresh();
 }
 
+wxSize HotkeyButton::DoGetBestSize() const {
+    wxClientDC dc(const_cast<HotkeyButton *>(this));
+    dc.SetFont(GetFont());
+    wxSize ext = dc.GetTextExtent("Control+Shift+PageDown");
+    int w = std::max(ext.GetWidth() + 24, 110);
+    int h = std::max(ext.GetHeight() + 12, 28);
+    return wxSize(w, h);
+}
+
 void HotkeyButton::StartCapture() {
     capturing_ = true;
     SetFocus();
