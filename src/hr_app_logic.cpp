@@ -36,6 +36,8 @@
    typedef pid_t hr_proc_t;
 #endif
 
+#include "ui/version.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -117,11 +119,11 @@ static void _scopy(char *dst, size_t dstlen, const char *src) {
 /*  Version                                                                    */
 /* --------------------------------------------------------------------------- */
 
-static const char CURRENT_VERSION[] = "1.6.2";
+static const char CURRENT_VERSION[] = HR_APP_VERSION;
 
 /*
  * hr_version_string
- * Returns the compiled-in version string (e.g. "1.6.2").
+ * Returns the compiled-in version string (e.g. "2.2-b.4").
  * Buffer must be at least 16 bytes.
  */
 HR_EXPORT void hr_version_string(char *out, int out_len) {
@@ -156,12 +158,17 @@ HR_EXPORT int hr_version_gt(const char *a, const char *b) {
  * hr_find_ffmpeg
  *
  * Searches, in order:
- *   1. Directory of the calling executable (exe_dir parameter).
- *   2. Current working directory.
- *   3. Directories in PATH.
+ *   1. The ffmpeg/ subfolder next to the calling executable (exe_dir
+ *      parameter) - where the app root's ffmpeg/ffmpeg.exe (dev tree) and
+ *      the installer's {app}\ffmpeg\ffmpeg.exe both put it.
+ *   2. Directory of the calling executable itself (exe_dir parameter) -
+ *      kept for backward compatibility with older installs/archives that
+ *      still drop ffmpeg.exe directly next to hr.exe.
+ *   3. Current working directory.
+ *   4. Directories in PATH.
  *
  * exe_dir : UTF-8 path to the directory containing homrec.exe / homrec.py.
- *           Pass nullptr to skip step 1.
+ *           Pass nullptr to skip steps 1-2.
  * out     : receives the found path (UTF-8).
  * out_len : size of out buffer.
  * Returns 1 if found, 0 otherwise.
@@ -182,19 +189,21 @@ HR_EXPORT int hr_find_ffmpeg(const char *exe_dir, char *out, int out_len) {
     const std::vector<std::string> names = {"ffmpeg"};
 #endif
 
-    /* Step 1: exe directory */
+    /* Step 1: <exe_dir>/ffmpeg/, Step 2: exe directory itself */
     if (exe_dir && exe_dir[0]) {
         std::string dir = _str(exe_dir);
         if (dir.back() != '/' && dir.back() != '\\') dir += '/';
         for (const auto &nm : names)
+            if (_check(dir + "ffmpeg/" + nm)) return 1;
+        for (const auto &nm : names)
             if (_check(dir + nm)) return 1;
     }
 
-    /* Step 2: current working directory */
+    /* Step 3: current working directory */
     for (const auto &nm : names)
         if (_check(nm)) return 1;
 
-    /* Step 3: PATH */
+    /* Step 4: PATH */
 #ifdef _WIN32
     char path_env[32768] = {};
     GetEnvironmentVariableA("PATH", path_env, sizeof(path_env));
