@@ -66,6 +66,8 @@ enum MenuCommandId {
     ID_VIEW_AUDIO_PANEL     = 1024,
     ID_FILE_HIDE_WINDOW     = 1025,
     ID_FILE_SET_PRESET      = 1026,
+    ID_FILE_OPEN_PROGRAM_FILES = 1027,
+    ID_FILE_IMPORT_HRP      = 1028,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
@@ -223,6 +225,8 @@ private:
     // ends up in front of HomRec instead of silently behind it - see the
     // comment at its definition for why that isn't automatic.
     void OpenRecordingsFolder();
+    void OpenProgramFilesFolder();
+    void ImportHrpPlugin();
     void OnRestoreTopmostTimer(wxTimerEvent &evt);
     bool pending_restore_topmost_ = false;
 

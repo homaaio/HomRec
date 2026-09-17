@@ -673,11 +673,11 @@ HomRecMainFrame::HomRecMainFrame()
     stats_timer_.Start(500);
     RestartLevelMeterTimer();
 
-    // Upper bound extended to ID_FILE_SET_PRESET (1026) - it's the
+    // Upper bound extended to ID_FILE_IMPORT_HRP (1028) - it's the
     // newest menu ID and this Bind() is an inclusive ID *range*, so
-    // adding an ID after ID_FILE_HIDE_WINDOW without updating this bound
+    // adding an ID after ID_FILE_SET_PRESET without updating this bound
     // would silently leave its menu item's clicks unhandled.
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_SET_PRESET);
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_IMPORT_HRP);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
     Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
@@ -747,11 +747,13 @@ void HomRecMainFrame::BuildMenuBar() {
 
     auto *fileMenu = new wxMenu();
     fileMenu->Append(ID_FILE_OPEN_RECORDINGS, wxString::FromUTF8(lang_.Get("open_recordings")));
+    fileMenu->Append(ID_FILE_OPEN_PROGRAM_FILES, wxString::FromUTF8(lang_.Get("open_program_files")));
     fileMenu->Append(ID_FILE_SELECT_WINDOW, wxString::FromUTF8(lang_.Get("select_window")));
     fileMenu->Append(ID_FILE_HIDE_WINDOW, wxString::FromUTF8(lang_.Get("hide_window")));
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXPORT_HRC, wxString::FromUTF8(lang_.Get("export_hrc")));
     fileMenu->Append(ID_FILE_IMPORT_HRC, wxString::FromUTF8(lang_.Get("import_hrc")));
+    fileMenu->Append(ID_FILE_IMPORT_HRP, wxString::FromUTF8(lang_.Get("import_hrp")));
     fileMenu->Append(ID_FILE_SET_PRESET, wxString::FromUTF8(lang_.Get("set_preset")));
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXIT, wxString::FromUTF8(lang_.Get("exit")));
@@ -1494,6 +1496,101 @@ void HomRecMainFrame::ToggleFullscreenNative() {
     ShowFullScreen(fullscreen_, wxFULLSCREEN_NOBORDER | wxFULLSCREEN_NOCAPTION);
 }
 
+void HomRecMainFrame::OpenProgramFilesFolder() {
+    // Opens the folder hr.exe itself lives in - the installed/portable
+    // program's own files (ffmpeg/, plugins/, icons/, logs/, homrec.hrc,
+    // etc.) - as distinct from ID_FILE_OPEN_RECORDINGS above, which opens
+    // wherever the user has configured recordings to be *saved*
+    // (Settings > General > Output folder), frequently a different drive
+    // or folder entirely from where the program is installed. Useful for
+    // reaching plugins/, dropping in a .hrp by hand, or grabbing a log
+    // file to attach to a bug report without hunting down the install
+    // path first.
+    std::wstring dir = MainFrameExeDir();
+    if (dir.empty()) return;
+
+    // Same foreground/topmost handling as OpenRecordingsFolder() above -
+    // see its own comment for why both steps are needed.
+    AllowSetForegroundWindow(ASFW_ANY);
+    bool was_topmost = (GetWindowStyleFlag() & wxSTAY_ON_TOP) != 0;
+    if (was_topmost) {
+        SetWindowStyleFlag(GetWindowStyleFlag() & ~wxSTAY_ON_TOP);
+        pending_restore_topmost_ = true;
+        restore_topmost_timer_.StartOnce(1500);
+    }
+
+    ShellExecuteW(GetHWND(), L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void HomRecMainFrame::ImportHrpPlugin() {
+    // The README's documented install path for a packaged plugin
+    // ("download it and drop it into plugins/ as-is, then restart
+    // HomRec") requires manually finding the plugins folder and
+    // relaunching the app. This does the same copy from an ordinary file
+    // picker and loads the plugin immediately via
+    // plugins_->LoadPluginArchive() (lua_engine.cpp - already used
+    // internally by LoadAll() for every *.hrp sitting in plugins/, see
+    // its own header comment) instead.
+    wxFileDialog dlg(this, "Import Plugin (.hrp)", wxEmptyString, wxEmptyString,
+                      "HomRec Plugin (*.hrp)|*.hrp|All files (*.*)|*.*",
+                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK) return;
+
+    std::string srcPath = dlg.GetPath().ToUTF8().data();
+
+    // Same "plugins" relative directory LuaPluginEngine was constructed
+    // with (plugins_ = std::make_unique<LuaPluginEngine>("plugins"),
+    // below) - its constructor already CreateDirectoryA()s it, so by the
+    // time this can run (plugins_ exists) it's already there.
+    std::string base = srcPath;
+    size_t slash = base.find_last_of("\\/");
+    if (slash != std::string::npos) base = base.substr(slash + 1);
+    if (base.empty()) base = "plugin";
+    // LoadPluginArchive() derives the plugin's extracted-folder name from
+    // the filename up to the last '.', so force the copy to actually end
+    // in ".hrp" regardless of what the source file was called - picking
+    // a renamed "cool-plugin.zip" via the "All files" filter above should
+    // still land as plugins\cool-plugin.hrp, not
+    // plugins\cool-plugin.zip.hrp.
+    size_t dot = base.find_last_of('.');
+    if (dot != std::string::npos) base = base.substr(0, dot);
+    std::string destPath = "plugins\\" + base + ".hrp";
+
+    if (GetFileAttributesA(destPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        wxString msg = wxString::Format(
+            "A plugin named \"%s\" is already installed. Overwrite it?",
+            wxString::FromUTF8(base.c_str()));
+        if (wxMessageBox(msg, "Import Plugin", wxYES_NO | wxICON_QUESTION, this) != wxYES) {
+            return;
+        }
+    }
+
+    if (!CopyFileA(srcPath.c_str(), destPath.c_str(), FALSE)) {
+        HrLog::Error("Failed to import plugin from " + srcPath);
+        wxMessageBox("Couldn't copy that file into the plugins folder.",
+                     "Import Plugin", wxOK | wxICON_ERROR, this);
+        return;
+    }
+
+    bool loaded = plugins_ && plugins_->LoadPluginArchive(destPath);
+    HrLog::Info("Imported plugin from " + srcPath + " -> " + destPath);
+    if (loaded) {
+        wxMessageBox("Plugin installed and loaded.", "Import Plugin",
+                     wxOK | wxICON_INFORMATION, this);
+    } else {
+        // Copied fine, but LoadPluginArchive() itself failed (bad
+        // plugin.json, missing entry script, on_load() threw, etc. - see
+        // plugins.log for specifics) or plugins_ isn't up yet. The file
+        // is still sitting in plugins/ either way, so the *next* full
+        // restart's plugins_->LoadAll() will try it again from scratch,
+        // same as if it had been dropped in by hand per the README.
+        wxMessageBox("Plugin copied into the plugins folder, but couldn't be "
+                      "loaded right now - check the Console/plugins.log for "
+                      "details. It will be tried again the next time HomRec starts.",
+                     "Import Plugin", wxOK | wxICON_WARNING, this);
+    }
+}
+
 void HomRecMainFrame::OpenRecordingsFolder() {
     if (state_.output_folder.empty()) return;
 
@@ -1539,6 +1636,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         case ID_FILE_EXIT: Close(true); break;
         case ID_FILE_OPEN_RECORDINGS:
             OpenRecordingsFolder();
+            break;
+        case ID_FILE_OPEN_PROGRAM_FILES:
+            OpenProgramFilesFolder();
             break;
         case ID_FILE_SELECT_WINDOW:
             ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
@@ -1592,6 +1692,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             }
             break;
         }
+        case ID_FILE_IMPORT_HRP:
+            ImportHrpPlugin();
+            break;
         case ID_VIEW_ALWAYS_ON_TOP: {
             long style = GetWindowStyleFlag();
             SetWindowStyleFlag(style ^ wxSTAY_ON_TOP);
