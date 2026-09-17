@@ -187,7 +187,8 @@ def step_build():
 def find_ffmpeg():
     section("ffmpeg")
     candidates = [
-        os.path.join(REPO_ROOT, "ffmpeg.exe"),
+        os.path.join(REPO_ROOT, "ffmpeg", "ffmpeg.exe"),
+        os.path.join(REPO_ROOT, "ffmpeg.exe"),  # legacy location, still honored if present
     ]
     found = next((c for c in candidates if os.path.isfile(c)), None)
     if not found:
@@ -330,7 +331,7 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
         if hom_exe:
             files.append((hom_exe, "hom.exe"))
         if preset == "full" and ffmpeg_path:
-            files.append((ffmpeg_path, "ffmpeg.exe"))
+            files.append((ffmpeg_path, os.path.join("ffmpeg", "ffmpeg.exe")))
         for doc in BASE_DOCS:
             p = os.path.join(REPO_ROOT, doc)
             if os.path.isfile(p):
