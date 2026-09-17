@@ -1,5 +1,68 @@
 welcome to changelog :D
 
+[Version 2.2.0] - 2026-09-17 (stable)
+
+- Fixed: recording still ran the live-preview thumbnail generator at up
+  to "Preview FPS" (Settings > General, 60 by default) times a second
+  even with Settings > "Disable live preview (for performance)" checked
+  - the exact CPU cost that setting exists to remove, still being paid
+  in full. A manual recording always keeps a real Pipeline object alive
+  (hr_pipeline.cpp) regardless of this setting, since it's also the
+  encoder path - so the setting couldn't be implemented by simply not
+  creating one. But capture_loop() had no way to know the thumbnail it
+  was building every tick (a full box-filter downscale of the captured
+  frame, not a cheap operation) had nowhere to go: PreviewPanel::OnPaint()
+  already skips reading it whenever disable_preview is set (it just
+  draws the ":)" placeholder instead), so every one of those thumbnails
+  was pure waste. Added Pipeline::preview_needed (hr_pipeline.cpp) plus
+  hr_pl_set_preview_needed(), and wired RecordingController to push it
+  from state_.disable_preview at every point a pipeline is created *or*
+  reused (Start(), EnableInstantReplay(), EnsurePreview(), and
+  RefreshPreviewSettings() - the last one specifically covers flipping
+  the checkbox mid-recording, where the existing pipeline has to be
+  reached directly rather than only affecting the next preview-only
+  pipeline EnsurePreview() would create). capture_loop() now skips
+  update_preview() entirely when the flag is off. This is a real,
+  continuous CPU cut during every recording made with the setting on -
+  the reason it exists in the first place ("weak devices").
+  Investigated but did NOT find a memory leak to go with it: audited
+  pipe_queue/free_bufs (hr_pipeline.cpp) and the overlay compositor's
+  per-type caches (hr_overlay_render.cpp) - all are properly bounded
+  (MAX_QUEUE_SIZE/MAX_FREE_BUFS, and PruneStaleCaches() on every overlay
+  count change) and none grow unbounded. The one bug that *did* match
+  "memory climbs during recording, only partly comes back after Stop"
+  (pipe_queue bypassing its own cap during a catch-up burst) was already
+  fixed in an earlier beta - see hr_pipeline.cpp's own "BUGFIX (freeze +
+  memory growth after Stop..." comment a few lines above where this
+  round's fix landed. The ~100-150MB a recording session settles at
+  going forward looks like ordinary buffer overhead for this
+  resolution/overlay setup (capture buffer, scaled/YUV working buffers,
+  the wx UI itself) rather than a leak, and ffmpeg's own memory is a
+  separate process not even counted in that figure (see hr_pc_log.cpp -
+  it reads GetProcessMemoryInfo() on hr.exe's own process handle only).
+
+- Added: File menu now has "Open Program Files" (opens the folder hr.exe
+  itself lives in - ffmpeg/, plugins/, icons/, logs/, homrec.hrc - as
+  distinct from the existing "Open Recordings Folder," which opens
+  wherever Settings > Output folder points, often a completely different
+  place) and "Import Plugin (.hrp)..." (file picker -> copies the chosen
+  .hrp into plugins/ next to hr.exe, same as the README's documented
+  "download it and drop it into plugins/" step, then calls
+  LuaPluginEngine::LoadPluginArchive() on it immediately instead of
+  requiring a restart - LoadAll() already extracts/loads any *.hrp
+  sitting in plugins/ the same way on every future launch, so this is
+  just doing that copy-and-load through a dialog instead of a file
+  manager). main_frame.h/.cpp, language.cpp (new "open_program_files"/
+  "import_hrp" keys, English defaults + required-key list so a custom
+  .hrl without them still falls back cleanly instead of showing a blank
+  label).
+
+- Version bump only, no functional/behavior change:
+  HR_APP_VERSION 2.2-b.4 -> 2.2.0. This is the first release this round
+  actually calls "stable" rather than a numbered beta - see 2.2-b.4's
+  own changelog note below about the beta-numbering scheme this
+  supersedes.
+
 [Version 2.2-b.4] - 2026-09-17
 
 Note on the version number: HR_APP_VERSION (src/ui/version.h) had stayed at
