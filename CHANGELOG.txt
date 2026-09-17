@@ -1,6 +1,78 @@
 welcome to changelog :D
 
-[Version 2.2 beta3] - 2026-09-15
+[Version 2.2-b.4] - 2026-09-17
+
+Note on the version number: HR_APP_VERSION (src/ui/version.h) had stayed at
+a flat "2.2.0" through the entire beta/beta2/.../beta5 cycle above - it was
+never actually bumped per beta despite the changelog tracking each one by
+name. This release is the first to put a real, distinct string into
+HR_APP_VERSION (previously it was always the same "2.2.0" no matter which
+beta was actually running). It lands as "2.2-b.4" per this round's
+instructions rather than continuing on from "beta5" above; whoever cuts
+the next release should decide whether that continues this "-b.N" scheme
+going forward (e.g. "2.2-b.5" next) or jumps back in line with the
+changelog's own beta numbering - just flagging that the two numbering
+tracks aren't currently in sync so it doesn't look like a version regression.
+
+- Fixed: hr_version_string() (src/hr_app_logic.cpp) always returned a
+  hardcoded "1.6.2", completely disconnected from HR_APP_VERSION and
+  stale since long before the 2.2 betas - despite version.h's own header
+  comment already claiming hr_version_string()/hr_version_gt() "build off
+  HR_APP_VERSION now". CURRENT_VERSION now is HR_APP_VERSION (added the
+  `#include "ui/version.h"`) instead of a second hand-maintained literal.
+- Fixed: hr_ff_destroy() (ffmpeg process manager) still unconditionally
+  closed ctx->hStdin when force-killing a still-running process, in both
+  pipe_input and non-pipe_input mode. In pipe_input mode that handle is
+  the same raw-video pipe the capture pipeline's writer thread owns and
+  closes itself exactly once, right after its loop ends (see
+  writer_loop() in hr_pipeline.cpp) - this is the exact same
+  handle-ownership race hr_ff_kill() and hr_ff_stop_graceful() were
+  already fixed for elsewhere in this same file, just missed here.
+  RecordingController::StopFinalizeTail()'s ~30s last-resort force-stop
+  path calls hr_ff_destroy() directly on a still-running ctx, which is
+  precisely the case where the writer thread can still be mid-WriteFile()
+  on that handle from another thread. Now only non-pipe_input mode (where
+  stdin is solely ffmpeg's own interactive channel) closes the handle
+  here directly; pipe_input mode just drops the reference, same as the
+  other two functions.
+- Reorganized: ffmpeg-related code and the ffmpeg binary itself now live
+  under a new ffmpeg/ folder at the repo root instead of being split
+  between src/ (hr_ffmpeg_runner.cpp) and the bare repo root
+  (ffmpeg.exe). ffmpeg/hr_ffmpeg_runner.cpp is unchanged apart from the
+  fix above; it's still compiled straight into hr.exe (no new DLL/build
+  target - Makefile and CMakeLists.txt both just point at the new path).
+  hr_find_ffmpeg() (src/hr_app_logic.cpp) now checks <exe_dir>/ffmpeg/
+  first, still falling back to <exe_dir> itself, cwd, then PATH, so older
+  portable installs that had ffmpeg.exe sitting loose next to hr.exe keep
+  working. installer/HomRec.iss now packages ffmpeg\ffmpeg.exe into
+  {app}\ffmpeg instead of {app} directly, and tools/homrec_build.py's
+  find_ffmpeg()/collect_files() look for and package it from ffmpeg/ the
+  same way (falling back to the old repo-root ffmpeg.exe location if
+  that's still where it's sitting locally). Did not go further and add a
+  separate ffmpeg/include/ - hr_ffmpeg_runner.cpp has never had its own
+  header (every caller just declares the handful of extern "C" hr_ff_*()
+  functions it needs inline, same as hr_pipeline.cpp already does for
+  hr_dx_*/hr_sw_*), and nothing else in this codebase keeps headers in a
+  separate include/ tree away from their .cpp, so there's nothing for an
+  include/ folder to hold yet. ffmpeg.exe itself is still not checked
+  into the repo (third-party binary) - see the new ffmpeg/README.md.
+- Fixed: installer/HomRec.iss's file-association task has referenced
+  icons\files_icons\hrc.ico / hrp.ico (and SetupIconFile has referenced
+  icons\hrsetup.ico) since the feature was added several betas ago, but
+  none of those three files actually existed anywhere in the repo -
+  icons/files_icons/ didn't even exist as a folder. Because every one of
+  those [Files]/[Icons] entries is flagged skipifsourcedoesntexist, ISCC
+  would happily build a "successful" installer that silently shipped
+  with no .hrc/.hrp file-type icons and reused hr.exe's own main.ico for
+  Setup.exe instead of a dedicated one - never an error, just quietly not
+  doing what the script (and installer/README.md) both claim it does.
+  Added icons/files_icons/hrc.ico and hrp.ico (simple flat file-badge
+  icons, blue/green, labelled HRC/HRP) and icons/hrsetup.ico (a
+  distinct install-themed icon - box + arrow - instead of another copy
+  of main.ico) so the installer actually has real assets to package.
+
+[Version 2.2 beta5] - 2026-09-16
+
 - Fixed: adding a custom hotkey (Settings > Hotkeys > "+ Add Hotkey", or
   just opening that tab with any custom hotkeys already saved) popped a
   "wxWidgets Debug Alert" dialog every time. Cause: AddCustomHotkeyRow()
@@ -43,6 +115,9 @@ welcome to changelog :D
   update-check thread, the hotkey thunks) already looked correctly
   guarded. If this crash recurs, a plain-text crash log/dump (not .7z)
   would help pin down the exact stack.
+
+[Version 2.2 beta4] - 2026-09-16
+
 - Fixed: a recording almost always took ~20-30s to "save" after pressing
   Stop, and the resulting file was frequently corrupt/unplayable -
   reported as "a 10 second recording saves in about 20 seconds." Root
@@ -107,6 +182,7 @@ welcome to changelog :D
   Instant Replay (e.g. a lower dedicated buffer fps/quality separate from
   manual-recording settings) as a followup if that's wanted.
 
+[Version 2.2 beta3] - 2026-09-15
   RecordingController::StopAsync() exists specifically so the Stop
   button doesn't have to block the UI thread, but it still called
   hr_pl_stop() directly - which waits (with a timeout) for the capture
