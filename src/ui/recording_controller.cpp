@@ -70,6 +70,7 @@ extern "C" {
     void hr_pl_set_capture_rect(void *handle, int x, int y, int w, int h);
     void hr_pl_set_output_size(void *handle, int w, int h);
     void hr_pl_set_preview_fps(void *handle, int fps);
+    void hr_pl_set_preview_needed(void *handle, int enabled);
     int hr_pl_end_recording_segment(void *handle, int timeout_ms);
 
     // hr_ffmpeg_runner.cpp
@@ -559,7 +560,15 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_pl_set_output_size(pipeline_, output_w_, output_h_);
         pipeline_started = hr_pl_start(pipeline_) != 0;
     }
-    if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+    if (pipeline_) {
+        hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+        // A manual recording always needs a real Pipeline (it's also the
+        // encoder path) regardless of the "Disable live preview" setting,
+        // but there's no reason for it to keep generating an unread
+        // thumbnail every preview_fps tick when that setting is on - see
+        // Pipeline::preview_needed's own comment (hr_pipeline.cpp).
+        hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+    }
     if (!pipeline_ || !pipeline_started) {
         error_out = L"Failed to start the capture pipeline.";
         HrLog::Error("Start failed: capture pipeline didn't start");
@@ -1192,6 +1201,7 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
         return false;
     }
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+    hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
 
     if (!StartInstantReplayEncoder(error_out)) return false;
     instant_replay_active_ = true;
@@ -1422,6 +1432,9 @@ void RecordingController::EnsurePreview() {
     // itself once Start() reuses this pipeline and re-applies the crop.
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+    // EnsurePreview() already bailed out above when state_.disable_preview
+    // is set, so reaching here means the preview genuinely is wanted.
+    hr_pl_set_preview_needed(pipeline_, 1);
 }
 
 void RecordingController::TeardownPreview() {
@@ -1713,7 +1726,17 @@ void RecordingController::RefreshPreviewSettings() {
         applied_preview_capture_settings_ = now;
         applied_preview_capture_settings_valid_ = true;
     }
-    if (pipeline_) hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+    if (pipeline_) {
+        hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+        // Covers the case TeardownPreview()/EnsurePreview() above don't:
+        // a recording already in progress owns pipeline_ and keeps it
+        // regardless of this setting (see TeardownPreview()'s own "never
+        // tear down while state_.recording" guard), so toggling "Disable
+        // live preview" mid-recording needs to reach the existing
+        // pipeline directly rather than only affecting the next preview-
+        // only pipeline EnsurePreview() would create.
+        hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+    }
 
     // Picking a different microphone in Settings had no effect
     // until the app was restarted -- hr_audio_start() only ever ran once,
