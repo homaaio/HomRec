@@ -69,7 +69,7 @@ OBJS := \
 	src/hr_overlay_render.o \
 	src/hr_webcam_enum.o \
 	src/hr_webcam_capture.o \
-	src/hr_ffmpeg_runner.o \
+	ffmpeg/hr_ffmpeg_runner.o \
 	src/hr_tools.o \
 	src/hr_ui_utils.o \
 	src/hr_audio.o \
@@ -92,6 +92,9 @@ src/%.o: src/%.cpp
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+ffmpeg/%.o: ffmpeg/%.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 resource.o: resource.rc
 	windres resource.rc -O coff -o resource.o

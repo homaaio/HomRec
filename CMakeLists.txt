@@ -66,7 +66,7 @@ set(HR_SOURCES
     src/hr_webcam_enum.cpp
     src/hr_webcam_capture.cpp
     src/hr_encoder_helpers.c
-    src/hr_ffmpeg_runner.cpp
+    ffmpeg/hr_ffmpeg_runner.cpp
     src/hr_tools.cpp
     src/hr_ui_utils.cpp
     src/hr_audio.cpp
