@@ -10,12 +10,12 @@ Install Inno Setup 6 (Windows only - it doesn't cross-compile), then either:
   ```
   make
   make hom
-  iscc /DMyAppVersion=2.0.3 installer\HomRec.iss
+  iscc /DMyAppVersion=2.2-b.4 installer\HomRec.iss
   ```
   matching `/DMyAppVersion` to `HR_APP_VERSION` in `src/ui/version.h`.
 
 Either way, `hr.exe` (and `hom.exe`, and any runtime `.dll`s next to it,
-and `ffmpeg.exe` if you want it bundled) need to already be built and
+and `ffmpeg\ffmpeg.exe` if you want it bundled) need to already be built and
 sitting in the repo root first - the script only packages what it finds,
 it doesn't compile anything.
 

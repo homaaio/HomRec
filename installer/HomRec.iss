@@ -1,7 +1,7 @@
 ; HomRec.iss - Inno Setup script for HomRec's Windows installer/uninstaller.
 ;
 ; Build with the Inno Setup Compiler (iscc.exe), from the repo root:
-;   iscc /DMyAppVersion=2.0.3 installer\HomRec.iss
+;   iscc /DMyAppVersion=2.2-b.4 installer\HomRec.iss
 ; (MyAppVersion defaults to the value baked in below if you omit /D - keep
 ; that default in sync with src/ui/version.h's HR_APP_VERSION by hand, or
 ; just always pass /D explicitly. tools/homrec_build.py's optional
@@ -26,7 +26,7 @@
 ; running hr.exe instead of failing to overwrite it mid-update.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.2.0"
+  #define MyAppVersion "2.2-b.4"
 #endif
 
 #define MyAppName "HomRec"
@@ -114,7 +114,7 @@ Source: "hom.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexis
 ; time have to travel with it. Same reasoning tools/homrec_build.py uses
 ; for its "full"/"portable" archive presets.
 Source: "*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "ffmpeg\ffmpeg.exe"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "cfg\*"; DestDir: "{app}\cfg"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "CHANGELOG.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
