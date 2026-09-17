@@ -214,7 +214,7 @@ __marimo__/
 
 # .exe/.bat/trash
 
-ffmpeg.exe
+*.exe
 hr.exe
 !hr.exe
 homrec_settings.json
