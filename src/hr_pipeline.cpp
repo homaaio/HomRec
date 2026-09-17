@@ -382,6 +382,24 @@ struct Pipeline {
     // (hr_pl_set_preview_fps()) takes effect immediately, not just on
     // the next hr_pl_create().
     std::atomic<int> preview_fps{15};
+
+    // Whether anything is actually going to consume the live-preview
+    // thumbnail this pipeline produces (hr_pl_get_preview()). Defaults to
+    // true so every existing caller that never touches this flag keeps its
+    // current behavior. RecordingController sets this to false whenever
+    // Settings > "Disable live preview (for performance)" is on
+    // (hr_pl_set_preview_needed()) - see that flag's own comment
+    // (app_state.h) for why. Before this flag existed, capture_loop()
+    // called update_preview() unconditionally at up to preview_fps times a
+    // second (60 by default) even with the setting checked and the preview
+    // panel torn down/never polling hr_pl_get_preview() - the exact
+    // "supposed to be off but still costing CPU" gap that setting's own
+    // label promised not to have, and pure waste on the low-end machines
+    // that setting exists for in the first place. A manual recording still
+    // creates a real Pipeline regardless of this setting (it's also the
+    // encoder path), so this couldn't be fixed by simply not creating one.
+    std::atomic<bool> preview_needed{true};
+
     intptr_t pipe_handle = 0;
     bool recording = false;   // pipe open → encode YUV; false → preview only
 
@@ -1212,7 +1230,8 @@ struct Pipeline {
                 int want_fps = preview_fps.load(std::memory_order_relaxed);
                 if (want_fps < 1) want_fps = 1;
                 int64_t preview_interval_ns = 1'000'000'000LL / want_fps;
-                if (now_ns - last_preview_ns >= preview_interval_ns) {
+                if (preview_needed.load(std::memory_order_relaxed) &&
+                    now_ns - last_preview_ns >= preview_interval_ns) {
                     last_preview_ns = now_ns;
                     update_preview();
                 }
@@ -1908,5 +1927,18 @@ HR_EXPORT void hr_pl_set_preview_fps(void* handle, int fps) {
     if (!handle || fps <= 0) return;
 #ifdef _WIN32
     static_cast<Pipeline*>(handle)->preview_fps.store(fps, std::memory_order_relaxed);
+#endif
+}
+
+// See Pipeline::preview_needed's own comment. Call with enabled=0 whenever
+// nothing is going to read hr_pl_get_preview() for this pipeline (Settings
+// > "Disable live preview" is on) so capture_loop() skips update_preview()
+// entirely instead of building a thumbnail every tick just to have it sit
+// unread in pv_buf. Safe to call at any time, including mid-recording;
+// takes effect on the very next capture_loop() iteration.
+HR_EXPORT void hr_pl_set_preview_needed(void* handle, int enabled) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->preview_needed.store(enabled != 0, std::memory_order_relaxed);
 #endif
 }
