@@ -5,158 +5,146 @@
 [![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
 [![Boosty](https://img.shields.io/badge/support-boosty-orange?style=flat-square)](https://boosty.to/homa4ella/donate)
 
+A native C/C++ screen recorder for low-spec Windows machines. Single-binary (`hr.exe`), FFmpeg for encoding, no GPU requirement, no bundled runtime.
 
-**Screen recorder built for weak PCs.**
-No lags. No bloat. No GPU required.
+## Contents
 
----
+- [Overview](#overview)
+- [Features](#features)
+- [Installation](#installation)
+  - [Installer](#installer)
+  - [Portable](#portable)
+  - [From source](#from-source)
+- [Usage](#usage)
+  - [Keyboard shortcuts](#keyboard-shortcuts)
+  - [Custom languages](#custom-languages)
+  - [Console startup scripts](#console-startup-scripts)
+- [Plugins](#plugins)
+- [Build dependencies](#build-dependencies)
+- [Support & community](#support--community)
 
-## What is HomRec?
+## Overview
 
-If you've ever tried recording your screen with OBS or Bandicam on an old laptop or office PC and everything lagged - **HomRec is made for you.**
+HomRec targets a specific problem: general-purpose screen recorders (OBS, Bandicam) assume more CPU/GPU headroom than a lot of real-world machines have. HomRec is built to avoid that assumption entirely - no compositor, no GPU dependency, no background services beyond what active recording requires.
 
-Written from the ground up to use the minimum possible CPU and RAM. No fancy effects, no GPU requirement, no background services. Just open, record, done.
-
-**HomRec is 100% native C++/C.** There is no Python anywhere in this project - the entire app (UI, recording pipeline, audio, plugins, console) compiles directly into a single `hr.exe` with no runtime dependencies beyond FFmpeg.
-
----
+The application is 100% native C/C++: UI, capture pipeline, audio, plugin host, and console all compile into a single `hr.exe` with no runtime dependency beyond FFmpeg (bundled in the portable distribution). Note that this refers to the *application* - a small number of Python scripts exist under `tools/` for maintainer use (build packaging, spec-checking, language file conversion) and are not part of `hr.exe` or required to run it.
 
 ## Features
 
-| Feature | Details |
-|---|---|
-| **Screen recording** | Full desktop or specific window |
-| **Audio capture** | Microphone + Desktop audio (via WASAPI loopback) |
-| **Multi-monitor** | Select which monitor to record |
-| **Hotkeys** | F9 start/stop · F10 pause · F11 fullscreen |
-| **Custom languages** | Drop a `.hrl` file in Advanced Settings to add any language instantly |
-| **Overlays** | Add and position text/image/webcam overlays on your recording |
-| **Custom output folder** | Choose where recordings are saved |
-| **Recording stats** | Live FPS, duration, frame count in status bar |
-| **Console window** | Access advanced commands directly via the built-in console |
-| **Plugins** | Lua-scripted plugins with full filesystem/network access |
-| **Always on top** | Keep the window above everything else |
-| **System tray** | Minimise to tray, control recording from tray menu |
-| **Help menu** | Check for updates and report issues directly from the app |
-
----
+- **Video capture** - full desktop, a chosen monitor, or a specific window; output scaled or at an exact resolution
+- **Encoding** - automatic hardware-encoder detection (NVENC, AMD AMF, Intel Quick Sync) with software fallback (libx264/libx265); MP4 or MKV output
+- **Audio capture** - microphone and/or desktop audio (WASAPI loopback), combined or exported as separate tracks
+- **Multi-monitor support** - select which display to record
+- **Overlays** - text, image, webcam, and an input overlay (on-screen keypress/mouse-click display)
+- **Instant Replay** - background rolling buffer, saved on demand via hotkey, independent of active recording
+- **Hotkeys** - start/stop, pause/resume, fullscreen toggle, save-replay, all user-rebindable
+- **Custom languages** - `.hrl` translation files, applied without restarting
+- **Plugin system** - Lua-scripted, filesystem/network access, lifecycle hooks
+- **Console** - built-in command console with optional autorun scripts
+- **Performance controls** - live preview can be disabled at the pipeline level (not just hidden in the UI), with independently adjustable preview resolution/FPS when left on
+- **System integration** - system tray, always-on-top, desktop shortcut, launch-at-startup, in-app self-update
 
 ## Installation
 
-### Option A - Installer (recommended)
+### Installer
 
-**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `HomRec-Setup-*.exe`     
-**2.** Run it - no admin rights needed, it installs per-user     
-**3.** Optionally tick "Create a desktop shortcut" and/or "Launch HomRec automatically when Windows starts" on the Tasks page - these are the only place system integration is offered before first launch; everything's also available afterward in Settings > System     
+1. Download `homrec-setup-*.exe` from [Releases](https://github.com/homaaio/homrec/releases).
+2. Run it. Installs per-user, no admin rights required.
+3. Optional: enable a desktop shortcut and/or launch-at-startup from the Tasks page (both also configurable later, in Settings > System).
 
-> Comes with its own uninstaller (Windows Settings > Apps, or the Start Menu shortcut) and self-updates from within the app via **Help > Check for Updates**.
+The installer registers a standard uninstaller (Windows Settings > Apps). Subsequent updates can be applied in-app via Help > Check for Updates, without re-running the installer.
 
-### Option B - Portable .zip/.7z
+### Portable
 
-**1.** Go to [**Releases**](https://github.com/homaaio/homrec/releases) and download the latest `.zip` or `.7z`         
-**2.** Unzip anywhere you want - no installer needed     
-**3.** Launch `hr.exe`     
+1. Download the latest `.zip` or `.7z` from [Releases](https://github.com/homaaio/homrec/releases).
+2. Extract to any location.
+3. Run `hr.exe`. FFmpeg is included in the archive.
 
-> FFmpeg is already included in the archive - no extra downloads needed.
-> **Antivirus warning?** Some antiviruses (Kaspersky, Avast) may flag HomRec because it is a new program. It is not a virus - the full source code is on GitHub. Add the HomRec folder to exceptions if needed.
+**Note on antivirus warnings:** some antivirus products (reported with Kaspersky and Avast) flag `hr.exe` heuristically as a new/unsigned binary. This is a false positive - the source is public in this repository. Add an exception if needed.
 
----
+### From source
 
-### Option C - Build from source
+Requirements: a MinGW-w64 toolchain and Lua 5.4 (headers + library).
 
-HomRec is a native C++/C project - building it means compiling, not installing a Python environment.
-
-**1. Clone the repo**
 ```bash
 git clone https://github.com/homaaio/HomRec.git
 cd homrec
 ```
 
-**2. Get a C++ toolchain**
-Windows needs a MinGW-w64 toolchain (g++, gcc, windres, make). The easiest way: install [MSYS2](https://www.msys2.org/), then inside its terminal:
+Install a toolchain (via [MSYS2](https://www.msys2.org/)):
 ```bash
 pacman -S mingw-w64-x86_64-toolchain
 ```
 
-**3. Get Lua 5.4**
-Plugins are Lua-scripted, so the build needs Lua's headers/library. Either:
+Obtain Lua 5.4:
 ```bash
 vcpkg install lua:x64-mingw-dynamic
 ```
-or download the amalgamation from [lua.org](https://www.lua.org/download.html) and point the build at it (see the Makefile's `LUA_CFLAGS`/`LUA_LDFLAGS` variables).
+(or the amalgamation from [lua.org](https://www.lua.org/download.html) - point the build at it via the Makefile's `LUA_CFLAGS`/`LUA_LDFLAGS`)
 
-**4. Place ffmpeg**
-Download from [ffmpeg.org](https://ffmpeg.org/download.html) and either:
-- Place `ffmpeg.exe` in the HomRec folder, **or**
-- Add FFmpeg to your system PATH
+Place `ffmpeg.exe` next to the build output, or ensure it's on PATH.
 
-**5. Build**
+Build and run:
 ```bash
 make
-```
-This compiles everything - UI, recording engine, audio, plugin host - directly into one `hr.exe`. No separate DLL step, no packaging step.
-
-**6. Run**
-```bash
 hr.exe
 ```
 
-**7. (Optional) Build the installer**
-Want to package `hr.exe` into the same `HomRec-Setup-*.exe` from Option A?
-See [`installer/README.md`](installer/README.md) - it's an Inno Setup
-script (`installer/HomRec.iss`), buildable by hand or via
-`tools/homrec_build.py`.
+`make` produces a single `hr.exe` covering the UI, recording engine, audio, and plugin host - no separate library/packaging step.
 
----
+To reproduce the installer itself, see [`installer/README.md`](installer/README.md) (`installer/HomRec.iss`, an Inno Setup script - buildable manually or via `tools/homrec_build.py`).
 
-## Keyboard shortcuts
+## Usage
 
-| Key | Action |
+### Keyboard shortcuts
+
+| Key (default) | Action |
 |---|---|
 | `F9` | Start / Stop recording |
 | `F10` | Pause / Resume recording |
-| `F11` | Toggle fullscreen |
+| `F11` | Toggle HomRec's own window fullscreen |
+| `F8` | Save Instant Replay |
 
----
+All shortcuts are configurable in Settings > Hotkeys.
 
-## Custom languages (.hrl)
+### Custom languages
 
-HomRec supports custom language files in the `.hrl` format (HomRec Language).
-To install one: **Advanced Settings → Interface → 📥 Install .hrl...**
+Language files use the `.hrl` format (compressed JSON, keyed against the built-in English template).
 
-The language applies instantly - no restart needed. You can also drop `.hrl` files directly onto the HomRec window if drag-and-drop is available on your system.
+To install: Settings > General > **Add Language...** > select file > **Save**. Applies immediately, no restart required.
 
-Want to create your own? Each `.hrl` file is a compressed JSON with all UI strings based on the English template. Community-made language files can be shared on the Discord server.
+To create one: use `tools/hrl_tool.py` to pack/unpack `.hrl` files against plain JSON. Community translations are commonly shared via Discord.
 
----
+### Console startup scripts
+
+Two optional, plain-text script files under `cfg/` (auto-created next to `hr.exe` on first run):
+
+| File | Runs when |
+|---|---|
+| `autoexec.cfg` | Every application launch |
+| `startrec.cfg` | Start of every recording |
+
+Format: one console command per line; `//` or `#` for comments. See [`cfg/README.md`](cfg/README.md) for the command reference and example files.
 
 ## Plugins
 
-Plugins are written in **Lua**, not Python. Drop a folder into `plugins/`:
+Plugins are written in Lua and packaged as a directory under `plugins/`:
+
 ```
 plugins/
   my_plugin/
     plugin.json     { "id": "my_plugin", "name": "My Plugin", "version": "1.0", "entry": "main.lua" }
     main.lua
 ```
-Plugins get full filesystem and network access (`io`, `os`, and `homrec.http_get`/`http_post` are all available), plus hooks like `on_load`, `on_recording_start`, `on_recording_stop`, and a `homrec.*` API for toasts, colors, and cross-plugin events.
 
-**Installing a plugin** doesn't require any tooling: a packaged plugin
-is just a `.hrp` file (a renamed `.zip`) - download it and drop it into
-`plugins/` as-is, then restart HomRec. If you'd rather not fetch the
-file by hand, `hom` (the plugin manager in `tools/hom/`) does the same
-download-and-place step for you: `hom install <plugin-name>`. Either
-way ends with the exact same file sitting in `plugins/`. See
-[`plugins/READMEplugins.md`](plugins/READMEplugins.md) for the full
-walkthrough.
+Plugin code has full filesystem and network access (`io`, `os`, `homrec.http_get`/`http_post`), lifecycle hooks (`on_load`, `on_recording_start`, `on_recording_stop`), and a `homrec.*` API (toasts, color helpers, cross-plugin events). Given this access level, only install plugins from trusted sources.
 
----
+A packaged plugin (`.hrp`, a renamed `.zip`) can be installed by:
+- placing it in `plugins/` manually and restarting HomRec, or
+- **File > Import Plugin (.hrp)...** in the app, which loads it without a restart, or
+- `hom install <plugin-name>`, using the CLI plugin manager in `tools/hom/`
 
-## Console startup scripts
-
-Drop an `autoexec.cfg` in `cfg/` (next to `hr.exe`, auto-created on first run) and it'll run on every launch - one console command per line, `//` or `#` for comments. A `startrec.cfg` in the same folder runs at the start of every new recording instead. Both are entirely optional. See `cfg/README.md` for the format and a couple of example files to copy from.
-
----
+See [`plugins/READMEplugins.md`](plugins/READMEplugins.md) for the complete plugin API reference.
 
 ## Build dependencies
 
@@ -164,13 +152,14 @@ Drop an `autoexec.cfg` in `cfg/` (next to `hr.exe`, auto-created on first run) a
 MinGW-w64 toolchain (g++, gcc, windres, make)
 Lua 5.4 (headers + library)
 ```
----
 
-## Stay updated
+## Support & community
 
-### **[t.me/homaexe](https://t.me/homaexe)** / **[x.com/homrec_dev](https://x.com/homrec_dev)** / [discord.gg](https://discord.gg/Gv4t6Xhy7E)
-
----
+- Releases: [github.com/homaaio/homrec/releases](https://github.com/homaaio/homrec/releases)
+- Telegram: [t.me/homaexe](https://t.me/homaexe)
+- X: [x.com/homrec_dev](https://x.com/homrec_dev)
+- Discord: [discord.gg/Gv4t6Xhy7E](https://discord.gg/Gv4t6Xhy7E)
+- Support (Boosty): [Boosty](https://boosty.to/homa4ella/donate)
 
 <div align="center">
 Made with ❤️ by <b>homaaio</b>
