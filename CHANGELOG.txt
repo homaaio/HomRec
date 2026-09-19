@@ -2,6 +2,19 @@ welcome to changelog :D
 
 [Version 2.2.1] - 2026-09-19
 
+- Fixed: overlays couldn't be moved/resized on the preview - no frame ever
+  showed up and clicking did nothing, leaving "Position Overlays..." as the
+  only way. The preview now draws a labelled frame (with corner handles)
+  around every overlay, a clicked overlay stays selected and highlighted
+  after releasing the mouse, the cursor changes over grabbable frames/
+  handles, and the arrow keys nudge the selected overlay (Shift = 10px).
+  Frames are now mapped through the pipeline's real composite size instead
+  of the full monitor size, so they line up in window-capture mode too.
+- Fixed: with "Disable live preview" on, clicking the preview did nothing.
+  It now takes a screenshot and lets overlays be edited on it right in the
+  preview (right-click: Refresh screenshot / Done editing, or Esc). This
+  also works while a recording or Instant Replay is running, and no longer
+  risks tearing down the pipeline Instant Replay is using when it ends.
 - Fixed: ugly black borders/box on the whole recording when a game runs
   exclusive fullscreen at a different resolution than the desktop (e.g.
   1366x768 on a 1600x900 desktop) - a previous fix for the same mismatch
