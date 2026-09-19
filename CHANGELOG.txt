@@ -1,7 +1,30 @@
 welcome to changelog :D
 
-[Version 2.2.1] - 2026-09-19 (stable)
+[Version 2.2.1] - 2026-09-19
 
+- Fixed: ugly black borders/box on the whole recording when a game runs
+  exclusive fullscreen at a different resolution than the desktop (e.g.
+  1366x768 on a 1600x900 desktop) - a previous fix for the same mismatch
+  (see 2.2.1's "diagonal line/pixel corruption" entry below) plugged the
+  corruption by pinning dx_capture()'s output to the size the recording
+  buffer/ffmpeg pipe expect, but did it by black-letterboxing whatever
+  didn't fit - correct for a one-tick glitch, but a permanent eyesore for
+  a game that runs its whole session at the mismatched resolution.
+  hr_dx_capture() (hr_dxgi_capture.cpp) now nearest-neighbour stretches
+  the real captured frame to fill the pinned output shape instead, so the
+  recording always uses the full frame - visually indistinguishable from
+  native capture for near-identical aspect ratios like this one.
+- Fixed: recordings had a constant ~0.5-0.8s audio lag on every session.
+  hr_merge_av() (hr_tools.cpp) muxed the finished video and the captured
+  audio WAV assuming both start at the same real-world instant, but
+  video's "frame 0" and audio's "sample 0" are set several setup steps
+  apart in RecordingController::Start() (ffmpeg process spawn, DXGI
+  device/duplication creation, etc. all happen in between) with nothing
+  measuring or compensating for that gap. Start() now measures the actual
+  gap (av_start_skew_sec_, logged) between the pipe being pointed at the
+  output file and hr_audio_reset_buffers() marking audio's zero-point, and
+  hr_merge_av() applies it as an -itsoffset (or -ss trim, if the gap runs
+  the other way) on the audio input so the two line back up.
 - Fixed: window-capture recordings (e.g. recording just the Garry's Mod
   window) came out as skewed, streaky, garbled video. capture_loop()
   (hr_pipeline.cpp) cropped the window rect by compacting bgra_buf IN
