@@ -56,6 +56,18 @@ struct DxCapCtx {
     int  height;
     bool acquired;
 
+    // Fixed output shape the CALLER's buffer (and, downstream, ffmpeg's
+    // rawvideo pipe) was sized for -- set once via hr_dx_set_output_size()
+    // right after the caller allocates its buffer, and deliberately never
+    // touched by reset(). width/height above track whatever DXGI's output
+    // duplication is ACTUALLY handing back right now, which can change
+    // out from under us mid-recording (see hr_dx_capture()'s blit comment
+    // below). 0/0 means "not set yet -- behave exactly as before and just
+    // use width/height", so nothing changes for any caller that never
+    // calls hr_dx_set_output_size().
+    int  out_w = 0;
+    int  out_h = 0;
+
     DxCapCtx() : adapter_idx(0), output_idx(0), width(0), height(0), acquired(false) {}
 
     /* Re-acquire duplication interface (needed after HR_DX_LOST) */
@@ -218,6 +230,51 @@ HR_EXPORT int hr_dx_get_size(void *handle, int *out_w, int *out_h) {
 }
 
 /* -------------------------------------------------------------------------
+ * hr_dx_set_output_size
+ *
+ * BUGFIX (diagonal line/pixel corruption + the bottom slice of the frame
+ * missing, seen recording fullscreen games -- e.g. older Source titles --
+ * running at a lower exclusive-fullscreen resolution than the desktop,
+ * such as 1366x768 on a 1600x900 desktop):
+ *
+ * The caller (hr_pipeline.cpp) allocates its bgra_buf once, at
+ * hr_pl_start() time, sized to whatever dx_get_size() reports THEN, and
+ * tells ffmpeg's rawvideo demuxer that exact width/height for the entire
+ * recording. But a game switching into (or out of, or between two
+ * different) exclusive-fullscreen resolutions after that point triggers
+ * DXGI_ERROR_ACCESS_LOST -- handled by calling reset() -- and reset()
+ * re-reads the OS's current output mode and resizes DxCapCtx::width/
+ * height to match it. hr_dx_capture() used to always blit ctx->width
+ * tightly-packed columns per row; once ctx->width no longer matched what
+ * the caller's buffer/ffmpeg pipe were told, every row landed at the
+ * wrong offset in the caller's buffer (a smaller ctx->width packed into a
+ * wider expected stride), which reads back as the frame shearing into
+ * diagonal lines, and left the buffer's tail -- the bottom rows, since
+ * everything is one row-major array -- with whatever stale bytes were
+ * there before, i.e. a chunk of the bottom of the frame effectively
+ * missing.
+ *
+ * Call this once with the width/height the caller's buffer was actually
+ * allocated for (immediately after that allocation). From then on,
+ * hr_dx_capture() always fills exactly that many rows of exactly that
+ * stride, regardless of what the desktop's actual mode does mid-
+ * recording -- letterboxing with black if the real frame is smaller,
+ * cropping if it's larger -- so a resolution change can, at worst, make
+ * the recording show black bars until the next reset() recovers, instead
+ * of ever writing a corrupted/misaligned frame into the caller's buffer.
+ * ---------------------------------------------------------------------- */
+HR_EXPORT void hr_dx_set_output_size(void *handle, int w, int h) {
+#ifdef _WIN32
+    if (!handle) return;
+    auto *ctx = static_cast<DxCapCtx *>(handle);
+    ctx->out_w = (w > 0) ? w : 0;
+    ctx->out_h = (h > 0) ? h : 0;
+#else
+    (void)handle; (void)w; (void)h;
+#endif
+}
+
+/* -------------------------------------------------------------------------
  * hr_dx_capture
  * Grabs one frame into caller-allocated BGRA buffer.
  * ---------------------------------------------------------------------- */
@@ -274,44 +331,6 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
 
     if (!have_output) return HR_DX_TIMEOUT;
 
-    // BUGFIX (freeze + growing audio/video desync under heavy GPU load,
-    // e.g. recording a demanding fullscreen 3D game like TF2):
-    //
-    // This used to reuse `timeout_ms` -- the same 8-33ms value derived in
-    // hr_pipeline.cpp as "2/3 of one frame interval" for AcquireNextFrame --
-    // as the deadline for this Map() poll too. Those are two very
-    // different waits and conflating them was the bug:
-    //   - AcquireNextFrame's timeout is *supposed* to be short: a timeout
-    //     there just means "the desktop hasn't changed since last frame",
-    //     which happens constantly and is totally normal.
-    //   - This Map() is reading back the *previous* call's CopyResource
-    //     (see the staging[]/pending_idx pipelining above), i.e. a GPU
-    //     copy that normally has had a full frame interval to finish. It
-    //     only takes noticeably longer than that when the GPU's command
-    //     queue is backed up behind something else demanding -- exactly
-    //     what happens with the GPU maxed out by a fullscreen game.
-    //
-    // With only 8-33ms of slack, any such backlog made Map() return
-    // DXGI_ERROR_WAS_STILL_DRAWING past the deadline on essentially every
-    // call, so hr_dx_capture() kept returning HR_DX_TIMEOUT run after run.
-    // The pipeline's TIMEOUT handling (by design) re-encodes whatever
-    // stale content is already in bgra_buf instead of skipping the output
-    // slot -- correct for the normal "static desktop" case, but here it
-    // meant the recorded video visibly froze on one stale frame for as
-    // long as the backlog lasted, while audio (captured on its own
-    // real-time WASAPI clock, unaffected by GPU load) kept flowing
-    // normally -- which is exactly "recording freezes, audio ends up ~30s
-    // out of sync". Once the GPU backlog cleared, every frame that *would*
-    // have been produced during the freeze finally became mappable in a
-    // burst, which is the "video periodically speeds up" half of the
-    // report: a stretch of real gameplay time getting compressed into far
-    // fewer output frames than it should have had.
-    //
-    // Fix: give this read-back its own, much more generous budget,
-    // independent of AcquireNextFrame's intentionally-short timeout_ms, so
-    // a transient GPU backlog has a real chance to drain before we give up
-    // and repeat a stale frame. Still bounded (not an unbounded wait) so a
-    // genuinely stuck/lost device doesn't hang the capture thread forever.
     static constexpr ULONGLONG kMapWaitBudgetMs = 250;
     D3D11_MAPPED_SUBRESOURCE mapped{};
     const ULONGLONG map_deadline = GetTickCount64() + kMapWaitBudgetMs;
@@ -324,17 +343,30 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     }
     if (FAILED(hr)) return HR_DX_ERROR;
 
-    const int row_bytes  = ctx->width * 4;
-    const uint8_t *src   = reinterpret_cast<const uint8_t *>(mapped.pData);
-    uint8_t       *dst   = out_bgra;
-    if ((int)mapped.RowPitch == row_bytes) {
-        memcpy(dst, src, (size_t)row_bytes * (size_t)ctx->height);
-    } else {
-        for (int y = 0; y < ctx->height; ++y) {
-            memcpy(dst, src, (size_t)row_bytes);
-            src += mapped.RowPitch;
-            dst += row_bytes;
+    // Target shape the caller's buffer actually has room for -- see the
+    // hr_dx_set_output_size() comment above. Falls back to the real
+    // captured size (old behaviour) when nobody's called it.
+    const int tgt_w = (ctx->out_w  > 0) ? ctx->out_w  : ctx->width;
+    const int tgt_h = (ctx->out_h  > 0) ? ctx->out_h  : ctx->height;
+    const int dst_row_bytes = tgt_w * 4;
+    const int copy_w   = std::min(tgt_w, ctx->width);
+    const int copy_h   = std::min(tgt_h, ctx->height);
+    const int copy_bytes = copy_w * 4;
+
+    const uint8_t *src = reinterpret_cast<const uint8_t *>(mapped.pData);
+    uint8_t       *dst = out_bgra;
+    for (int y = 0; y < tgt_h; ++y) {
+        if (y < copy_h) {
+            memcpy(dst, src + (size_t)y * mapped.RowPitch, (size_t)copy_bytes);
+            if (copy_w < tgt_w)
+                memset(dst + copy_bytes, 0, (size_t)dst_row_bytes - (size_t)copy_bytes);
+        } else {
+            // Real frame is shorter than what the caller expects (e.g. the
+            // desktop just dropped to a lower exclusive-fullscreen mode) --
+            // letterbox with black instead of leaving stale bytes behind.
+            memset(dst, 0, (size_t)dst_row_bytes);
         }
+        dst += dst_row_bytes;
     }
 
     ctx->context->Unmap(ctx->staging[read_idx].Get(), 0);
