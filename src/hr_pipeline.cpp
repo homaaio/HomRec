@@ -63,6 +63,7 @@ extern "C" {
     int   hr_dx_get_size(void *handle, int *out_w, int *out_h);
     int   hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms);
     int   hr_dx_reset(void *handle);
+    void  hr_dx_set_output_size(void *handle, int w, int h);
     int   hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y,
                              int *out_w, int *out_h, char *name_buf, int name_buf_len);
     unsigned long hr_dx_last_error(void);
@@ -84,6 +85,7 @@ struct LibHandles {
     int   (*dx_capture)(void*, uint8_t*, int)           = &hr_dx_capture;
     int   (*dx_get_size)(void*, int*, int*)             = &hr_dx_get_size;
     int   (*dx_reset)(void*)                            = &hr_dx_reset;
+    void  (*dx_set_output_size)(void*, int, int)        = &hr_dx_set_output_size;
     unsigned long (*dx_last_error)(void)                = &hr_dx_last_error;
     void  (*bgra_to_yuv)(const uint8_t*, uint8_t*, int, int) = &hr_bgra_to_yuv420p;
     void *(*sw_create)()                                = &hr_sw_create;
@@ -175,6 +177,25 @@ private:
         unsigned hw = std::thread::hardware_concurrency();
         int n_bands = 1;
         if (total_pixels >= kMinPixelsForThreads && hw > 1) {
+            // BUGFIX (game FPS drop while recording, worst on quad/hexa-
+            // core machines): this used to be std::min(hw - 1, 4), which
+            // only ever held back a single core for "the capture thread
+            // (DXGI grab + overlay compositing + BGRA->YUV) and everything
+            // else (audio, UI)" the comment on this class promises -
+            // despite that comment's own wording ("just holding a couple
+            // back"). On an 8+ core machine that 1-core margin is plenty
+            // (this class already caps at 4 bands total), but on the
+            // 4-6 core CPUs a lot of gaming PCs/laptops actually have, it
+            // meant 3 of 4 cores (75%) or 4 of 6 (67%) going straight to
+            // color conversion alone, on top of the separately-boosted
+            // capture/writer threads - leaving the game itself starved of
+            // CPU for the entire recording, which is exactly the
+            // "Minecraft drops from 100+ fps to 60-90 while recording"
+            // report this was causing. Now actually reserves 2 cores
+            // (matching the comment's own stated intent) before deciding
+            // how many bands to split into, still capped at 4 bands so
+            // nothing changes on the higher-core-count machines this was
+            // already fine for.
             static constexpr unsigned kReservedCores = 2;
             unsigned usable = (hw > kReservedCores) ? (hw - kReservedCores) : 1;
             n_bands = (int)std::min<unsigned>(usable, 4);
@@ -1615,6 +1636,7 @@ HR_EXPORT int hr_pl_start(void* handle) {
     pl->bgra_buf.resize((size_t)pl->src_w * pl->src_h * 4);
     // YUV conversion buffers are now lazily sized from the free-list pool
     // the first time a frame is converted (see capture_loop()).
+    if (g_libs.dx_set_output_size) g_libs.dx_set_output_size(pl->dx_ctx, pl->src_w, pl->src_h);
 
     // Pre-allocate preview buffer
     int tw = pl->pv_w, th = pl->pv_h;
