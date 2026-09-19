@@ -91,8 +91,13 @@ public:
     // overlay is drawn/hit-testable regardless of OverlayDef::visible (the
     // user needs to be able to reach a hidden one to reposition it too),
     // not just the ones normally shown live.
-    void EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h);
-    void UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, int h);
+    // native_w/native_h = the full-resolution size overlays are measured in
+    // (0 = same as w/h). Clicking the preview while Disable live preview is
+    // on starts this by itself - see OnLeftDown()/BeginSnapshotEditing().
+    void EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h,
+                           int native_w = 0, int native_h = 0);
+    void UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, int h,
+                             int native_w = 0, int native_h = 0);
     void ExitSnapshotMode();
     bool InSnapshotMode() const { return snapshot_mode_; }
 
@@ -101,7 +106,16 @@ private:
     void OnLeftDown(wxMouseEvent &evt);
     void OnMouseMove(wxMouseEvent &evt);
     void OnLeftUp(wxMouseEvent &evt);
+    void OnRightUp(wxMouseEvent &evt);
+    void OnKeyDown(wxKeyEvent &evt);
     void OnCaptureLost(wxMouseCaptureLostEvent &evt);
+
+    // Preview-off editing session on a one-off screenshot (see .cpp).
+    bool BeginSnapshotEditing();
+    void RefreshSnapshot();
+    void EndSnapshotEditingSession();
+    // Size overlay x/y/w/h are measured in for what's currently shown.
+    bool GetNativeSize(int &w, int &h) const;
 
     // Maps the current preview bitmap's on-screen rect within the panel
     // (position + scale), so overlay coordinates (always stored in real
@@ -124,6 +138,7 @@ private:
     bool snapshot_mode_ = false;
     std::vector<uint8_t> snapshot_buf_;
     int snapshot_w_ = 0, snapshot_h_ = 0;
+    int snapshot_native_w_ = 0, snapshot_native_h_ = 0;
 
     // -- direct overlay drag/resize on the preview -------------------------
     // Overlays previously could only be repositioned via a
@@ -136,6 +151,11 @@ private:
     // plain move-drag (grabbed the body, not a handle).
     enum class Corner { kNone, kTopLeft, kBottomRight };
     Corner drag_corner_ = Corner::kNone;
+    // Topmost overlay under the point (or -1); sets `corner` if a resize
+    // handle was hit.
+    int HitTestOverlay(int mx, int my, Corner &corner) const;
+    // Overlay the user last clicked - stays highlighted after mouse-up.
+    int selected_overlay_index_ = -1;
     int drag_start_mouse_x_ = 0, drag_start_mouse_y_ = 0;
     int drag_start_ov_x_ = 0, drag_start_ov_y_ = 0, drag_start_ov_w_ = 0, drag_start_ov_h_ = 0;
 

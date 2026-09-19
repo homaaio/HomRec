@@ -188,8 +188,25 @@ private:
 // ---------------------------------------------------------------------------
 // PreviewPanel
 // ---------------------------------------------------------------------------
+namespace {
+// Size (px) of the square resize handles drawn on/hit-tested against each
+// overlay frame - big enough to grab comfortably on a scaled-down preview.
+constexpr int kOverlayHandle = 10;
+
+// Where an overlay's rectangle lands inside the on-screen preview bitmap.
+// `prev` is the bitmap's rect within the panel, sx/sy convert overlay-space
+// (native capture) pixels to on-screen pixels.
+wxRect OverlayScreenRect(const OverlayDef &ov, const wxRect &prev, double sx, double sy) {
+    int rx = prev.GetX() + (int)(ov.x * sx);
+    int ry = prev.GetY() + (int)(ov.y * sy);
+    int rw = std::max(kOverlayHandle * 2, (int)(ov.w * sx));
+    int rh = std::max(kOverlayHandle * 2, (int)(ov.h * sy));
+    return wxRect(rx, ry, rw, rh);
+}
+} // namespace
+
 PreviewPanel::PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState &state)
-    : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE),
+    : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxWANTS_CHARS),
       rec_(rec), state_(state) {
     SetBackgroundStyle(wxBG_STYLE_PAINT);
     Bind(wxEVT_PAINT, &PreviewPanel::OnPaint, this);
@@ -201,7 +218,26 @@ PreviewPanel::PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState
     Bind(wxEVT_LEFT_DOWN, &PreviewPanel::OnLeftDown, this);
     Bind(wxEVT_MOTION, &PreviewPanel::OnMouseMove, this);
     Bind(wxEVT_LEFT_UP, &PreviewPanel::OnLeftUp, this);
+    Bind(wxEVT_RIGHT_UP, &PreviewPanel::OnRightUp, this);
+    Bind(wxEVT_KEY_DOWN, &PreviewPanel::OnKeyDown, this);
     Bind(wxEVT_MOUSE_CAPTURE_LOST, &PreviewPanel::OnCaptureLost, this);
+}
+
+// The coordinate space overlays are measured in for whatever is currently
+// on screen: the pipeline's real composite size for the live feed (the
+// cropped window rect in window-capture mode, the full monitor otherwise),
+// or the size the one-off screenshot was taken at in snapshot mode. Using
+// capture_width()/height() for this instead is wrong whenever a window crop
+// is active - it would scale every frame by the monitor size, not the
+// picture actually shown.
+bool PreviewPanel::GetNativeSize(int &w, int &h) const {
+    w = h = 0;
+    if (snapshot_mode_) {
+        w = snapshot_native_w_ > 0 ? snapshot_native_w_ : snapshot_w_;
+        h = snapshot_native_h_ > 0 ? snapshot_native_h_ : snapshot_h_;
+        return w > 0 && h > 0;
+    }
+    return rec_ && rec_->GetPreviewNativeSize(w, h) && w > 0 && h > 0;
 }
 
 void PreviewPanel::OnPaint(wxPaintEvent &) {
@@ -224,17 +260,16 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         int smileyY = (cs.GetHeight() - ext.GetHeight()) / 2;
         dc.DrawText(smiley, (cs.GetWidth() - ext.GetWidth()) / 2, smileyY);
 
-        // Preview being off means dragging/resizing overlays against the
-        // live image doesn't work (see overlays_dock_panel.cpp's "apply
-        // with preview off" snapshot editor for the actual fix) - this is
-        // just a pointer to it, and it's what "edit settings
-        // hint-no-overlay false" (bter plugin console command) turns off.
+        // Preview being off means there's no live image to drag overlays
+        // against - clicking anywhere in this area grabs a one-off
+        // screenshot and edits them on that instead (see OnLeftDown() /
+        // BeginSnapshotEditing()). This is just the pointer to it, and
+        // it's what "edit settings hint-no-overlay false" (bter plugin
+        // console command) turns off.
         if (state_.hint_no_overlay) {
             wxFont hintFont = GetFont();
             dc.SetFont(hintFont);
-            wxString hint = "Don't see your overlay here? Preview is off - "
-                             "right-click it in the Overlays panel and use "
-                             "\"Apply with preview off\" instead.";
+            wxString hint = "Preview is off - click here to move/resize your overlays on a screenshot.";
             wxSize hintExt = dc.GetTextExtent(hint);
             dc.DrawText(hint, (cs.GetWidth() - hintExt.GetWidth()) / 2, smileyY + ext.GetHeight() + 8);
         }
@@ -294,16 +329,20 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         dc.DrawBitmap(cached_bmp_, (cs.GetWidth() - cached_dst_w_) / 2, (cs.GetHeight() - cached_dst_h_) / 2);
     }
 
-    // Draw each configured overlay's rectangle
-    // (plus a small resize-handle square at its bottom-right corner)
-    // directly on top of the live preview, so it can be grabbed with the
-    // mouse right here instead of only through the separate full-screen
-    // "Position Overlays" window.
+    // Draw a frame around EVERY overlay (with its name/type above it and a
+    // resize handle on the top-left and bottom-right corners) directly on
+    // top of the preview, so it can be clicked, moved and resized right
+    // here instead of only through the separate "Position Overlays..."
+    // window. A clicked overlay stays selected (gold, thicker frame) after
+    // the mouse button is released, so it's always obvious which one is
+    // being edited.
     wxRect prevRect;
-    if (GetPreviewRect(prevRect) && rec_ && rec_->capture_width() > 0 && rec_->capture_height() > 0) {
-        double sx = (double)prevRect.GetWidth() / rec_->capture_width();
-        double sy = (double)prevRect.GetHeight() / rec_->capture_height();
-        const int handle = 8;
+    int nw = 0, nh = 0;
+    if (GetPreviewRect(prevRect) && GetNativeSize(nw, nh)) {
+        double sx = (double)prevRect.GetWidth() / nw;
+        double sy = (double)prevRect.GetHeight() / nh;
+        if (selected_overlay_index_ >= (int)state_.overlays.size()) selected_overlay_index_ = -1;
+
         for (size_t i = 0; i < state_.overlays.size(); ++i) {
             const auto &ov = state_.overlays[i];
             // In snapshot mode every overlay is shown/draggable, even a
@@ -311,26 +350,47 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
             // live preview (where it'd otherwise be temporarily unhidden
             // via Show/Hide) is off.
             if (!ov.visible && !snapshot_mode_) continue;
-            int rx = prevRect.GetX() + (int)(ov.x * sx);
-            int ry = prevRect.GetY() + (int)(ov.y * sy);
-            int rw = std::max(4, (int)(ov.w * sx));
-            int rh = std::max(4, (int)(ov.h * sy));
-            bool active = ((int)i == drag_overlay_index_);
+            wxRect r = OverlayScreenRect(ov, prevRect, sx, sy);
+            bool active = ((int)i == drag_overlay_index_) || ((int)i == selected_overlay_index_);
             wxColour accent = active ? wxColour(255, 210, 90) : wxColour(120, 170, 250);
 
+            // Dark outer line first so the frame stays readable on top of
+            // both bright and dark screen content.
             dc.SetBrush(*wxTRANSPARENT_BRUSH);
-            dc.SetPen(wxPen(accent, active ? 2 : 1, wxPENSTYLE_SHORT_DASH));
-            dc.DrawRectangle(rx, ry, rw, rh);
+            dc.SetPen(wxPen(wxColour(0, 0, 0), 1));
+            dc.DrawRectangle(r.GetX() - 1, r.GetY() - 1, r.GetWidth() + 2, r.GetHeight() + 2);
+            dc.SetPen(wxPen(accent, active ? 2 : 1));
+            dc.DrawRectangle(r);
 
-            // Two resize handles -- top-left and bottom-right -- instead
-            // of only bottom-right, so either corner can be grabbed to
-            // resize (top-left drags the top-left edge in while keeping
-            // the bottom-right corner anchored, and vice versa).
             dc.SetBrush(wxBrush(accent));
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawRectangle(rx + rw - handle, ry + rh - handle, handle, handle);
-            dc.DrawRectangle(rx, ry, handle, handle);
+            dc.SetPen(wxPen(wxColour(0, 0, 0), 1));
+            dc.DrawRectangle(r.GetRight() - kOverlayHandle + 1, r.GetBottom() - kOverlayHandle + 1,
+                             kOverlayHandle, kOverlayHandle);
+            dc.DrawRectangle(r.GetX(), r.GetY(), kOverlayHandle, kOverlayHandle);
+
+            wxString label = wxString::FromUTF8((ov.name.empty() ? ov.type : ov.name).c_str());
+            if (!ov.visible) label += " (hidden)";
+            if (!label.empty()) {
+                wxSize te = dc.GetTextExtent(label);
+                int ty = r.GetY() >= te.GetHeight() + 2 ? r.GetY() - te.GetHeight() - 2
+                                                         : r.GetY() + kOverlayHandle + 2;
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.SetBrush(wxBrush(wxColour(20, 20, 26)));
+                dc.DrawRectangle(r.GetX(), ty, te.GetWidth() + 6, te.GetHeight() + 2);
+                dc.SetTextForeground(accent);
+                dc.DrawText(label, r.GetX() + 3, ty + 1);
+            }
         }
+    }
+
+    if (snapshot_mode_) {
+        wxString msg = "Editing overlays on a screenshot - right-click: Refresh / Done (Esc)";
+        wxSize te = dc.GetTextExtent(msg);
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(wxColour(20, 20, 26)));
+        dc.DrawRectangle(0, 0, te.GetWidth() + 12, te.GetHeight() + 6);
+        dc.SetTextForeground(wxColour(255, 210, 90));
+        dc.DrawText(msg, 6, 3);
     }
 }
 
@@ -343,64 +403,69 @@ bool PreviewPanel::GetPreviewRect(wxRect &out) const {
     return true;
 }
 
-void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
+// Topmost overlay under (mx,my), or -1. Later entries paint on top of
+// earlier ones, so walk backwards to grab the one the user actually sees.
+// `corner` reports whether a resize handle (vs. the plain body) was hit.
+int PreviewPanel::HitTestOverlay(int mx, int my, Corner &corner) const {
+    corner = Corner::kNone;
     wxRect prevRect;
-    if (!GetPreviewRect(prevRect) || !rec_ || rec_->capture_width() <= 0 || rec_->capture_height() <= 0) {
+    int nw = 0, nh = 0;
+    if (!GetPreviewRect(prevRect) || !GetNativeSize(nw, nh)) return -1;
+    double sx = (double)prevRect.GetWidth() / nw;
+    double sy = (double)prevRect.GetHeight() / nh;
+
+    for (int i = (int)state_.overlays.size() - 1; i >= 0; --i) {
+        const auto &ov = state_.overlays[(size_t)i];
+        if (!ov.visible && !snapshot_mode_) continue;
+        wxRect r = OverlayScreenRect(ov, prevRect, sx, sy);
+        wxRect brHandle(r.GetRight() - kOverlayHandle + 1, r.GetBottom() - kOverlayHandle + 1,
+                        kOverlayHandle, kOverlayHandle);
+        wxRect tlHandle(r.GetX(), r.GetY(), kOverlayHandle, kOverlayHandle);
+        if (brHandle.Contains(mx, my))      { corner = Corner::kBottomRight; return i; }
+        if (tlHandle.Contains(mx, my))      { corner = Corner::kTopLeft;     return i; }
+        if (r.Contains(mx, my))             { corner = Corner::kNone;        return i; }
+    }
+    return -1;
+}
+
+void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
+    SetFocus(); // so the arrow keys / Esc reach OnKeyDown()
+
+    // Preview is off: there's no live picture to grab an overlay on, so a
+    // click here starts an edit-on-screenshot session instead (nothing
+    // visible happened at all on click before this).
+    if (state_.disable_preview && !snapshot_mode_) {
+        if (!state_.overlays.empty()) BeginSnapshotEditing();
         evt.Skip();
         return;
     }
-    double sx = (double)prevRect.GetWidth() / rec_->capture_width();
-    double sy = (double)prevRect.GetHeight() / rec_->capture_height();
-    int mx = evt.GetX(), my = evt.GetY();
-    const int handle = 8;
 
-    // Topmost-first (later in the vector paints on top of earlier ones),
-    // so overlapping overlays grab the one the user actually sees on top.
-    for (int i = (int)state_.overlays.size() - 1; i >= 0; --i) {
-        auto &ov = state_.overlays[(size_t)i];
-        if (!ov.visible && !snapshot_mode_) continue;
-        int rx = prevRect.GetX() + (int)(ov.x * sx);
-        int ry = prevRect.GetY() + (int)(ov.y * sy);
-        int rw = std::max(4, (int)(ov.w * sx));
-        int rh = std::max(4, (int)(ov.h * sy));
-        wxRect body(rx, ry, rw, rh);
-        wxRect brHandle(rx + rw - handle, ry + rh - handle, handle, handle);
-        wxRect tlHandle(rx, ry, handle, handle);
-
-        if (brHandle.Contains(mx, my)) {
-            drag_corner_ = Corner::kBottomRight;
-        } else if (tlHandle.Contains(mx, my)) {
-            drag_corner_ = Corner::kTopLeft;
-        } else if (body.Contains(mx, my)) {
-            drag_corner_ = Corner::kNone;
-        } else {
-            continue;
-        }
-
-        drag_overlay_index_ = i;
-        drag_start_mouse_x_ = mx;
-        drag_start_mouse_y_ = my;
+    Corner corner = Corner::kNone;
+    int hit = HitTestOverlay(evt.GetX(), evt.GetY(), corner);
+    if (hit >= 0) {
+        auto &ov = state_.overlays[(size_t)hit];
+        drag_corner_ = corner;
+        drag_overlay_index_ = hit;
+        selected_overlay_index_ = hit;
+        drag_start_mouse_x_ = evt.GetX();
+        drag_start_mouse_y_ = evt.GetY();
         drag_start_ov_x_ = ov.x;
         drag_start_ov_y_ = ov.y;
         drag_start_ov_w_ = ov.w;
         drag_start_ov_h_ = ov.h;
-        CaptureMouse();
+        if (!HasCapture()) CaptureMouse();
         Refresh();
         return;
     }
 
-    // If a previous drag never got a matching OnLeftUp/OnCaptureLost
-    // (e.g. mouse capture was silently stolen by another window mid-drag,
-    // or a modal dialog popped up while the button was held), drag_overlay_
-    // index_ could stay pointing at an overlay indefinitely - it would just
-    // sit rendered in its "active" gold-highlighted state (see OnPaint's
-    // `active` colour below) with no way to clear it short of restarting a
-    // fresh drag on that same overlay. A plain click on empty space now
-    // also clears any such stuck state, instead of only a fresh hit doing
-    // it via drag_overlay_index_ = i above.
-    if (drag_overlay_index_ >= 0) {
+    // A plain click on empty space deselects, and also clears any drag
+    // state left stuck by a drag that never got a matching OnLeftUp/
+    // OnCaptureLost (mouse capture silently stolen by another window
+    // mid-drag, a modal dialog popping up while the button was held...).
+    if (drag_overlay_index_ >= 0 || selected_overlay_index_ >= 0) {
         if (HasCapture()) ReleaseMouse();
         drag_overlay_index_ = -1;
+        selected_overlay_index_ = -1;
         drag_corner_ = Corner::kNone;
         Refresh();
     }
@@ -408,18 +473,36 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
 }
 
 void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
-    if (drag_overlay_index_ < 0 || !evt.LeftIsDown() || !rec_ ||
-        rec_->capture_width() <= 0 || rec_->capture_height() <= 0) {
+    if (drag_overlay_index_ < 0 || !evt.LeftIsDown()) {
+        // Not dragging - just tell the user what's grabbable here.
+        Corner corner = Corner::kNone;
+        int hit = (state_.disable_preview && !snapshot_mode_)
+                      ? -1 : HitTestOverlay(evt.GetX(), evt.GetY(), corner);
+        wxStockCursor cur = wxCURSOR_ARROW;
+        if (state_.disable_preview && !snapshot_mode_ && !state_.overlays.empty()) cur = wxCURSOR_HAND;
+        else if (hit >= 0) {
+            cur = corner == Corner::kBottomRight ? wxCURSOR_SIZENWSE
+                : corner == Corner::kTopLeft     ? wxCURSOR_SIZENWSE
+                                                 : wxCURSOR_SIZING;
+        }
+        SetCursor(wxCursor(cur));
+        evt.Skip();
+        return;
+    }
+    if (drag_overlay_index_ >= (int)state_.overlays.size()) { // list changed under us
+        drag_overlay_index_ = -1;
         evt.Skip();
         return;
     }
     wxRect prevRect;
-    if (!GetPreviewRect(prevRect) || prevRect.GetWidth() <= 0 || prevRect.GetHeight() <= 0) {
+    int cw = 0, ch = 0;
+    if (!GetPreviewRect(prevRect) || prevRect.GetWidth() <= 0 || prevRect.GetHeight() <= 0 ||
+        !GetNativeSize(cw, ch)) {
         evt.Skip();
         return;
     }
-    double sx = (double)prevRect.GetWidth() / rec_->capture_width();
-    double sy = (double)prevRect.GetHeight() / rec_->capture_height();
+    double sx = (double)prevRect.GetWidth() / cw;
+    double sy = (double)prevRect.GetHeight() / ch;
 
     // Convert the mouse delta from on-screen preview pixels back to real
     // capture-resolution pixels (the space OverlayDef::x/y/w/h -- and the
@@ -428,7 +511,6 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
     int dy = (int)std::lround((evt.GetY() - drag_start_mouse_y_) / sy);
 
     auto &ov = state_.overlays[(size_t)drag_overlay_index_];
-    int cw = rec_->capture_width(), ch = rec_->capture_height();
     if (drag_corner_ == Corner::kBottomRight) {
         // Top-left corner stays put; bottom-right corner follows the mouse.
         ov.w = std::max(10, drag_start_ov_w_ + dx);
@@ -458,9 +540,9 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
 void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
     if (drag_overlay_index_ >= 0) {
         if (HasCapture()) ReleaseMouse();
-        drag_overlay_index_ = -1;
+        drag_overlay_index_ = -1; // selected_overlay_index_ stays - the frame stays highlighted
         drag_corner_ = Corner::kNone;
-        // This in-place drag-on-the-live-preview path (the normal,
+        // This in-place drag-on-the-preview path (the normal,
         // most-used way to reposition an overlay) bypasses both
         // OverlaysDockPanel::Refresh() and ShowOverlayPlacementDialog() -
         // the two places that otherwise persist state_.overlays (see their
@@ -473,28 +555,112 @@ void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
     evt.Skip();
 }
 
+// Right-click while editing on a screenshot: Refresh (re-take it) / Done.
+void PreviewPanel::OnRightUp(wxMouseEvent &evt) {
+    if (!snapshot_mode_) { evt.Skip(); return; }
+    wxMenu menu;
+    menu.Append(wxID_REFRESH, "Refresh screenshot");
+    menu.Append(wxID_CLOSE, "Done editing\tEsc");
+    int id = GetPopupMenuSelectionFromUser(menu);
+    if (id == wxID_REFRESH) RefreshSnapshot();
+    else if (id == wxID_CLOSE) EndSnapshotEditingSession();
+}
+
+void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
+    int key = evt.GetKeyCode();
+    if (key == WXK_ESCAPE && snapshot_mode_) {
+        EndSnapshotEditingSession();
+        return;
+    }
+    // Arrow keys nudge the selected overlay by 1 native pixel (10 with
+    // Shift) - precise placement that's fiddly to do with the mouse on a
+    // scaled-down preview.
+    bool arrow = key == WXK_LEFT || key == WXK_RIGHT || key == WXK_UP || key == WXK_DOWN;
+    if (arrow && selected_overlay_index_ >= 0 &&
+        selected_overlay_index_ < (int)state_.overlays.size() && drag_overlay_index_ < 0) {
+        int cw = 0, ch = 0;
+        if (GetNativeSize(cw, ch)) {
+            int step = evt.ShiftDown() ? 10 : 1;
+            auto &ov = state_.overlays[(size_t)selected_overlay_index_];
+            if (key == WXK_LEFT)  ov.x -= step;
+            if (key == WXK_RIGHT) ov.x += step;
+            if (key == WXK_UP)    ov.y -= step;
+            if (key == WXK_DOWN)  ov.y += step;
+            ov.x = std::clamp(ov.x, 0, std::max(0, cw - ov.w));
+            ov.y = std::clamp(ov.y, 0, std::max(0, ch - ov.h));
+            HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
+            Refresh();
+            return;
+        }
+    }
+    evt.Skip();
+}
+
 void PreviewPanel::OnCaptureLost(wxMouseCaptureLostEvent &) {
     drag_overlay_index_ = -1;
     drag_corner_ = Corner::kNone;
     Refresh();
 }
 
-void PreviewPanel::EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h) {
-    snapshot_mode_ = true;
-    UpdateSnapshotFrame(buf, w, h);
+// Preview is off: grab one screenshot and edit overlays on it, right here in
+// the preview area. Ends with Esc / right-click > Done editing.
+bool PreviewPanel::BeginSnapshotEditing() {
+    if (!rec_) return false;
+    std::vector<uint8_t> buf;
+    int w = 0, h = 0, nw = 0, nh = 0;
+    if (!rec_->CaptureSnapshotFrame(buf, w, h, nw, nh, /*first_call=*/true)) {
+        rec_->EndSnapshotEditing();
+        wxMessageBox("Couldn't capture a screenshot to edit overlays against - try again in a moment.",
+                     "HomRec", wxOK | wxICON_WARNING, this);
+        return false;
+    }
+    EnterSnapshotMode(buf, w, h, nw, nh);
+    return true;
 }
 
-void PreviewPanel::UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, int h) {
+void PreviewPanel::RefreshSnapshot() {
+    if (!rec_ || !snapshot_mode_) return;
+    std::vector<uint8_t> buf;
+    int w = 0, h = 0, nw = 0, nh = 0;
+    if (rec_->CaptureSnapshotFrame(buf, w, h, nw, nh, /*first_call=*/false)) {
+        UpdateSnapshotFrame(buf, w, h, nw, nh);
+    }
+}
+
+void PreviewPanel::EndSnapshotEditingSession() {
+    if (!snapshot_mode_) return;
+    ExitSnapshotMode();
+    // Lets the temporary preview pipeline CaptureSnapshotFrame() started go
+    // away again if Disable live preview is still on.
+    if (rec_) rec_->EndSnapshotEditing();
+}
+
+void PreviewPanel::EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h,
+                                     int native_w, int native_h) {
+    snapshot_mode_ = true;
+    UpdateSnapshotFrame(buf, w, h, native_w, native_h);
+}
+
+void PreviewPanel::UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, int h,
+                                       int native_w, int native_h) {
     snapshot_buf_ = buf;
     snapshot_w_ = w;
     snapshot_h_ = h;
+    snapshot_native_w_ = native_w;
+    snapshot_native_h_ = native_h;
     Refresh();
 }
 
 void PreviewPanel::ExitSnapshotMode() {
+    if (HasCapture()) ReleaseMouse();
     snapshot_mode_ = false;
     snapshot_buf_.clear();
     snapshot_w_ = snapshot_h_ = 0;
+    snapshot_native_w_ = snapshot_native_h_ = 0;
+    drag_overlay_index_ = -1;
+    selected_overlay_index_ = -1;
+    drag_corner_ = Corner::kNone;
+    SetCursor(wxCursor(wxCURSOR_ARROW));
     Refresh();
 }
 
