@@ -1,5 +1,84 @@
 welcome to changelog :D
 
+[Version 2.2.1] - 2026-09-19 (stable)
+
+- Fixed: window-capture recordings (e.g. recording just the Garry's Mod
+  window) came out as skewed, streaky, garbled video. capture_loop()
+  (hr_pipeline.cpp) cropped the window rect by compacting bgra_buf IN
+  PLACE. Any tick that didn't get a fresh DXGI frame (the very first call
+  always, plus every HR_DX_TIMEOUT / HR_DX_LOST tick) deliberately
+  re-encodes "whatever is still in bgra_buf" - which was now the already
+  cropped, tightly-packed data - and cropped it AGAIN using the full-
+  monitor row stride, shearing the picture more each time. bgra_buf now
+  always stays the pristine full-desktop frame; the crop goes into a
+  separate work_buf. Overlays and the cursor are also drawn on a work
+  copy now instead of on bgra_buf itself, so repeated ticks no longer
+  stack overlays/cursor on top of themselves (ghost trails, alpha overlays
+  getting darker) either. The live preview reads the same per-tick frame.
+- Fixed: app crashed (silent std::terminate) on the SECOND Stop of a
+  session. RecordingController::StopAsync() assigned a new std::thread to
+  finalize_thread_ without joining the previous recording's (already
+  finished, but never joined - the UI uses StopAsync, only the blocking
+  Stop() joined) thread; assigning to a joinable std::thread terminates
+  the process. StopAsync() and Start() now join it first, and Start()
+  refuses (with a message) while a previous recording is still being saved.
+- Fixed: possible out-of-bounds read / crash when a running preview
+  pipeline was re-targeted at a different window (crop rect changed by
+  the UI thread while capture_loop() was mid-frame and reading the four
+  crop_* fields separately). The rect is now guarded by crop_mtx,
+  snapshotted once per frame and re-validated against the real frame size.
+- Fixed: a timed-out hr_pl_end_recording_segment() left its close request
+  armed, so the writer thread could close the NEXT recording's pipe (early
+  EOF to ffmpeg) as soon as its queue ran empty. Cleared on timeout and
+  whenever hr_pl_set_recording() (re)activates a pipe.
+- Fixed: hr_dxgi_capture.cpp's Map() wait deadline was stored in a DWORD
+  while GetTickCount64() is 64-bit, so after ~49.7 days of PC uptime every
+  read-back timed out instantly (frozen/duplicated frames). Now ULONGLONG.
+- Fixed: recorded audio ending up noticeably (often 15-20s) "behind" the
+  video on playback. RecordingController::Start() (recording_controller.cpp)
+  used to call hr_audio_reset_buffers() - the call that actually starts
+  accumulating this recording's audio - *before* the capture pipeline was
+  even created/started, i.e. before hr_pl_create()'s D3D11 device + DXGI
+  duplication setup (including its own up-to-40x50ms retry loop when the
+  desktop isn't immediately duplicable: a UAC prompt, a fullscreen game
+  holding exclusive access, a driver still waking up, etc.) and before
+  hr_pl_start() had produced a single real video frame. hr_merge_av()
+  (hr_tools.cpp) lines the resulting audio track up starting at t=0
+  against the video track's own frame 0 with no compensating offset, so
+  audio's t=0 being consistently earlier in real time than video's t=0
+  meant the audio matching any given on-screen moment played out later
+  than that moment was shown - "the sound lags the picture." Moved the
+  hr_audio_reset_buffers()/hr_audio_set_volumes() call to right after the
+  pipeline is confirmed started and flipped into recording mode instead,
+  as close as this function can get audio's start to video's actual first
+  frame.
+- Fixed: recording could measurably drop game framerate (e.g. Minecraft)
+  more than it needed to, worst on 4-6 core machines. Two contributing
+  issues in hr_pipeline.cpp:
+    1. Yuv420pWorkerPool::EnsureStarted() sized its thread pool as
+       min(hardware_concurrency() - 1, 4) bands, which only ever held back
+       a single core "for the capture thread ... and everything else" -
+       despite that same comment's own wording ("holding a couple back").
+       On a quad-core machine that put 75% of all cores into color
+       conversion alone (67% on a hexa-core), on top of the separately-
+       boosted capture/writer threads, starving the actual game of CPU for
+       the whole recording. Now reserves 2 cores before splitting into
+       bands (still capped at 4 bands total, so 8+ core machines are
+       unaffected).
+    2. writer_loop() set THREAD_PRIORITY_HIGHEST unconditionally, once, on
+       thread start - unlike capture_loop(), which already modulates
+       between HIGHEST and ABOVE_NORMAL based on boost_priority (see that
+       flag's own comment: it exists specifically so a passive feature
+       like Instant Replay's background buffer doesn't run at a
+       system-wide-contending priority indefinitely just for sitting
+       there unnoticed). Instant Replay's background segment writer keeps
+       this thread genuinely busy the entire time a game is running, so it
+       was paying that same cost the capture-thread fix was supposed to
+       have already removed. writer_loop() now checks boost_priority the
+       same way capture_loop() does, both at thread start and on every
+       loop iteration (since boost_priority can flip without the writer
+       thread restarting).
+
 [Version 2.2.0] - 2026-09-17 (stable)
 
 - Fixed: recording still ran the live-preview thumbnail generator at up
