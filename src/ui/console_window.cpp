@@ -634,6 +634,19 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
     auto aliasIt = aliases_.find(cmd);
     if (aliasIt != aliases_.end()) cmd = aliasIt->second;
 
+    // Hidden "sudo" synonym for "inwid" (deliberately undocumented). The
+    // line is rewritten so the word "sudo" is replaced by "inwid" *before*
+    // anything else looks at it - every message, refusal or "Unknown
+    // command" the rest of RunCommand() prints therefore says "inwid",
+    // never "sudo".
+    if (cmd == L"sudo") {
+        std::wstring trimmedRaw = Trim(raw);
+        size_t sp = trimmedRaw.find_first_of(L" \t");
+        std::wstring rest = (sp == std::wstring::npos) ? L"" : Trim(trimmedRaw.substr(sp + 1));
+        RunCommand(rest.empty() ? std::wstring(L"inwid") : (L"inwid " + rest), confirmed);
+        return;
+    }
+
     if (cmd != L"batch" && raw.find(L"&&") != std::wstring::npos) {
         PrintWarn(L"\"&&\" only chains commands inside \"batch\" - run: batch " + raw);
         return;
