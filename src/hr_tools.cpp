@@ -310,7 +310,8 @@ static double probe_duration_sec(const std::wstring& ffpath, const std::wstring&
 HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
                            const wchar_t* video_file,
                            const wchar_t* audio_file,
-                           double real_elapsed_sec)
+                           double real_elapsed_sec,
+                           double av_start_skew_sec)
 {
     if (!ffpath || !video_file || !audio_file) return 0;
 
@@ -327,6 +328,17 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
     bool stretch = real_elapsed_sec > 0.5 && video_dur > 0.05 &&
                    video_dur < real_elapsed_sec * 0.9;
 
+    std::wstring audio_pre;   // goes right before "-i audio_file"
+    if (av_start_skew_sec > 0.02) {
+        wchar_t buf[64];
+        swprintf_s(buf, L"%.6f", av_start_skew_sec);
+        audio_pre = L" -itsoffset " + std::wstring(buf);
+    } else if (av_start_skew_sec < -0.02) {
+        wchar_t buf[64];
+        swprintf_s(buf, L"%.6f", -av_start_skew_sec);
+        audio_pre = L" -ss " + std::wstring(buf);
+    }
+
     std::wstring cmd;
     if (stretch) {
         double ratio = real_elapsed_sec / video_dur;
@@ -339,6 +351,7 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
         cmd =
             L"\"" + std::wstring(ffpath) + L"\""
             L" -i \"" + vf + L"\""
+            + audio_pre +
             L" -i \"" + std::wstring(audio_file) + L"\""
             L" -vf \"setpts=" + std::wstring(ratio_buf) + L"*PTS\""
             L" -c:v libx264 -preset veryfast -crf 20 -c:a aac"
@@ -350,6 +363,7 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
         cmd =
             L"\"" + std::wstring(ffpath) + L"\""
             L" -i \"" + vf + L"\""
+            + audio_pre +
             L" -i \"" + std::wstring(audio_file) + L"\""
             L" -c:v copy -c:a aac"
             L" -af aresample=async=1000"
