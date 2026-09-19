@@ -312,9 +312,9 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     // a transient GPU backlog has a real chance to drain before we give up
     // and repeat a stale frame. Still bounded (not an unbounded wait) so a
     // genuinely stuck/lost device doesn't hang the capture thread forever.
-    static constexpr DWORD kMapWaitBudgetMs = 250;
+    static constexpr ULONGLONG kMapWaitBudgetMs = 250;
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    const DWORD map_deadline = GetTickCount64() + kMapWaitBudgetMs;
+    const ULONGLONG map_deadline = GetTickCount64() + kMapWaitBudgetMs;
     for (;;) {
         hr = ctx->context->Map(ctx->staging[read_idx].Get(), 0, D3D11_MAP_READ,
                                 D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
