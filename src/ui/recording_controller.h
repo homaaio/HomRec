@@ -419,6 +419,14 @@ private:
     std::wstring last_output_path_;
     double last_duration_sec_ = 0.0;
     double last_output_size_mb_ = 0.0;
+    // Measured gap between the video pipeline's and the audio buffer's
+    // real-world "frame/sample 0" moments this Start() (positive: audio's
+    // zero-point is later than video's; negative: earlier) - see the long
+    // comment on its computation in Start() and its use in Stop()'s
+    // hr_merge_av() call. 0.0 means "not measured this session" (e.g. no
+    // audio channels enabled), which hr_merge_av() treats as "don't touch
+    // AV alignment", matching its prior behavior.
+    double av_start_skew_sec_ = 0.0;
 
     // Mic device id actually applied to the currently-running continuous
     // audio capture (see Init()'s hr_audio_start() and

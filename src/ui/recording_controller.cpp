@@ -19,7 +19,7 @@ extern "C" {
     int hr_build_codec_args(const wchar_t *codec, int quality, int fps, int cpu_count,
                              wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
     int hr_merge_av(const wchar_t *ffpath, const wchar_t *video_file, const wchar_t *audio_file,
-                     double real_elapsed_sec);
+                     double real_elapsed_sec, double av_start_skew_sec);
     int hr_export_mp3(const wchar_t *ffpath, const wchar_t *wav_path, const wchar_t *mp3_path);
     int hr_concat_segments(const wchar_t *ffpath, const wchar_t *list_path, const wchar_t *out_path);
 
@@ -575,6 +575,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     // this too - but re-asserting here is a harmless no-op either way and
     // guards against either path's default ever silently changing.
     hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
+    const auto t_video_go = std::chrono::steady_clock::now();
 
     // A manual recording is genuinely happening now (as opposed to just
     // Instant Replay's background buffer, which also sets `recording` via
@@ -587,6 +588,12 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_audio_set_max_buffer_sec(0);
         hr_audio_reset_buffers();
         hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
+        const auto t_audio_go = std::chrono::steady_clock::now();
+        av_start_skew_sec_ = std::chrono::duration<double>(t_audio_go - t_video_go).count();
+        HrLog::Info("Recording: measured video/audio start skew = " +
+                    std::to_string(av_start_skew_sec_) + "s (applied at merge time)");
+    } else {
+        av_start_skew_sec_ = 0.0;
     }
 
     hr_ctl_set_output_path(ctl_, NarrowFromWide(current_output_path_).c_str());
@@ -769,7 +776,7 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         // overload) instead of cutting the accurate audio down to match.
         merged = hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
                               WideFromNarrow(audio_wav).c_str(),
-                              elapsed_seconds()) != 0;
+                              elapsed_seconds(), av_start_skew_sec_) != 0;
         if (!merged) {
             HrLog::Error("Recording: merging the captured audio into the video failed -- "
                         "keeping '" + audio_wav + "' next to the (silent) video instead "
@@ -1339,7 +1346,7 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
         // fixed-length segments. Just mux the audio in at the fast
         // stream-copy path.
         if (hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
-                         WideFromNarrow(audio_wav_a).c_str(), 0.0) != 0) {
+                         WideFromNarrow(audio_wav_a).c_str(), 0.0, 0.0) != 0) {
             std::remove(audio_wav_a.c_str());
         } else {
             HrLog::Error("Instant Replay: merging the captured audio into the saved replay "
