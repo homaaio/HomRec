@@ -175,7 +175,9 @@ private:
         unsigned hw = std::thread::hardware_concurrency();
         int n_bands = 1;
         if (total_pixels >= kMinPixelsForThreads && hw > 1) {
-            n_bands = (int)std::min<unsigned>(hw - 1, 4);
+            static constexpr unsigned kReservedCores = 2;
+            unsigned usable = (hw > kReservedCores) ? (hw - kReservedCores) : 1;
+            n_bands = (int)std::min<unsigned>(usable, 4);
             n_bands = std::max(n_bands, 1);
         }
         int n_workers = n_bands - 1; // main/calling thread does one band itself
@@ -434,6 +436,13 @@ struct Pipeline {
     // not re-resolved live if the window moves mid-recording (a known,
     // documented limitation -- see recording_controller.cpp).
     int crop_x = 0, crop_y = 0, crop_w = 0, crop_h = 0;
+    // Guards the four crop_* fields above: hr_pl_set_capture_rect() runs on
+    // the UI thread while capture_loop() may be mid-frame on this pipeline
+    // (Start() re-targets an already-running preview pipeline). Unlocked,
+    // the capture thread could read e.g. the new crop_y with the old
+    // crop_h and copy rows from past the end of bgra_buf. Uncontended
+    // lock/unlock once per frame is negligible.
+    std::mutex crop_mtx;
 
     // "Effective" frame dimensions for THIS frame: src_w/src_h when
     // crop_w==0, or crop_w/crop_h when a crop rect is active. Every
@@ -476,7 +485,21 @@ struct Pipeline {
     std::atomic<bool> include_cursor{false};
     int cap_origin_x = 0, cap_origin_y = 0;
 
-    std::vector<uint8_t> bgra_buf;  // src_w * src_h * 4
+    std::vector<uint8_t> bgra_buf;  // src_w * src_h * 4 -- ALWAYS the pristine, untouched last full-desktop frame
+
+    // Per-tick work frame (cropped window rect and/or overlays/cursor baked
+    // in). Kept separate from bgra_buf on purpose: the TIMEOUT/LOST paths in
+    // capture_loop() deliberately re-encode "whatever is still in bgra_buf"
+    // from the last real frame, and the old code cropped/composited IN PLACE
+    // on bgra_buf -- so every repeated tick re-cropped an already-compacted
+    // buffer using the full-monitor stride (garbled, skewed horizontal
+    // streaks in window-capture recordings) and re-drew overlays/cursor on
+    // top of themselves. Only touched by the capture thread.
+    std::vector<uint8_t> work_buf;
+    // Pointer to the frame every downstream step reads this tick:
+    // bgra_buf.data() (no crop/overlay/cursor -- zero extra cost) or
+    // work_buf.data(). Set each tick in capture_loop(); read by update_preview().
+    const uint8_t* frame_ptr = nullptr;
 
     // Overlays configured from the UI (RecordingController pushes the
     // current list in via hr_pl_set_overlays whenever it changes -- drag,
@@ -617,8 +640,32 @@ struct Pipeline {
     // -------------------------------------------------------------------------
     void writer_loop() {
 #ifdef _WIN32
-        // Set high priority for writer to keep pipe full
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        // BUGFIX (game FPS drop while Instant Replay is just buffering in
+        // the background, no manual recording active): this used to set
+        // THREAD_PRIORITY_HIGHEST unconditionally here, once, on thread
+        // start - regardless of `boost_priority`. That's the exact same
+        // "system-wide-contending priority for a feature explicitly
+        // designed to sit there unnoticed" problem boost_priority's own
+        // comment on the Pipeline struct describes fixing for the CAPTURE
+        // thread (see capture_loop()'s want_boost handling below) - the
+        // fix just never made it to this thread. Instant Replay's
+        // background segment writer keeps this thread genuinely busy
+        // (continuously draining pipe_queue to disk) for as long as the
+        // feature is on, which on a gaming PC is "the whole time the game
+        // is running" - competing at Windows' highest normal-class
+        // priority against the game's own render/sim threads the entire
+        // time, even though nothing the user actually asked for is
+        // happening yet. Now this thread honors boost_priority the same
+        // way capture_loop() does: HIGHEST only while a manual recording
+        // (or an Instant Replay clip actually being saved) is genuinely in
+        // progress, ABOVE_NORMAL the rest of the time - checked once here
+        // at start, then re-checked every loop iteration below since
+        // boost_priority can flip independently of this thread's lifetime
+        // (Start()/Stop() toggle it without tearing the writer down).
+        bool writer_was_boosted = boost_priority.load(std::memory_order_relaxed);
+        SetThreadPriority(GetCurrentThread(), writer_was_boosted
+                                                   ? THREAD_PRIORITY_HIGHEST
+                                                   : THREAD_PRIORITY_ABOVE_NORMAL);
 #if defined(HR_HAS_SET_THREAD_DESC)
         typedef HRESULT (WINAPI *PFN_SET_THREAD_DESC)(HANDLE, PCWSTR);
         static PFN_SET_THREAD_DESC set_thread_desc = 
@@ -639,6 +686,20 @@ struct Pipeline {
         // free-list bookkeeping, etc.) was another std::terminate() path.
         try {
         while (writer_running.load(std::memory_order_relaxed)) {
+#ifdef _WIN32
+            // See the matching comment above (~line 620) - boost_priority
+            // can change independently of this thread's lifetime, so this
+            // needs to be checked every iteration, not just once at
+            // thread-start, exactly like capture_loop()'s own want_boost
+            // check.
+            bool writer_want_boost = boost_priority.load(std::memory_order_relaxed);
+            if (writer_want_boost != writer_was_boosted) {
+                writer_was_boosted = writer_want_boost;
+                SetThreadPriority(GetCurrentThread(), writer_want_boost
+                                      ? THREAD_PRIORITY_HIGHEST
+                                      : THREAD_PRIORITY_ABOVE_NORMAL);
+            }
+#endif
             std::vector<uint8_t> frame;
             
             {
@@ -760,7 +821,7 @@ struct Pipeline {
         std::lock_guard<std::mutex> lock(pv_mtx);
         if (pv_buf.size() != pv_sz) pv_buf.resize(pv_sz);
 
-        bgra_to_thumb(bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
+        bgra_to_thumb(frame_ptr ? frame_ptr : bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
         pv_actual_w = tw;
         pv_actual_h = th;
         pv_native_w = eff_w;
@@ -1019,30 +1080,53 @@ struct Pipeline {
 
             // ====== WINDOW CROP (optional) ======
             // See the crop_x/crop_w/eff_w comments on the Pipeline struct.
-            // Compacts just the target window's sub-rectangle of the full
-            // monitor frame down to a tightly-packed buffer at bgra_buf's
-            // start, in place, and points eff_w/eff_h at ITS dimensions --
-            // every step below (overlays, cursor, YUV conversion, preview)
-            // reads eff_w/eff_h, not src_w/src_h, so this one spot is the
-            // only place that needs to know about cropping. Zero-cost
-            // no-op when crop_w==0 (the default, full-desktop case).
-            if (crop_w > 0 && crop_h > 0) {
-                eff_w = crop_w;
-                eff_h = crop_h;
-                uint8_t* buf = bgra_buf.data();
-                // memmove, not memcpy: source and destination rows can
-                // overlap (e.g. crop_x==0 && crop_y==0 makes row 0
-                // identical), and memmove is the one of the two that's
-                // defined to handle that correctly.
-                for (int y = 0; y < crop_h; ++y) {
-                    const uint8_t* srow = buf + ((size_t)(crop_y + y) * src_w + crop_x) * 4;
-                    uint8_t*       drow = buf + (size_t)y * crop_w * 4;
-                    std::memmove(drow, srow, (size_t)crop_w * 4);
+            // Copies just the target window's sub-rectangle of the full
+            // monitor frame into a tightly-packed work_buf (bgra_buf itself
+            // is never modified -- see the work_buf comment) and points
+            // eff_w/eff_h at ITS dimensions. Every step below (overlays,
+            // cursor, YUV conversion, preview) reads eff_w/eff_h + `frame`,
+            // not src_w/src_h, so this one spot is the only place that needs
+            // to know about cropping. The crop rect is snapshotted into
+            // locals and re-validated because hr_pl_set_capture_rect() can
+            // run on the UI thread mid-loop.
+            int c_x, c_y, c_w, c_h;
+            {
+                std::lock_guard<std::mutex> crop_lk(crop_mtx);
+                c_x = crop_x; c_y = crop_y; c_w = crop_w; c_h = crop_h;
+            }
+            const bool do_crop = c_w > 0 && c_h > 0 && c_x >= 0 && c_y >= 0 &&
+                                 c_x + c_w <= src_w && c_y + c_h <= src_h;
+            uint8_t* frame = bgra_buf.data();   // what overlays/cursor/encode read this tick
+            if (do_crop) {
+                eff_w = c_w;
+                eff_h = c_h;
+                const size_t need = (size_t)c_w * c_h * 4;
+                if (work_buf.size() != need) work_buf.resize(need);
+                const uint8_t* full = bgra_buf.data();
+                uint8_t* wb = work_buf.data();
+                for (int y = 0; y < c_h; ++y) {
+                    std::memcpy(wb + (size_t)y * c_w * 4,
+                                full + ((size_t)(c_y + y) * src_w + c_x) * 4,
+                                (size_t)c_w * 4);
                 }
+                frame = wb;
             } else {
                 eff_w = src_w;
                 eff_h = src_h;
             }
+
+            // Copy-on-write for the non-cropped case: overlays/cursor draw
+            // in place, so if `frame` still points at the pristine bgra_buf,
+            // duplicate it into work_buf first. Free when nothing needs
+            // compositing (no overlays, cursor off) and in the cropped case
+            // (frame already is work_buf).
+            auto ensure_work_copy = [&](uint8_t*& f) {
+                if (f != bgra_buf.data()) return;
+                const size_t need = (size_t)eff_w * eff_h * 4;
+                if (work_buf.size() != need) work_buf.resize(need);
+                std::memcpy(work_buf.data(), bgra_buf.data(), need);
+                f = work_buf.data();
+            };
 
             // ====== OVERLAY COMPOSITING ======
             // Bakes any configured text/image/input overlays directly into
@@ -1070,6 +1154,7 @@ struct Pipeline {
                     last_overlays_gen = gen;
                 }
                 if (!overlays_snapshot.empty()) {
+                    ensure_work_copy(frame);
                     // Belt-and-suspenders alongside the try/catch
                     // now inside OverlayCompositor::Apply() itself (see
                     // hr_overlay_render.cpp) -- this loop runs on a bare
@@ -1081,7 +1166,7 @@ struct Pipeline {
                     // even a future change to this call site can't silently
                     // reopen that hole.
                     try {
-                        overlay_compositor.Apply(bgra_buf.data(), eff_w, eff_h, eff_w * 4, overlays_snapshot);
+                        overlay_compositor.Apply(frame, eff_w, eff_h, eff_w * 4, overlays_snapshot);
                     } catch (const std::exception &e) {
                         HrLog::Error(std::string("Overlay compositing threw (") + e.what() +
                                      ") -- this frame's overlays were skipped, recording continues.");
@@ -1101,9 +1186,11 @@ struct Pipeline {
             // is the *monitor's* virtual-desktop offset, but bgra_buf now
             // holds just the cropped window sub-rectangle of it.
             if (include_cursor.load(std::memory_order_relaxed)) {
-                hr_composite_cursor(bgra_buf.data(), eff_w, eff_h,
+                ensure_work_copy(frame);
+                hr_composite_cursor(frame, eff_w, eff_h,
                                      cap_origin_x + crop_x, cap_origin_y + crop_y);
             }
+            frame_ptr = frame;
             int extra_slots = 0;
 #ifdef _WIN32
             if (recording && sw_ctx && g_libs.sw_elapsed_ns) {
@@ -1142,12 +1229,12 @@ struct Pipeline {
                 for (int rep = 0; rep <= extra_slots; ++rep) {
                 int req_w = out_w.load(std::memory_order_relaxed);
                 int req_h = out_h.load(std::memory_order_relaxed);
-                const uint8_t* enc_src = bgra_buf.data();
+                const uint8_t* enc_src = frame;
                 int enc_w = eff_w, enc_h = eff_h;
                 if (req_w > 0 && req_h > 0 && (req_w != eff_w || req_h != eff_h)) {
                     const size_t scaled_needed = (size_t)req_w * req_h * 4;
                     if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
-                    bgra_downscale(bgra_buf.data(), scaled_buf.data(), eff_w, eff_h, req_w, req_h);
+                    bgra_downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
                     enc_src = scaled_buf.data();
                     enc_w = req_w; enc_h = req_h;
                 }
@@ -1690,24 +1777,21 @@ HR_EXPORT void hr_pl_set_capture_rect(void* handle, int x, int y, int w, int h) 
     if (!handle) return;
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
-    if (w <= 0 || h <= 0) {
-        pl->crop_x = pl->crop_y = pl->crop_w = pl->crop_h = 0;
-        return;
+    int cx = 0, cy = 0, cw = 0, ch = 0;   // 0/0/0/0 == "no crop"
+    if (w > 0 && h > 0) {
+        // Clamp to the monitor frame - a window that's partially off-screen
+        // (dragged half onto another monitor, etc.) must not make the crop
+        // step in capture_loop() read outside bgra_buf.
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x + w > pl->src_w) w = pl->src_w - x;
+        if (y + h > pl->src_h) h = pl->src_h - y;
+        if (w % 2) w--;  // keep it even, same reasoning as capture_w_/h_ elsewhere (YUV420 needs even dims)
+        if (h % 2) h--;
+        if (w > 0 && h > 0) { cx = x; cy = y; cw = w; ch = h; }
     }
-    // Clamp to the monitor frame - a window that's partially off-screen
-    // (dragged half onto another monitor, etc.) must not make the crop
-    // step below read outside bgra_buf.
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > pl->src_w) w = pl->src_w - x;
-    if (y + h > pl->src_h) h = pl->src_h - y;
-    if (w <= 0 || h <= 0) {
-        pl->crop_x = pl->crop_y = pl->crop_w = pl->crop_h = 0;
-        return;
-    }
-    if (w % 2) w--;  // keep it even, same reasoning as capture_w_/h_ elsewhere (YUV420 needs even dims)
-    if (h % 2) h--;
-    pl->crop_x = x; pl->crop_y = y; pl->crop_w = w; pl->crop_h = h;
+    std::lock_guard<std::mutex> lk(pl->crop_mtx);
+    pl->crop_x = cx; pl->crop_y = cy; pl->crop_w = cw; pl->crop_h = ch;
 #endif
 }
 
@@ -1732,6 +1816,11 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
     if (!handle) return;
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
+    // A close request that timed out earlier (see hr_pl_end_recording_segment())
+    // is still flagged; left alone, the writer thread would honor it as soon
+    // as its queue next runs empty and close the NEW recording's pipe --
+    // ffmpeg would see EOF seconds into the next recording.
+    if (active != 0) pl->pending_close_requested.store(false, std::memory_order_release);
     pl->pipe_handle = pipe_fd;
     pl->recording   = (active != 0) && (pipe_fd != 0) && (pipe_fd != -1);
     // YUV conversion buffers are lazily sized from the free-list pool.
@@ -1795,6 +1884,7 @@ HR_EXPORT int hr_pl_end_recording_segment(void* handle, int timeout_ms) {
     if (!done) {
         HrLog::Warn("Pipeline: writer thread didn't close the previous recording's pipe in time "
                     "(it may be stuck writing) - the ffmpeg process for it likely won't finalize cleanly.");
+        pl->pending_close_requested.store(false, std::memory_order_release); // don't leave it armed for the next recording
     }
     return done ? 1 : 0;
 #endif
