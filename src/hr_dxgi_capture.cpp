@@ -258,10 +258,10 @@ HR_EXPORT int hr_dx_get_size(void *handle, int *out_w, int *out_h) {
  * allocated for (immediately after that allocation). From then on,
  * hr_dx_capture() always fills exactly that many rows of exactly that
  * stride, regardless of what the desktop's actual mode does mid-
- * recording -- letterboxing with black if the real frame is smaller,
- * cropping if it's larger -- so a resolution change can, at worst, make
- * the recording show black bars until the next reset() recovers, instead
- * of ever writing a corrupted/misaligned frame into the caller's buffer.
+ * recording -- nearest-neighbour stretching the real frame to fit if it
+ * doesn't match -- so a resolution change can, at worst, introduce mild
+ * resampling, instead of ever writing a corrupted/misaligned frame into
+ * the caller's buffer.
  * ---------------------------------------------------------------------- */
 HR_EXPORT void hr_dx_set_output_size(void *handle, int w, int h) {
 #ifdef _WIN32
@@ -349,24 +349,30 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     const int tgt_w = (ctx->out_w  > 0) ? ctx->out_w  : ctx->width;
     const int tgt_h = (ctx->out_h  > 0) ? ctx->out_h  : ctx->height;
     const int dst_row_bytes = tgt_w * 4;
-    const int copy_w   = std::min(tgt_w, ctx->width);
-    const int copy_h   = std::min(tgt_h, ctx->height);
-    const int copy_bytes = copy_w * 4;
-
     const uint8_t *src = reinterpret_cast<const uint8_t *>(mapped.pData);
     uint8_t       *dst = out_bgra;
-    for (int y = 0; y < tgt_h; ++y) {
-        if (y < copy_h) {
-            memcpy(dst, src + (size_t)y * mapped.RowPitch, (size_t)copy_bytes);
-            if (copy_w < tgt_w)
-                memset(dst + copy_bytes, 0, (size_t)dst_row_bytes - (size_t)copy_bytes);
-        } else {
-            // Real frame is shorter than what the caller expects (e.g. the
-            // desktop just dropped to a lower exclusive-fullscreen mode) --
-            // letterbox with black instead of leaving stale bytes behind.
-            memset(dst, 0, (size_t)dst_row_bytes);
+
+    if (tgt_w == ctx->width && tgt_h == ctx->height) {
+        // Common case: nothing's mismatched, straight row copy.
+        for (int y = 0; y < tgt_h; ++y) {
+            memcpy(dst, src + (size_t)y * mapped.RowPitch, (size_t)dst_row_bytes);
+            dst += dst_row_bytes;
         }
-        dst += dst_row_bytes;
+    } else {
+        const float rx = (float)ctx->width  / (float)tgt_w;
+        const float ry = (float)ctx->height / (float)tgt_h;
+        for (int y = 0; y < tgt_h; ++y) {
+            int sy = (int)(y * ry);
+            if (sy >= ctx->height) sy = ctx->height - 1;
+            const uint8_t *srow = src + (size_t)sy * mapped.RowPitch;
+            uint32_t *drow = reinterpret_cast<uint32_t *>(dst);
+            for (int x = 0; x < tgt_w; ++x) {
+                int sx = (int)(x * rx);
+                if (sx >= ctx->width) sx = ctx->width - 1;
+                drow[x] = reinterpret_cast<const uint32_t *>(srow)[sx];
+            }
+            dst += dst_row_bytes;
+        }
     }
 
     ctx->context->Unmap(ctx->staging[read_idx].Get(), 0);
