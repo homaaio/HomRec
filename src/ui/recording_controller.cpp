@@ -412,6 +412,8 @@ void RecordingController::ResolveCaptureSize() {
 
 bool RecordingController::Start(std::wstring &error_out) {
     if (state_.recording) { error_out = L"Already recording."; return false; }
+    if (finalizing_) { error_out = L"The previous recording is still being saved - try again in a moment."; return false; }
+    if (finalize_thread_.joinable()) finalize_thread_.join();
 
     // Instant Replay and a manual recording share this class's one
     // pipeline_ and hr_pl_set_recording()'s one active pipe_fd (see the
@@ -508,17 +510,6 @@ bool RecordingController::Start(std::wstring &error_out) {
         return false;
     }
 
-    if (state_.audio_out_channels > 0) {
-        // A manual recording needs every sample from here to Stop() kept -
-        // undo whatever rolling-window cap Instant Replay's background
-        // buffering left in place (see hr_audio_set_max_buffer_sec()'s own
-        // comment) before hr_audio_reset_buffers() starts this recording's
-        // accumulation.
-        hr_audio_set_max_buffer_sec(0);
-        hr_audio_reset_buffers();
-        hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
-    }
-
     // Pipeline handles the actual DXGI capture + frame conversion + piping
     // frames into ffmpeg's stdin. pv_w/pv_h come from AppState's preview
     // panel size (set by main_window on layout).
@@ -592,11 +583,11 @@ bool RecordingController::Start(std::wstring &error_out) {
     // the one place that's actually true, so bump the capture thread.
     hr_pl_set_priority_boost(pipeline_, 1);
 
-    // (Audio capture is already running continuously, started once in
-    // Initialize() - hr_audio_reset_buffers()/hr_audio_set_volumes() for
-    // this recording were already called above, right before the video
-    // pipeline started, to keep the two as close in time as possible; see
-    // that call site's comment for why it moved.)
+    if (state_.audio_out_channels > 0) {
+        hr_audio_set_max_buffer_sec(0);
+        hr_audio_reset_buffers();
+        hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
+    }
 
     hr_ctl_set_output_path(ctl_, NarrowFromWide(current_output_path_).c_str());
     hr_ctl_start(ctl_);
@@ -629,6 +620,7 @@ void RecordingController::Stop() {
 void RecordingController::StopAsync(std::function<void()> on_done) {
     if (!state_.recording || finalizing_) return;
     finalizing_ = true;
+    if (finalize_thread_.joinable()) finalize_thread_.join();
 
     // If we're keeping the pipeline alive afterward for continued live
     // preview, don't call hr_pl_stop() here - that joins the capture
