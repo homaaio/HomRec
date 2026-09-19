@@ -115,6 +115,16 @@ public:
     // the buffer.
     bool GetPreviewFrame(std::vector<uint8_t> &out, int &out_w, int &out_h);
 
+    // The coordinate space OverlayDef::x/y/w/h are measured in for the
+    // frame GetPreviewFrame() last returned (i.e. the size overlays are
+    // actually composited at - the cropped window rect in window-capture
+    // mode, the full monitor otherwise). The on-screen preview MUST map
+    // overlay rectangles through this and not capture_width()/height():
+    // those are always the full monitor's size, which is wrong the moment
+    // a window crop is active. Falls back to capture_width()/height() if
+    // the pipeline hasn't produced a frame yet. False if neither is known.
+    bool GetPreviewNativeSize(int &w, int &h);
+
     // Pushes the current AppState.overlays list into the running/preview
     // pipeline so it actually gets composited into captured frames (both
     // the live preview and, once recording, the encoded output). Cheap
@@ -344,6 +354,10 @@ private:
 
     // -- Instant Replay state -------------------------------------------
     bool   instant_replay_enabled_ = false; // user turned it on - survives being paused for a manual recording
+    // True between a CaptureSnapshotFrame() call that had to switch the
+    // pipeline's thumbnail generator back on (Disable live preview is on)
+    // and the matching EndSnapshotEditing().
+    bool   snapshot_forced_preview_ = false;
     bool   instant_replay_active_  = false; // actually buffering right now (false while state_.recording is true)
     void  *replay_ff_ = nullptr;            // hr_ff_create() handle for the background segment-writer process
     std::wstring replay_dir_;               // current run's segment subfolder (see StartInstantReplayEncoder())

@@ -1376,6 +1376,14 @@ bool RecordingController::GetPreviewFrame(std::vector<uint8_t> &out, int &out_w,
     return hr_pl_get_preview(pipeline_, out.data(), &out_w, &out_h) != 0;
 }
 
+bool RecordingController::GetPreviewNativeSize(int &w, int &h) {
+    w = h = 0;
+    if (pipeline_ && hr_pl_get_native_size(pipeline_, &w, &h) && w > 0 && h > 0) return true;
+    w = capture_w_;
+    h = capture_h_;
+    return w > 0 && h > 0;
+}
+
 void RecordingController::EnsurePreview() {
     if (pipeline_ || state_.disable_preview) return; // already running, or user turned it off
     // See JoinPendingPreviewTeardown()'s comment (recording_controller.h) -
@@ -1803,13 +1811,25 @@ bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &o
     }
     if (!pipeline_) return false;
 
+    // The pipeline can already exist without producing thumbnails: a
+    // recording or Instant Replay started while Settings > Disable live
+    // preview is on keeps its pipeline alive but switches the thumbnail
+    // generator off (see Pipeline::preview_needed), so hr_pl_get_preview()
+    // would never return a frame and overlay editing would just fail with
+    // "no screenshot". Switch it back on for the duration of the editing
+    // session - EndSnapshotEditing() switches it off again.
+    if (state_.disable_preview) {
+        hr_pl_set_preview_needed(pipeline_, 1);
+        snapshot_forced_preview_ = true;
+    }
+
     // A freshly-started pipeline's capture thread needs a moment to
     // produce its first thumbnail (hr_pl_get_preview() returns false
     // until then) - worth waiting out whenever EnsurePreview() just (re)ran
     // above, not only on the session's first call; an already-running
     // pipeline from an earlier call should already have one available
     // immediately.
-    const int max_wait_ms = (first_call || just_started) ? 1000 : 0;
+    const int max_wait_ms = (first_call || just_started || snapshot_forced_preview_) ? 1000 : 0;
     const int step_ms = 25;
     for (int waited = 0; ; waited += step_ms) {
         if (GetPreviewFrame(out, out_w, out_h)) {
@@ -1825,7 +1845,17 @@ bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &o
 }
 
 void RecordingController::EndSnapshotEditing() {
-    if (state_.disable_preview) TeardownPreview();
+    if (!state_.disable_preview) { snapshot_forced_preview_ = false; return; }
+    // A recording or Instant Replay still owns the pipeline (TeardownPreview()
+    // deliberately refuses while recording, and must not be allowed to
+    // destroy the pipeline Instant Replay is buffering through either) -
+    // just switch its thumbnail generator back off instead.
+    if (pipeline_ && (state_.recording || instant_replay_active_)) {
+        hr_pl_set_preview_needed(pipeline_, 0);
+    } else {
+        TeardownPreview();
+    }
+    snapshot_forced_preview_ = false;
 }
 
 double RecordingController::elapsed_seconds() const {
