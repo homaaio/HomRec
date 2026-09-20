@@ -165,6 +165,12 @@ struct WasapiStream {
     uint32_t              rate        = 44100;
     HANDLE                data_event  = nullptr;
 
+    // Wall-clock bookkeeping for loopback gap filling (see read()).
+    bool                  clock_started = false;
+    LARGE_INTEGER         clock_t0{};
+    LARGE_INTEGER         clock_freq{};
+    int64_t               frames_total = 0;   // stereo frames delivered (incl. padding) since clock_t0
+
     bool open(bool is_loopback, IMMDevice* dev)
     {
         loopback = is_loopback;
@@ -198,7 +204,28 @@ struct WasapiStream {
         if (FAILED(hr)) return false;
 
         hr = client->Start();
-        return SUCCEEDED(hr);
+        if (FAILED(hr)) return false;
+        QueryPerformanceFrequency(&clock_freq);
+        QueryPerformanceCounter(&clock_t0);
+        frames_total  = 0;
+        clock_started = true;
+        return true;
+    }
+
+    // Used while recording is paused: throw away whatever WASAPI queued up
+    // (up to its 2s buffer) so it isn't appended after resume, and restart
+    // the wall-clock baseline so the paused time isn't padded as silence.
+    void drain_and_rebase()
+    {
+        if (capture) {
+            UINT32 pkt = 0;
+            while (SUCCEEDED(capture->GetNextPacketSize(&pkt)) && pkt > 0) {
+                BYTE* d = nullptr; UINT32 n = 0; DWORD f = 0;
+                if (FAILED(capture->GetBuffer(&d, &n, &f, nullptr, nullptr))) break;
+                capture->ReleaseBuffer(n);
+            }
+        }
+        clock_started = false;
     }
 
     // Read available frames, convert to int16 stereo 44100
@@ -208,6 +235,7 @@ struct WasapiStream {
         if (!capture) return 0;
         int total = 0;
         UINT32 pkt = 0;
+        const size_t start_idx = out.size();
         while (SUCCEEDED(capture->GetNextPacketSize(&pkt)) && pkt > 0) {
             BYTE* data = nullptr;
             UINT32 n   = 0;
@@ -249,6 +277,38 @@ struct WasapiStream {
             }
             total += (int)(n * 2);
             capture->ReleaseBuffer(n);
+        }
+
+        // A/V SYNC FIX (system audio "runs ahead" of the video): WASAPI
+        // loopback delivers NO packets at all while nothing is playing - the
+        // silence is simply absent, not sent as zeros. Every silent stretch
+        // therefore made the system-audio track shorter than real time, and
+        // everything after it played EARLIER than the video it belongs to
+        // (the drift grows with the total silence). The mic stream doesn't
+        // have this problem (it delivers continuously), so only loopback is
+        // padded: compare the frames delivered so far with the wall-clock
+        // time elapsed and insert the missing silence BEFORE this call's data
+        // (the gap precedes it). Small deficits (< 50ms: normal packet
+        // jitter / device-clock ppm drift) are left alone.
+        if (loopback && rate > 0) {
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            if (!clock_started) {
+                clock_t0 = now;
+                frames_total = 0;
+                clock_started = true;
+            }
+            const int64_t frames_new = (int64_t)(out.size() - start_idx) / 2;
+            const double elapsed_frames = clock_freq.QuadPart > 0
+                ? (double)(now.QuadPart - clock_t0.QuadPart) * (double)rate / (double)clock_freq.QuadPart
+                : 0.0;
+            const int64_t deficit = (int64_t)elapsed_frames - (frames_total + frames_new);
+            if (deficit > (int64_t)rate / 20) {
+                out.insert(out.begin() + (ptrdiff_t)start_idx, (size_t)deficit * 2, (int16_t)0);
+                frames_total += deficit;
+                total += (int)(deficit * 2);
+            }
+            frames_total += frames_new;
         }
         return total;
     }
@@ -406,6 +466,7 @@ static void mic_worker(AudioState* st)
     const int SLEEP_MS = 10;
     while (st->running.load()) {
         if (st->paused.load()) {
+            st->mic_stream.drain_and_rebase();
             Sleep(SLEEP_MS);
             continue;
         }
@@ -455,6 +516,12 @@ static void mic_worker(AudioState* st)
                 int cap_sec = st->max_buffer_sec.load();
                 if (cap_sec > 0 && st->mic_stream.rate > 0) {
                     size_t max_samples = (size_t)cap_sec * st->mic_stream.rate * 2; // stereo int16
+                    // PERF: trim in ~1s chunks, not on every 10ms read. Once the
+                    // rolling buffer is full, erasing from the front of a
+                    // std::vector memmoves the whole buffer (megabytes) - doing
+                    // that 100x/sec while holding the mutex was pure overhead.
+                    // The buffer may now exceed the cap by up to 1s; every
+                    // reader trims to the exact cap (see ring_window_start()).
                     if (st->mic_buf.size() > max_samples + (size_t)st->mic_stream.rate * 2)
                         st->mic_buf.erase(st->mic_buf.begin(), st->mic_buf.end() - (ptrdiff_t)max_samples);
                 }
@@ -477,6 +544,7 @@ static void sys_worker(AudioState* st)
     const int SLEEP_MS = 10;
     while (st->running.load()) {
         if (st->paused.load()) {
+            st->sys_stream.drain_and_rebase();
             Sleep(SLEEP_MS);
             continue;
         }
@@ -516,6 +584,12 @@ static void sys_worker(AudioState* st)
                 int cap_sec = st->max_buffer_sec.load();
                 if (cap_sec > 0 && st->sys_stream.rate > 0) {
                     size_t max_samples = (size_t)cap_sec * st->sys_stream.rate * 2; // stereo int16
+                    // PERF: trim in ~1s chunks, not on every 10ms read. Once the
+                    // rolling buffer is full, erasing from the front of a
+                    // std::vector memmoves the whole buffer (megabytes) - doing
+                    // that 100x/sec while holding the mutex was pure overhead.
+                    // The buffer may now exceed the cap by up to 1s; every
+                    // reader trims to the exact cap (see ring_window_start()).
                     if (st->sys_buf.size() > max_samples + (size_t)st->sys_stream.rate * 2)
                         st->sys_buf.erase(st->sys_buf.begin(), st->sys_buf.end() - (ptrdiff_t)max_samples);
                 }
@@ -730,6 +804,11 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
     // there's no window where a worker thread could sneak in one more insert().
     g_state->buffering.store(false);
 
+    // PERF/BUGFIX: the buffers are swapped out under the lock and the WAV is
+    // written AFTER releasing it. The swap also hands the (potentially
+    // hundreds of MB) capacity to the local vector, which frees it when this
+    // function returns - the old clear()+shrink_to_fit() did the same job but
+    // kept the capture thread blocked on the mutex for the whole disk write.
     std::vector<int16_t> mic_out, sys_out;
     int mic_rate = 0, sys_rate = 0;
     {
@@ -769,6 +848,9 @@ HR_EXPORT void hr_audio_set_max_buffer_sec(int seconds)
     recording's Stop() wants the destructive version; a background replay
     buffer being sampled does not - see hr_audio_capture_to_wav()'s own
     comment for that case). */
+// First sample index of the window a rolling buffer should expose: the last
+// max_buffer_sec seconds (the worker threads only trim in ~1s chunks now).
+// Always even, so stereo frames stay aligned. Caller holds the stream's mutex.
 static size_t ring_window_start(size_t size, int cap_sec, int rate)
 {
     if (cap_sec <= 0 || rate <= 0) return 0;
@@ -781,6 +863,9 @@ HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
 {
     if (!g_state) return 0;
     int result = 0;
+    // PERF: copy the window under the lock, write to disk after releasing it,
+    // so saving a replay no longer stalls the capture threads (audible as a
+    // glitch in the still-running buffer) for the duration of the file write.
     const int cap_sec = g_state->max_buffer_sec.load();
     std::vector<int16_t> mic_copy, sys_copy;
     int mic_rate = 0, sys_rate = 0;
