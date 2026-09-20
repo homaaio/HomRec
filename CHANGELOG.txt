@@ -1,21 +1,49 @@
 welcome to changelog :D
 
-[Version 2.3] - 2026-09-19 (unreleased)
+[Version 2.2.2] - 2026-09-19 (unreleased)
 
-  Fixed / improved:
+  Fixed / improved (audit pass):
   - hr_pipeline.cpp: pipe_handle/recording are std::atomic (UI vs capture/writer thread data race).
   - hr_pipeline.cpp: catch-up frames are converted once and written N times (QueuedFrame::repeat) instead of re-converted up to 90x.
   - hr_pipeline.cpp: an evicted (dropped) frame passes its timeline slots to the next one - fixes audio lagging behind video after "Recording overloaded: dropping frames".
   - hr_pipeline.cpp / recording_controller: bounds-checked, change-aware preview fetch (hr_pl_get_preview_ex); closes a possible heap overflow.
   - main_frame.cpp: preview repaints only on new frames; no per-paint snapshot copy; debounced overlay autosave; stuck-drag recovery; fewer idle relayouts.
+  - hr_audio.cpp: loopback (system audio) capture pads the silence WASAPI doesn't deliver, so system audio no longer runs ahead of the video; pause now discards queued audio.
   - hr_audio.cpp: replay ring buffer trims in 1s chunks; WAV files written outside the audio mutex.
   - hr_update.cpp: HTTPS-only, truncated/corrupt downloads rejected, version tag sanitised.
   - hr_archive.cpp: PowerShell fallback works with spaces in paths; 2-minute timeout.
   - console_window.cpp: `rm @homrec` script is UTF-8, waits on our PID, refuses root-like folders.
   - hrc_config.cpp: settings/overlays saved atomically (temp file + replace).
   - Removed stale duplicate src/hr_ffmpeg_runner.cpp (build uses ffmpeg/hr_ffmpeg_runner.cpp).
-  
-[Version 2.2.1] - 2026-09-19
+
+- Optimized: hardware-encoded recordings (nvenc/qsv/amf) now convert BGRA
+  captures straight to NV12 instead of planar YUV420p. Previously every
+  hardware-encoded frame was converted to YUV420p and then silently
+  re-converted to NV12 by ffmpeg's own swscale right before hitting the
+  encoder - a redundant CPU-side color-conversion pass on every single
+  frame, on top of the CPU work HomRec itself already did. Software
+  (libx264/libx265) recordings are unchanged and still use YUV420p.
+  New: hr_bgra_to_nv12 / hr_bgra_to_nv12_band (hr_encoder_helpers.c),
+  Yuv420pWorkerPool::SetUseNv12 + hr_pl_set_output_pixfmt (hr_pipeline.cpp),
+  matching "-pixel_format"/"-pix_fmt" switch in hr_ffmpeg_runner.cpp
+  (picked automatically from the selected encoder, no new setting to
+  configure).
+
+- Fixed: hardware-encoded recordings (nvenc/qsv/amf) came out dark/dull
+  with a "blackness" look and no detail in shadows, while the same scene
+  recorded with libx264/libx265 looked correct. hr_bgra_to_nv12_band was
+  reusing the software path's full/PC-range (0..255) color math, tagged
+  with "-color_range pc" - a flag NVENC/QSV/AMF don't reliably write into
+  the encoded bitstream, so ordinary players fell back to the default
+  limited-range decode on genuinely full-range samples: everything below
+  source Y=16 crushed straight to black and the rest got pulled toward
+  the extremes, hitting dark scenes hardest. hr_bgra_to_nv12_band /
+  hr_bgra_to_nv12_band_sse41 (hr_encoder_helpers.c) now encode proper
+  limited/"tv" range (16..235 luma, 16..240 chroma) instead, matching
+  what a decoder assumes with no range flag present at all; the
+  hardware-encoder branch in hr_ffmpeg_runner.cpp now says
+  "-color_range tv" to match. Software (libx264/libx265) recordings are
+  untouched - still full range, still tagged pc, still correct.
 
 - Fixed: overlays couldn't be moved/resized on the preview - no frame ever
   showed up and clicking did nothing, leaving "Position Overlays..." as the
@@ -30,6 +58,9 @@ welcome to changelog :D
   preview (right-click: Refresh screenshot / Done editing, or Esc). This
   also works while a recording or Instant Replay is running, and no longer
   risks tearing down the pipeline Instant Replay is using when it ends.
+
+[Version 2.2.1] - 2026-09-19
+
 - Fixed: ugly black borders/box on the whole recording when a game runs
   exclusive fullscreen at a different resolution than the desktop (e.g.
   1366x768 on a 1600x900 desktop) - a previous fix for the same mismatch
