@@ -183,9 +183,11 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
  * Builds the complete ffmpeg argument list for screen recording.
  * When pipe_input is false, MSS captures to a file and ffmpeg re-encodes it.
  * When pipe_input is true, the pipeline converts each captured frame to
- * planar YUV420P (see hr_bgra_to_yuv420p in hr_pipeline.cpp) before writing
- * it to ffmpeg's stdin, matching the "-pixel_format yuv420p" below - ffmpeg
- * never sees the original BGRA capture buffer.
+ * planar YUV420p or NV12 (hr_bgra_to_yuv420p / hr_bgra_to_nv12_band in
+ * hr_pipeline.cpp/hr_encoder_helpers.c, chosen to match the encoder - see
+ * _wants_hw_pixfmt() below) before writing it to ffmpeg's stdin, matching
+ * the "-pixel_format"/"-pix_fmt" args below - ffmpeg never sees the
+ * original BGRA capture buffer.
  */
 #ifdef _WIN32
 static std::wstring _utf8_to_wide(const std::string &s) {
@@ -202,6 +204,24 @@ static std::wstring _utf8_to_wide(const std::string &s) {
 }
 #endif
 
+// Hardware encoders (nvenc/qsv/amf) natively consume NV12; feeding them
+// yuv420p makes ffmpeg silently swscale-convert yuv420p->nv12 on the CPU
+// right before encode - a second, redundant color-conversion pass on top
+// of the one hr_bgra_to_yuv420p/hr_bgra_to_nv12 already did. codec_args
+// (e.g. "-c:v h264_qsv -preset veryfast ...") already names the encoder,
+// so that's the single source of truth here - same substring check
+// hr_build_codec_args() (hr_tools.cpp) uses to pick its own encoder-
+// specific flags, kept in sync with the raw pixel format the pipeline
+// actually writes (see Yuv420pWorkerPool::SetUseNv12() in hr_pipeline.cpp
+// and hr_pl_set_output_pixfmt() - the caller must select the same format
+// on both sides or the rawvideo demuxer below will misinterpret the bytes
+// arriving on the pipe).
+static bool _wants_hw_pixfmt(const std::string &codec_args) {
+    return codec_args.find("nvenc") != std::string::npos ||
+           codec_args.find("qsv")   != std::string::npos ||
+           codec_args.find("amf")   != std::string::npos;
+}
+
 static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     std::wostringstream ss;
 
@@ -210,12 +230,14 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         return L"\"" + _utf8_to_wide(s) + L"\"";
     };
 
+    const wchar_t *raw_pixfmt = _wants_hw_pixfmt(ctx->codec_args) ? L"nv12" : L"yuv420p";
+
     ss << Q(ctx->ffmpeg_path);
 
     if (ctx->pipe_input) {
         /* Pipe mode: read raw BGRA from stdin */
         ss << L" -f rawvideo"
-           << L" -pixel_format yuv420p"
+           << L" -pixel_format " << raw_pixfmt
            << L" -video_size " << ctx->width << L"x" << ctx->height
            << L" -framerate " << ctx->fps
            << L" -i pipe:0";
@@ -229,9 +251,23 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         ss << L" " << _utf8_to_wide(ctx->codec_args);
     }
 
-    /* Pixel format for H.264 compatibility */
-    ss << L" -pix_fmt yuv420p";
-    ss << L" -color_range pc -colorspace smpte170m"
+    /* Pixel format for H.264 compatibility - matches raw_pixfmt above so
+       hardware encoders receive NV12 directly instead of ffmpeg silently
+       re-converting from yuv420p. */
+    ss << L" -pix_fmt " << raw_pixfmt;
+    /* BUGFIX: this used to always say "-color_range pc" for both paths.
+       hr_bgra_to_yuv420p_band (software libx264/libx265 path) really is
+       full/PC range and libx264/libx265 reliably write that into the
+       bitstream, so "pc" is correct there. hr_bgra_to_nv12_band (hardware
+       nvenc/qsv/amf path) no longer is: NVENC/QSV/AMF don't reliably
+       propagate "-color_range pc" into the encoded VUI, so a plain
+       full-range flag request here was silently getting dropped and
+       players fell back to the default limited-range decode on genuinely
+       full-range samples - crushed shadows, dark/dull picture. The NV12
+       converter (hr_encoder_helpers.c) now emits real limited/"tv" range
+       samples instead, so this just has to say what they actually are. */
+    const wchar_t *out_color_range = _wants_hw_pixfmt(ctx->codec_args) ? L"tv" : L"pc";
+    ss << L" -color_range " << out_color_range << L" -colorspace smpte170m"
           L" -color_primaries smpte170m -color_trc smpte170m";
 
     /* Encode-time downscale (AppState's Settings > Resolution, e.g. 75%/
