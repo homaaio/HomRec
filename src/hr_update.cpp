@@ -79,46 +79,83 @@ std::string HttpsGetText(const wchar_t *host, const wchar_t *path) {
 
 // Downloads a URL's raw bytes straight to disk. `url` must be https.
 // Returns true on success (status 200 and at least one byte written).
+// The version tag comes from GitHub's JSON and ends up in a file NAME under
+// %TEMP% - keep only [A-Za-z0-9._-] so a hostile/garbled tag can't contain
+// path separators or "..\" segments.
+static std::wstring SafeFileTag(const std::string &tag) {
+    std::wstring out;
+    for (unsigned char c : tag) {
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            c == '.' || c == '-' || c == '_')
+            out += (wchar_t)c;
+    }
+    if (out.empty() || out == L"." || out == L"..") out = L"latest";
+    return out;
+}
+
 bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path) {
     URL_COMPONENTS uc = {};
     uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {}, path[2048] = {};
+    wchar_t host[256] = {}, path[2048] = {}, extra[1024] = {};
     uc.lpszHostName = host; uc.dwHostNameLength = _countof(host);
     uc.lpszUrlPath = path; uc.dwUrlPathLength = _countof(path);
+    uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = _countof(extra);
     if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.size(), 0, &uc)) return false;
+    // SECURITY: the installer is executed afterwards, so never fetch it over
+    // plain HTTP (the old code silently allowed it despite saying otherwise).
+    if (uc.nScheme != INTERNET_SCHEME_HTTPS) return false;
+    // lpszUrlPath excludes "?query" - keep it, or signed URLs would break.
+    const std::wstring request_path = std::wstring(path) + extra;
 
     HINTERNET hSession = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
     HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
-    HINTERNET hReq = WinHttpOpenRequest(hConnect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-                                         WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                         uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+    HINTERNET hReq = WinHttpOpenRequest(hConnect, L"GET", request_path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                         WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (!hReq) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
 
     // GitHub asset downloads 302-redirect to a signed S3/Azure URL - WinHTTP
-    // follows redirects by default, but the *host* the request was opened
-    // against still governs which security flags apply, so we ask nothing
-    // release-specific of the redirected host beyond "give me the bytes".
+    // follows redirects by default (and, by default, refuses an HTTPS->HTTP
+    // downgrade), so nothing release-specific is asked of the redirected host.
     bool ok = false;
     if (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
         WinHttpReceiveResponse(hReq, nullptr)) {
         DWORD status = 0, statusLen = sizeof(status);
         WinHttpQueryHeaders(hReq, WINHTTP_QUERY_FLAG_NUMBER | WINHTTP_QUERY_STATUS_CODE,
                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusLen, WINHTTP_NO_HEADER_INDEX);
+        DWORD expected = 0, expectedLen = sizeof(expected);
+        if (!WinHttpQueryHeaders(hReq, WINHTTP_QUERY_FLAG_NUMBER | WINHTTP_QUERY_CONTENT_LENGTH,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &expected, &expectedLen,
+                                 WINHTTP_NO_HEADER_INDEX))
+            expected = 0; // unknown (chunked) - can't verify the length
         if (status == 200) {
             std::ofstream out(std::filesystem::path(dest_path), std::ios::binary | std::ios::trunc);
             if (out.is_open()) {
                 char buf[8192];
                 DWORD read = 0;
                 size_t total = 0;
-                while (WinHttpReadData(hReq, buf, sizeof(buf), &read) && read > 0) {
+                bool read_ok = true, write_ok = true, looks_like_exe = false;
+                for (;;) {
+                    if (!WinHttpReadData(hReq, buf, sizeof(buf), &read)) { read_ok = false; break; }
+                    if (read == 0) break; // clean end of stream
+                    if (total == 0) looks_like_exe = read >= 2 && buf[0] == 'M' && buf[1] == 'Z';
                     out.write(buf, read);
+                    if (!out) { write_ok = false; break; }
                     total += read;
                 }
                 out.close();
-                ok = total > 0;
+                // BUGFIX: a read error / short download used to count as success
+                // (any total > 0), and the half-downloaded installer was then
+                // launched. Require a clean end of stream, a matching
+                // Content-Length when the server sent one, and a PE header.
+                ok = read_ok && write_ok && !out.fail() && total > 0 && looks_like_exe &&
+                     (expected == 0 || total == (size_t)expected);
+                if (!ok) {
+                    std::error_code ec;
+                    std::filesystem::remove(std::filesystem::path(dest_path), ec);
+                }
             }
         }
     }
@@ -218,7 +255,7 @@ bool DownloadAndLaunchInstaller(const UpdateInfo &info) {
 
     wchar_t tempDir[MAX_PATH] = {};
     if (!GetTempPathW(MAX_PATH, tempDir)) return false;
-    std::wstring destPath = std::wstring(tempDir) + L"HomRec-Update-" + std::wstring(info.latest_version.begin(), info.latest_version.end()) + L".exe";
+    std::wstring destPath = std::wstring(tempDir) + L"HomRec-Update-" + SafeFileTag(info.latest_version) + L".exe";
 
     if (!DownloadToFile(url, destPath)) return false;
 
