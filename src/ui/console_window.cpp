@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <filesystem>
 #include <vector>
 #include <cmath>
 #include <cwchar>
@@ -1427,26 +1428,55 @@ void ConsoleWindow::CmdRmSelfApp(const std::wstring &raw) {
     }
 }
 
-void ConsoleWindow::ScheduleSelfDelete(const std::wstring &base) {
+void ConsoleWindow::ScheduleSelfDelete(const std::wstring &base_in) {
+    std::wstring base = base_in;
+    while (!base.empty() && (base.back() == L'\\' || base.back() == L'/')) base.pop_back();
+    size_t seps = (size_t)std::count_if(base.begin(), base.end(),
+                                        [](wchar_t c) { return c == L'\\' || c == L'/'; });
+    if (base.size() < 4 || seps < 2 ||
+        base.find_first_of(L"\"\r\n&|<>^") != std::wstring::npos) {
+        PrintErr(L"rm @homrec: refusing to delete '" + base_in +
+                 L"' (doesn't look like a dedicated install folder)");
+        return;
+    }
+    // In a .bat file '%' starts variable expansion - double it.
+    std::wstring base_bat;
+    for (wchar_t c : base) { base_bat += c; if (c == L'%') base_bat += L'%'; }
+
     wchar_t tempPath[MAX_PATH];
     GetTempPathW(MAX_PATH, tempPath);
     std::wstring batPath = std::wstring(tempPath) + L"homrec_uninstall.bat";
 
-    // NOTE: the tasklist check matches the process name "HomRec.exe" -- if
-    // you're running this straight from a debugger/different exe name, it
-    // won't detect exit correctly and the loop will spin until manually
-    // killed.
-    std::wofstream f(batPath.c_str(), std::ios::trunc);
-    f << L"@echo off\r\n"
-      << L":wait_loop\r\n"
-      << L"tasklist | findstr /i \"HomRec\" >nul 2>&1\r\n"
-      << L"if not errorlevel 1 (\r\n"
-      << L"  timeout /t 1 /nobreak >nul\r\n"
-      << L"  goto wait_loop\r\n"
-      << L")\r\n"
-      << L"rmdir /s /q \"" << base << L"\"\r\n"
-      << L"(goto) 2>nul & del \"%~f0\"\r\n";
-    f.close();
+    const DWORD pid = GetCurrentProcessId();
+    std::wstring script;
+    script += L"@echo off\r\n";
+    script += L"chcp 65001 >nul\r\n"; // the file below is UTF-8 (non-ASCII install paths)
+    script += L":wait_loop\r\n";
+    script += L"tasklist /fi \"PID eq " + std::to_wstring(pid) + L"\" 2>nul | find \"" +
+              std::to_wstring(pid) + L"\" >nul\r\n";
+    script += L"if not errorlevel 1 (\r\n";
+    script += L"  timeout /t 1 /nobreak >nul\r\n";
+    script += L"  goto wait_loop\r\n";
+    script += L")\r\n";
+    script += L"rmdir /s /q \"" + base_bat + L"\"\r\n";
+    script += L"(goto) 2>nul & del \"%~f0\"\r\n";
+
+    int n = WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(), nullptr, 0, nullptr, nullptr);
+    std::string utf8((size_t)std::max(n, 0), '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(), utf8.data(), n, nullptr, nullptr);
+    {
+        std::ofstream f(std::filesystem::path(batPath), std::ios::binary | std::ios::trunc);
+        if (!f || utf8.empty()) {
+            PrintErr(L"rm @homrec: couldn't write the uninstall script to " + batPath);
+            return;
+        }
+        f.write(utf8.data(), (std::streamsize)utf8.size());
+        if (!f) {
+            PrintErr(L"rm @homrec: couldn't write the uninstall script to " + batPath);
+            return;
+        }
+    }
 
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
