@@ -39,6 +39,11 @@ int RunAndWait(const std::wstring &cmdline) {
     HANDLE hNul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE | FILE_SHARE_READ,
                               &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
+    // CreateFileW reports failure as INVALID_HANDLE_VALUE, not nullptr - the
+    // `if (hNul)` checks below would otherwise pass an invalid handle to
+    // STARTUPINFO and CloseHandle().
+    if (hNul == INVALID_HANDLE_VALUE) hNul = nullptr;
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
@@ -57,8 +62,17 @@ int RunAndWait(const std::wstring &cmdline) {
     if (hNul) CloseHandle(hNul);
     if (!ok) return -1;
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    // A hung tar/PowerShell used to block the caller (the UI thread, for
+    // plugin installs) forever - give it two minutes, then kill it.
     DWORD code = 1;
+    if (WaitForSingleObject(pi.hProcess, 120000) == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+        code = (DWORD)-1;
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return -1;
+    }
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
@@ -110,9 +124,15 @@ bool ExtractWithPowerShell(const std::string &archive_path, const std::string &d
     }
 
     std::wstring wzip = WidenPath(zip_path), wdest = WidenPath(dest_dir);
-    std::wstring ps_cmd = L"Expand-Archive -LiteralPath " + QuoteW(wzip) +
-                           L" -DestinationPath " + QuoteW(wdest) + L" -Force";
-    std::wstring cmd = L"powershell.exe -NoProfile -NonInteractive -Command " + QuoteW(ps_cmd);
+    auto psq = [](const std::wstring &v) {
+        std::wstring o = L"'";
+        for (wchar_t c : v) { if (c == L'\'') o += L"''"; else o += c; }
+        o += L"'";
+        return o;
+    };
+    std::wstring ps_cmd = L"Expand-Archive -LiteralPath " + psq(wzip) +
+                           L" -DestinationPath " + psq(wdest) + L" -Force";
+    std::wstring cmd = L"powershell.exe -NoProfile -NonInteractive -Command \"" + ps_cmd + L"\"";
     int code = RunAndWait(cmd);
 
     if (made_temp_copy) DeleteFileA(zip_path.c_str());
