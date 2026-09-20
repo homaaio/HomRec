@@ -73,6 +73,7 @@ extern "C" {
     void hr_pl_set_include_cursor(void *handle, int flag);
     void hr_pl_set_capture_rect(void *handle, int x, int y, int w, int h);
     void hr_pl_set_output_size(void *handle, int w, int h);
+    void hr_pl_set_output_pixfmt(void *handle, int nv12);
     void hr_pl_set_preview_fps(void *handle, int fps);
     void hr_pl_set_preview_needed(void *handle, int enabled);
     int hr_pl_end_recording_segment(void *handle, int timeout_ms);
@@ -470,8 +471,9 @@ bool RecordingController::Start(std::wstring &error_out) {
                               ? hw_encoder_
                               : WideFromNarrow(state_.video_codec);
     std::wstring codec_args = BuildCodecArgs(codec);
+    bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
     HrLog::Info("Recording: encoding with " + NarrowFromWide(codec) +
-                (codec == L"libx264" || codec == L"libx265" ? " (software)" : " (hardware)"));
+                (codec_is_hw ? " (hardware)" : " (software)"));
 
     ffproc_ = hr_ff_create();
     hr_ff_set_ffmpeg_path(ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
@@ -548,6 +550,10 @@ bool RecordingController::Start(std::wstring &error_out) {
         pipeline_output_idx_ = capture_output_idx_;
         last_overlays_sent_valid_ = false;
     }
+    // Must be set every Start() (not only on fresh pipeline creation) -
+    // a reused preview pipeline may have been left in the opposite format
+    // by a previous recording that used a different encoder.
+    if (pipeline_) hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
     bool pipeline_started = reused_preview_pipeline;
     if (pipeline_ && !reused_preview_pipeline) {
         hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
@@ -1043,6 +1049,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     std::wstring codec = state_.video_codec == "libx264" && !hw_encoder_.empty()
                               ? hw_encoder_ : WideFromNarrow(state_.video_codec);
     std::wstring codec_args = BuildCodecArgs(codec);
+    bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
 
     replay_ff_ = hr_ff_create();
     hr_ff_set_ffmpeg_path(replay_ff_, NarrowFromWide(ffmpeg_path_).c_str());
@@ -1071,6 +1078,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
         replay_ff_ = nullptr;
         return false;
     }
+    hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
     hr_pl_set_recording(pipeline_, /*active=*/1, stdin_h);
 
     // Instant Replay's segment writer above only ever piped raw video -
@@ -1563,6 +1571,7 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
                               ? hw_encoder_
                               : WideFromNarrow(codec_in);
     qt_encoder_used_ = NarrowFromWide(codec);
+    bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
 
     // Same args-building hr_build_codec_args() call BuildCodecArgs() makes,
     // just with the Settings dialog's live (possibly-unsaved) preset
@@ -1621,6 +1630,7 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
         if (qt_preview_was_torn_down_) EnsurePreview();
         return false;
     }
+    hr_pl_set_output_pixfmt(qt_pipeline_, codec_is_hw ? 1 : 0);
     hr_pl_set_recording(qt_pipeline_, /*active=*/1, ff_stdin);
 
     qt_fps_sum_ = 0.0;
