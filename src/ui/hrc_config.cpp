@@ -1,3 +1,9 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "hrc_config.h"
 #include "../hr_str_convert.h"
 #include "../hr_settings_registry.h"
@@ -134,7 +140,32 @@ void ReadHotkeysSection(const std::unordered_map<std::string, std::string> &kv,
 
 namespace HrcConfig {
 
+static bool SaveDirect(const AppState &state, const std::wstring &path);
+static bool SaveOverlaysDirect(const std::vector<OverlayDef> &overlays, const std::wstring &path);
+
+// Crash/power-loss safety: the old code opened the real file with `trunc`
+// and streamed into it, so dying mid-write left a truncated .hrc / overlays
+// file (= lost settings). Write to "<path>.tmp" first and swap it in with
+// MoveFileEx, so the real file is always either the old or the new content.
+template <typename WriteFn>
+static bool WriteAtomically(const std::wstring &path, WriteFn write) {
+#ifdef _WIN32
+    const std::wstring tmp = path + L".tmp";
+    if (write(tmp)) {
+        if (MoveFileExW(tmp.c_str(), path.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            return true;
+    }
+    DeleteFileW(tmp.c_str());
+#endif
+    return write(path); // fallback: previous behaviour (also the non-Windows path)
+}
+
 bool Save(const AppState &state, const std::wstring &path) {
+    return WriteAtomically(path, [&](const std::wstring &p) { return SaveDirect(state, p); });
+}
+
+static bool SaveDirect(const AppState &state, const std::wstring &path) {
     std::ofstream f(path.c_str(), std::ios::trunc | std::ios::binary);
     if (!f) return false;
 
@@ -220,6 +251,10 @@ bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields
 // pair from Save()/Load() above, rather than folding overlays into either
 // HrcConfig::Save() or homrec_settings.json directly.
 bool SaveOverlaysOnly(const std::vector<OverlayDef> &overlays, const std::wstring &path) {
+    return WriteAtomically(path, [&](const std::wstring &p) { return SaveOverlaysDirect(overlays, p); });
+}
+
+static bool SaveOverlaysDirect(const std::vector<OverlayDef> &overlays, const std::wstring &path) {
     std::ofstream f(path.c_str(), std::ios::trunc | std::ios::binary);
     if (!f) return false;
     f << "# HomRec Overlays (auto-saved) v1\n"
