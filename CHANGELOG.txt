@@ -1,5 +1,20 @@
 welcome to changelog :D
 
+[Version 2.3] - 2026-09-19 (unreleased)
+
+  Fixed / improved:
+  - hr_pipeline.cpp: pipe_handle/recording are std::atomic (UI vs capture/writer thread data race).
+  - hr_pipeline.cpp: catch-up frames are converted once and written N times (QueuedFrame::repeat) instead of re-converted up to 90x.
+  - hr_pipeline.cpp: an evicted (dropped) frame passes its timeline slots to the next one - fixes audio lagging behind video after "Recording overloaded: dropping frames".
+  - hr_pipeline.cpp / recording_controller: bounds-checked, change-aware preview fetch (hr_pl_get_preview_ex); closes a possible heap overflow.
+  - main_frame.cpp: preview repaints only on new frames; no per-paint snapshot copy; debounced overlay autosave; stuck-drag recovery; fewer idle relayouts.
+  - hr_audio.cpp: replay ring buffer trims in 1s chunks; WAV files written outside the audio mutex.
+  - hr_update.cpp: HTTPS-only, truncated/corrupt downloads rejected, version tag sanitised.
+  - hr_archive.cpp: PowerShell fallback works with spaces in paths; 2-minute timeout.
+  - console_window.cpp: `rm @homrec` script is UTF-8, waits on our PID, refuses root-like folders.
+  - hrc_config.cpp: settings/overlays saved atomically (temp file + replace).
+  - Removed stale duplicate src/hr_ffmpeg_runner.cpp (build uses ffmpeg/hr_ffmpeg_runner.cpp).
+  
 [Version 2.2.1] - 2026-09-19
 
 - Fixed: overlays couldn't be moved/resized on the preview - no frame ever
