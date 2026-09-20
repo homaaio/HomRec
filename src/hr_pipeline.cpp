@@ -390,6 +390,13 @@ static void bgra_downscale(const uint8_t* __restrict src,
 // below instead of racing it blind.
 static std::atomic<int> g_handed_off_pipelines{0};
 
+// Process-wide counter behind Pipeline::pv_seq. Global (not per-pipeline) on
+// purpose: RecordingController tears preview pipelines down and creates new
+// ones during a session, and a per-pipeline counter restarting at 1 could
+// collide with the "last seen" value the UI still holds from the old
+// pipeline and make the UI think a brand-new frame is unchanged.
+static std::atomic<uint64_t> g_pv_seq_counter{0};
+
 // ---------------------------------------------------------------------------
 // Pipeline state
 // ---------------------------------------------------------------------------
@@ -423,8 +430,16 @@ struct Pipeline {
     // encoder path), so this couldn't be fixed by simply not creating one.
     std::atomic<bool> preview_needed{true};
 
-    intptr_t pipe_handle = 0;
-    bool recording = false;   // pipe open → encode YUV; false → preview only
+    // BUGFIX (data race): pipe_handle and `recording` are written by the UI
+    // thread (hr_pl_set_recording()/hr_pl_end_recording_segment()) while the
+    // capture and writer threads read - and the writer thread also zeroes -
+    // them, with no synchronisation at all. Plain non-atomic reads/writes
+    // from two threads are undefined behaviour and, on a bad day, let the
+    // writer thread keep using (or double-close) a handle the UI thread had
+    // already swapped out. Both are std::atomic now; every access below goes
+    // through load()/store() explicitly so the intent is visible.
+    std::atomic<intptr_t> pipe_handle{0};
+    std::atomic<bool> recording{false};   // pipe open → encode YUV; false → preview only
 
     // Separate from `recording` above on purpose: `recording` just means
     // "a pipe is open, encode YUV for it" and is also true while Instant
@@ -542,6 +557,12 @@ struct Pipeline {
     int  pv_actual_w = 0, pv_actual_h = 0;
     int  pv_native_w = 0, pv_native_h = 0;
     bool pv_ready    = false;
+    // Bumped (from g_pv_seq_counter, so it is unique across pipelines) every
+    // time update_preview() publishes a new thumbnail. Lets the UI poll
+    // "has anything changed?" with one atomic load and skip the copy + compare
+    // + rescale work entirely on paints where it hasn't - see
+    // hr_pl_get_preview_ex()/hr_pl_get_preview_seq().
+    std::atomic<uint64_t> pv_seq{0};
 
     std::thread       capture_thread;
     std::atomic<bool> running{false};
@@ -596,7 +617,20 @@ struct Pipeline {
     std::atomic<double>  fps_actual{0.0};
 
     // ====== FRAME QUEUE FOR ASYNC WRITING ======
-    std::queue<std::vector<uint8_t>> pipe_queue;
+    // One queue entry = one converted YUV frame plus how many consecutive
+    // times it must be written to the pipe. `repeat` > 1 is how the capture
+    // thread's catch-up logic keeps the muxed timeline on pace with real
+    // time (see capture_loop()'s extra_slots): the SAME picture is simply
+    // written several times, instead of being re-scaled, re-converted and
+    // re-queued as up to 90 separate buffers. That used to burn ~90x the
+    // conversion CPU in exactly the situation where the machine was already
+    // behind, and - because MAX_QUEUE_SIZE is 3 - all but the last few of
+    // those buffers were evicted from the queue again immediately anyway.
+    struct QueuedFrame {
+        std::vector<uint8_t> data;
+        int repeat = 1;
+    };
+    std::queue<QueuedFrame> pipe_queue;
     std::mutex pipe_queue_mtx;
     std::condition_variable pipe_queue_cv;
     std::thread writer_thread;
@@ -617,10 +651,11 @@ struct Pipeline {
     // Write raw bytes to pipe
     // -------------------------------------------------------------------------
     bool write_pipe(const uint8_t* data, size_t total) {
-        if (pipe_handle == 0 || pipe_handle == -1) return false;
+        const intptr_t ph = pipe_handle.load(std::memory_order_acquire);
+        if (ph == 0 || ph == -1) return false;
         size_t written = 0;
 #ifdef _WIN32
-        HANDLE h = reinterpret_cast<HANDLE>(pipe_handle);
+        HANDLE h = reinterpret_cast<HANDLE>(ph);
         if (!write_evt) write_evt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         while (written < total) {
             OVERLAPPED ov{};
@@ -647,7 +682,7 @@ struct Pipeline {
         }
 #else
         while (written < total) {
-            ssize_t r = ::write(static_cast<int>(pipe_handle),
+            ssize_t r = ::write(static_cast<int>(ph),
                                 data + written, total - written);
             if (r <= 0) return false;
             written += static_cast<size_t>(r);
@@ -722,6 +757,7 @@ struct Pipeline {
             }
 #endif
             std::vector<uint8_t> frame;
+            int frame_repeat = 1;
             
             {
                 std::unique_lock<std::mutex> lock(pipe_queue_mtx);
@@ -739,13 +775,13 @@ struct Pipeline {
                 
                 if (pipe_queue.empty()) {
                     if (pending_close_requested.load(std::memory_order_acquire)) {
-                        if (pipe_handle != 0 && pipe_handle != -1) {
+                        const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
+                        if (ph != 0 && ph != -1) {
 #ifdef _WIN32
-                            CloseHandle(reinterpret_cast<HANDLE>(pipe_handle));
+                            CloseHandle(reinterpret_cast<HANDLE>(ph));
 #else
-                            ::close(static_cast<int>(pipe_handle));
+                            ::close(static_cast<int>(ph));
 #endif
-                            pipe_handle = 0;
                         }
                         pending_close_requested.store(false, std::memory_order_release);
                         {
@@ -758,13 +794,17 @@ struct Pipeline {
                 }
                 
                 // Move frame out of queue (no copy)
-                frame = std::move(pipe_queue.front());
+                frame = std::move(pipe_queue.front().data);
+                frame_repeat = pipe_queue.front().repeat;
                 pipe_queue.pop();
             }
             
             // Write to pipe outside the lock
             if (!frame.empty()) {
-                bool ok = write_pipe(frame.data(), frame.size());
+                bool ok = true;
+                for (int rep = 0; rep < frame_repeat && ok; ++rep) {
+                    ok = write_pipe(frame.data(), frame.size());
+                }
 
                 // Hand the buffer back to the free-list instead of letting
                 // it fall out of scope and get freed - the capture thread
@@ -803,13 +843,15 @@ struct Pipeline {
         // milliseconds after Stop (the common case) or well after being
         // handed off to run detached in the background (the case that was
         // triggering the broken file).
-        if (pipe_handle != 0 && pipe_handle != -1) {
+        {
+            const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
+            if (ph != 0 && ph != -1) {
 #ifdef _WIN32
-            CloseHandle(reinterpret_cast<HANDLE>(pipe_handle));
+                CloseHandle(reinterpret_cast<HANDLE>(ph));
 #else
-            ::close(static_cast<int>(pipe_handle));
+                ::close(static_cast<int>(ph));
 #endif
-            pipe_handle = 0;
+            }
         }
 
         // Portable completion signal - see writer_thread_done's declaration
@@ -848,6 +890,8 @@ struct Pipeline {
         pv_native_w = eff_w;
         pv_native_h = eff_h;
         pv_ready    = true;
+        pv_seq.store(g_pv_seq_counter.fetch_add(1, std::memory_order_relaxed) + 1,
+                     std::memory_order_release);
     }
 
     // -------------------------------------------------------------------------
@@ -895,7 +939,7 @@ struct Pipeline {
         };
         int64_t frame_ns_idle = compute_frame_ns_idle();
         int64_t frame_ns = frame_ns_recording;
-        bool was_recording = recording;
+        bool was_recording = recording.load(std::memory_order_acquire);
         bool was_boosted = boost_priority.load(std::memory_order_relaxed);
 #ifdef _WIN32
         // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
@@ -974,7 +1018,7 @@ struct Pipeline {
             // reuse) - react to that instead of only sizing pacing/
             // priority once when the thread was first created.
             {
-                bool is_recording_now = recording;
+                const bool is_recording_now = recording.load(std::memory_order_acquire);
                 if (is_recording_now != was_recording) {
                     was_recording = is_recording_now;
                     if (!is_recording_now) frame_ns_idle = compute_frame_ns_idle();
@@ -1214,7 +1258,7 @@ struct Pipeline {
             frame_ptr = frame;
             int extra_slots = 0;
 #ifdef _WIN32
-            if (recording && sw_ctx && g_libs.sw_elapsed_ns) {
+            if (recording.load(std::memory_order_acquire) && sw_ctx && g_libs.sw_elapsed_ns) {
                 static constexpr int kMaxCatchupFrames = 90; // ~1.5-3s of duplicate frames, whichever fps
                 int64_t now_ns = g_libs.sw_elapsed_ns(sw_ctx);
                 int64_t behind = now_ns - next_frame_ns;
@@ -1241,13 +1285,15 @@ struct Pipeline {
             // both the per-frame heap allocation and the full-frame memcpy
             // that pipe_queue.push(yuv_buf) used to perform.
             //
-            // Looped 1 + extra_slots times: the extra reps re-encode the
-            // exact same bgra_buf content (see the catch-up comment above)
-            // so the muxed timeline's frame count keeps pace with real
-            // elapsed time instead of quietly falling behind it.
+            // Converted ONCE per tick. The catch-up slots (extra_slots, see
+            // above) are expressed as QueuedFrame::repeat - the writer thread
+            // simply writes the same converted picture that many times - so
+            // the muxed timeline's frame count still keeps pace with real
+            // elapsed time, but without re-scaling and re-converting the
+            // identical frame up to 90 times in a row while the machine is
+            // already behind (which is exactly when CPU is scarcest).
 #ifdef _WIN32
-            if (recording && g_libs.bgra_to_yuv) {
-                for (int rep = 0; rep <= extra_slots; ++rep) {
+            if (recording.load(std::memory_order_acquire) && g_libs.bgra_to_yuv) {
                 int req_w = out_w.load(std::memory_order_relaxed);
                 int req_h = out_h.load(std::memory_order_relaxed);
                 const uint8_t* enc_src = frame;
@@ -1275,36 +1321,40 @@ struct Pipeline {
                 yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
 
                 std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
+                int carried_repeat = 0;        // timeline slots owned by an evicted entry
                 {
                     std::lock_guard<std::mutex> lock(pipe_queue_mtx);
 
-                    // BUGFIX (freeze + memory growth after Stop on a long
-                    // recording): this eviction used to only run when
-                    // rep == 0. A catch-up burst (extra_slots, up to
-                    // kMaxCatchupFrames == 90) pushes every one of its reps
-                    // into pipe_queue below regardless -- with the check
-                    // gated to rep == 0, up to 90 frames per capture tick
-                    // (~3 MB each at 1080p) bypassed MAX_QUEUE_SIZE
-                    // completely. On hardware that's chronically behind for
-                    // a good stretch of a long recording, that ran every
-                    // tick for as long as recording continued: pipe_queue
-                    // grew without any real bound (steadily climbing memory
-                    // -- the "leak"), and the writer thread then had to
-                    // drain that multi-GB backlog frame-by-frame before
-                    // hr_pl_stop()/hr_pl_destroy()'s join() could ever see
-                    // it finish (the "freeze" right after pressing Stop).
-                    // Evicting on every rep instead keeps pipe_queue capped
-                    // at MAX_QUEUE_SIZE no matter how many catch-up reps ran
-                    // this tick, while the reps themselves still keep the
-                    // muxed timeline on pace (unchanged from before).
+                    // Backpressure: the queue is capped at MAX_QUEUE_SIZE
+                    // entries. A full queue means the writer/ffmpeg really is
+                    // behind, so the oldest entry is evicted (and counted as
+                    // a drop) instead of letting memory grow without bound
+                    // (see the earlier "freeze + memory growth after Stop on
+                    // a long recording" fix - that bug was catch-up frames
+                    // bypassing this cap, which the repeat count can no
+                    // longer do: it costs no extra buffers at all).
                     if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
-                        dropped = std::move(pipe_queue.front());
+                        dropped = std::move(pipe_queue.front().data);
+                        // A/V SYNC FIX: an evicted entry used to take its
+                        // timeline slots with it, so every drop made the
+                        // video 1+ frame shorter than real time while the
+                        // audio kept its full length - heard as audio
+                        // lagging behind the picture after an "overloaded:
+                        // dropping frames" warning. The newest frame now
+                        // inherits the evicted entry's slots (the picture
+                        // holds for that moment instead of the clock
+                        // slipping). Capped so one long stall can't
+                        // become a multi-second burst of writes.
+                        carried_repeat = pipe_queue.front().repeat;
                         pipe_queue.pop();
                         frames_dropped.fetch_add(1, std::memory_order_relaxed);
                         frames_stalled.fetch_add(1, std::memory_order_relaxed);
                     }
 
-                    pipe_queue.push(std::move(yuv_frame));
+                    QueuedFrame qf;
+                    qf.data   = std::move(yuv_frame);
+                    qf.repeat = std::min(1 + extra_slots + carried_repeat, 240);
+                    pipe_queue.push(std::move(qf));
                     pipe_queue_cv.notify_one();
                 }
 
@@ -1313,7 +1363,6 @@ struct Pipeline {
                     if (free_bufs.size() < MAX_FREE_BUFS)
                         free_bufs.push(std::move(dropped));
                 }
-                } // for rep
             }
 #endif
             // Catch-up reps count as captured (they keep the timeline
@@ -1412,8 +1461,8 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     pl->fps         = fps;
     pl->pv_w        = pv_w;
     pl->pv_h        = pv_h;
-    pl->pipe_handle = pipe_fd;
-    pl->recording   = (pipe_fd != 0 && pipe_fd != -1);
+    pl->pipe_handle.store(pipe_fd, std::memory_order_release);
+    pl->recording.store(pipe_fd != 0 && pipe_fd != -1, std::memory_order_release);
 
     // This used to be a hardcoded dx_create(0, 0), so the
     // "Monitor:" setting only ever affected capture *sizing*
@@ -1843,8 +1892,8 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
     // as its queue next runs empty and close the NEW recording's pipe --
     // ffmpeg would see EOF seconds into the next recording.
     if (active != 0) pl->pending_close_requested.store(false, std::memory_order_release);
-    pl->pipe_handle = pipe_fd;
-    pl->recording   = (active != 0) && (pipe_fd != 0) && (pipe_fd != -1);
+    pl->pipe_handle.store(pipe_fd, std::memory_order_release);
+    pl->recording.store((active != 0) && (pipe_fd != 0) && (pipe_fd != -1), std::memory_order_release);
     // YUV conversion buffers are lazily sized from the free-list pool.
 #endif
 }
@@ -1895,8 +1944,11 @@ HR_EXPORT int hr_pl_end_recording_segment(void* handle, int timeout_ms) {
     return 1;
 #else
     auto* pl = static_cast<Pipeline*>(handle);
-    if (pl->pipe_handle == 0 || pl->pipe_handle == -1) return 1; // nothing to close
-    pl->recording = false; // stop the capture thread queuing more frames for this segment
+    {
+        const intptr_t ph = pl->pipe_handle.load(std::memory_order_acquire);
+        if (ph == 0 || ph == -1) return 1; // nothing to close
+    }
+    pl->recording.store(false, std::memory_order_release); // stop the capture thread queuing more frames for this segment
     pl->pending_close_done.store(false, std::memory_order_relaxed);
     pl->pending_close_requested.store(true, std::memory_order_release);
     pl->pipe_queue_cv.notify_all(); // wake the writer thread now instead of its next 10ms poll
@@ -1938,6 +1990,61 @@ HR_EXPORT int hr_pl_get_preview(void* handle, uint8_t* out_rgb,
     *out_h = pl->pv_actual_h;
     memcpy(out_rgb, pl->pv_buf.data(), pl->pv_buf.size());
     return 1;
+#endif
+}
+
+// Bounds-checked, change-aware replacement for hr_pl_get_preview().
+//
+// Why it exists (two real problems with the old call):
+//  1. It memcpy'd pv_buf.size() bytes into a buffer whose size the caller
+//     only *assumed* (RecordingController sized it from AppState's
+//     preview_width x preview_height, which the pipeline's own thumbnail
+//     size is derived from at creation time). If those settings shrank
+//     between pipeline creation and the next UI poll, the copy ran past the
+//     end of the caller's buffer - a heap overflow. `out_cap` makes the copy
+//     refuse instead.
+//  2. The UI polls on every paint (20x/sec) and used to copy the whole
+//     thumbnail, memcmp it against the previous one and rescale it even when
+//     the pipeline hadn't produced anything new (preview fps is usually
+//     lower than the paint rate). `seq_io` carries the caller's last-seen
+//     sequence number; when it still matches, nothing is copied.
+//
+// Returns 0 = no frame available (or `out_cap` too small), 1 = new frame
+// copied (out_w/out_h/native size/seq_io updated), 2 = unchanged since
+// *seq_io (no bytes copied, all outputs left untouched).
+HR_EXPORT int hr_pl_get_preview_ex(void* handle, uint8_t* out_rgb, size_t out_cap,
+                                    int* out_w, int* out_h,
+                                    int* out_native_w, int* out_native_h,
+                                    uint64_t* seq_io) {
+    if (!handle || !out_rgb || !out_w || !out_h) return 0;
+#ifndef _WIN32
+    (void)out_cap; (void)out_native_w; (void)out_native_h; (void)seq_io;
+    return 0;
+#else
+    auto* pl = static_cast<Pipeline*>(handle);
+    std::lock_guard<std::mutex> lock(pl->pv_mtx);
+    if (!pl->pv_ready || pl->pv_buf.empty()) return 0;
+    const uint64_t cur = pl->pv_seq.load(std::memory_order_acquire);
+    if (seq_io && *seq_io == cur) return 2;
+    if (pl->pv_buf.size() > out_cap) return 0;
+    *out_w = pl->pv_actual_w;
+    *out_h = pl->pv_actual_h;
+    if (out_native_w) *out_native_w = pl->pv_native_w;
+    if (out_native_h) *out_native_h = pl->pv_native_h;
+    memcpy(out_rgb, pl->pv_buf.data(), pl->pv_buf.size());
+    if (seq_io) *seq_io = cur;
+    return 1;
+#endif
+}
+
+// Lock-free "did the thumbnail change?" probe for the UI's paint timer.
+// 0 until the first thumbnail exists.
+HR_EXPORT uint64_t hr_pl_get_preview_seq(void* handle) {
+    if (!handle) return 0;
+#ifndef _WIN32
+    return 0;
+#else
+    return static_cast<Pipeline*>(handle)->pv_seq.load(std::memory_order_acquire);
 #endif
 }
 
