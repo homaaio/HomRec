@@ -329,6 +329,179 @@ HR_EXPORT void hr_bgra_to_yuv420p(
 }
 
 /* -------------------------------------------------------------------------
+ * BGRA -> NV12 (Y plane + interleaved U/V plane)
+ *
+ * Hardware encoders (h264_nvenc/qsv/amf) all natively consume NV12, not
+ * planar YUV420p. Feeding them yuv420p makes ffmpeg silently insert its
+ * own CPU-side swscale conversion yuv420p->nv12 right before handing the
+ * frame to the encoder - i.e. this same Y/chroma math gets done twice per
+ * frame for zero benefit. This is the same subsampling/coefficients as
+ * hr_bgra_to_yuv420p_band above, just writing chroma interleaved (U,V,U,V…)
+ * into one plane instead of two separate planes, so hardware-encoder
+ * recordings can skip that redundant second pass. See callers in
+ * hr_pipeline.cpp (Yuv420pWorkerPool::SetUseNv12) and hr_ffmpeg_runner.cpp
+ * (the matching "-pixel_format nv12"/"-pix_fmt nv12" switch).
+ * ---------------------------------------------------------------------- */
+
+static void hr_bgra_to_nv12_band_scalar(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT nv12_out,
+    int width, int height, int y0, int y1)
+{
+    if (HR_UNLIKELY(!bgra || !nv12_out || width <= 0 || height <= 0)) return;
+    if (y0 < 0) y0 = 0;
+    if (y1 > height) y1 = height;
+    if (y0 >= y1) return;
+
+    size_t frame_sz = (size_t)width * (size_t)height;
+    uint8_t *Y  = nv12_out;
+    uint8_t *UV = nv12_out + frame_sz;   /* U0,V0,U1,V1,... */
+    size_t uv_stride = (size_t)width;    /* (width/2) pairs * 2 bytes == width */
+
+    for (int y = y0; y < y1; y += 2) {
+        const uint8_t *row0 = bgra + (size_t)y * width * 4;
+        const uint8_t *row1 = (y + 1 < height)
+                            ? bgra + (size_t)(y+1) * width * 4
+                            : row0;
+        int y1r = (y+1 < height) ? y+1 : y;
+
+        uint8_t *Yrow0 = Y + (size_t)y * width;
+        uint8_t *Yrow1r = Y + (size_t)y1r * width;
+        uint8_t *UVrow = UV + (size_t)(y / 2) * uv_stride;
+
+        int x = 0;
+        for (; x + 3 < width; x += 4) {
+            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
+            uint8_t r01=row0[(x+1)*4+2],g01=row0[(x+1)*4+1],b01=row0[(x+1)*4+0];
+            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
+            uint8_t r11=row1[(x+1)*4+2],g11=row1[(x+1)*4+1],b11=row1[(x+1)*4+0];
+            Yrow0[x]  =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
+            Yrow0[x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
+            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Yrow1r[x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            {
+                int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
+                size_t ci=(size_t)(x/2)*2;
+                UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+                UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+            }
+
+            uint8_t r02=row0[(x+2)*4+2],g02=row0[(x+2)*4+1],b02=row0[(x+2)*4+0];
+            uint8_t r03=row0[(x+3)*4+2],g03=row0[(x+3)*4+1],b03=row0[(x+3)*4+0];
+            uint8_t r12=row1[(x+2)*4+2],g12=row1[(x+2)*4+1],b12=row1[(x+2)*4+0];
+            uint8_t r13=row1[(x+3)*4+2],g13=row1[(x+3)*4+1],b13=row1[(x+3)*4+0];
+            Yrow0[x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
+            Yrow0[x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
+            Yrow1r[x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
+            Yrow1r[x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
+            {
+                int ra=((int)r02+r03+r12+r13)>>2,ga=((int)g02+g03+g12+g13)>>2,ba=((int)b02+b03+b12+b13)>>2;
+                size_t ci=(size_t)((x+2)/2)*2;
+                UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+                UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+            }
+        }
+        for (; x < width; x += 2) {
+            int x1=(x+1<width)?x+1:x;
+            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
+            uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
+            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
+            uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
+            Yrow0[x] =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
+            Yrow0[x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
+            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
+            Yrow1r[x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
+            int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
+            size_t ci=(size_t)(x/2)*2;
+            UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+            UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+        }
+    }
+}
+
+#if defined(HR_HAVE_X86_SIMD)
+__attribute__((target("sse4.1")))
+static void hr_bgra_to_nv12_band_sse41(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT nv12_out,
+    int width, int height, int y0, int y1)
+{
+    if (HR_UNLIKELY(!bgra || !nv12_out || width <= 0 || height <= 0)) return;
+    if (y0 < 0) y0 = 0;
+    if (y1 > height) y1 = height;
+    if (y0 >= y1) return;
+
+    size_t frame_sz = (size_t)width * (size_t)height;
+    uint8_t *Y  = nv12_out;
+    uint8_t *UV = nv12_out + frame_sz;
+    size_t uv_stride = (size_t)width;
+
+    for (int y = y0; y < y1; y += 2) {
+        const uint8_t *row0 = bgra + (size_t)y * width * 4;
+        const uint8_t *row1 = (y + 1 < height)
+                            ? bgra + (size_t)(y+1) * width * 4
+                            : row0;
+        int y1r = (y+1 < height) ? y+1 : y;
+
+        uint8_t *Yrow0 = Y + (size_t)y * width;
+        uint8_t *Yrow1r = Y + (size_t)y1r * width;
+        uint8_t *UVrow = UV + (size_t)(y / 2) * uv_stride;
+
+        int x = 0;
+        for (; x + 7 < width; x += 8) {
+            hr_y8_sse41(row0 + (size_t)x * 4, Yrow0 + x);
+            hr_y8_sse41(row1 + (size_t)x * 4, Yrow1r + x);
+        }
+        for (; x < width; ++x) {
+            uint8_t b = row0[x*4+0], g = row0[x*4+1], r = row0[x*4+2];
+            Yrow0[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
+            b = row1[x*4+0]; g = row1[x*4+1]; r = row1[x*4+2];
+            Yrow1r[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
+        }
+
+        for (x = 0; x < width; x += 2) {
+            int x1=(x+1<width)?x+1:x;
+            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
+            uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
+            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
+            uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
+            int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
+            size_t ci=(size_t)(x/2)*2;
+            UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
+            UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+        }
+    }
+}
+#endif /* HR_HAVE_X86_SIMD */
+
+HR_EXPORT void hr_bgra_to_nv12_band(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT nv12_out,
+    int width, int height, int y0, int y1)
+{
+#if defined(HR_HAVE_X86_SIMD)
+    static int has_sse41 = -1;
+    if (HR_UNLIKELY(has_sse41 < 0)) {
+        __builtin_cpu_init();
+        has_sse41 = __builtin_cpu_supports("sse4.1") ? 1 : 0;
+    }
+    if (has_sse41) {
+        hr_bgra_to_nv12_band_sse41(bgra, nv12_out, width, height, y0, y1);
+        return;
+    }
+#endif
+    hr_bgra_to_nv12_band_scalar(bgra, nv12_out, width, height, y0, y1);
+}
+
+HR_EXPORT void hr_bgra_to_nv12(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT nv12_out,
+    int width, int height)
+{
+    hr_bgra_to_nv12_band(bgra, nv12_out, width, height, 0, height);
+}
+
+/* -------------------------------------------------------------------------
  * YUV420p -> RGB24
  * ---------------------------------------------------------------------- */
 HR_EXPORT void hr_yuv420p_to_rgb(

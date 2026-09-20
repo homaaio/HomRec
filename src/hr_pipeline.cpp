@@ -70,6 +70,7 @@ extern "C" {
     void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
+    void  hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
     void *hr_sw_create();
     void  hr_sw_destroy(void *handle);
     void  hr_sw_start(void *handle);
@@ -120,6 +121,10 @@ class Yuv420pWorkerPool {
 public:
     ~Yuv420pWorkerPool() { Stop(); }
 
+    void SetUseNv12(bool nv12) {
+        convert_band_ = nv12 ? &hr_bgra_to_nv12_band : &hr_bgra_to_yuv420p_band;
+    }
+
     void Stop() {
         if (threads_.empty()) return;
         {
@@ -141,7 +146,7 @@ public:
         EnsureStarted((long long)w * h);
         int n = (int)threads_.size();
         if (n == 0) {
-            hr_bgra_to_yuv420p_band(bgra, yuv, w, h, 0, h);
+            convert_band_(bgra, yuv, w, h, 0, h);
             return;
         }
         int n_bands = n + 1;
@@ -158,7 +163,7 @@ public:
 
         // Main/calling thread does the last band itself, same as before.
         int y0 = band_h * n;
-        if (y0 < h) hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, h);
+        if (y0 < h) convert_band_(bgra, yuv, w, h, y0, h);
 
         std::unique_lock<std::mutex> lk(mtx_);
         cv_done_.wait(lk, [this] { return pending_ == 0; });
@@ -219,7 +224,7 @@ private:
             }
             int y0 = band_h * idx;
             int y1 = std::min(h, y0 + band_h);
-            if (y0 < y1) hr_bgra_to_yuv420p_band(bgra, yuv, w, h, y0, y1);
+            if (y0 < y1) convert_band_(bgra, yuv, w, h, y0, y1);
             {
                 std::lock_guard<std::mutex> lk(mtx_);
                 if (--pending_ == 0) cv_done_.notify_one();
@@ -237,6 +242,7 @@ private:
     const uint8_t *bgra_ = nullptr;
     uint8_t *yuv_ = nullptr;
     int w_ = 0, h_ = 0, band_h_ = 0;
+    void (*convert_band_)(const uint8_t*, uint8_t*, int, int, int, int) = &hr_bgra_to_yuv420p_band;
 };
 #endif  // _WIN32
 
@@ -1880,6 +1886,23 @@ HR_EXPORT void hr_pl_set_output_size(void* handle, int w, int h) {
     if (h > 0 && (h % 2)) h--;
     pl->out_w.store(w > 0 ? w : 0, std::memory_order_relaxed);
     pl->out_h.store(h > 0 ? h : 0, std::memory_order_relaxed);
+#endif
+}
+
+// Selects the raw pixel format the pipeline converts captured BGRA into
+// before writing it to ffmpeg's stdin: NV12 (nv12 != 0) for hardware
+// encoders (nvenc/qsv/amf), planar YUV420p (the default) for software
+// libx264/libx265 - see Yuv420pWorkerPool::SetUseNv12()'s comment.
+// Callers (RecordingController) should call this right after
+// hr_pl_create()/whenever the encoder choice changes and before the next
+// hr_pl_set_recording(..., active=1); it only affects frames converted
+// after the call, so it does nothing useful mid-recording once frames are
+// already flowing with the old format baked into the ffmpeg process's
+// already-negotiated "-pixel_format"/"-pix_fmt" args.
+HR_EXPORT void hr_pl_set_output_pixfmt(void* handle, int nv12) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->yuv_pool.SetUseNv12(nv12 != 0);
 #endif
 }
 
