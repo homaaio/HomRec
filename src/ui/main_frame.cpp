@@ -207,7 +207,7 @@ wxRect OverlayScreenRect(const OverlayDef &ov, const wxRect &prev, double sx, do
 
 PreviewPanel::PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState &state)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxWANTS_CHARS),
-      rec_(rec), state_(state) {
+      rec_(rec), state_(state), overlay_save_timer_(this) {
     SetBackgroundStyle(wxBG_STYLE_PAINT);
     Bind(wxEVT_PAINT, &PreviewPanel::OnPaint, this);
     // See ColorSlider's ctor (themed_widgets.cpp) for why: a buffered
@@ -221,6 +221,30 @@ PreviewPanel::PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState
     Bind(wxEVT_RIGHT_UP, &PreviewPanel::OnRightUp, this);
     Bind(wxEVT_KEY_DOWN, &PreviewPanel::OnKeyDown, this);
     Bind(wxEVT_MOUSE_CAPTURE_LOST, &PreviewPanel::OnCaptureLost, this);
+    Bind(wxEVT_TIMER, [this](wxTimerEvent &) { FlushOverlaySave(); }, overlay_save_timer_.GetId());
+}
+
+void PreviewPanel::ScheduleOverlaySave() {
+    overlay_save_pending_ = true;
+    overlay_save_timer_.StartOnce(400); // restarts on every call = debounce
+}
+
+void PreviewPanel::FlushOverlaySave() {
+    overlay_save_timer_.Stop();
+    if (!overlay_save_pending_) return;
+    overlay_save_pending_ = false;
+    HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
+}
+
+void PreviewPanel::PollRefresh() {
+    if (snapshot_mode_) { Refresh(false); return; } // static image; painting is cached and cheap
+    if (state_.disable_preview) {
+        if ((++idle_ticks_ % 10) == 0) Refresh(false);
+        return;
+    }
+    const uint64_t cur = rec_ ? rec_->PreviewSeq() : 0;
+    if (cur != pv_seq_ || (cur == 0 && have_frame_)) { Refresh(false); return; }
+    if ((++idle_ticks_ % 10) == 0) Refresh(false);
 }
 
 // The coordinate space overlays are measured in for whatever is currently
@@ -236,6 +260,11 @@ bool PreviewPanel::GetNativeSize(int &w, int &h) const {
         w = snapshot_native_w_ > 0 ? snapshot_native_w_ : snapshot_w_;
         h = snapshot_native_h_ > 0 ? snapshot_native_h_ : snapshot_h_;
         return w > 0 && h > 0;
+    }
+    if (have_frame_ && frame_native_w_ > 0 && frame_native_h_ > 0) {
+        w = frame_native_w_;
+        h = frame_native_h_;
+        return true;
     }
     return rec_ && rec_->GetPreviewNativeSize(w, h) && w > 0 && h > 0;
 }
@@ -279,19 +308,35 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
     dc.SetBackground(wxBrush(GetBackgroundColour()));
     dc.Clear();
 
+    // Where this paint's pixels come from. No per-paint copies any more: the
+    // snapshot is read in place, and the live path asks the pipeline for a
+    // frame only if its sequence number moved (GetPreviewFrameIfNew).
+    const uint8_t *src = nullptr;
     int w = 0, h = 0;
-    bool got;
+    bool new_frame = false;
     if (snapshot_mode_) {
-        // Static one-off screenshot (see EnterSnapshotMode()) instead of
-        // the live feed - frame_buf_ below is what the rest of this
-        // function (scaling/caching/drawing) actually reads.
-        frame_buf_ = snapshot_buf_;
         w = snapshot_w_; h = snapshot_h_;
-        got = !frame_buf_.empty() && w > 0 && h > 0;
-    } else {
-        got = rec_ && rec_->GetPreviewFrame(frame_buf_, w, h);
+        if (w > 0 && h > 0 && snapshot_buf_.size() >= (size_t)w * (size_t)h * 3) {
+            src = snapshot_buf_.data();
+            new_frame = snapshot_dirty_;
+        }
+    } else if (rec_) {
+        const int r = rec_->GetPreviewFrameIfNew(frame_buf_, frame_w_, frame_h_,
+                                                 frame_native_w_, frame_native_h_, pv_seq_);
+        if (r == 0) {
+            pv_seq_ = 0;
+            have_frame_ = false;
+        } else {
+            have_frame_ = true;
+            new_frame = (r == 1);
+            if (frame_w_ > 0 && frame_h_ > 0 &&
+                frame_buf_.size() >= (size_t)frame_w_ * (size_t)frame_h_ * 3) {
+                src = frame_buf_.data();
+                w = frame_w_; h = frame_h_;
+            }
+        }
     }
-    if (!got || w <= 0 || h <= 0) {
+    if (!src) {
         dc.SetTextForeground(wxColour(150, 150, 160));
         wxFont f = GetFont();
         dc.SetFont(f);
@@ -306,16 +351,22 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
     // so this can go straight into a wxImage with no channel swap.
     wxSize cs = GetClientSize();
     if (cs.GetWidth() > 0 && cs.GetHeight() > 0) {
-        bool same_frame = (int)frame_buf_.size() == (int)last_frame_buf_.size() &&
-                           w == cached_src_w_ && h == cached_src_h_ &&
-                           cs.GetWidth() == cached_panel_w_ && cs.GetHeight() == cached_panel_h_ &&
-                           cached_bmp_.IsOk() &&
-                           std::memcmp(frame_buf_.data(), last_frame_buf_.data(), frame_buf_.size()) == 0;
+        const size_t need = (size_t)w * (size_t)h * 3;
+        const bool geometry_changed = w != cached_src_w_ || h != cached_src_h_ ||
+                                      cs.GetWidth() != cached_panel_w_ ||
+                                      cs.GetHeight() != cached_panel_h_;
+        bool rescale = cache_dirty_ || !cached_bmp_.IsOk() || geometry_changed;
+        // A new sequence number doesn't always mean new pixels (a static
+        // desktop republishes the same thumbnail); the byte compare is far
+        // cheaper than the bilinear rescale it can avoid.
+        if (!rescale && new_frame)
+            rescale = last_frame_buf_.size() != need ||
+                      std::memcmp(src, last_frame_buf_.data(), need) != 0;
 
-        if (!same_frame) {
+        if (rescale) {
             // Preserve aspect ratio (letterbox/pillarbox) instead of stretching
             // to fill the panel.
-            wxImage img(w, h, frame_buf_.data(), /*static_data=*/true);
+            wxImage img(w, h, const_cast<uint8_t *>(src), /*static_data=*/true);
             double scale = std::min((double)cs.GetWidth() / w, (double)cs.GetHeight() / h);
             int dw = std::max(1, (int)(w * scale));
             int dh = std::max(1, (int)(h * scale));
@@ -324,8 +375,10 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
             cached_src_w_ = w; cached_src_h_ = h;
             cached_dst_w_ = dw; cached_dst_h_ = dh;
             cached_panel_w_ = cs.GetWidth(); cached_panel_h_ = cs.GetHeight();
-            last_frame_buf_ = frame_buf_;
+            last_frame_buf_.assign(src, src + need);
+            cache_dirty_ = false;
         }
+        if (snapshot_mode_) snapshot_dirty_ = false;
         dc.DrawBitmap(cached_bmp_, (cs.GetWidth() - cached_dst_w_) / 2, (cs.GetHeight() - cached_dst_h_) / 2);
     }
 
@@ -453,6 +506,7 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
         drag_start_ov_y_ = ov.y;
         drag_start_ov_w_ = ov.w;
         drag_start_ov_h_ = ov.h;
+        drag_moved_ = false;
         if (!HasCapture()) CaptureMouse();
         Refresh();
         return;
@@ -473,6 +527,10 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
 }
 
 void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
+    // Button released without us ever seeing the LEFT_UP (released over a
+    // modal/other window): finish the drag properly instead of leaving it
+    // stuck and the position unsaved.
+    if (drag_overlay_index_ >= 0 && !evt.LeftIsDown()) EndDrag();
     if (drag_overlay_index_ < 0 || !evt.LeftIsDown()) {
         // Not dragging - just tell the user what's grabbable here.
         Corner corner = Corner::kNone;
@@ -534,24 +592,30 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
         ov.x = std::clamp(drag_start_ov_x_ + dx, 0, std::max(0, cw - ov.w));
         ov.y = std::clamp(drag_start_ov_y_ + dy, 0, std::max(0, ch - ov.h));
     }
+    if (dx != 0 || dy != 0) drag_moved_ = true;
+    Refresh();
+}
+
+void PreviewPanel::EndDrag() {
+    if (drag_overlay_index_ < 0) return;
+    if (HasCapture()) ReleaseMouse();
+    drag_overlay_index_ = -1; // selected_overlay_index_ stays - the frame stays highlighted
+    drag_corner_ = Corner::kNone;
+    // This in-place drag-on-the-preview path bypasses both
+    // OverlaysDockPanel::Refresh() and ShowOverlayPlacementDialog() (the
+    // other places that persist state_.overlays), so a finished drag has to
+    // save itself - but only if the overlay actually moved: a plain click
+    // used to rewrite the whole autosave file for nothing.
+    if (drag_moved_) {
+        drag_moved_ = false;
+        overlay_save_pending_ = true;
+        FlushOverlaySave();
+    }
     Refresh();
 }
 
 void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
-    if (drag_overlay_index_ >= 0) {
-        if (HasCapture()) ReleaseMouse();
-        drag_overlay_index_ = -1; // selected_overlay_index_ stays - the frame stays highlighted
-        drag_corner_ = Corner::kNone;
-        // This in-place drag-on-the-preview path (the normal,
-        // most-used way to reposition an overlay) bypasses both
-        // OverlaysDockPanel::Refresh() and ShowOverlayPlacementDialog() -
-        // the two places that otherwise persist state_.overlays (see their
-        // Own fix comments) - so a drag finishing here used to leave
-        // the new position live for the rest of the session but silently
-        // lost on the next launch.
-        HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
-        Refresh();
-    }
+    EndDrag();
     evt.Skip();
 }
 
@@ -588,7 +652,7 @@ void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
             if (key == WXK_DOWN)  ov.y += step;
             ov.x = std::clamp(ov.x, 0, std::max(0, cw - ov.w));
             ov.y = std::clamp(ov.y, 0, std::max(0, ch - ov.h));
-            HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
+            ScheduleOverlaySave(); // debounced - a held arrow key repeats ~30x/sec
             Refresh();
             return;
         }
@@ -648,6 +712,9 @@ void PreviewPanel::UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, i
     snapshot_h_ = h;
     snapshot_native_w_ = native_w;
     snapshot_native_h_ = native_h;
+    snapshot_dirty_ = true;
+    cache_dirty_ = true;
+    pv_seq_ = 0; // live frame must be re-fetched when snapshot mode ends
     Refresh();
 }
 
@@ -657,6 +724,10 @@ void PreviewPanel::ExitSnapshotMode() {
     snapshot_buf_.clear();
     snapshot_w_ = snapshot_h_ = 0;
     snapshot_native_w_ = snapshot_native_h_ = 0;
+    snapshot_dirty_ = false;
+    cache_dirty_ = true;
+    pv_seq_ = 0;
+    FlushOverlaySave();
     drag_overlay_index_ = -1;
     selected_overlay_index_ = -1;
     drag_corner_ = Corner::kNone;
@@ -860,6 +931,7 @@ HomRecMainFrame::HomRecMainFrame()
 }
 
 HomRecMainFrame::~HomRecMainFrame() {
+    if (preview_panel_) preview_panel_->FlushOverlaySave(); // children + state_ still alive here
     if (state_.recording && rec_) rec_->Stop();
     // MUST run on every exit path, not just a clean menu-driven Exit -
     // SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) persists on a
@@ -2022,9 +2094,10 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
         static const wxString kUnavailableText =
             wxString::FromUTF8("Screen capture unavailable \u2014 check you're not on RDP/a "
                                 "virtual display, and that the selected monitor is connected.");
+        static const wxString kLoadingText("Preview loading...");
         bool unavailable = rec_ && rec_->preview_capture_unavailable();
-        preview_panel_->SetPlaceholderText(unavailable ? kUnavailableText : wxString("Preview loading..."));
-        preview_panel_->Refresh(false);
+        preview_panel_->SetPlaceholderText(unavailable ? kUnavailableText : kLoadingText);
+        if (!IsIconized()) preview_panel_->PollRefresh(); // repaints only on a new frame
     }
 }
 
@@ -2080,7 +2153,9 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
                             theme_.warning);
         }
     }
-    left_panel_->Layout();
+    // Labels only change while recording - relayouting the panel every
+    // 500ms while idle was wasted work.
+    if (state_.recording) left_panel_->Layout();
 }
 
 void HomRecMainFrame::OnLevelMeterTimer(wxTimerEvent &) {

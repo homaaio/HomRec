@@ -82,7 +82,23 @@ enum MenuCommandId {
 class PreviewPanel : public wxPanel {
 public:
     PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState &state);
-    void SetPlaceholderText(const wxString &text) { placeholder_ = text; Refresh(); }
+    void SetPlaceholderText(const wxString &text) {
+        if (placeholder_ == text) return; // called every timer tick - don't repaint for nothing
+        placeholder_ = text;
+        Refresh();
+    }
+
+    // Called from the main frame's preview timer instead of an unconditional
+    // Refresh(): repaints only when the pipeline has produced a new thumbnail
+    // (one atomic load), plus a slow fallback tick so state-only changes
+    // (overlay list edits, theme) still show up.
+    void PollRefresh();
+
+    // Writes any debounced overlay edit (arrow-key nudges) to disk right now.
+    // The main frame calls this before it is destroyed - the panel itself must
+    // not do it from its own destructor, because AppState (a frame member) is
+    // already gone by the time wx destroys child windows.
+    void FlushOverlaySave();
 
     // "Apply with preview off" (overlays_dock_panel.cpp's row context
     // menu, wired up in main_frame.cpp) - lets overlays still be dragged/
@@ -116,6 +132,8 @@ private:
     void EndSnapshotEditingSession();
     // Size overlay x/y/w/h are measured in for what's currently shown.
     bool GetNativeSize(int &w, int &h) const;
+    void EndDrag();               // shared by OnLeftUp / stuck-drag recovery
+    void ScheduleOverlaySave();   // debounced (400ms) autosave of state_.overlays
 
     // Maps the current preview bitmap's on-screen rect within the panel
     // (position + scale), so overlay coordinates (always stored in real
@@ -171,6 +189,18 @@ private:
     int cached_src_w_ = -1, cached_src_h_ = -1;
     int cached_dst_w_ = -1, cached_dst_h_ = -1;
     int cached_panel_w_ = -1, cached_panel_h_ = -1;
+
+    // -- change tracking (see PollRefresh()/OnPaint()) ----------------------
+    uint64_t pv_seq_ = 0;            // last preview sequence number painted
+    int frame_w_ = 0, frame_h_ = 0;  // size of frame_buf_'s valid pixels
+    int frame_native_w_ = 0, frame_native_h_ = 0; // overlay coordinate space
+    bool have_frame_ = false;
+    bool snapshot_dirty_ = false;    // snapshot_buf_ changed since last scale
+    bool cache_dirty_ = true;        // cached_bmp_ no longer matches the source
+    int idle_ticks_ = 0;
+    bool drag_moved_ = false;        // a drag actually changed the overlay
+    bool overlay_save_pending_ = false;
+    wxTimer overlay_save_timer_;
 };
 
 class HomRecMainFrame : public wxFrame {
