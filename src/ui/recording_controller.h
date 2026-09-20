@@ -115,6 +115,24 @@ public:
     // the buffer.
     bool GetPreviewFrame(std::vector<uint8_t> &out, int &out_w, int &out_h);
 
+    // Change-aware variant used by the paint path (PreviewPanel::OnPaint).
+    // `seq` is the caller's last-seen sequence number (0 = "never seen
+    // one"), updated whenever a new frame is returned. Returns:
+    //   0 - no frame available (no pipeline / nothing captured yet)
+    //   1 - a NEW frame was copied into `out` (out_w/out_h/native_* set;
+    //       `out` holds at least out_w*out_h*3 valid bytes - it is only ever
+    //       grown, never shrunk, so don't use out.size() as the frame size)
+    //   2 - unchanged since `seq`: nothing was copied and `out` is untouched
+    // Also bounds-checked against `out`'s real size (see hr_pl_get_preview_ex
+    // in hr_pipeline.cpp for the heap-overflow this closes).
+    int GetPreviewFrameIfNew(std::vector<uint8_t> &out, int &out_w, int &out_h,
+                             int &native_w, int &native_h, uint64_t &seq);
+
+    // Lock-free: the sequence number of the newest preview thumbnail the
+    // pipeline has produced (0 if none / no pipeline). The UI timer compares
+    // this against what it last painted so it only repaints on a real change.
+    uint64_t PreviewSeq() const;
+
     // The coordinate space OverlayDef::x/y/w/h are measured in for the
     // frame GetPreviewFrame() last returned (i.e. the size overlays are
     // actually composited at - the cropped window rect in window-capture
@@ -481,6 +499,9 @@ private:
     // and re-sending an identical list instead of doing that work ~20-60
     // times a second regardless of whether anything changed.
     std::vector<HrOverlayDesc> last_overlays_sent_;
+    // Reused scratch for SyncOverlays()'s per-tick rebuild (see there) so the
+    // steady state does no heap allocation.
+    std::vector<HrOverlayDesc> overlays_scratch_;
     bool last_overlays_sent_valid_ = false;
 
     std::chrono::steady_clock::time_point next_preview_retry_{};

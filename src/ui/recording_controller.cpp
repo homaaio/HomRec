@@ -61,6 +61,10 @@ extern "C" {
     void hr_pl_stop(void *handle);
     void hr_pl_pause(void *handle, int flag);
     int hr_pl_get_preview(void *handle, unsigned char *out_rgb, int *out_w, int *out_h);
+    int hr_pl_get_preview_ex(void *handle, unsigned char *out_rgb, size_t out_cap,
+                              int *out_w, int *out_h, int *out_native_w, int *out_native_h,
+                              uint64_t *seq_io);
+    uint64_t hr_pl_get_preview_seq(void *handle);
     int hr_pl_get_native_size(void *handle, int *out_w, int *out_h);
     void hr_pl_set_recording(void *handle, int active, intptr_t pipe_fd);
     void hr_pl_set_priority_boost(void *handle, int flag);
@@ -102,7 +106,6 @@ extern "C" {
     void hr_audio_pause(int paused);
     void hr_audio_reset_buffers();
     int hr_audio_capture_to_wav(const char *mic_wav_path, const char *sys_wav_path);
-    int hr_audio_stop(const char *mic_wav_path, const char *sys_wav_path);
     int hr_audio_mix_wav(const char *mic_path, const char *sys_path, const char *out_path);
 }
 
@@ -970,7 +973,12 @@ void RecordingController::SyncOverlays() {
         b = (unsigned char)((digits[4] << 4) | digits[5]);
     };
 
-    std::vector<HrOverlayDesc> descs;
+    // Rebuilt into a member scratch vector (capacity is kept between ticks)
+    // instead of a fresh local: this runs on every preview-timer tick, and
+    // HrOverlayDesc is several KB of fixed char buffers per overlay, so a
+    // new heap allocation + zero-fill per tick was pure churn.
+    std::vector<HrOverlayDesc> &descs = overlays_scratch_;
+    descs.clear();
     descs.reserve(state_.overlays.size());
     for (const auto &ov : state_.overlays) {
         HrOverlayDesc d{};
@@ -1006,7 +1014,7 @@ void RecordingController::SyncOverlays() {
     if (same) return;
 
     hr_pl_set_overlays(pipeline_, descs.empty() ? nullptr : descs.data(), (int)descs.size());
-    last_overlays_sent_ = std::move(descs);
+    last_overlays_sent_.swap(descs); // descs (== overlays_scratch_) keeps the old buffer for reuse
     last_overlays_sent_valid_ = true;
 }
 
@@ -1372,8 +1380,31 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
 
 bool RecordingController::GetPreviewFrame(std::vector<uint8_t> &out, int &out_w, int &out_h) {
     if (!pipeline_) return false;
-    out.resize((size_t)state_.preview_width * state_.preview_height * 3);
-    return hr_pl_get_preview(pipeline_, out.data(), &out_w, &out_h) != 0;
+    int nw = 0, nh = 0;
+    uint64_t seq = 0; // 0 = never seen one -> always returns the current frame
+    if (GetPreviewFrameIfNew(out, out_w, out_h, nw, nh, seq) != 1) return false;
+    // Legacy contract: `out` is exactly out_w*out_h*3 bytes on success.
+    out.resize((size_t)out_w * (size_t)out_h * 3);
+    return true;
+}
+
+int RecordingController::GetPreviewFrameIfNew(std::vector<uint8_t> &out, int &out_w, int &out_h,
+                                              int &native_w, int &native_h, uint64_t &seq) {
+    if (!pipeline_) return 0;
+    // Room for the largest thumbnail this pipeline can produce. The pipeline
+    // sizes its thumbnail from ScaledPreviewSize() (<= preview_width x
+    // preview_height) at creation time, but AppState can change afterwards,
+    // so the capacity is passed to the pipeline, which refuses to overrun it.
+    // Only ever grown - shrinking/regrowing would zero-fill on every call.
+    const size_t cap = (size_t)std::max(state_.preview_width, 2) *
+                       (size_t)std::max(state_.preview_height, 2) * 3;
+    if (out.size() < cap) out.resize(cap);
+    return hr_pl_get_preview_ex(pipeline_, out.data(), out.size(), &out_w, &out_h,
+                                &native_w, &native_h, &seq);
+}
+
+uint64_t RecordingController::PreviewSeq() const {
+    return pipeline_ ? hr_pl_get_preview_seq(pipeline_) : 0;
 }
 
 bool RecordingController::GetPreviewNativeSize(int &w, int &h) {
