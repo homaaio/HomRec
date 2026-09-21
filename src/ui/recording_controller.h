@@ -103,6 +103,8 @@ private:
     // be called from anywhere but that lambda.
     void StopFinalizeTail(bool keep_for_preview);
 
+    void FinishPipelineAfterStop(bool keep_for_preview);
+
 public:
 
     // Called on a timer (e.g. every 250-500ms) to refresh AppState.frame_count and pull

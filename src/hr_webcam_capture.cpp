@@ -14,6 +14,7 @@
   #include <wrl/client.h>
   #include <thread>
   #include <mutex>
+  #include <condition_variable>
   #include <atomic>
   using Microsoft::WRL::ComPtr;
 #endif
@@ -46,6 +47,11 @@ struct HrWebcamCapture::Impl {
 
     std::string device_name;
     int device_index = -1;
+
+    std::mutex finish_mtx;
+    std::condition_variable finish_cv;
+    bool finished = false;
+    std::atomic<bool> handed_off{false};
 };
 
 namespace {
@@ -93,6 +99,17 @@ void HrWebcamCaptureThreadMain(HrWebcamCapture::Impl *impl) {
         impl->alive = false;
         if (mf_started) MFShutdown();
         if (should_uninit_co) CoUninitialize();
+        // Signal the destructor (if it's still waiting on us) that we're
+        // done, then check whether it already gave up and handed cleanup
+        // off to us instead (see Impl's own comment) - if so, it's not
+        // coming back, so we delete ourselves here rather than leaking.
+        bool was_handed_off = impl->handed_off.load(std::memory_order_acquire);
+        {
+            std::lock_guard<std::mutex> lk(impl->finish_mtx);
+            impl->finished = true;
+        }
+        impl->finish_cv.notify_all();
+        if (was_handed_off) delete impl;
     };
 
     if (!mf_started) { give_up(); return; }
@@ -217,7 +234,29 @@ HrWebcamCapture *HrWebcamCapture::Open(const std::string &device_name, int devic
 HrWebcamCapture::~HrWebcamCapture() {
     if (impl_) {
         impl_->stop = true;
-        if (impl_->thread.joinable()) impl_->thread.join();
+        if (impl_->thread.joinable()) {
+            // Bounded wait (see Impl's comment for why an unconditional
+            // join() here isn't safe) - 2s is generous for a thread that's
+            // just idling between camera frames (checks `finished` the
+            // instant it actually exits), but short enough that a genuinely
+            // stuck driver doesn't freeze whoever's destroying this overlay.
+            bool finished;
+            {
+                std::unique_lock<std::mutex> lk(impl_->finish_mtx);
+                finished = impl_->finish_cv.wait_for(lk, std::chrono::milliseconds(2000),
+                    [this] { return impl_->finished; });
+            }
+            if (finished) {
+                impl_->thread.join();
+            } else {
+                HrLog::Error("Webcam overlay: capture thread did not stop in time "
+                             "(camera driver stuck, or the device was removed mid-capture) "
+                             "- handing off cleanup to it instead of freezing here.");
+                impl_->handed_off.store(true, std::memory_order_release);
+                impl_->thread.detach();
+                return; // impl_ is now owned by the detached thread - see give_up()
+            }
+        }
         delete impl_;
     }
 }

@@ -676,10 +676,32 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
         // recording's pipe instead.
         hr_pl_end_recording_segment(pipeline_, 3000);
     }
+    FinishPipelineAfterStop(keep_for_preview);
     StopFinalizeTail(keep_for_preview);
     finalizing_ = false;
     if (on_done) on_done();
     });
+}
+
+void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
+    if (pipeline_) hr_pl_set_priority_boost(pipeline_, 0);
+
+    if (instant_replay_enabled_) {
+        std::wstring resume_err;
+        if (StartInstantReplayEncoder(resume_err)) {
+            instant_replay_active_ = true;
+            HrLog::Info("Instant Replay: resumed buffering after the recording stopped.");
+        } else {
+            HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume after the recording stopped - " + resume_err));
+            if (keep_for_preview) hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
+            else if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+        }
+    } else if (keep_for_preview) {
+        hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
+    } else if (pipeline_) {
+        hr_pl_destroy(pipeline_);
+        pipeline_ = nullptr;
+    }
 }
 
 void RecordingController::StopFinalizeTail(bool keep_for_preview) {
@@ -834,43 +856,6 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     last_output_path_ = current_output_path_;
     last_output_size_mb_ = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
 
-    // Previously this destroyed the pipeline outright, which is exactly
-    // why preview only ever worked *during* a recording - once Stop() ran
-    // there was nothing left to show a frame from. Now: if preview isn't
-    // disabled, just switch the same (still-running) pipeline back to
-    // preview-only mode so the live preview keeps working right after the
-    // recording ends.
-
-    // The manual recording that justified boosting the capture thread's
-    // priority (see Start()'s hr_pl_set_priority_boost(pipeline_, 1) call
-    // and boost_priority's comment in hr_pipeline.cpp / bug #5) is over -
-    // every branch below either drops back to plain preview or resumes
-    // Instant Replay's background buffer, neither of which should run
-    // boosted. StartInstantReplayEncoder() below only ever calls
-    // hr_pl_set_recording() (never touches priority), so this needs to
-    // happen unconditionally here rather than in just one branch.
-    if (pipeline_) hr_pl_set_priority_boost(pipeline_, 0);
-
-    if (instant_replay_enabled_) {
-        // Resume Instant Replay's background buffer (paused, if it was
-        // running, at the top of Start() above) rather than falling back
-        // to plain preview-only mode - a fresh buffer, same as any other
-        // StartInstantReplayEncoder() call.
-        std::wstring resume_err;
-        if (StartInstantReplayEncoder(resume_err)) {
-            instant_replay_active_ = true;
-            HrLog::Info("Instant Replay: resumed buffering after the recording stopped.");
-        } else {
-            HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume after the recording stopped - " + resume_err));
-            if (keep_for_preview) hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
-            else if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
-        }
-    } else if (keep_for_preview) {
-        hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
-    } else if (pipeline_) {
-        hr_pl_destroy(pipeline_);
-        pipeline_ = nullptr;
-    }
     hr_ff_destroy(ffproc_);
     ffproc_ = nullptr;
 
