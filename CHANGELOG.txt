@@ -2,6 +2,19 @@ welcome to changelog :D
 
 [Version 2.2.2] - 2026-09-19 (unreleased)
 
+- Fixed: starting a manual recording while Instant Replay was buffering
+  could leave the recording truncated/never finalizing (log: "writer thread
+  didn't close the previous recording's pipe in time", "segment writer
+  didn't finish gracefully - killing it", "ffmpeg didn't finish on its own
+  after 30s"). recording_controller.cpp: StopInstantReplayEncoderAsync()
+  now closes the replay segment's pipe synchronously BEFORE Start() swaps
+  in the manual recording's pipe, instead of from its background thread
+  (which by then acted on the manual recording's pipe).
+- Fixed: closing the app froze for several seconds with Instant Replay on
+  (replay ffmpeg was force-killed after two 3s timeouts). main_frame.cpp:
+  OnClose() now stops Instant Replay via DisableInstantReplay() before
+  TeardownPreview() detaches the pipeline it still needs.
+
 - Fixed: RAM usage stayed at its recording-time level (reported as "still
   ~70MB after Stop") for as long as the post-Stop finalize took to finish -
   which can itself run up to ~30s waiting on ffmpeg alone, longer once
