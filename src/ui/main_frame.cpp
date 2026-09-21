@@ -2184,6 +2184,7 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
     // background thread could still wxQueueEvent() onto a frame that's
     // about to be freed. See the comment on g_frame's declaration.
     if (g_frame == this) g_frame = nullptr;
+    if (rec_ && rec_->instant_replay_enabled()) rec_->DisableInstantReplay();
     if (rec_) rec_->TeardownPreview();
     if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
     HrLog::Info("HomRec closing");
