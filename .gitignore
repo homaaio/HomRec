@@ -293,6 +293,10 @@ Testing/
 .cache/
 create/
 
+# git
+
+.git_ssh/
+
 # HomRec files
 
 *.hrc
