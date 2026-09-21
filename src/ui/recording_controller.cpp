@@ -1127,7 +1127,8 @@ void RecordingController::StopInstantReplayEncoderAsync() {
     // pattern JoinPendingPreviewTeardown() uses) before overwriting the
     // member with this call's thread.
     JoinPendingInstantReplayStop();
-    instant_replay_stop_thread_ = std::thread([h, pl]() {
+    hr_pl_end_recording_segment(pl, 1500);
+    instant_replay_stop_thread_ = std::thread([h]() {
         // BUGFIX (std::terminate() crash a moment after "Instant Replay:
         // segment writer didn't finish gracefully in time - killing it"):
         // this is a bare std::thread with no exception handler anywhere
@@ -1143,13 +1144,6 @@ void RecordingController::StopInstantReplayEncoderAsync() {
         // catching it here turns a full crash into a logged, recoverable
         // failure - same tradeoff those other two threads already made.
         try {
-            // See hr_pl_end_recording_segment()'s comment in
-            // hr_pipeline.cpp - without this, hr_ff_wait() below can
-            // never see the EOF it's waiting for (pipeline_'s pipe is
-            // shared with everything else this class does with it), so
-            // this branch was hitting the timeout/kill path on basically
-            // every call instead of only under genuine load.
-            hr_pl_end_recording_segment(pl, 3000);
             hr_ff_stop_graceful(h);
             if (hr_ff_wait(h, 3000) != 0 && hr_ff_is_running(h)) {
                 HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
