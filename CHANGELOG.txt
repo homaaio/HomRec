@@ -2,6 +2,38 @@ welcome to changelog :D
 
 [Version 2.2.2] - 2026-09-19 (unreleased)
 
+- Fixed: RAM usage stayed at its recording-time level (reported as "still
+  ~70MB after Stop") for as long as the post-Stop finalize took to finish -
+  which can itself run up to ~30s waiting on ffmpeg alone, longer once
+  audio mixing and hr_merge_av()'s own re-encode (see its CHANGELOG entry
+  above) are added on top - even with live preview disabled. The capture
+  pipeline (its BGRA frame buffer, the YUV/NV12 conversion pool, the
+  pipe-queue frame pool, and - with preview off - the DXGI Desktop
+  Duplication handle itself) used to only get freed at the very end of
+  that finalize tail. recording_controller.h/.cpp: split the pipeline
+  teardown/resume-Instant-Replay decision out of StopFinalizeTail() into
+  its own FinishPipelineAfterStop(), now called right after the capture/
+  writer threads actually stop, before the ffmpeg-wait/audio-merge work
+  runs - frees that memory (and the DXGI handle) within about a second of
+  pressing Stop instead of only once finalize fully completes.
+- Fixed: closing the app (or stopping a recording while it does) could
+  block for a moment - hr_webcam_capture.cpp's capture thread joined
+  unconditionally in its destructor, but IMFSourceReader::ReadSample()
+  runs synchronously with no way to interrupt an in-flight call and no
+  guaranteed upper bound, so a stalled camera driver or a device unplugged
+  mid-capture could leave that join waiting indefinitely (unlike every
+  other worker thread in this codebase, which already uses a bounded
+  timeout + detach-and-hand-off fallback - see Pipeline::handed_off in
+  hr_pipeline.cpp). hr_webcam_capture.cpp: same pattern now applied here -
+  a 2s bounded wait, then detach-and-self-delete-on-actual-exit instead of
+  blocking. Also: main_frame.cpp's OnClose() now kicks off
+  RecordingController::TeardownPreview() (already existed for exactly this
+  reason, just wasn't called on the way out) as soon as the window starts
+  closing, so the live-preview pipeline's own DXGI teardown runs in the
+  background overlapping the rest of shutdown instead of happening
+  synchronously, on the UI thread, inside ~RecordingController() at the
+  very end.
+
   Fixed / improved (audit pass):
   - hr_pipeline.cpp: pipe_handle/recording are std::atomic (UI vs capture/writer thread data race).
   - hr_pipeline.cpp: catch-up frames are converted once and written N times (QueuedFrame::repeat) instead of re-converted up to 90x.
