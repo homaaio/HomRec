@@ -134,178 +134,210 @@ HR_EXPORT void hr_rgb_to_yuv420p(
     }
 }
 
-static void hr_bgra_to_yuv420p_band_scalar(
-    const uint8_t * HR_RESTRICT bgra,
-    uint8_t       * HR_RESTRICT yuv_out,
-    int width, int height, int y0, int y1)
-{
-    if (HR_UNLIKELY(!bgra || !yuv_out || width <= 0 || height <= 0)) return;
-    if (y0 < 0) y0 = 0;
-    if (y1 > height) y1 = height;
-    if (y0 >= y1) return;
+/* -------------------------------------------------------------------------
+ * BGRA -> YUV 4:2:0 (planar I420 or semi-planar NV12)
+ *
+ * One shared implementation for both output layouts; only the way the
+ * chroma samples are stored differs.  Two colour matrices are supported
+ * (both BT.601, matching the "-colorspace smpte170m" tag the ffmpeg runner
+ * writes):
+ *
+ *   k_csc_full - full/PC range   (Y 0..255, C 0..255)  -> planar I420,
+ *                fed to libx264/libx265 and tagged "-color_range pc".
+ *   k_csc_tv   - studio/TV range (Y 16..235, C 16..240) -> NV12, fed to
+ *                NVENC/QSV/AMF, tagged "-color_range tv".
+ *
+ * BUGFIX: hr_bgra_to_nv12_band() used to reuse the full-range maths while
+ * hr_ffmpeg_runner.cpp already tags hardware-encoder output as limited
+ * range ("-color_range tv", see CHANGELOG "hardware-encoded recordings came
+ * out dark/dull").  Full-range samples decoded as limited range crush every
+ * shadow below Y=16 to pure black and clip highlights above 235 - exactly the
+ * "dark/dull picture" that entry describes.  The NV12 path now really emits
+ * 16..235 / 16..240 data.
+ *
+ * Chroma is the average of each 2x2 block.  The four samples are summed
+ * (0..1020) and scaled once (>>18) instead of truncating an average first,
+ * which is both a little more accurate and cheaper.
+ * ---------------------------------------------------------------------- */
+typedef struct {
+    int yr, yg, yb;     /* luma coefficients, scaled by 65536            */
+    int yoff;           /* luma offset added after the shift (0 or 16)   */
+    int cbr, cbg, cbb;  /* Cb coefficients (2x2 sums), scaled by 65536   */
+    int crr, crg, crb;  /* Cr coefficients                               */
+} HrCsc;
 
+static const HrCsc k_csc_full = {
+    19595, 38470, 7471, 0,
+    -11059, -21709, 32768,
+     32768, -27439, -5329
+};
+static const HrCsc k_csc_tv = {
+    16829, 33039, 6416, 16,
+    -9714, -19071, 28785,
+     28785, -24103, -4682
+};
+
+/* One 2x2 block (2 columns of row0/row1) at columns x, x1 -> Y + chroma. */
+static HR_INLINE void hr_csc_block_scalar(
+    const uint8_t *row0, const uint8_t *row1, int x, int x1,
+    uint8_t *Yrow0, uint8_t *Yrow1, const HrCsc *k,
+    uint8_t *cb_out, uint8_t *cr_out)
+{
+    const int yround = 32768 + (k->yoff << 16);
+    int b00=row0[x*4+0],  g00=row0[x*4+1],  r00=row0[x*4+2];
+    int b01=row0[x1*4+0], g01=row0[x1*4+1], r01=row0[x1*4+2];
+    int b10=row1[x*4+0],  g10=row1[x*4+1],  r10=row1[x*4+2];
+    int b11=row1[x1*4+0], g11=row1[x1*4+1], r11=row1[x1*4+2];
+
+    Yrow0[x ] = (uint8_t)((k->yr*r00 + k->yg*g00 + k->yb*b00 + yround) >> 16);
+    Yrow0[x1] = (uint8_t)((k->yr*r01 + k->yg*g01 + k->yb*b01 + yround) >> 16);
+    Yrow1[x ] = (uint8_t)((k->yr*r10 + k->yg*g10 + k->yb*b10 + yround) >> 16);
+    Yrow1[x1] = (uint8_t)((k->yr*r11 + k->yg*g11 + k->yb*b11 + yround) >> 16);
+
+    int rs = r00 + r01 + r10 + r11;
+    int gs = g00 + g01 + g10 + g11;
+    int bs = b00 + b01 + b10 + b11;
+    *cb_out = _clamp8(((k->cbr*rs + k->cbg*gs + k->cbb*bs + (1 << 17)) >> 18) + 128);
+    *cr_out = _clamp8(((k->crr*rs + k->crg*gs + k->crb*bs + (1 << 17)) >> 18) + 128);
+}
+
+/* Scalar band converter (also the tail handler for the SIMD one). Converts
+ * rows [y0,y1) x columns [xs,width). y0 must be even. */
+static void hr_csc_band_scalar(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT out,
+    int width, int height, int y0, int y1, int xs, int nv12, const HrCsc *k)
+{
     size_t frame_sz = (size_t)width * (size_t)height;
-    uint8_t *Y  = yuv_out;
-    uint8_t *Cb = yuv_out + frame_sz;
-    uint8_t *Cr = yuv_out + frame_sz + frame_sz / 4;
+    uint8_t *Y  = out;
+    uint8_t *C0 = out + frame_sz;                               /* Cb plane, or the UV plane */
+    uint8_t *C1 = out + frame_sz + frame_sz / 4;                /* Cr plane (I420 only)      */
 
     for (int y = y0; y < y1; y += 2) {
         const uint8_t *row0 = bgra + (size_t)y * width * 4;
-        const uint8_t *row1 = (y + 1 < height)
-                            ? bgra + (size_t)(y+1) * width * 4
-                            : row0;
-        int y1r = (y+1 < height) ? y+1 : y;
+        const uint8_t *row1 = (y + 1 < height) ? bgra + (size_t)(y + 1) * width * 4 : row0;
+        int y1r = (y + 1 < height) ? y + 1 : y;
+        uint8_t *Yrow0 = Y + (size_t)y  * width;
+        uint8_t *Yrow1 = Y + (size_t)y1r * width;
+        size_t cbase = (size_t)(y / 2) * (size_t)(nv12 ? width : width / 2);
 
-        /* this is the hot path (called every captured frame, live
-         * during recording) - hoist the per-row Y/Cb/Cr output bases so
-         * the multiply that used to happen for every pixel (y*width,
-         * y1r*width, (y/2)*(width/2)) happens once per row instead. */
-        uint8_t *Yrow0 = Y + (size_t)y * width;
-        uint8_t *Yrow1r = Y + (size_t)y1r * width;
-        size_t crow = (size_t)(y / 2) * (size_t)(width / 2);
-        uint8_t *Cbrow = Cb + crow;
-        uint8_t *Crrow = Cr + crow;
-
-        int x = 0;
-        for (; x + 3 < width; x += 4) {
-            /* BGRA: 0=B,1=G,2=R,3=A */
-            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
-            uint8_t r01=row0[(x+1)*4+2],g01=row0[(x+1)*4+1],b01=row0[(x+1)*4+0];
-            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
-            uint8_t r11=row1[(x+1)*4+2],g11=row1[(x+1)*4+1],b11=row1[(x+1)*4+0];
-            Yrow0[x]  =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Yrow0[x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Yrow1r[x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
-            {
-                int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-                size_t ci=(size_t)(x/2);
-                Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+        for (int x = xs; x < width; x += 2) {
+            int x1 = (x + 1 < width) ? x + 1 : x;
+            uint8_t cb, cr;
+            hr_csc_block_scalar(row0, row1, x, x1, Yrow0, Yrow1, k, &cb, &cr);
+            if (nv12) {
+                C0[cbase + (size_t)x]     = cb;      /* (x/2)*2 == x for even x */
+                C0[cbase + (size_t)x + 1] = cr;
+            } else {
+                C0[cbase + (size_t)(x / 2)] = cb;
+                C1[cbase + (size_t)(x / 2)] = cr;
             }
-
-            uint8_t r02=row0[(x+2)*4+2],g02=row0[(x+2)*4+1],b02=row0[(x+2)*4+0];
-            uint8_t r03=row0[(x+3)*4+2],g03=row0[(x+3)*4+1],b03=row0[(x+3)*4+0];
-            uint8_t r12=row1[(x+2)*4+2],g12=row1[(x+2)*4+1],b12=row1[(x+2)*4+0];
-            uint8_t r13=row1[(x+3)*4+2],g13=row1[(x+3)*4+1],b13=row1[(x+3)*4+0];
-            Yrow0[x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
-            Yrow0[x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
-            Yrow1r[x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
-            Yrow1r[x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
-            {
-                int ra=((int)r02+r03+r12+r13)>>2,ga=((int)g02+g03+g12+g13)>>2,ba=((int)b02+b03+b12+b13)>>2;
-                size_t ci=(size_t)((x+2)/2);
-                Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
-            }
-        }
-        for (; x < width; x += 2) {
-            int x1=(x+1<width)?x+1:x;
-            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
-            uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
-            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
-            uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
-            Yrow0[x] =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Yrow0[x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Yrow1r[x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
-            int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-            size_t ci=(size_t)(x/2);
-            Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-            Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
         }
     }
 }
 
 #if defined(HR_HAVE_X86_SIMD)
+/* SSE4.1 band converter: 8 pixels x 2 rows per iteration; luma AND chroma are
+ * vectorised (chroma used to be a scalar loop even in the "SIMD" path). */
 __attribute__((target("sse4.1")))
-static inline void hr_y8_sse41(const uint8_t *bgra8, uint8_t *out8) {
-    __m128i pixA = _mm_loadu_si128((const __m128i *)(bgra8));
-    __m128i pixB = _mm_loadu_si128((const __m128i *)(bgra8 + 16));
-    __m128i mask = _mm_set1_epi32(0xFF);
-    __m128i coefR = _mm_set1_epi32(YR), coefG = _mm_set1_epi32(YG), coefB = _mm_set1_epi32(YB);
-    __m128i round = _mm_set1_epi32(32768);
-
-    __m128i BA = _mm_and_si128(pixA, mask);
-    __m128i GA = _mm_and_si128(_mm_srli_epi32(pixA, 8), mask);
-    __m128i RA = _mm_and_si128(_mm_srli_epi32(pixA, 16), mask);
-    __m128i sumA = _mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(RA, coefR), _mm_mullo_epi32(GA, coefG)),
-                                  _mm_add_epi32(_mm_mullo_epi32(BA, coefB), round));
-    __m128i yA32 = _mm_srli_epi32(sumA, 16);
-
-    __m128i BB = _mm_and_si128(pixB, mask);
-    __m128i GB = _mm_and_si128(_mm_srli_epi32(pixB, 8), mask);
-    __m128i RB = _mm_and_si128(_mm_srli_epi32(pixB, 16), mask);
-    __m128i sumB = _mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(RB, coefR), _mm_mullo_epi32(GB, coefG)),
-                                  _mm_add_epi32(_mm_mullo_epi32(BB, coefB), round));
-    __m128i yB32 = _mm_srli_epi32(sumB, 16);
-
-    __m128i y16 = _mm_packus_epi32(yA32, yB32);   /* 8x16-bit, values 0..255 */
-    __m128i y8  = _mm_packus_epi16(y16, y16);     /* low 8 bytes valid */
-    _mm_storel_epi64((__m128i *)out8, y8);
-}
-
-__attribute__((target("sse4.1")))
-static void hr_bgra_to_yuv420p_band_sse41(
+static void hr_csc_band_sse41(
     const uint8_t * HR_RESTRICT bgra,
-    uint8_t       * HR_RESTRICT yuv_out,
-    int width, int height, int y0, int y1)
+    uint8_t       * HR_RESTRICT out,
+    int width, int height, int y0, int y1, int nv12, const HrCsc *k)
 {
-    if (HR_UNLIKELY(!bgra || !yuv_out || width <= 0 || height <= 0)) return;
-    if (y0 < 0) y0 = 0;
-    if (y1 > height) y1 = height;
-    if (y0 >= y1) return;
-
     size_t frame_sz = (size_t)width * (size_t)height;
-    uint8_t *Y  = yuv_out;
-    uint8_t *Cb = yuv_out + frame_sz;
-    uint8_t *Cr = yuv_out + frame_sz + frame_sz / 4;
+    uint8_t *Y  = out;
+    uint8_t *C0 = out + frame_sz;
+    uint8_t *C1 = out + frame_sz + frame_sz / 4;
+
+    const __m128i mask  = _mm_set1_epi32(0xFF);
+    const __m128i c_yr  = _mm_set1_epi32(k->yr),  c_yg  = _mm_set1_epi32(k->yg),  c_yb  = _mm_set1_epi32(k->yb);
+    const __m128i c_yrd = _mm_set1_epi32(32768 + (k->yoff << 16));
+    const __m128i c_cbr = _mm_set1_epi32(k->cbr), c_cbg = _mm_set1_epi32(k->cbg), c_cbb = _mm_set1_epi32(k->cbb);
+    const __m128i c_crr = _mm_set1_epi32(k->crr), c_crg = _mm_set1_epi32(k->crg), c_crb = _mm_set1_epi32(k->crb);
+    const __m128i c_crd = _mm_set1_epi32(1 << 17);
+    const __m128i c_128 = _mm_set1_epi32(128);
+    const __m128i c_0   = _mm_setzero_si128();
+    const __m128i c_255 = _mm_set1_epi32(255);
+
+    const int vec_w = width & ~7;
 
     for (int y = y0; y < y1; y += 2) {
         const uint8_t *row0 = bgra + (size_t)y * width * 4;
-        const uint8_t *row1 = (y + 1 < height)
-                            ? bgra + (size_t)(y+1) * width * 4
-                            : row0;
-        int y1r = (y+1 < height) ? y+1 : y;
+        const uint8_t *row1 = (y + 1 < height) ? bgra + (size_t)(y + 1) * width * 4 : row0;
+        int y1r = (y + 1 < height) ? y + 1 : y;
+        uint8_t *Yrow0 = Y + (size_t)y   * width;
+        uint8_t *Yrow1 = Y + (size_t)y1r * width;
+        size_t cbase = (size_t)(y / 2) * (size_t)(nv12 ? width : width / 2);
 
-        uint8_t *Yrow0 = Y + (size_t)y * width;
-        uint8_t *Yrow1r = Y + (size_t)y1r * width;
-        size_t crow = (size_t)(y / 2) * (size_t)(width / 2);
-        uint8_t *Cbrow = Cb + crow;
-        uint8_t *Crrow = Cr + crow;
+        for (int x = 0; x < vec_w; x += 8) {
+            __m128i a0 = _mm_loadu_si128((const __m128i *)(row0 + (size_t)x * 4));
+            __m128i a1 = _mm_loadu_si128((const __m128i *)(row0 + (size_t)x * 4 + 16));
+            __m128i b0 = _mm_loadu_si128((const __m128i *)(row1 + (size_t)x * 4));
+            __m128i b1 = _mm_loadu_si128((const __m128i *)(row1 + (size_t)x * 4 + 16));
 
-        int x = 0;
-        for (; x + 7 < width; x += 8) {
-            hr_y8_sse41(row0 + (size_t)x * 4, Yrow0 + x);
-            hr_y8_sse41(row1 + (size_t)x * 4, Yrow1r + x);
-        }
-        for (; x < width; ++x) {
-            uint8_t b = row0[x*4+0], g = row0[x*4+1], r = row0[x*4+2];
-            Yrow0[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
-            b = row1[x*4+0]; g = row1[x*4+1]; r = row1[x*4+2];
-            Yrow1r[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
-        }
+            __m128i a0b = _mm_and_si128(a0, mask), a0g = _mm_and_si128(_mm_srli_epi32(a0, 8), mask), a0r = _mm_and_si128(_mm_srli_epi32(a0, 16), mask);
+            __m128i a1b = _mm_and_si128(a1, mask), a1g = _mm_and_si128(_mm_srli_epi32(a1, 8), mask), a1r = _mm_and_si128(_mm_srli_epi32(a1, 16), mask);
+            __m128i b0b = _mm_and_si128(b0, mask), b0g = _mm_and_si128(_mm_srli_epi32(b0, 8), mask), b0r = _mm_and_si128(_mm_srli_epi32(b0, 16), mask);
+            __m128i b1b = _mm_and_si128(b1, mask), b1g = _mm_and_si128(_mm_srli_epi32(b1, 8), mask), b1r = _mm_and_si128(_mm_srli_epi32(b1, 16), mask);
 
-        for (x = 0; x < width; x += 2) {
-            int x1=(x+1<width)?x+1:x;
-            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
-            uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
-            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
-            uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
-            int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-            size_t ci=(size_t)(x/2);
-            Cbrow[ci]=_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-            Crrow[ci]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
+            /* ---- luma: 8 px of row0 and 8 px of row1 ---- */
+            __m128i ya0 = _mm_srli_epi32(_mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(a0r, c_yr), _mm_mullo_epi32(a0g, c_yg)),
+                                                       _mm_add_epi32(_mm_mullo_epi32(a0b, c_yb), c_yrd)), 16);
+            __m128i ya1 = _mm_srli_epi32(_mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(a1r, c_yr), _mm_mullo_epi32(a1g, c_yg)),
+                                                       _mm_add_epi32(_mm_mullo_epi32(a1b, c_yb), c_yrd)), 16);
+            __m128i yb0 = _mm_srli_epi32(_mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(b0r, c_yr), _mm_mullo_epi32(b0g, c_yg)),
+                                                       _mm_add_epi32(_mm_mullo_epi32(b0b, c_yb), c_yrd)), 16);
+            __m128i yb1 = _mm_srli_epi32(_mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(b1r, c_yr), _mm_mullo_epi32(b1g, c_yg)),
+                                                       _mm_add_epi32(_mm_mullo_epi32(b1b, c_yb), c_yrd)), 16);
+            __m128i ypa = _mm_packus_epi32(ya0, ya1);
+            __m128i ypb = _mm_packus_epi32(yb0, yb1);
+            _mm_storel_epi64((__m128i *)(Yrow0 + x), _mm_packus_epi16(ypa, ypa));
+            _mm_storel_epi64((__m128i *)(Yrow1 + x), _mm_packus_epi16(ypb, ypb));
+
+            /* ---- chroma: vertical sum, then horizontal pair sum -> 4 samples ---- */
+            __m128i rs = _mm_hadd_epi32(_mm_add_epi32(a0r, b0r), _mm_add_epi32(a1r, b1r));
+            __m128i gs = _mm_hadd_epi32(_mm_add_epi32(a0g, b0g), _mm_add_epi32(a1g, b1g));
+            __m128i bs = _mm_hadd_epi32(_mm_add_epi32(a0b, b0b), _mm_add_epi32(a1b, b1b));
+
+            __m128i cb = _mm_add_epi32(_mm_srai_epi32(_mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(rs, c_cbr), _mm_mullo_epi32(gs, c_cbg)),
+                                                                     _mm_add_epi32(_mm_mullo_epi32(bs, c_cbb), c_crd)), 18), c_128);
+            __m128i cr = _mm_add_epi32(_mm_srai_epi32(_mm_add_epi32(_mm_add_epi32(_mm_mullo_epi32(rs, c_crr), _mm_mullo_epi32(gs, c_crg)),
+                                                                     _mm_add_epi32(_mm_mullo_epi32(bs, c_crb), c_crd)), 18), c_128);
+            cb = _mm_min_epi32(_mm_max_epi32(cb, c_0), c_255);
+            cr = _mm_min_epi32(_mm_max_epi32(cr, c_0), c_255);
+
+            if (nv12) {
+                /* U0 V0 U1 V1 U2 V2 U3 V3 */
+                __m128i uv  = _mm_or_si128(cb, _mm_slli_epi32(cr, 8));
+                __m128i uv16 = _mm_packus_epi32(uv, uv);
+                _mm_storel_epi64((__m128i *)(C0 + cbase + (size_t)x), uv16);
+            } else {
+                __m128i cb16 = _mm_packus_epi32(cb, cb);
+                __m128i cr16 = _mm_packus_epi32(cr, cr);
+                int cb4 = _mm_cvtsi128_si32(_mm_packus_epi16(cb16, cb16));
+                int cr4 = _mm_cvtsi128_si32(_mm_packus_epi16(cr16, cr16));
+                memcpy(C0 + cbase + (size_t)(x / 2), &cb4, 4);
+                memcpy(C1 + cbase + (size_t)(x / 2), &cr4, 4);
+            }
         }
     }
+
+    /* Columns beyond the last full group of 8 (only when width % 8 != 0). */
+    if (vec_w < width)
+        hr_csc_band_scalar(bgra, out, width, height, y0, y1, vec_w, nv12, k);
 }
 #endif /* HR_HAVE_X86_SIMD */
 
-HR_EXPORT void hr_bgra_to_yuv420p_band(
-    const uint8_t * HR_RESTRICT bgra,
-    uint8_t       * HR_RESTRICT yuv_out,
-    int width, int height, int y0, int y1)
+static void hr_csc_band(
+    const uint8_t *bgra, uint8_t *out,
+    int width, int height, int y0, int y1, int nv12, const HrCsc *k)
 {
+    if (HR_UNLIKELY(!bgra || !out || width <= 0 || height <= 0)) return;
+    if (y0 < 0) y0 = 0;
+    if (y1 > height) y1 = height;
+    y0 &= ~1;                       /* chroma rows come in pairs */
+    if (y0 >= y1) return;
 #if defined(HR_HAVE_X86_SIMD)
     static int has_sse41 = -1;
     if (HR_UNLIKELY(has_sse41 < 0)) {
@@ -313,11 +345,20 @@ HR_EXPORT void hr_bgra_to_yuv420p_band(
         has_sse41 = __builtin_cpu_supports("sse4.1") ? 1 : 0;
     }
     if (has_sse41) {
-        hr_bgra_to_yuv420p_band_sse41(bgra, yuv_out, width, height, y0, y1);
+        hr_csc_band_sse41(bgra, out, width, height, y0, y1, nv12, k);
         return;
     }
 #endif
-    hr_bgra_to_yuv420p_band_scalar(bgra, yuv_out, width, height, y0, y1);
+    hr_csc_band_scalar(bgra, out, width, height, y0, y1, 0, nv12, k);
+}
+
+/* Planar I420, full/PC range - software encoders (libx264/libx265). */
+HR_EXPORT void hr_bgra_to_yuv420p_band(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT yuv_out,
+    int width, int height, int y0, int y1)
+{
+    hr_csc_band(bgra, yuv_out, width, height, y0, y1, 0, &k_csc_full);
 }
 
 HR_EXPORT void hr_bgra_to_yuv420p(
@@ -328,169 +369,15 @@ HR_EXPORT void hr_bgra_to_yuv420p(
     hr_bgra_to_yuv420p_band(bgra, yuv_out, width, height, 0, height);
 }
 
-/* -------------------------------------------------------------------------
- * BGRA -> NV12 (Y plane + interleaved U/V plane)
- *
- * Hardware encoders (h264_nvenc/qsv/amf) all natively consume NV12, not
- * planar YUV420p. Feeding them yuv420p makes ffmpeg silently insert its
- * own CPU-side swscale conversion yuv420p->nv12 right before handing the
- * frame to the encoder - i.e. this same Y/chroma math gets done twice per
- * frame for zero benefit. This is the same subsampling/coefficients as
- * hr_bgra_to_yuv420p_band above, just writing chroma interleaved (U,V,U,V…)
- * into one plane instead of two separate planes, so hardware-encoder
- * recordings can skip that redundant second pass. See callers in
- * hr_pipeline.cpp (Yuv420pWorkerPool::SetUseNv12) and hr_ffmpeg_runner.cpp
- * (the matching "-pixel_format nv12"/"-pix_fmt nv12" switch).
- * ---------------------------------------------------------------------- */
-
-static void hr_bgra_to_nv12_band_scalar(
-    const uint8_t * HR_RESTRICT bgra,
-    uint8_t       * HR_RESTRICT nv12_out,
-    int width, int height, int y0, int y1)
-{
-    if (HR_UNLIKELY(!bgra || !nv12_out || width <= 0 || height <= 0)) return;
-    if (y0 < 0) y0 = 0;
-    if (y1 > height) y1 = height;
-    if (y0 >= y1) return;
-
-    size_t frame_sz = (size_t)width * (size_t)height;
-    uint8_t *Y  = nv12_out;
-    uint8_t *UV = nv12_out + frame_sz;   /* U0,V0,U1,V1,... */
-    size_t uv_stride = (size_t)width;    /* (width/2) pairs * 2 bytes == width */
-
-    for (int y = y0; y < y1; y += 2) {
-        const uint8_t *row0 = bgra + (size_t)y * width * 4;
-        const uint8_t *row1 = (y + 1 < height)
-                            ? bgra + (size_t)(y+1) * width * 4
-                            : row0;
-        int y1r = (y+1 < height) ? y+1 : y;
-
-        uint8_t *Yrow0 = Y + (size_t)y * width;
-        uint8_t *Yrow1r = Y + (size_t)y1r * width;
-        uint8_t *UVrow = UV + (size_t)(y / 2) * uv_stride;
-
-        int x = 0;
-        for (; x + 3 < width; x += 4) {
-            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
-            uint8_t r01=row0[(x+1)*4+2],g01=row0[(x+1)*4+1],b01=row0[(x+1)*4+0];
-            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
-            uint8_t r11=row1[(x+1)*4+2],g11=row1[(x+1)*4+1],b11=row1[(x+1)*4+0];
-            Yrow0[x]  =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Yrow0[x+1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Yrow1r[x+1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
-            {
-                int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-                size_t ci=(size_t)(x/2)*2;
-                UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
-            }
-
-            uint8_t r02=row0[(x+2)*4+2],g02=row0[(x+2)*4+1],b02=row0[(x+2)*4+0];
-            uint8_t r03=row0[(x+3)*4+2],g03=row0[(x+3)*4+1],b03=row0[(x+3)*4+0];
-            uint8_t r12=row1[(x+2)*4+2],g12=row1[(x+2)*4+1],b12=row1[(x+2)*4+0];
-            uint8_t r13=row1[(x+3)*4+2],g13=row1[(x+3)*4+1],b13=row1[(x+3)*4+0];
-            Yrow0[x+2]=(uint8_t)((YR*r02+YG*g02+YB*b02+32768)>>16);
-            Yrow0[x+3]=(uint8_t)((YR*r03+YG*g03+YB*b03+32768)>>16);
-            Yrow1r[x+2]=(uint8_t)((YR*r12+YG*g12+YB*b12+32768)>>16);
-            Yrow1r[x+3]=(uint8_t)((YR*r13+YG*g13+YB*b13+32768)>>16);
-            {
-                int ra=((int)r02+r03+r12+r13)>>2,ga=((int)g02+g03+g12+g13)>>2,ba=((int)b02+b03+b12+b13)>>2;
-                size_t ci=(size_t)((x+2)/2)*2;
-                UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-                UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
-            }
-        }
-        for (; x < width; x += 2) {
-            int x1=(x+1<width)?x+1:x;
-            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
-            uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
-            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
-            uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
-            Yrow0[x] =(uint8_t)((YR*r00+YG*g00+YB*b00+32768)>>16);
-            Yrow0[x1]=(uint8_t)((YR*r01+YG*g01+YB*b01+32768)>>16);
-            Yrow1r[x] =(uint8_t)((YR*r10+YG*g10+YB*b10+32768)>>16);
-            Yrow1r[x1]=(uint8_t)((YR*r11+YG*g11+YB*b11+32768)>>16);
-            int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-            size_t ci=(size_t)(x/2)*2;
-            UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-            UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
-        }
-    }
-}
-
-#if defined(HR_HAVE_X86_SIMD)
-__attribute__((target("sse4.1")))
-static void hr_bgra_to_nv12_band_sse41(
-    const uint8_t * HR_RESTRICT bgra,
-    uint8_t       * HR_RESTRICT nv12_out,
-    int width, int height, int y0, int y1)
-{
-    if (HR_UNLIKELY(!bgra || !nv12_out || width <= 0 || height <= 0)) return;
-    if (y0 < 0) y0 = 0;
-    if (y1 > height) y1 = height;
-    if (y0 >= y1) return;
-
-    size_t frame_sz = (size_t)width * (size_t)height;
-    uint8_t *Y  = nv12_out;
-    uint8_t *UV = nv12_out + frame_sz;
-    size_t uv_stride = (size_t)width;
-
-    for (int y = y0; y < y1; y += 2) {
-        const uint8_t *row0 = bgra + (size_t)y * width * 4;
-        const uint8_t *row1 = (y + 1 < height)
-                            ? bgra + (size_t)(y+1) * width * 4
-                            : row0;
-        int y1r = (y+1 < height) ? y+1 : y;
-
-        uint8_t *Yrow0 = Y + (size_t)y * width;
-        uint8_t *Yrow1r = Y + (size_t)y1r * width;
-        uint8_t *UVrow = UV + (size_t)(y / 2) * uv_stride;
-
-        int x = 0;
-        for (; x + 7 < width; x += 8) {
-            hr_y8_sse41(row0 + (size_t)x * 4, Yrow0 + x);
-            hr_y8_sse41(row1 + (size_t)x * 4, Yrow1r + x);
-        }
-        for (; x < width; ++x) {
-            uint8_t b = row0[x*4+0], g = row0[x*4+1], r = row0[x*4+2];
-            Yrow0[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
-            b = row1[x*4+0]; g = row1[x*4+1]; r = row1[x*4+2];
-            Yrow1r[x] = (uint8_t)((YR*r+YG*g+YB*b+32768)>>16);
-        }
-
-        for (x = 0; x < width; x += 2) {
-            int x1=(x+1<width)?x+1:x;
-            uint8_t r00=row0[x*4+2],g00=row0[x*4+1],b00=row0[x*4+0];
-            uint8_t r01=row0[x1*4+2],g01=row0[x1*4+1],b01=row0[x1*4+0];
-            uint8_t r10=row1[x*4+2],g10=row1[x*4+1],b10=row1[x*4+0];
-            uint8_t r11=row1[x1*4+2],g11=row1[x1*4+1],b11=row1[x1*4+0];
-            int ra=((int)r00+r01+r10+r11)>>2,ga=((int)g00+g01+g10+g11)>>2,ba=((int)b00+b01+b10+b11)>>2;
-            size_t ci=(size_t)(x/2)*2;
-            UVrow[ci]  =_clamp8(((-CBR*ra-CBG*ga+CBB*ba+32768)>>16)+128);
-            UVrow[ci+1]=_clamp8((( CRR*ra-CRG*ga-CRB*ba+32768)>>16)+128);
-        }
-    }
-}
-#endif /* HR_HAVE_X86_SIMD */
-
+/* Semi-planar NV12, studio/TV range - hardware encoders (nvenc/qsv/amf), which
+ * consume NV12 natively (feeding them yuv420p would make ffmpeg insert its own
+ * swscale pass).  See hr_ffmpeg_runner.cpp's matching "-pix_fmt nv12 -color_range tv". */
 HR_EXPORT void hr_bgra_to_nv12_band(
     const uint8_t * HR_RESTRICT bgra,
     uint8_t       * HR_RESTRICT nv12_out,
     int width, int height, int y0, int y1)
 {
-#if defined(HR_HAVE_X86_SIMD)
-    static int has_sse41 = -1;
-    if (HR_UNLIKELY(has_sse41 < 0)) {
-        __builtin_cpu_init();
-        has_sse41 = __builtin_cpu_supports("sse4.1") ? 1 : 0;
-    }
-    if (has_sse41) {
-        hr_bgra_to_nv12_band_sse41(bgra, nv12_out, width, height, y0, y1);
-        return;
-    }
-#endif
-    hr_bgra_to_nv12_band_scalar(bgra, nv12_out, width, height, y0, y1);
+    hr_csc_band(bgra, nv12_out, width, height, y0, y1, 1, &k_csc_tv);
 }
 
 HR_EXPORT void hr_bgra_to_nv12(
