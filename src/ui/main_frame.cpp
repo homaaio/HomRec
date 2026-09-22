@@ -2120,7 +2120,12 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     // piggybacking on this existing 500ms tick (rather than adding a
     // dedicated timer just for this) doesn't mean 500ms-resolution writes.
     HrPcLog::MaybeLogSnapshot(state_.recording, rec_ ? rec_->current_fps() : 0.0,
-                               rec_ && !rec_->resolved_hw_encoder().empty(),
+                               // resolved_hw_encoder() is only filled when hw_accel == "auto";
+                               // an explicitly chosen h264_qsv/nvenc/amf codec is hardware too.
+                               rec_ && (!rec_->resolved_hw_encoder().empty() ||
+                                        state_.video_codec.find("nvenc") != std::string::npos ||
+                                        state_.video_codec.find("qsv")   != std::string::npos ||
+                                        state_.video_codec.find("amf")   != std::string::npos),
                                state_.output_folder);
 
     if (state_.recording) {
@@ -2184,6 +2189,14 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
     // background thread could still wxQueueEvent() onto a frame that's
     // about to be freed. See the comment on g_frame's declaration.
     if (g_frame == this) g_frame = nullptr;
+    // BUGFIX (app froze ~3-6s on close while Instant Replay was on - log:
+    // "HomRec closing" then, 3s later, "Instant Replay: segment writer didn't
+    // finish gracefully in time - killing it"): TeardownPreview() below
+    // detaches pipeline_ (sets it to nullptr) even though Instant Replay's
+    // segment writer is still piping into it, so ~RecordingController()'s
+    // later StopInstantReplayEncoder() had no pipeline to close the pipe on,
+    // ffmpeg never saw EOF, and both 3s waits ran out before it got killed.
+    // Stop Instant Replay properly first, while pipeline_ still exists.
     if (rec_ && rec_->instant_replay_enabled()) rec_->DisableInstantReplay();
     if (rec_) rec_->TeardownPreview();
     if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
