@@ -169,6 +169,16 @@ HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
         &ctx->device, &fl, &ctx->context);
     if (FAILED(hr)) { g_last_dx_error = hr; delete ctx; return nullptr; }
 
+    // Ask the GPU scheduler to run our desktop-copy ahead of the game's own
+    // queued work (OBS does the same).  Without this, CopyResource()/Map()
+    // wait behind the game's frames, capture misses its deadline and frames
+    // are dropped exactly when the GPU is busiest.  Priorities above 0 need
+    // an elevated process; when refused this is a harmless no-op.
+    {
+        ComPtr<IDXGIDevice> gpu_dev;
+        if (SUCCEEDED(ctx->device.As(&gpu_dev))) gpu_dev->SetGPUThreadPriority(7);
+    }
+
     hr = ctx->reset();
     if (FAILED(hr)) { delete ctx; return nullptr; } // reset() already set g_last_dx_error
 
