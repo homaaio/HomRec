@@ -117,7 +117,7 @@ static bool _create_overlapped_stdin_pipe(HANDLE *out_read, HANDLE *out_write) {
         PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
         PIPE_TYPE_BYTE | PIPE_WAIT,
         1,             // one instance - this is a private pipe, not a server
-        1 << 20,       // out buffer (1MB - comfortably holds a full 1080p BGRA/YUV frame)
+        4 << 20,       // out buffer (4MB - holds a whole 1080p NV12 frame (3.1MB)
         0,             // in buffer - unused, outbound only
         0,             // default timeout
         nullptr);
@@ -160,7 +160,8 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
     std::wstring mut_cmd = cmdline;
     bool ok = (CreateProcessW(nullptr, mut_cmd.data(),
                                nullptr, nullptr, ctx->pipe_input ? TRUE : FALSE,
-                               CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) != 0);
+                               CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS,
+                               nullptr, nullptr, &si, &pi) != 0);
 
     if (ctx->pipe_input && hReadStdin) CloseHandle(hReadStdin);
 
