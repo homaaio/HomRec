@@ -18,6 +18,9 @@ extern "C" {
     int hr_probe_gpu(const wchar_t *ffpath, wchar_t *out_enc, int out_len);
     int hr_build_codec_args(const wchar_t *codec, int quality, int fps, int cpu_count,
                              wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
+    int hr_build_codec_args_ex(const wchar_t *codec, int quality, int fps, int cpu_count,
+                                int enc_w, int enc_h,
+                                wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
     int hr_merge_av(const wchar_t *ffpath, const wchar_t *video_file, const wchar_t *audio_file,
                      double real_elapsed_sec, double av_start_skew_sec);
     int hr_export_mp3(const wchar_t *ffpath, const wchar_t *wav_path, const wchar_t *mp3_path);
@@ -210,8 +213,9 @@ std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
     // low-latency presets, which aren't meaningfully tunable via x264-style
     // preset names like "medium"/"veryslow").
     std::wstring preset = WideFromNarrow(state_.enc_preset);
-    hr_build_codec_args(codec.c_str(), state_.quality, state_.target_fps,
-                         (int)si.dwNumberOfProcessors, buf, 512, preset.c_str());
+    hr_build_codec_args_ex(codec.c_str(), state_.quality, state_.target_fps,
+                            (int)si.dwNumberOfProcessors, output_w_, output_h_,
+                            buf, 512, preset.c_str());
     return buf;
 }
 
@@ -1566,8 +1570,9 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
         SYSTEM_INFO si;
         GetSystemInfo(&si);
         std::wstring wpreset = WideFromNarrow(preset);
-        hr_build_codec_args(codec.c_str(), state_.quality, state_.target_fps,
-                             (int)si.dwNumberOfProcessors, buf, 512, wpreset.c_str());
+        hr_build_codec_args_ex(codec.c_str(), state_.quality, state_.target_fps,
+                                (int)si.dwNumberOfProcessors, mw, mh,
+                                buf, 512, wpreset.c_str());
         codec_args = buf;
     }
 
