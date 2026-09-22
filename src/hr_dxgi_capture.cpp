@@ -99,7 +99,7 @@ struct DxCapCtx {
         hr = output.As(&output1);
         if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
 
-        for (int attempt = 0; attempt < 40; ++attempt) {
+        for (int attempt = 0; attempt < 5; ++attempt) {
             hr = output1->DuplicateOutput(device.Get(), &duplication);
             if (SUCCEEDED(hr)) break;
             if (hr != E_ACCESSDENIED &&
@@ -108,7 +108,7 @@ struct DxCapCtx {
                 hr != static_cast<HRESULT>(DXGI_ERROR_SESSION_DISCONNECTED) &&
                 hr != E_INVALIDARG)
                 break;
-            Sleep(50);
+            Sleep(20);
         }
         if (FAILED(hr)) { g_last_dx_error = hr; return hr; }
 
@@ -341,7 +341,7 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
 
     if (!have_output) return HR_DX_TIMEOUT;
 
-    static constexpr ULONGLONG kMapWaitBudgetMs = 250;
+    const ULONGLONG kMapWaitBudgetMs = (ULONGLONG)std::max(timeout_ms, 8);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     const ULONGLONG map_deadline = GetTickCount64() + kMapWaitBudgetMs;
     for (;;) {
