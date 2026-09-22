@@ -125,6 +125,13 @@ public:
         convert_band_ = nv12 ? &hr_bgra_to_nv12_band : &hr_bgra_to_yuv420p_band;
     }
 
+    // PERF: the capture thread (HIGHEST while recording) blocks in Convert()
+    // until every worker has finished its band.  The workers used to run at
+    // NORMAL priority, so under CPU load (a game) they were scheduled late and
+    // the high-priority capture thread just sat waiting on them -> late frames
+    // and "dropping frames".  Workers now follow the capture thread's boost.
+    void SetBoost(bool boost) { boost_.store(boost, std::memory_order_relaxed); }
+
     void Stop() {
         if (threads_.empty()) return;
         {
@@ -213,6 +220,7 @@ private:
 
     void WorkerLoop(int idx) {
         int seen_round = 0;
+        int applied_prio = THREAD_PRIORITY_NORMAL;
         for (;;) {
             const uint8_t *bgra; uint8_t *yuv; int w, h, band_h;
             {
@@ -221,6 +229,11 @@ private:
                 if (stop_) return;
                 seen_round = round_;
                 bgra = bgra_; yuv = yuv_; w = w_; h = h_; band_h = band_h_;
+            }
+            {
+                int want = boost_.load(std::memory_order_relaxed) ? THREAD_PRIORITY_HIGHEST
+                                                                  : THREAD_PRIORITY_NORMAL;
+                if (want != applied_prio) { SetThreadPriority(GetCurrentThread(), want); applied_prio = want; }
             }
             int y0 = band_h * idx;
             int y1 = std::min(h, y0 + band_h);
@@ -235,6 +248,7 @@ private:
     std::vector<std::thread> threads_;
     std::mutex mtx_;
     std::condition_variable cv_start_, cv_done_;
+    std::atomic<bool> boost_{false};
     bool stop_ = false;
     bool started_ = false;
     int round_ = 0;
@@ -641,7 +655,9 @@ struct Pipeline {
     std::condition_variable pipe_queue_cv;
     std::thread writer_thread;
     std::atomic<bool> writer_running{false};
-    static constexpr size_t MAX_QUEUE_SIZE = 3;  // Max frames in queue - reduced for lower latency
+    static constexpr size_t MAX_QUEUE_SIZE = 8;  // ~25MB at 1080p NV12. Was 3: any 100ms hiccup in ffmpeg/QSV/disk (or a
+                                                  // game stealing the CPU) evicted frames -> "Recording overloaded".
+                                                  // Latency is irrelevant when recording to a file.
 
     // ====== RECYCLED BUFFER POOL ======
     // The writer thread returns finished conversion buffers here so the
@@ -649,6 +665,13 @@ struct Pipeline {
     // buffer and copying the full YUV frame (~3 MB at 1080p) every frame -
     // steady-state adds zero heap allocations and zero extra memcpy per
     // frame.
+    // Last converted frame, owned by the capture thread only. When the desktop
+    // is static (DXGI TIMEOUT: nothing changed) the next tick re-sends this
+    // instead of re-running the whole BGRA->YUV conversion.
+    std::vector<uint8_t> last_yuv;
+    bool last_yuv_valid = false;
+    int  last_yuv_w = 0, last_yuv_h = 0;
+
     std::queue<std::vector<uint8_t>> free_bufs;
     std::mutex free_bufs_mtx;
     static constexpr size_t MAX_FREE_BUFS = MAX_QUEUE_SIZE + 2;
@@ -947,6 +970,7 @@ struct Pipeline {
         int64_t frame_ns = frame_ns_recording;
         bool was_recording = recording.load(std::memory_order_acquire);
         bool was_boosted = boost_priority.load(std::memory_order_relaxed);
+        yuv_pool.SetBoost(was_boosted);
 #ifdef _WIN32
         // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
         // the moment recording started (both here and in the is_recording_now
@@ -1027,6 +1051,7 @@ struct Pipeline {
                 const bool is_recording_now = recording.load(std::memory_order_acquire);
                 if (is_recording_now != was_recording) {
                     was_recording = is_recording_now;
+                    last_yuv_valid = false;   // pixel format / size may differ next recording
                     if (!is_recording_now) frame_ns_idle = compute_frame_ns_idle();
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
@@ -1051,6 +1076,7 @@ struct Pipeline {
             bool want_boost = boost_priority.load(std::memory_order_relaxed);
             if (want_boost != was_boosted) {
                 was_boosted = want_boost;
+                yuv_pool.SetBoost(want_boost);
                 SetThreadPriority(GetCurrentThread(), want_boost
                                       ? THREAD_PRIORITY_HIGHEST
                                       : THREAD_PRIORITY_ABOVE_NORMAL);
@@ -1304,27 +1330,61 @@ struct Pipeline {
                 int req_h = out_h.load(std::memory_order_relaxed);
                 const uint8_t* enc_src = frame;
                 int enc_w = eff_w, enc_h = eff_h;
-                if (req_w > 0 && req_h > 0 && (req_w != eff_w || req_h != eff_h)) {
-                    const size_t scaled_needed = (size_t)req_w * req_h * 4;
-                    if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
-                    bgra_downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
-                    enc_src = scaled_buf.data();
-                    enc_w = req_w; enc_h = req_h;
-                }
+                const bool scaling = req_w > 0 && req_h > 0 && (req_w != eff_w || req_h != eff_h);
+                if (scaling) { enc_w = req_w; enc_h = req_h; }
 
-                std::vector<uint8_t> yuv_frame;
-                {
-                    std::lock_guard<std::mutex> lock(free_bufs_mtx);
-                    if (!free_bufs.empty()) {
-                        yuv_frame = std::move(free_bufs.front());
-                        free_bufs.pop();
+                // PERF: static desktop (DXGI timeout) with nothing composited on
+                // top -> the picture is identical to the last one we converted.
+                // Re-send it instead of downscaling + converting the same pixels
+                // again (typical for tutorials/desktop recordings: most ticks).
+                const bool reuse_last = (ret == HR_DX_TIMEOUT) && last_yuv_valid &&
+                                        overlays_snapshot.empty() &&
+                                        !include_cursor.load(std::memory_order_relaxed) &&
+                                        last_yuv_w == enc_w && last_yuv_h == enc_h;
+                bool merged_into_queue = false;
+                if (reuse_last) {
+                    // Cheapest: the previous frame is still waiting in the queue ->
+                    // just make it last one slot longer, no copy at all.
+                    std::lock_guard<std::mutex> lock(pipe_queue_mtx);
+                    if (!pipe_queue.empty()) {
+                        int r = pipe_queue.back().repeat + 1 + extra_slots;
+                        pipe_queue.back().repeat = std::min(r, 240);
+                        merged_into_queue = true;
                     }
                 }
 
-                const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
-                if (yuv_frame.size() != needed) yuv_frame.resize(needed);
+                std::vector<uint8_t> yuv_frame;
+                if (!merged_into_queue) {
+                    {
+                        std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                        if (!free_bufs.empty()) {
+                            yuv_frame = std::move(free_bufs.front());
+                            free_bufs.pop();
+                        }
+                    }
 
-                yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
+                    const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
+                    if (yuv_frame.size() != needed) yuv_frame.resize(needed);
+
+                    if (reuse_last) {
+                        std::memcpy(yuv_frame.data(), last_yuv.data(), needed);   // 3MB copy vs full convert
+                    } else {
+                        if (scaling) {
+                            const size_t scaled_needed = (size_t)req_w * req_h * 4;
+                            if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
+                            bgra_downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
+                            enc_src = scaled_buf.data();
+                        }
+                        yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
+                        // Keep a private copy so a following static tick can reuse it.
+                        if (ret == HR_DX_OK) {
+                            last_yuv.assign(yuv_frame.begin(), yuv_frame.end());
+                            last_yuv_valid = true;
+                            last_yuv_w = enc_w; last_yuv_h = enc_h;
+                        }
+                    }
+                }
+                if (!merged_into_queue) {
 
                 std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
                 int carried_repeat = 0;        // timeline slots owned by an evicted entry
@@ -1369,6 +1429,7 @@ struct Pipeline {
                     if (free_bufs.size() < MAX_FREE_BUFS)
                         free_bufs.push(std::move(dropped));
                 }
+                }   // if (!merged_into_queue)
             }
 #endif
             // Catch-up reps count as captured (they keep the timeline
