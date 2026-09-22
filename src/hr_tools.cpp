@@ -204,10 +204,14 @@ HR_EXPORT int hr_probe_gpu(const wchar_t* ffpath, wchar_t* out_enc, int out_len)
 // hr_build_codec_args
 // Returns space-separated ffmpeg argument string in out_buf.
 // -------------------------------------------------------------
-HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
-                                   int quality, int fps, int cpu_count,
-                                   wchar_t* out_buf, int buf_chars,
-                                   const wchar_t* preset_override)
+// hr_build_codec_args_ex - same as hr_build_codec_args() plus the real encode
+// size (w x h, 0 = unknown -> assumed 1920x1080). Needed because Intel QSV is
+// now driven by a bitrate derived from resolution*fps*quality (see below).
+HR_EXPORT int hr_build_codec_args_ex(const wchar_t* codec,
+                                      int quality, int fps, int cpu_count,
+                                      int enc_w, int enc_h,
+                                      wchar_t* out_buf, int buf_chars,
+                                      const wchar_t* preset_override)
 {
     if (!codec || !out_buf || buf_chars < 2) return 0;
 
@@ -229,13 +233,31 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
     if (is_nvenc) {
         ss << L" -preset p1 -tune ull -rc constqp -qp " << qp << L" -g " << gop;
     } else if (is_qsv) {
-        // -low_power 1 forces Intel QSV's VDENC hardware path, which
-        // on many GPU generations requires width/height divisible by 16
-        // (sometimes 8) - stricter than the general even-dimension rule
-        // enforced elsewhere. Resolutions like 1200x674 (even, but not a
-        // multiple of 16) fail to encode with low_power on affected hardware.
-        // The standard QSV path handles arbitrary even dimensions fine.
-        ss << L" -preset veryfast -look_ahead 0 -qp " << qp << L" -g " << gop;
+        // BUGFIX: this used to pass "-qp N". h264_qsv has NO "qp" option
+        // (ffmpeg only prints "Codec AVOption qp ... has not been used for
+        // any stream" and carries on), so the Quality slider did nothing for
+        // Intel QSV and the encoder silently ran at ffmpeg's built-in QSV
+        // default (~1 Mbps). QSV needs a bitrate (or -global_quality, which
+        // requires ICQ support = Skylake or newer and would refuse to start
+        // on older iGPUs). Use plain VBR with a cap: works on every QSV
+        // generation, gives a predictable encoder load/file size (like OBS's
+        // fixed-bitrate QSV) and no runaway bitrate spikes on busy scenes.
+        //   bits-per-pixel-per-frame: 0.04 (quality 0) .. 0.18 (quality 100)
+        //   1080p30: q=30 -> ~5.1 Mbps (the OBS setting), q=50 -> ~6.8,
+        //            q=100 -> ~11 Mbps.
+        int w = enc_w > 0 ? enc_w : 1920;
+        int h = enc_h > 0 ? enc_h : 1080;
+        int q = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
+        double bpp = 0.04 + 0.14 * (q / 100.0);
+        long long kbps = (long long)((double)w * h * (fps > 0 ? fps : 30) * bpp / 1000.0);
+        if (kbps < 1500)  kbps = 1500;
+        if (kbps > 60000) kbps = 60000;
+        // -low_power is deliberately NOT forced: it needs VDENC hardware that
+        // older/lower-end Intel iGPUs don't have and ffmpeg would just fail
+        // to init QSV on those; -bf 0 avoids B-frame reordering delay and
+        // work, -look_ahead 0 keeps the encoder single-pass.
+        ss << L" -preset veryfast -look_ahead 0 -bf 0 -b:v " << kbps << L"k -maxrate "
+           << (kbps * 3 / 2) << L"k -bufsize " << (kbps * 2) << L"k -g " << gop;
     } else if (is_amf) {
         ss << L" -quality speed -rc cqp -qp_i " << qp << L" -qp_p " << qp << L" -g " << gop;
     } else {
@@ -266,7 +288,7 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
         // null, so behavior for anyone who's never touched that dropdown
         // is unchanged).
         std::wstring preset = (preset_override && preset_override[0]) ? preset_override : L"ultrafast";
-        ss << L" -preset " << preset << L" -tune zerolatency -crf " << qp
+        ss << L" -preset " << preset << L" -crf " << qp
            << L" -g " << gop << L" -threads " << thr;
         if (is_265) ss << L" -x265-params log-level=error";
     }
@@ -281,6 +303,15 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
         else { if (!in_tok) tok++; in_tok=true; }
     }
     return tok;
+}
+
+HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
+                                   int quality, int fps, int cpu_count,
+                                   wchar_t* out_buf, int buf_chars,
+                                   const wchar_t* preset_override)
+{
+    return hr_build_codec_args_ex(codec, quality, fps, cpu_count, 0, 0,
+                                  out_buf, buf_chars, preset_override);
 }
 
 // -------------------------------------------------------------
