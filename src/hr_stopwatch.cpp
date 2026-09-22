@@ -110,20 +110,52 @@ HR_EXPORT double hr_sw_elapsed_ms(void *handle) {
  * Sleeps in 1 ms increments until ~2 ms before target, then spins.
  * This keeps CPU usage low while still being accurate to <100 µs.
  */
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+// One high-resolution waitable timer per calling thread (Win10 1803+; NULL on
+// older systems -> we fall back to Sleep()).  Wakes with ~0.5ms accuracy
+// without burning a core, which lets the spin phase below shrink from 2ms to
+// ~0.3ms per frame (the old 2ms spin was ~6% of a core at 30fps, constantly).
+static HANDLE _hr_thread_timer() {
+    static thread_local HANDLE h = [] {
+        return CreateWaitableTimerExW(nullptr, nullptr,
+                                      CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                      TIMER_ALL_ACCESS);
+    }();
+    return h;
+}
+#endif
+
 HR_EXPORT void hr_sw_sleep_until_ns(void *handle, int64_t target_ns) {
     if (!handle) return;
     Stopwatch *sw = static_cast<Stopwatch *>(handle);
 
-    /* Coarse sleep phase: sleep while more than 2 ms remain */
-    for (;;) {
+#ifdef _WIN32
+    HANDLE timer = _hr_thread_timer();
+    if (timer) {
         int64_t remaining = target_ns - (_hw_now_ns() - sw->start_ns);
-        if (remaining <= 2'000'000LL) break;    /* 2 ms threshold */
-        int sleep_ms = (int)((remaining - 2'000'000LL) / 1'000'000LL);
-        if (sleep_ms < 1) sleep_ms = 1;
-        _hw_sleep_ms(sleep_ms);
+        if (remaining > 800'000LL) {
+            LARGE_INTEGER due;
+            due.QuadPart = -((remaining - 400'000LL) / 100);   /* relative, 100ns units */
+            if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+                WaitForSingleObject(timer, INFINITE);
+        }
+    } else
+#endif
+    {
+        /* Coarse sleep phase: sleep while more than 2 ms remain */
+        for (;;) {
+            int64_t remaining = target_ns - (_hw_now_ns() - sw->start_ns);
+            if (remaining <= 2'000'000LL) break;
+            int sleep_ms = (int)((remaining - 2'000'000LL) / 1'000'000LL);
+            if (sleep_ms < 1) sleep_ms = 1;
+            _hw_sleep_ms(sleep_ms);
+        }
     }
 
-    /* Spin phase: busy-wait for sub-ms precision */
+    /* Short spin phase for sub-ms precision */
     while ((_hw_now_ns() - sw->start_ns) < target_ns) {
 #if defined(__x86_64__) || defined(__i386__)
         __asm__ volatile("pause" ::: "memory");
