@@ -288,6 +288,7 @@ ConsoleWindow::ConsoleWindow(AppState &state, RecordingController *rec, HWND mai
 ConsoleWindow::~ConsoleWindow() {
     JoinPendingHomThread();
     if (hwnd_) DestroyWindow(hwnd_);
+    if (mono_font_) { DeleteObject(mono_font_); mono_font_ = nullptr; }
 }
 
 LRESULT CALLBACK ConsoleWindow::WindowProcThunk(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
