@@ -204,7 +204,7 @@ HBITMAP CaptureWindowThumbnail(HWND hwnd, int tileW, int tileH) {
     DeleteObject(bg);
 
     bool drew = false;
-    if (!IsIconic(hwnd)) {
+    if (!IsIconic(hwnd) && !IsHungAppWindow(hwnd)) {
         HDC srcDC = CreateCompatibleDC(screenDC);
         HBITMAP srcBmp = CreateCompatibleBitmap(screenDC, w, h);
         HBITMAP oldSrc = static_cast<HBITMAP>(SelectObject(srcDC, srcBmp));
