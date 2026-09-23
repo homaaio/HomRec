@@ -1,6 +1,41 @@
 welcome to changelog :D
 
-[Version 2.2.2] - 2026-09-19 (unreleased)
+[Version 2.3] - 2026-09-23 (unreleased)
+
+- Fixed (data corruption, profile/language JSON round-trip): hr_profile_io.cpp's
+  hand-rolled JSON reader (_jget_str()) unescaped "\\n" and "\\r" wrong - it
+  just dropped the backslash and copied the following letter as-is, so a
+  saved string containing an actual newline or carriage return (which
+  _jesc(), the writer right above it, correctly escapes to the two
+  characters "\n"/"\r") came back from disk with a literal 'n' or 'r'
+  baked into the value instead of the original line break, on every
+  load. \" and \\ happened to reconstruct correctly by the same "just
+  copy the next character" logic (both collapse to themselves), which is
+  presumably why this went unnoticed - only the two escapes that don't
+  survive a verbatim copy were broken. Reworked to actually map each
+  escape back to its real character (mirrors the equivalent parser in
+  hr_input_overlay.cpp, which already did this correctly).
+
+- Fixed (perf, game FPS while recording with a software encoder): ffmpeg
+  was always launched with ABOVE_NORMAL_PRIORITY_CLASS, including on the
+  libx264/libx265 path. hr_build_codec_args_ex() (hr_tools.cpp) sizes
+  -threads to (logical cores - 2), and Yuv420pWorkerPool (hr_pipeline.cpp)
+  separately reserves 2 cores for its own conversion workers - both do
+  this specifically to leave the game headroom, on the assumption that the
+  threads they're yielding to run at normal priority. Giving ffmpeg's
+  whole process an above-normal priority class silently broke that
+  assumption: every x264 encoder thread then outranked the game for CPU
+  time regardless of the "-threads" math, eating back exactly the
+  headroom both reservations were trying to preserve - part of the
+  remaining game-FPS gap against OBS on CPU-encode setups.
+  hr_ffmpeg_runner.cpp: _launch_win() now only requests
+  ABOVE_NORMAL_PRIORITY_CLASS for the GPU-bound encoders (nvenc/qsv/amf),
+  where it's harmless (those threads mostly wait on the GPU) and keeps
+  the encode from being starved; the CPU-bound libx264/libx265 path now
+  launches at plain NORMAL_PRIORITY_CLASS so it competes for CPU on equal
+  footing with everything else instead of ahead of it.
+
+[Version 2.2.2] - 2026-09-19
 
 - Fixed: starting a manual recording while Instant Replay was buffering
   could leave the recording truncated/never finalizing (log: "writer thread
