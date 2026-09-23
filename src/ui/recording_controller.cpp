@@ -138,6 +138,23 @@ std::wstring WideFromNarrow(const std::string &s) {
     if (!w.empty() && w.back() == L'\0') w.pop_back();
     return w;
 }
+
+void DeleteReplayDir(const std::wstring &dir) {
+    if (dir.empty()) return;
+    WIN32_FIND_DATAW fd;
+    std::wstring pattern = dir + L"*";
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            std::wstring name(fd.cFileName);
+            if (name == L"." || name == L"..") continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue; // not expected; skip defensively
+            DeleteFileW((dir + name).c_str());
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir.c_str());
+}
 }
 
 RecordingController::RecordingController(AppState &state) : state_(state) {
@@ -147,7 +164,10 @@ RecordingController::RecordingController(AppState &state) : state_(state) {
 RecordingController::~RecordingController() {
     if (state_.recording) Stop();
     if (finalize_thread_.joinable()) finalize_thread_.join();
-    if (instant_replay_active_) StopInstantReplayEncoder();
+    if (instant_replay_active_) {
+        StopInstantReplayEncoder();
+        DeleteReplayDir(replay_dir_); // see DeleteReplayDir()'s comment
+    }
     JoinPendingInstantReplayStop();
     JoinPendingPreviewTeardown();
     if (ctl_) hr_ctl_destroy(ctl_);
@@ -1211,6 +1231,10 @@ void RecordingController::DisableInstantReplay() {
     instant_replay_enabled_ = false;
     if (!instant_replay_active_) return;
     StopInstantReplayEncoder();
+    // See DeleteReplayDir()'s comment - the feature is fully off now, so
+    // this run's segment folder is dead weight, not a buffer anyone will
+    // read from again.
+    DeleteReplayDir(replay_dir_);
     instant_replay_active_ = false;
     if (pipeline_ && !state_.recording) {
         // See JoinPendingInstantReplayStop()'s comment - belt-and-suspenders
@@ -1260,6 +1284,10 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
         error_out = L"Instant Replay buffer is empty (nothing captured yet).";
         instant_replay_active_ = restarted;
         if (!restarted) HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering - " + restart_err));
+        // See DeleteReplayDir()'s comment - dir_to_read's run is over
+        // either way (StartInstantReplayEncoder() above already moved
+        // replay_dir_ on to a new folder), empty or not.
+        DeleteReplayDir(dir_to_read);
         return false;
     }
 
@@ -1337,6 +1365,7 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
     bool ok = hr_concat_segments(ffmpeg_path_.c_str(), list_path.c_str(),
                                   current_output_path_.c_str()) != 0;
 
+    bool keep_dir_for_audio_fallback = false;
     if (ok && have_replay_audio) {
         // real_elapsed_sec = 0.0 deliberately skips hr_merge_av()'s
         // dropped-frame "stretch" correction (see its own comment) - that
@@ -1351,6 +1380,7 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
             HrLog::Error("Instant Replay: merging the captured audio into the saved replay "
                          "failed -- keeping '" + audio_wav_a + "' next to the (silent) clip "
                          "instead of losing the audio entirely.");
+            keep_dir_for_audio_fallback = true;
         }
     }
 
@@ -1358,6 +1388,14 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
     if (!restarted) {
         HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering after Save Replay - " + restart_err));
     }
+
+    // See DeleteReplayDir()'s comment - dir_to_read's run is over either
+    // way (StartInstantReplayEncoder() above already moved replay_dir_ on
+    // to a new folder). The one exception is the audio-merge-failed
+    // branch just above, which deliberately leaves audio_wav_a behind
+    // inside dir_to_read as a last-resort recovery file - don't delete
+    // out from under that.
+    if (!keep_dir_for_audio_fallback) DeleteReplayDir(dir_to_read);
 
     if (!ok) {
         error_out = L"Couldn't save the replay (ffmpeg concat failed).";
