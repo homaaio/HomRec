@@ -278,9 +278,13 @@ static std::vector<uint8_t> _gz_compress(const uint8_t *data, size_t sz) {
     return out;
 }
 
+static constexpr size_t kMaxDecompressedBytes = 64u * 1024u * 1024u; // 64MB
+
 static std::vector<uint8_t> _gz_decompress(const uint8_t *data, size_t sz) {
     /* Start with 4× input size; expand as needed */
-    std::vector<uint8_t> out(sz * 4 + 1024);
+    size_t init_sz = sz * 4 + 1024;
+    if (init_sz > kMaxDecompressedBytes) init_sz = kMaxDecompressedBytes;
+    std::vector<uint8_t> out(init_sz);
 
     z_stream zs = {};
     inflateInit2(&zs, 15 + 16);  /* +16 = gzip */
@@ -296,7 +300,10 @@ static std::vector<uint8_t> _gz_decompress(const uint8_t *data, size_t sz) {
         if (rc != Z_OK && rc != Z_STREAM_END) { inflateEnd(&zs); return {}; }
         total = out.size() - zs.avail_out;
         if (rc != Z_STREAM_END && zs.avail_out == 0) {
-            out.resize(out.size() * 2);
+            if (out.size() >= kMaxDecompressedBytes) { inflateEnd(&zs); return {}; }
+            size_t next_sz = out.size() * 2;
+            if (next_sz > kMaxDecompressedBytes) next_sz = kMaxDecompressedBytes;
+            out.resize(next_sz);
         }
     } while (rc != Z_STREAM_END);
     inflateEnd(&zs);
