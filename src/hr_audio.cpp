@@ -177,12 +177,26 @@ struct WasapiStream {
         device   = dev;
         device->AddRef();
 
+        // BUGFIX (handle/COM leak on any Start() that fails partway):
+        // every early-return below used to just `return false` once
+        // device/client/mix_fmt/data_event/capture had already been
+        // partially acquired - leaking whichever of those had already been
+        // set (device's extra AddRef() above included) instead of releasing
+        // them. On its own this is a slow leak (repeatedly failing to open
+        // a WASAPI stream - a device that's unplugged, in exclusive use by
+        // another app, or a bad mic_device_id from Settings - just leaked a
+        // little more each time), but since Settings can call hr_audio_start()
+        // to preview a device, that "occasionally fails" path could be
+        // exercised often enough to add up over an app session. Every
+        // failure path now calls close() (defined below - already null-
+        // checks each field) before returning, exactly like the success
+        // path's own eventual teardown.
         HRESULT hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
                                       nullptr, (void**)&client);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { close(); return false; }
 
         hr = client->GetMixFormat(&mix_fmt);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { close(); return false; }
 
         channels = (uint16_t)mix_fmt->nChannels;
         rate     = mix_fmt->nSamplesPerSec;
@@ -192,19 +206,19 @@ struct WasapiStream {
                       | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
         hr = client->Initialize(mode, flags,
                                 2000000LL, 0, mix_fmt, nullptr);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { close(); return false; }
 
         data_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!data_event) return false;
+        if (!data_event) { close(); return false; }
         hr = client->SetEventHandle(data_event);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { close(); return false; }
 
         hr = client->GetService(__uuidof(IAudioCaptureClient),
                                 (void**)&capture);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { close(); return false; }
 
         hr = client->Start();
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { close(); return false; }
         QueryPerformanceFrequency(&clock_freq);
         QueryPerformanceCounter(&clock_t0);
         frames_total  = 0;
