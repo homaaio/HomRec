@@ -93,6 +93,8 @@ static int64_t _file_size(const char *path) {
 
 /* -- Process launch helpers ------------------------------------------------- */
 
+static bool _wants_hw_pixfmt(const std::string &codec_args);
+
 #ifdef _WIN32
 // Plain CreatePipe() (used here previously) hands back an anonymous
 // pipe that only supports blocking, synchronous I/O - the write end had no
@@ -158,9 +160,12 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
 
     PROCESS_INFORMATION pi{};
     std::wstring mut_cmd = cmdline;
+    DWORD priority_class = CREATE_NO_WINDOW |
+        (_wants_hw_pixfmt(ctx->codec_args) ? ABOVE_NORMAL_PRIORITY_CLASS
+                                            : NORMAL_PRIORITY_CLASS);
     bool ok = (CreateProcessW(nullptr, mut_cmd.data(),
                                nullptr, nullptr, ctx->pipe_input ? TRUE : FALSE,
-                               CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS,
+                               priority_class,
                                nullptr, nullptr, &si, &pi) != 0);
 
     if (ctx->pipe_input && hReadStdin) CloseHandle(hReadStdin);
