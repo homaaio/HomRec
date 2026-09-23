@@ -212,7 +212,18 @@ static int _jget_str(const char *json, const char *key, char *dst, int dstlen) {
     if (!v || *v != '"') return 0; ++v;
     int i = 0;
     while (*v && *v != '"' && i < dstlen - 1) {
-        if (*v == '\\' && *(v+1)) { ++v; }
+        if (*v == '\\' && *(v+1)) {
+            char e = *(v+1);
+            char out;
+            switch (e) {
+                case 'n': out = '\n'; break;
+                case 'r': out = '\r'; break;
+                default:  out = e;    break; // " and \ (and anything else) pass through as-is
+            }
+            dst[i++] = out;
+            v += 2;
+            continue;
+        }
         dst[i++] = *v++;
     }
     dst[i] = '\0';
