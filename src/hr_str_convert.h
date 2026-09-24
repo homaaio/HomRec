@@ -38,11 +38,34 @@ inline RecordingMode HrRecordingModeFromStr(const std::string &s) {
     return RecordingMode::Balanced;
 }
 
-inline std::string HrCaptureModeToStr(CaptureMode m) { return m == CaptureMode::Window ? "window" : "desktop"; }
-inline CaptureMode HrCaptureModeFromStr(const std::string &s) { return s == "window" ? CaptureMode::Window : CaptureMode::Desktop; }
+inline std::string HrCaptureModeToStr(CaptureMode m) {
+    if (m == CaptureMode::Window) return "window";
+    if (m == CaptureMode::Region) return "region";
+    return "desktop";
+}
+inline CaptureMode HrCaptureModeFromStr(const std::string &s) {
+    if (s == "window") return CaptureMode::Window;
+    if (s == "region") return CaptureMode::Region;
+    return CaptureMode::Desktop;
+}
 
 inline std::string HrVideoFormatToStr(VideoFormat f) { return f == VideoFormat::Mkv ? "mkv" : "mp4"; }
 inline VideoFormat HrVideoFormatFromStr(const std::string &s) { return s == "mkv" ? VideoFormat::Mkv : VideoFormat::Mp4; }
+
+inline std::string HrPostRecordHookTypeToStr(AppState::PostRecordHookType t) {
+    switch (t) {
+        case AppState::PostRecordHookType::Script:     return "script";
+        case AppState::PostRecordHookType::Move:       return "move";
+        case AppState::PostRecordHookType::OpenFolder: return "open_folder";
+        default:                                       return "none";
+    }
+}
+inline AppState::PostRecordHookType HrPostRecordHookTypeFromStr(const std::string &s) {
+    if (s == "script")      return AppState::PostRecordHookType::Script;
+    if (s == "move")        return AppState::PostRecordHookType::Move;
+    if (s == "open_folder") return AppState::PostRecordHookType::OpenFolder;
+    return AppState::PostRecordHookType::None;
+}
 
 // resolution_mode has always round-tripped through .hrc as a bare "0"/"1"
 // (see hrc_config.cpp's original Save()/Load()), not as a word - kept
