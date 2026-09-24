@@ -31,6 +31,11 @@
 #include <memory>
 
 struct lua_State; // fwd-declare, real definition comes from lua.h in the .cpp
+struct PluginPermissions {
+    bool network    = true;  // homrec.http_get()/http_post()
+    bool filesystem = true;  // homrec.log_to() (already sandboxed to logs\, see HrLogPaths::SanitizeLogFilename)
+    bool store      = true;  // homrec.store_get()/store_set()
+};
 
 struct PluginManifest {
     std::string id;
@@ -38,6 +43,7 @@ struct PluginManifest {
     std::string version;
     std::string author;    // optional; shown in the plugin list UI as "by <author>"
     std::string entry = "main.lua";
+    PluginPermissions permissions;
 };
 
 struct LoadedPlugin {
