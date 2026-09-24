@@ -317,6 +317,7 @@ void OverlaysDockPanel::AddTextOverlay(HWND parent, HINSTANCE hInst) {
     ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 60;
     ov.visible = true;
     state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
     Refresh();
 }
 
@@ -334,6 +335,7 @@ void OverlaysDockPanel::AddImageOverlay(HWND parent, HINSTANCE hInst) {
     ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 150;
     ov.visible = true;
     state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
     Refresh();
 }
 
@@ -351,6 +353,7 @@ void OverlaysDockPanel::AddGifOverlay(HWND parent, HINSTANCE hInst) {
     ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 150;
     ov.visible = true;
     state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
     Refresh();
 }
 
@@ -378,6 +381,7 @@ void OverlaysDockPanel::AddWebcamOverlay(HWND parent, HINSTANCE hInst) {
     ov.x = 40; ov.y = 40; ov.w = 240; ov.h = 180;
     ov.visible = true;
     state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
     Refresh();
 }
 
@@ -411,6 +415,7 @@ void OverlaysDockPanel::AddExternalOverlay(HWND parent, HINSTANCE hInst) {
     ov.h = layout.height > 0 ? layout.height : 150;
     ov.visible = true;
     state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
     Refresh();
 }
 
@@ -437,6 +442,7 @@ void OverlaysDockPanel::AddFromInputOverlayRegistry(HWND parent, HINSTANCE hInst
     ov.h = layout.height > 0 ? layout.height : 150;
     ov.visible = true;
     state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
     Refresh();
 }
 
@@ -450,6 +456,7 @@ void OverlaysDockPanel::ToggleVisibility(size_t idx) {
 void OverlaysDockPanel::RemoveAt(size_t idx) {
     if (idx >= state_.overlays.size()) return;
     state_.overlays.erase(state_.overlays.begin() + (ptrdiff_t)idx);
+    if (on_overlay_removed) on_overlay_removed();
     Refresh();
 }
 
