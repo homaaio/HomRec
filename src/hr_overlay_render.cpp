@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <ctime>
 #include <exception>
 
 namespace {
@@ -414,24 +415,64 @@ static void BlitBgraRect(uint8_t *dst, int dst_w, int dst_h,
 
 #endif // _WIN32
 
+namespace {
+bool HasDynamicToken(const char *text) {
+    return std::strstr(text, "{fps}") || std::strstr(text, "{time}") || std::strstr(text, "{date}");
+}
+
+std::string ExpandOverlayTextTokens(const char *tmpl, double fps) {
+    std::string s(tmpl);
+    if (s.find("{fps}") != std::string::npos) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.0f", fps);
+        size_t pos = 0;
+        while ((pos = s.find("{fps}", pos)) != std::string::npos) {
+            s.replace(pos, 5, buf);
+            pos += strlen(buf);
+        }
+    }
+    if (s.find("{time}") != std::string::npos || s.find("{date}") != std::string::npos) {
+        time_t now = time(nullptr);
+        struct tm lt{};
+#ifdef _WIN32
+        localtime_s(&lt, &now);
+#else
+        localtime_r(&now, &lt);
+#endif
+        char time_buf[16], date_buf[16];
+        strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &lt);
+        strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &lt);
+        size_t pos = 0;
+        while ((pos = s.find("{time}", pos)) != std::string::npos) {
+            s.replace(pos, 6, time_buf);
+            pos += strlen(time_buf);
+        }
+        pos = 0;
+        while ((pos = s.find("{date}", pos)) != std::string::npos) {
+            s.replace(pos, 6, date_buf);
+            pos += strlen(date_buf);
+        }
+    }
+    return s;
+}
+} // namespace
+
 const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderText(size_t idx, const HrOverlayDesc &ov) {
 #ifdef _WIN32
-    // OPT: cheap field comparison first -- avoids building/allocating the
-    // key string (several std::to_string() calls + concatenation) on every
-    // frame for the common case where a static text overlay hasn't
-    // changed since last frame. See TextImageSnapshot's comment in the
-    // header for why this exists.
+    bool dynamic = HasDynamicToken(ov.text);
+    std::string expanded_text = dynamic ? ExpandOverlayTextTokens(ov.text, current_fps_) : std::string(ov.text);
+    const char *text_for_key = expanded_text.c_str();
     auto &snap = snapshots_[idx];
     bool unchanged = snap.valid && std::strcmp(snap.type, "text") == 0 &&
                       snap.w == ov.w && snap.h == ov.h &&
                       snap.text_r == ov.text_r && snap.text_g == ov.text_g &&
                       snap.text_b == ov.text_b &&
-                      std::strncmp(snap.text, ov.text, sizeof(snap.text)) == 0 &&
+                      std::strncmp(snap.text, text_for_key, sizeof(snap.text)) == 0 &&
                       std::strncmp(snap.font_name, ov.font_name, sizeof(snap.font_name)) == 0;
     auto it0 = cache_.find(idx);
     if (unchanged && it0 != cache_.end()) return &it0->second;
 
-    std::string key = std::string("t|") + ov.text + "|" + std::to_string(ov.w) + "x" + std::to_string(ov.h)
+    std::string key = std::string("t|") + text_for_key + "|" + std::to_string(ov.w) + "x" + std::to_string(ov.h)
                      + "|" + std::to_string(ov.text_r) + "," + std::to_string(ov.text_g) + "," + std::to_string(ov.text_b)
                      + "|" + ov.font_name;
     auto it = cache_.find(idx);
@@ -439,16 +480,16 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderText(size_t 
         snap.valid = true; _scopy_local(snap.type, sizeof(snap.type), "text");
         snap.w = ov.w; snap.h = ov.h;
         snap.text_r = ov.text_r; snap.text_g = ov.text_g; snap.text_b = ov.text_b;
-        _scopy_local(snap.text, sizeof(snap.text), ov.text);
+        _scopy_local(snap.text, sizeof(snap.text), text_for_key);
         _scopy_local(snap.font_name, sizeof(snap.font_name), ov.font_name);
         return &it->second;
     }
 
     // Widen the UTF-8-ish text buffer (best-effort; overlay text is normally
     // plain ASCII entered through the UI).
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, ov.text, -1, nullptr, 0);
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, text_for_key, -1, nullptr, 0);
     std::wstring wtext(wlen > 0 ? wlen - 1 : 0, L'\0');
-    if (wlen > 1) MultiByteToWideChar(CP_UTF8, 0, ov.text, -1, wtext.data(), wlen);
+    if (wlen > 1) MultiByteToWideChar(CP_UTF8, 0, text_for_key, -1, wtext.data(), wlen);
 
     int flen = MultiByteToWideChar(CP_UTF8, 0, ov.font_name, -1, nullptr, 0);
     std::wstring wfont(flen > 0 ? flen - 1 : 0, L'\0');
@@ -461,7 +502,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderText(size_t 
     snap.valid = true; _scopy_local(snap.type, sizeof(snap.type), "text");
     snap.w = ov.w; snap.h = ov.h;
     snap.text_r = ov.text_r; snap.text_g = ov.text_g; snap.text_b = ov.text_b;
-    _scopy_local(snap.text, sizeof(snap.text), ov.text);
+    _scopy_local(snap.text, sizeof(snap.text), text_for_key);
     _scopy_local(snap.font_name, sizeof(snap.font_name), ov.font_name);
     return &cache_[idx];
 #else
@@ -778,9 +819,10 @@ void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {    auto prune =
 }
 
 void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
-                               const std::vector<HrOverlayDesc> &overlays)
+                               const std::vector<HrOverlayDesc> &overlays, double current_fps)
 {
     if (!base_bgra || base_w <= 0 || base_h <= 0) return;
+    current_fps_ = current_fps;
 
     PruneStaleCaches(overlays.size());
 
