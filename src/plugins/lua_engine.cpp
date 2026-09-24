@@ -43,6 +43,54 @@ std::string ExtractJsonString(const std::string &json, const std::string &key) {
     return json.substr(pos + 1, end - pos - 1);
 }
 
+// Finds a top-level object value for `key` (e.g. `"permissions": { ... }`)
+// and returns just the inside of its braces, or empty if the key isn't
+// present. Simple brace-counting, not a general JSON parser (same caveat
+// as ExtractJsonString() above) - fine for plugin.json's "permissions"
+// block, which is expected to stay a flat {network, filesystem, store}
+// shape with no further nesting of its own.
+std::string ExtractJsonObject(const std::string &json, const std::string &key) {
+    std::string needle = "\"" + key + "\"";
+    size_t pos = json.find(needle);
+    if (pos == std::string::npos) return {};
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return {};
+    pos = json.find('{', pos);
+    if (pos == std::string::npos) return {};
+    int depth = 0;
+    size_t start = pos;
+    for (size_t i = pos; i < json.size(); ++i) {
+        if (json[i] == '{') depth++;
+        else if (json[i] == '}') {
+            depth--;
+            if (depth == 0) return json.substr(start + 1, i - start - 1);
+        }
+    }
+    return {};
+}
+
+// Reads a bare JSON boolean (true/false, unquoted) for `key` out of a
+// flat object chunk like the one ExtractJsonObject() above returns.
+// Returns def if the key isn't present at all, so a "permissions" block
+// that only mentions some of the three flags leaves the rest at their
+// (allowed-by-default) value rather than needing every flag spelled out.
+bool ExtractJsonBool(const std::string &json, const std::string &key, bool def) {
+    std::string needle = "\"" + key + "\"";
+    size_t pos = json.find(needle);
+    if (pos == std::string::npos) return def;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return def;
+    size_t comma = json.find(',', pos);
+    size_t brace = json.find('}', pos);
+    size_t end = std::min(comma == std::string::npos ? json.size() : comma,
+                           brace == std::string::npos ? json.size() : brace);
+    size_t t = json.find("true", pos);
+    size_t f = json.find("false", pos);
+    if (t != std::string::npos && t < end) return true;
+    if (f != std::string::npos && f < end) return false;
+    return def;
+}
+
 bool DirectoryExists(const std::string &path) {
     DWORD attrs = GetFileAttributesA(path.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
@@ -108,6 +156,13 @@ bool LuaPluginEngine::LoadPlugin(const std::string &plugin_dir_path) {
     std::string entry = ExtractJsonString(manifest_json, "entry");
     if (!entry.empty()) manifest.entry = entry;
 
+    std::string perms_json = ExtractJsonObject(manifest_json, "permissions");
+    if (!perms_json.empty()) {
+        manifest.permissions.network    = ExtractJsonBool(perms_json, "network", true);
+        manifest.permissions.filesystem = ExtractJsonBool(perms_json, "filesystem", true);
+        manifest.permissions.store      = ExtractJsonBool(perms_json, "store", true);
+    }
+
     if (manifest.id.empty()) return false;
     if (plugins_.count(manifest.id)) return true; // already loaded, nothing to do
 
@@ -148,6 +203,13 @@ bool LuaPluginEngine::LoadPlugin(const std::string &plugin_dir_path) {
     plugins_[manifest.id] = std::move(plugin);
     HrPluginLog::Info(manifest.id, "loaded (version " +
                        (manifest.version.empty() ? std::string("?") : manifest.version) + ")");
+    if (!manifest.permissions.network || !manifest.permissions.filesystem || !manifest.permissions.store) {
+        std::string denied;
+        if (!manifest.permissions.network)    denied += "network ";
+        if (!manifest.permissions.filesystem) denied += "filesystem ";
+        if (!manifest.permissions.store)      denied += "store ";
+        HrPluginLog::Info(manifest.id, "permissions declared in plugin.json - disabled: " + denied);
+    }
     return true;
 }
 
