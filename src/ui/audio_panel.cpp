@@ -6,14 +6,17 @@
 extern "C" {
     void hr_audio_set_volumes(float mic_vol, float sys_vol, int mic_mute, int sys_mute);
     void hr_audio_get_levels(int *out_mic, int *out_sys);
-    uint32_t hr_lerp_color(float t);
     void hr_peak_decay(int level, int *peak, int *peak_decay);
 }
 
 namespace {
-wxColour U32ToColour(uint32_t rgb) {
-    // hr_lerp_color returns 0x00RRGGBB.
-    return wxColour((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+constexpr int kZoneYellowStart = 22;  // ~ -20 dBFS
+constexpr int kZoneRedStart    = 78;  // ~ -9 dBFS (clipping zone starts here)
+
+wxColour ZoneColour(int level_0_100) {
+    if (level_0_100 >= kZoneRedStart)    return wxColour(232, 68, 62);    // red   - clipping zone
+    if (level_0_100 >= kZoneYellowStart) return wxColour(230, 190, 60);   // yellow
+    return wxColour(110, 200, 130);                                      // green
 }
 } // namespace
 
@@ -40,10 +43,38 @@ void LevelMeterPanel::OnPaint(wxPaintEvent &) {
     dc.SetPen(*wxTRANSPARENT_PEN);
     dc.DrawRectangle(0, 0, cs.GetWidth(), cs.GetHeight());
 
-    int fillW = (int)((level_ / 100.0) * cs.GetWidth());
+    int w = cs.GetWidth();
+    int fillW = (int)((level_ / 100.0) * w);
+    int yellowPx = (int)((kZoneYellowStart / 100.0) * w);
+    int redPx    = (int)((kZoneRedStart    / 100.0) * w);
+
+    // Draw the lit portion of the bar in up to three segments so the
+    // color actually changes where the level crosses each zone boundary,
+    // instead of the whole filled bar being one single (blended) color.
     if (fillW > 0) {
-        dc.SetBrush(wxBrush(U32ToColour(hr_lerp_color(level_ / 100.0f))));
-        dc.DrawRectangle(0, 0, fillW, cs.GetHeight());
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        int greenEnd  = std::min(fillW, yellowPx);
+        int yellowEnd = std::min(fillW, redPx);
+        if (greenEnd > 0) {
+            dc.SetBrush(wxBrush(ZoneColour(0)));
+            dc.DrawRectangle(0, 0, greenEnd, cs.GetHeight());
+        }
+        if (yellowEnd > yellowPx) {
+            dc.SetBrush(wxBrush(ZoneColour(kZoneYellowStart)));
+            dc.DrawRectangle(yellowPx, 0, yellowEnd - yellowPx, cs.GetHeight());
+        }
+        if (fillW > redPx) {
+            dc.SetBrush(wxBrush(ZoneColour(kZoneRedStart)));
+            dc.DrawRectangle(redPx, 0, fillW - redPx, cs.GetHeight());
+        }
+    }
+
+    // Static marker at the clipping-zone boundary, drawn regardless of
+    // the current level - so where clipping starts is visible even while
+    // quiet, not just after the fact once it's already happened.
+    if (redPx > 0 && redPx < w) {
+        dc.SetPen(wxPen(wxColour(232, 68, 62), 1));
+        dc.DrawLine(redPx, 0, redPx, cs.GetHeight());
     }
 
     int peakX = (int)((peak_ / 100.0) * cs.GetWidth());
