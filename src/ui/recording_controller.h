@@ -102,6 +102,7 @@ private:
     // and the thread-lambda doesn't have to duplicate this. Not meant to
     // be called from anywhere but that lambda.
     void StopFinalizeTail(bool keep_for_preview);
+    void RunPostRecordHook(const std::wstring &output_path);
 
     void FinishPipelineAfterStop(bool keep_for_preview);
 
@@ -331,6 +332,13 @@ private:
     // always expand to *something* filename-safe rather than leaving a
     // literal "{app}" in the output path.
     std::string ResolveCaptureAppName() const;
+    // Side-effect-free check that the person's chosen Window/Region capture
+    // target can actually be recorded right now. Returns false (with a
+    // user-facing reason in error_out) if a picked window is gone/minimized
+    // or the picked region is entirely off every monitor. Start() and
+    // EnableInstantReplay() use it to refuse to start rather than silently
+    // recording the WHOLE desktop when the person asked for one window/region.
+    bool CheckCaptureTarget(std::wstring &error_out) const;
     // Shared by EnableInstantReplay()/SaveReplay(): (re)starts the
     // background segment-writer ffmpeg process into a fresh run
     // subfolder and points pipeline_'s recording pipe at it. Assumes
@@ -478,6 +486,13 @@ private:
         int monitor_id = -1;
         CaptureMode capture_mode = CaptureMode::Desktop;
         std::string capture_window_title;
+        // The picked window's HWND and the region rect drive what the
+        // pipeline crops to, so changing either has to rebuild/re-crop the
+        // preview pipeline too - they used to be missing from this
+        // comparison, leaving the live preview on the full desktop after
+        // File > Select Window/Region until something unrelated changed.
+        HWND capture_window_hwnd = nullptr;
+        int region_x = 0, region_y = 0, region_w = 0, region_h = 0;
         int target_fps = -1;
         int preview_width = -1, preview_height = -1;
         int preview_quality_pct = -1;
@@ -488,6 +503,9 @@ private:
         bool operator==(const PreviewCaptureSettings &o) const {
             return disable_preview == o.disable_preview && monitor_id == o.monitor_id &&
                    capture_mode == o.capture_mode && capture_window_title == o.capture_window_title &&
+                   capture_window_hwnd == o.capture_window_hwnd &&
+                   region_x == o.region_x && region_y == o.region_y &&
+                   region_w == o.region_w && region_h == o.region_h &&
                    target_fps == o.target_fps && preview_width == o.preview_width &&
                    preview_height == o.preview_height && preview_quality_pct == o.preview_quality_pct;
         }
@@ -527,6 +545,17 @@ private:
     static constexpr int kPreviewRetryMaxSeconds = 30;
     static constexpr int kPreviewRetryBackoffAfter = 5;
     int mic_level_ = 0, sys_level_ = 0;
+
+    // -- Auto-pause/resume on microphone silence (todo2.3.md section 3) --
+    // last_loud_time_ is reset to "now" every PollStats() tick where the
+    // mic is at/above silence_threshold_db; once it's been longer than
+    // silence_duration_sec since that last happened, PollStats() pauses
+    // the recording (auto_paused_by_silence_ = true, so the *next* loud
+    // tick knows to resume it - a manual pause the user pressed
+    // themselves is left alone, see PollStats()'s comment). Reset
+    // (unset) on every fresh Start().
+    std::chrono::steady_clock::time_point last_loud_time_ = std::chrono::steady_clock::now();
+    bool auto_paused_by_silence_ = false;
     int capture_w_ = 0, capture_h_ = 0; // native monitor resolution - MUST match what DXGI actually captures
     // DXGI output index (0-based) for the monitor ResolveCaptureSize() just
     // resolved state_.monitor_id to - passed into hr_pl_create() so the

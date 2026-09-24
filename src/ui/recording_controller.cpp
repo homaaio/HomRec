@@ -4,10 +4,12 @@
 #include "../hr_overlay_render.h"
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
                       // QueryFullProcessImageNameA (kernel32) - ResolveCaptureAppName()'s {app} lookup
+#include <shellapi.h> // ShellExecuteW - RunPostRecordHook()'s "open_folder" mode
 #include <vector>
 #include <thread>
 #include <exception>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <algorithm>
 #include <fstream>
@@ -29,7 +31,8 @@ extern "C" {
     // hr_ui_utils.cpp (narrow-string API - see README audit note: the core
     // is split between wide- and narrow-string exports depending on which
     // file it landed in; this class just calls each the way it expects).
-    void hr_filename_from_template(const char *tmpl, const char *folder, const char *app_name, char *out, int out_len);
+    void hr_filename_from_template(const char *tmpl, const char *folder, const char *app_name, char *out, int out_len,
+                                    const char *preset_name);
     int hr_make_output_dir(const char *path);
     int hr_path_exists(const char *path);
     float hr_file_size_mb(const char *path);
@@ -242,13 +245,14 @@ std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
 // Resolves the {app} filename-template placeholder - see the header
 // comment on the declaration for what this falls back to and why.
 std::string RecordingController::ResolveCaptureAppName() const {
+    if (state_.capture_mode == CaptureMode::Region) return "Region";
     if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) {
         return "Desktop";
     }
 
     HWND hwnd = nullptr;
     RECT r{};
-    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r) || !hwnd) {
+    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd) || !hwnd) {
         return "Desktop"; // window's gone (closed, title changed) - fall back rather than emit "{app}" literally
     }
 
@@ -289,7 +293,7 @@ std::wstring RecordingController::BuildOutputPath() {
     char buf[256] = {};
     std::string app_name = ResolveCaptureAppName();
     hr_filename_from_template(state_.filename_template.c_str(), state_.output_folder.c_str(),
-                               app_name.c_str(), buf, 256);
+                               app_name.c_str(), buf, 256, state_.active_preset_name.c_str());
     return WideFromNarrow(buf);
 }
 
@@ -328,6 +332,40 @@ void RecordingController::ComputeOutputDims(int src_w, int src_h, int &out_w, in
     if (out_h % 2) out_h--;
 }
 
+bool RecordingController::CheckCaptureTarget(std::wstring &error_out) const {
+    if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
+        HWND hwnd = nullptr;
+        RECT r{};
+        if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd)) {
+            error_out = L"The window you selected (\"" + WideFromNarrow(state_.capture_window_title) +
+                        L"\") is closed, hidden or minimized, so it can't be recorded.\n\n"
+                        L"Restore it, or choose File > Select Window... again "
+                        L"(or \"Use full desktop\") and start recording again.";
+            HrLog::Error("Start refused: selected window '" + state_.capture_window_title +
+                         "' not found/minimized - not falling back to full-desktop capture.");
+            return false;
+        }
+        if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) {
+            error_out = L"The window you selected is not on any screen right now, so it can't be recorded.\n\n"
+                        L"Move it onto a screen, or choose File > Select Window... again.";
+            HrLog::Error("Start refused: selected window '" + state_.capture_window_title +
+                         "' is entirely off-screen - not falling back to full-desktop capture.");
+            return false;
+        }
+    } else if (state_.capture_mode == CaptureMode::Region && state_.region_w > 0 && state_.region_h > 0) {
+        RECT r{state_.region_x, state_.region_y,
+               state_.region_x + state_.region_w, state_.region_y + state_.region_h};
+        if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) {
+            error_out = L"The region you selected is no longer on any screen (a monitor may have been "
+                        L"disconnected), so it can't be recorded.\n\nChoose File > Select Region... again.";
+            HrLog::Error("Start refused: selected region is entirely off-screen - not falling back to "
+                         "full-desktop capture.");
+            return false;
+        }
+    }
+    return true;
+}
+
 void RecordingController::ResolveCaptureSize() {
     void *di = hr_di_create();
     hr_di_refresh(di);
@@ -335,22 +373,40 @@ void RecordingController::ResolveCaptureSize() {
     float dpi = 96.0f;
     int idx = state_.monitor_id > 0 ? state_.monitor_id - 1 : 0;
 
+    // Unified "crop target" rect in virtual-desktop coordinates, resolved
+    // once, and used below for BOTH which monitor to capture and where to
+    // crop it - for either Window capture (from the live window's RECT)
+    // or Region capture (todo2.3.md's "Захват произвольной области
+    // экрана", from AppState::region_x/y/w/h, set by the region-picker
+    // overlay). Desktop mode leaves have_target false and crop_*_ at 0,
+    // same as before this was generalized from window-only.
+    RECT target_rect{};
+    bool have_target = false;
+    bool is_window = (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty());
+    bool is_region = (state_.capture_mode == CaptureMode::Region && state_.region_w > 0 && state_.region_h > 0);
+
     HWND capture_hwnd = nullptr;
-    RECT capture_win_rect{};
-    bool have_window = false;
-    if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
-        have_window = HR_ResolveCaptureWindow(state_.capture_window_title, capture_hwnd, capture_win_rect);
-        if (have_window) {
-            int wcx = (capture_win_rect.left + capture_win_rect.right) / 2;
-            int wcy = (capture_win_rect.top + capture_win_rect.bottom) / 2;
-            int count = hr_di_count(di);
-            for (int i = 0; i < count; ++i) {
-                int tx = 0, ty = 0, tw = 0, th = 0; float td = 96.0f;
-                if (!hr_di_get(di, i, &tx, &ty, &tw, &th, &td)) continue;
-                if (wcx >= tx && wcx < tx + tw && wcy >= ty && wcy < ty + th) {
-                    idx = i;
-                    break;
-                }
+    if (is_window) {
+        have_target = HR_ResolveCaptureWindow(state_.capture_window_title, capture_hwnd, target_rect,
+                                              state_.capture_window_hwnd);
+    } else if (is_region) {
+        target_rect.left = state_.region_x;
+        target_rect.top = state_.region_y;
+        target_rect.right = state_.region_x + state_.region_w;
+        target_rect.bottom = state_.region_y + state_.region_h;
+        have_target = true;
+    }
+
+    if (have_target) {
+        int tcx = (target_rect.left + target_rect.right) / 2;
+        int tcy = (target_rect.top + target_rect.bottom) / 2;
+        int count = hr_di_count(di);
+        for (int i = 0; i < count; ++i) {
+            int tx = 0, ty = 0, tw = 0, th = 0; float td = 96.0f;
+            if (!hr_di_get(di, i, &tx, &ty, &tw, &th, &td)) continue;
+            if (tcx >= tx && tcx < tx + tw && tcy >= ty && tcy < ty + th) {
+                idx = i;
+                break;
             }
         }
     }
@@ -389,20 +445,20 @@ void RecordingController::ResolveCaptureSize() {
     // itself captures.
     ComputeOutputDims(mw, mh, output_w_, output_h_);
 
-    // ====== WINDOW CAPTURE: crop the now-correctly-selected monitor's
-    // frame down to the window's rect ======
-    // Reuses the resolve done above (have_window/capture_win_rect)
-    // instead of calling HR_ResolveCaptureWindow() a second time - besides
-    // the redundant EnumWindows() pass, re-resolving here could in theory
-    // hit a narrow window between the two calls where the window closed
-    // and its title got reused by something else, cropping to the wrong
-    // window's rect. One resolve, used consistently for both which
-    // monitor to capture and where to crop it.
+    // ====== WINDOW/REGION CAPTURE: crop the now-correctly-selected
+    // monitor's frame down to the target rect ======
+    // Reuses the resolve done above (have_target/target_rect) instead of
+    // re-resolving here - besides the redundant EnumWindows() pass for
+    // Window mode, re-resolving could in theory hit a narrow window
+    // between two calls where the window closed and its title got reused
+    // by something else, cropping to the wrong window's rect. One
+    // resolve, used consistently for both which monitor to capture and
+    // where to crop it.
     crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
-    if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
-        if (have_window) {
-            RECT r = capture_win_rect;
-            // Window rect is in virtual-desktop coordinates; crop_x_/y_
+    if (is_window || is_region) {
+        if (have_target) {
+            RECT r = target_rect;
+            // Target rect is in virtual-desktop coordinates; crop_x_/y_
             // need to be relative to the captured monitor's own frame
             // (monitor_left/top, set above), matching what bgra_buf
             // actually holds.
@@ -411,7 +467,11 @@ void RecordingController::ResolveCaptureSize() {
             // Clamp to the monitor bounds - hr_pl_set_capture_rect() also
             // clamps defensively, but doing it here too means output_w_/
             // output_h_ (computed from ww/wh below) reflect the actual
-            // clamped crop size, not the pre-clamp one.
+            // clamped crop size, not the pre-clamp one. For a region that
+            // spans two monitors, this means only the part that falls on
+            // the resolved (majority-overlap-by-center) monitor is kept -
+            // same letterboxing-by-clamp behavior Window capture already
+            // had for a window that's partly off-monitor.
             if (wx < 0) { ww += wx; wx = 0; }
             if (wy < 0) { wh += wy; wy = 0; }
             if (wx + ww > capture_w_) ww = capture_w_ - wx;
@@ -422,11 +482,14 @@ void RecordingController::ResolveCaptureSize() {
             if (ww > 0 && wh > 0) {
                 crop_x_ = wx; crop_y_ = wy; crop_w_ = ww; crop_h_ = wh;
                 ComputeOutputDims(ww, wh, output_w_, output_h_);
-            } else {
+            } else if (is_window) {
                 HrLog::Warn("Window capture: '" + state_.capture_window_title +
                             "' is entirely off the selected monitor - falling back to full desktop.");
+            } else {
+                HrLog::Warn("Region capture: the selected region is entirely off the selected "
+                            "monitor - falling back to full desktop.");
             }
-        } else {
+        } else if (is_window) {
             // Window was closed/renamed since being picked, or isn't on
             // screen anymore. Fall back to full-desktop capture rather
             // than starting a recording of nothing/garbage - crop_*_ are
@@ -435,6 +498,9 @@ void RecordingController::ResolveCaptureSize() {
             HrLog::Warn("Window capture: couldn't find a window titled '" +
                         state_.capture_window_title + "' - falling back to full desktop.");
         }
+        // is_region with !have_target can't happen (is_region already
+        // requires region_w/h > 0, and have_target is unconditionally set
+        // true for it above).
     }
 }
 
@@ -442,6 +508,12 @@ bool RecordingController::Start(std::wstring &error_out) {
     if (state_.recording) { error_out = L"Already recording."; return false; }
     if (finalizing_) { error_out = L"The previous recording is still being saved - try again in a moment."; return false; }
     if (finalize_thread_.joinable()) finalize_thread_.join();
+
+    // Refuse up front (before Instant Replay gets paused or anything else
+    // is touched) if the chosen window/region can't be recorded - the old
+    // behavior of quietly recording the whole desktop instead is exactly
+    // what "I picked a window but my entire screen got recorded" was.
+    if (!CheckCaptureTarget(error_out)) return false;
 
     // Instant Replay and a manual recording share this class's one
     // pipeline_ and hr_pl_set_recording()'s one active pipe_fd (see the
@@ -638,6 +710,8 @@ bool RecordingController::Start(std::wstring &error_out) {
     last_drops_seen_ = 0;
     overload_streak_ = 0;
     overloaded_ = false;
+    last_loud_time_ = std::chrono::steady_clock::now();
+    auto_paused_by_silence_ = false;
     HrLog::Info("Recording started -> " + NarrowFromWide(current_output_path_) +
                 " (" + std::to_string(output_w_) + "x" + std::to_string(output_h_) +
                 " @ " + std::to_string(state_.target_fps) + "fps, captured at " +
@@ -888,6 +962,79 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     overloaded_ = false;
     overload_streak_ = 0;
     HrLog::Info("Recording stopped -> " + base);
+
+    RunPostRecordHook(last_output_path_);
+}
+
+void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
+    if (!state_.post_record_hook_enabled) return;
+    if (state_.post_record_hook_type == AppState::PostRecordHookType::None) return;
+    if (output_path.empty() || !hr_path_exists(NarrowFromWide(output_path).c_str())) {
+        HrLog::Warn("Recording: post-record hook skipped - no finished output file to act on.");
+        return;
+    }
+
+    switch (state_.post_record_hook_type) {
+    case AppState::PostRecordHookType::OpenFolder: {
+        // Same as the existing "Open Folder" button - opens the
+        // configured output_folder in Explorer, not necessarily this
+        // specific file's folder (they're normally the same, but a
+        // filename_template with a folder-changing {app}/{preset} token
+        // could in principle differ - output_folder is the honest
+        // "where recordings normally land" answer).
+        std::wstring folder = WideFromNarrow(state_.output_folder);
+        HINSTANCE r = ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if ((INT_PTR)r <= 32) {
+            HrLog::Error("Recording: post-record hook couldn't open the output folder.");
+        }
+        break;
+    }
+    case AppState::PostRecordHookType::Move: {
+        std::wstring dest_dir = WideFromNarrow(state_.post_record_hook_path);
+        if (dest_dir.empty()) {
+            HrLog::Warn("Recording: post-record hook is set to \"move\" but no destination folder is configured.");
+            break;
+        }
+        CreateDirectoryW(dest_dir.c_str(), nullptr);
+        size_t slash = output_path.find_last_of(L"\\/");
+        std::wstring filename = (slash == std::wstring::npos) ? output_path : output_path.substr(slash + 1);
+        if (!dest_dir.empty() && dest_dir.back() != L'\\' && dest_dir.back() != L'/') dest_dir += L'\\';
+        std::wstring dest_path = dest_dir + filename;
+        if (!MoveFileExW(output_path.c_str(), dest_path.c_str(),
+                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+            HrLog::Error("Recording: post-record hook couldn't move the output file to " +
+                         NarrowFromWide(dest_dir));
+        } else {
+            HrLog::Info("Recording: post-record hook moved the output file to " + NarrowFromWide(dest_dir));
+        }
+        break;
+    }
+    case AppState::PostRecordHookType::Script: {
+        std::wstring script = WideFromNarrow(state_.post_record_hook_path);
+        if (script.empty()) {
+            HrLog::Warn("Recording: post-record hook is set to \"script\" but no script path is configured.");
+            break;
+        }
+        std::wstring cmdline = L"\"" + script + L"\" \"" + output_path + L"\"";
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
+        buf.push_back(L'\0');
+        if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
+                            0, nullptr, nullptr, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            HrLog::Info("Recording: post-record hook launched " + NarrowFromWide(script));
+        } else {
+            HrLog::Error("Recording: post-record hook couldn't launch " + NarrowFromWide(script) +
+                         " (error " + std::to_string(GetLastError()) + ")");
+        }
+        break;
+    }
+    default:
+        break;
+    }
 }
 
 void RecordingController::TogglePause() {
@@ -938,6 +1085,28 @@ void RecordingController::PollStats() {
     hr_ctl_update_stats(ctl_, (long long)(size_mb * 1024.0 * 1024.0));
 
     hr_audio_get_levels(&mic_level_, &sys_level_);
+    
+    if (state_.auto_pause_on_silence && !mic_muted_) {
+        double threshold_rms = 32768.0 * std::pow(10.0, state_.silence_threshold_db / 20.0);
+        int threshold_level = (int)(threshold_rms / 150.0);
+        auto now = std::chrono::steady_clock::now();
+        if (mic_level_ >= threshold_level) {
+            last_loud_time_ = now;
+            if (auto_paused_by_silence_ && state_.paused) {
+                TogglePause();
+                auto_paused_by_silence_ = false;
+                HrLog::Info("Recording: mic is active again - auto-resumed.");
+            }
+        } else if (!state_.paused) {
+            double quiet_for = std::chrono::duration<double>(now - last_loud_time_).count();
+            if (quiet_for >= (double)state_.silence_duration_sec) {
+                TogglePause();
+                auto_paused_by_silence_ = true;
+                HrLog::Info("Recording: mic has been silent for " +
+                            std::to_string(state_.silence_duration_sec) + "s - auto-paused.");
+            }
+        }
+    }
 }
 
 void RecordingController::SyncOverlays() {
@@ -1193,6 +1362,7 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
         error_out = L"FFmpeg not found.";
         return false;
     }
+    if (!CheckCaptureTarget(error_out)) return false;
 
     int prev_w = capture_w_, prev_h = capture_h_;
     ResolveCaptureSize();
@@ -1767,6 +1937,9 @@ void RecordingController::RefreshPreviewSettings() {
     now.monitor_id = state_.monitor_id;
     now.capture_mode = state_.capture_mode;
     now.capture_window_title = state_.capture_window_title;
+    now.capture_window_hwnd = state_.capture_window_hwnd;
+    now.region_x = state_.region_x; now.region_y = state_.region_y;
+    now.region_w = state_.region_w; now.region_h = state_.region_h;
     now.target_fps = state_.target_fps;
     now.preview_width = state_.preview_width;
     now.preview_height = state_.preview_height;
