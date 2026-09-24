@@ -29,6 +29,7 @@
 #include <cctype>
 #include <cstring>
 #include <cmath>
+#include <ctime>
 
 extern "C" {
     void *hr_hk_create();
@@ -740,7 +741,7 @@ void PreviewPanel::ExitSnapshotMode() {
 // ---------------------------------------------------------------------------
 HomRecMainFrame::HomRecMainFrame()
     : wxFrame(nullptr, wxID_ANY, "HomRec", wxDefaultPosition, wxSize(1300, 750)),
-      countdown_timer_(this),
+      countdown_timer_(this), schedule_timer_(this),
       preview_timer_(this), stats_timer_(this), level_meter_timer_(this), restore_topmost_timer_(this) {
     g_frame = this;
     SetIcon(wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE));
@@ -906,8 +907,10 @@ HomRecMainFrame::HomRecMainFrame()
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnLevelMeterTimer, this, level_meter_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnRestoreTopmostTimer, this, restore_topmost_timer_.GetId());
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnCountdownTimer, this, countdown_timer_.GetId());
+    Bind(wxEVT_TIMER, &HomRecMainFrame::OnScheduleTimer, this, schedule_timer_.GetId());
     preview_timer_.Start(1000 / 20);
     stats_timer_.Start(500);
+    schedule_timer_.Start(1000);
     RestartLevelMeterTimer();
 
     // Upper bound extended to ID_FILE_IMPORT_HRP (1028) - it's the
@@ -987,6 +990,7 @@ void HomRecMainFrame::BuildMenuBar() {
     fileMenu->Append(ID_FILE_OPEN_RECORDINGS, wxString::FromUTF8(lang_.Get("open_recordings")));
     fileMenu->Append(ID_FILE_OPEN_PROGRAM_FILES, wxString::FromUTF8(lang_.Get("open_program_files")));
     fileMenu->Append(ID_FILE_SELECT_WINDOW, wxString::FromUTF8(lang_.Get("select_window")));
+    fileMenu->Append(ID_FILE_SELECT_REGION, wxString::FromUTF8(lang_.Get("select_region")));
     fileMenu->Append(ID_FILE_HIDE_WINDOW, wxString::FromUTF8(lang_.Get("hide_window")));
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXPORT_HRC, wxString::FromUTF8(lang_.Get("export_hrc")));
@@ -1173,6 +1177,8 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
         if (!rec_raw_) return;
         ShowOverlayPlacementDialog(this, state_, rec_raw_, theme_);
     };
+    overlays_panel_->on_overlay_added = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_added"); };
+    overlays_panel_->on_overlay_removed = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_removed"); };
     parentSizer->Add(overlays_host_, 0, wxEXPAND | wxLEFT, 15);
     overlays_panel_->SetVisible(state_.show_overlays_panel);
     overlays_host_->Show(state_.show_overlays_panel);
@@ -1428,6 +1434,31 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
     wxString msg = wxString::Format(wxString::FromUTF8("Starting in %d\u2026"), countdown_remaining_);
     SetStatusState(msg, theme_.warning);
     if (file_lbl_) file_lbl_->SetLabel(msg);
+}
+
+void HomRecMainFrame::OnScheduleTimer(wxTimerEvent &) {
+    if (!state_.scheduled_start_enabled || state_.scheduled_start_time.empty()) return;
+    if (state_.recording) return;
+
+    time_t now = time(nullptr);
+    struct tm *lt = localtime(&now);
+    if (!lt) return;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02d:%02d", lt->tm_hour, lt->tm_min);
+    std::string current_minute = buf;
+
+    // Only fire the instant the current minute first matches the target
+    // (schedule_last_matched_minute_ != current_minute) - without this,
+    // "12:00" would re-trigger RequestStart() every second for the
+    // entire 12:00-12:01 minute. Once the minute rolls over past the
+    // target, this naturally re-arms for the same time tomorrow, with no
+    // date-tracking needed - a mismatch just means "not the trigger
+    // instant right now".
+    if (current_minute == state_.scheduled_start_time && current_minute != schedule_last_matched_minute_) {
+        schedule_last_matched_minute_ = current_minute;
+        HrLog::Info("Recording: scheduled start time (" + current_minute + ") reached - starting.");
+        RequestStart();
+    }
 }
 
 void HomRecMainFrame::DoStart() {
@@ -1869,6 +1900,19 @@ void HomRecMainFrame::OnRestoreTopmostTimer(wxTimerEvent &) {
 void HomRecMainFrame::OnStartClicked(wxCommandEvent &) { if (state_.recording) DoStop(); else RequestStart(); }
 void HomRecMainFrame::OnPauseClicked(wxCommandEvent &) { DoPause(); }
 
+// Called right after the window/region pickers return. Both pickers only
+// write into state_ - without this the live preview kept showing (and
+// re-using, for Start()) a pipeline built for the OLD target until some
+// unrelated Settings change happened to rebuild it, so it looked like the
+// pick had been ignored and the full screen was still being captured.
+// Skipped while recording: the running pipeline keeps its crop until Stop(),
+// and RefreshPreviewSettings()'s change-detection snapshot deliberately
+// stays stale so the next call after Stop() rebuilds for the new target.
+void HomRecMainFrame::OnCaptureTargetChanged() {
+    if (!state_.recording && rec_raw_) rec_raw_->RefreshPreviewSettings();
+    PersistSettings();
+}
+
 void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
     switch (evt.GetId()) {
         case ID_FILE_EXIT: Close(true); break;
@@ -1880,6 +1924,11 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         case ID_FILE_SELECT_WINDOW:
             ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
+            OnCaptureTargetChanged();
+            break;
+        case ID_FILE_SELECT_REGION:
+            ShowRegionPickerOverlay(GetHWND(), wxGetInstance(), state_);
+            OnCaptureTargetChanged();
             break;
         case ID_FILE_HIDE_WINDOW:
             ShowHideWindowDialog(GetHWND(), wxGetInstance(), state_);

@@ -68,6 +68,7 @@ enum MenuCommandId {
     ID_FILE_SET_PRESET      = 1026,
     ID_FILE_OPEN_PROGRAM_FILES = 1027,
     ID_FILE_IMPORT_HRP      = 1028,
+    ID_FILE_SELECT_REGION   = 1029,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
@@ -225,6 +226,7 @@ private:
     // hr_settings_set_flag()+hr_settings_save() pair against the old,
     // no-longer-authoritative homrec_settings.json.
     void PersistSettings();
+    void OnCaptureTargetChanged(); // after File > Select Window/Region - see main_frame.cpp
 
     void SetupHotkeys();
     void ConfigureHotkeysFromState();
@@ -253,7 +255,24 @@ private:
     // (the Start button and the global hotkey) now go through this.
     void RequestStart();
     void OnCountdownTimer(wxTimerEvent &evt);
+    // Ticks every second; fires RequestStart() once local time reaches
+    // AppState::scheduled_start_time, if scheduled_start_enabled and
+    // nothing's already recording. See the .cpp for the "don't re-fire
+    // every second within the same minute" logic.
+    void OnScheduleTimer(wxTimerEvent &evt);
     wxTimer countdown_timer_;
+    // Scheduled recording start (todo2.3.md section 3) - checked once a
+    // second against AppState::scheduled_start_time/_enabled by
+    // OnScheduleTimer(). Independent of countdown_timer_ above (that one
+    // only runs during the 3s "Starting in..." window right before an
+    // already-requested start).
+    wxTimer schedule_timer_;
+    // Last "HH:MM" this ticked a match against scheduled_start_time -
+    // see OnScheduleTimer()'s comment for why this (not a simple
+    // fired-once bool) is what lets it correctly fire again on a later
+    // day without re-firing every second within the same matching
+    // minute.
+    std::string schedule_last_matched_minute_;
     int countdown_remaining_ = 0;
     // Session-only (not persisted to settings.json) - resets each launch,
     // same lifetime as the Python original's in-memory dont_show_again
