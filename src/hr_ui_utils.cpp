@@ -45,6 +45,8 @@
 #include <thread>
 #include <chrono>
 #include <string>
+#include <vector>
+#include <mutex>
 
 /* --------------------------------------------------------------------------- */
 /*  Monotonic clock                                                             */
@@ -690,10 +692,35 @@ HR_EXPORT int hr_path_exists(const char *path) {
  * mode, or the captured window's process name with no ".exe" in window-capture
  * mode). Appends ".mp4" extension.
  *
+ * v2.3 token set (see todo2.3.md section 3, "Токены в имени файла записи"):
+ *   {date}          - yyyymmdd, unchanged for backward compat with existing
+ *                      saved templates
+ *   {time}          - HHMMSS, unchanged
+ *   {app}           - resolved app/window name, unchanged
+ *   {hh} {min} {sec}- the current hour/minute/second on their own, each
+ *                      zero-padded to 2 digits (e.g. "05", not "5") so a
+ *                      template like "{hh}-{min}" always sorts correctly
+ *   {preset}        - name of the currently active preset (see preset_name
+ *                      param below; "default" when nothing's been switched
+ *                      to yet - see AppState::active_preset_name)
+ *   {date:FMT}      - strftime-style custom date/time formatting, resolving
+ *                      the open syntax question in todo2.3.md in favor of
+ *                      the flexible single-token form: one token gives you
+ *                      any piece of the date *and* time without needing a
+ *                      new fixed token for every combination, e.g.
+ *                      "{date:%d.%m.%Y}" -> "23.09.2026",
+ *                      "{date:%Y-%m-%d_%H-%M}" -> "2026-09-23_14-05".
+ *                      Any strftime conversion is accepted (day/month
+ *                      already come zero-padded via %d/%m); an empty or
+ *                      unrecognized format falls back to yyyymmdd so a
+ *                      typo can't silently produce a blank filename
+ *                      segment.
+ *
  * out must be at least 256 bytes.
  */
 HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
-                                         const char *app_name, char *out, int out_len) {
+                                         const char *app_name, char *out, int out_len,
+                                         const char *preset_name) {
     if (!out || out_len < 8) return;
     out[0] = '\0';
 
@@ -702,9 +729,12 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
     struct tm *lt = localtime(&now);
     if (!lt) { snprintf(out, (size_t)out_len, "%s/HomRec.mp4", folder ? folder : "."); return; }
 
-    char date_str[16], time_str[16];
+    char date_str[16], time_str[16], hh_str[8], min_str[8], sec_str[8];
     strftime(date_str, sizeof(date_str), "%Y%m%d", lt);
     strftime(time_str, sizeof(time_str), "%H%M%S", lt);
+    strftime(hh_str,  sizeof(hh_str),  "%H", lt);
+    strftime(min_str, sizeof(min_str), "%M", lt);
+    strftime(sec_str, sizeof(sec_str), "%S", lt);
 
     /* Expand template */
     std::string expanded = tmpl ? _str(tmpl) : "HomRec_{date}_{time}";
@@ -715,9 +745,33 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
             pos += to.size();
         }
     };
+
+    {
+        size_t pos = 0;
+        const std::string open = "{date:";
+        while ((pos = expanded.find(open, pos)) != std::string::npos) {
+            size_t close = expanded.find('}', pos + open.size());
+            if (close == std::string::npos) break; // unterminated - leave as-is
+            std::string fmt = expanded.substr(pos + open.size(), close - (pos + open.size()));
+            char custom[64] = {};
+            if (fmt.empty() || strftime(custom, sizeof(custom), fmt.c_str(), lt) == 0) {
+                // Empty/invalid format (or one that happens to expand to
+                // nothing, e.g. an empty literal) - fall back to yyyymmdd
+                // rather than leaving a blank segment in the filename.
+                snprintf(custom, sizeof(custom), "%s", date_str);
+            }
+            expanded.replace(pos, close - pos + 1, custom);
+            pos += strlen(custom);
+        }
+    }
+
     _replace(expanded, "{date}", date_str);
     _replace(expanded, "{time}", time_str);
+    _replace(expanded, "{hh}",  hh_str);
+    _replace(expanded, "{min}", min_str);
+    _replace(expanded, "{sec}", sec_str);
     _replace(expanded, "{app}", (app_name && app_name[0]) ? app_name : "Desktop");
+    _replace(expanded, "{preset}", (preset_name && preset_name[0]) ? preset_name : "default");
 
     std::string result;
     if (folder && folder[0]) {
@@ -759,31 +813,36 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
 #ifdef _WIN32
 namespace {
 constexpr COLORREF kCursorChromaKey = RGB(255, 0, 255); // magenta
+constexpr int kCursorRefreshIntervalMs = 100; // 10Hz upper bound on animated-cursor sampling
+
+struct CursorCache {
+    std::mutex mtx;
+    HCURSOR handle = nullptr;
+    int cw = 0, ch = 0;
+    int hotspot_x = 0, hotspot_y = 0;
+    bool valid = false;
+    int64_t last_refresh_ms = 0;
+    std::vector<uint8_t> bgra; // premultiplied-alpha-free straight BGRA, cw*ch*4
+};
+
+CursorCache &GetCursorCache() {
+    static CursorCache cache;
+    return cache;
 }
 
-/*
- * hr_composite_cursor
- *
- * bgra          : capture buffer, width*height*4 bytes, BGRA, row-major,
- *                 no padding (row pitch == width*4) -- matches
- *                 hr_dx_capture()'s output that this is always called on.
- * origin_x/y    : the top-left corner of this buffer in *virtual desktop*
- *                 screen coordinates (i.e. the captured monitor's
- *                 DesktopCoordinates.left/top from hr_dx_output_desc) --
- *                 needed because GetCursorInfo() reports the cursor's
- *                 position in those same virtual-desktop coordinates, not
- *                 relative to whichever monitor is being captured.
- */
-HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
-                                    int origin_x, int origin_y) {
-    if (!bgra || width <= 0 || height <= 0) return;
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
-    CURSORINFO ci{};
-    ci.cbSize = sizeof(ci);
-    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
-
+// Does the actual GDI rasterization -- only called when the cache needs
+// (re)building, not on every frame. Returns false (leaves *cache alone) on
+// any failure so a transient GDI hiccup just means "keep showing the last
+// good cursor bitmap" rather than losing the cursor for a frame.
+bool RasterizeCursor(HCURSOR hCursor, CursorCache &cache) {
     ICONINFO ii{};
-    if (!GetIconInfo(ci.hCursor, &ii)) return;
+    if (!GetIconInfo(hCursor, &ii)) return false;
 
     BITMAP bmMask{};
     GetObject(ii.hbmMask, sizeof(bmMask), &bmMask);
@@ -793,20 +852,9 @@ HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
     // hbmColor at all; colour cursors have a real hbmColor the same
     // height as hbmMask.
     int ch = ii.hbmColor ? bmMask.bmHeight : bmMask.bmHeight / 2;
-    if (cw <= 0 || ch <= 0 || cw > 512 || ch > 512) { // sanity clamp
-        if (ii.hbmMask)  DeleteObject(ii.hbmMask);
-        if (ii.hbmColor) DeleteObject(ii.hbmColor);
-        return;
-    }
+    bool ok = false;
 
-    int lx = ci.ptScreenPos.x - origin_x - (int)ii.xHotspot;
-    int ly = ci.ptScreenPos.y - origin_y - (int)ii.yHotspot;
-
-    // Entirely off-buffer -- nothing to do (still have to free the icon
-    // bitmaps below, so fall through to cleanup rather than early-return).
-    bool on_screen = (lx + cw > 0 && ly + ch > 0 && lx < width && ly < height);
-
-    if (on_screen) {
+    if (cw > 0 && ch > 0 && cw <= 512 && ch <= 512) { // sanity clamp
         HDC screenDC = GetDC(nullptr);
         HDC memDC = CreateCompatibleDC(screenDC);
 
@@ -828,26 +876,31 @@ HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
             FillRect(memDC, &full, keyBrush);
             DeleteObject(keyBrush);
 
-            DrawIconEx(memDC, 0, 0, ci.hCursor, cw, ch, 0, nullptr, DI_NORMAL);
-            GdiFlush();
+            DrawIconEx(memDC, 0, 0, hCursor, cw, ch, 0, nullptr, DI_NORMAL);
+            GdiFlush(); // only paid once per (re)build now, not once per frame
 
             const uint8_t keyB = GetBValue(kCursorChromaKey);
             const uint8_t keyG = GetGValue(kCursorChromaKey);
             const uint8_t keyR = GetRValue(kCursorChromaKey);
             const uint8_t *src = static_cast<const uint8_t *>(dibPixels); // BGRX, top-down
+
+            cache.bgra.resize((size_t)cw * ch * 4);
+            uint8_t *dst = cache.bgra.data();
             for (int y = 0; y < ch; ++y) {
-                int dy = ly + y;
-                if (dy < 0 || dy >= height) { src += (size_t)cw * 4; continue; }
                 for (int x = 0; x < cw; ++x) {
-                    int dx = lx + x;
                     const uint8_t *sp = src + (size_t)x * 4;
-                    if (dx < 0 || dx >= width) continue;
-                    if (sp[0] == keyB && sp[1] == keyG && sp[2] == keyR) continue; // chroma key -> transparent
-                    uint8_t *dp = bgra + ((size_t)dy * width + dx) * 4;
-                    dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
+                    uint8_t *dp = dst + (size_t)x * 4;
+                    // Chroma-key -> transparent (alpha 0); resolved once
+                    // here instead of on every compositing pass.
+                    bool key = (sp[0] == keyB && sp[1] == keyG && sp[2] == keyR);
+                    dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = key ? 0 : 255;
                 }
                 src += (size_t)cw * 4;
+                dst += (size_t)cw * 4;
             }
+            cache.cw = cw; cache.ch = ch;
+            cache.hotspot_x = (int)ii.xHotspot; cache.hotspot_y = (int)ii.yHotspot;
+            ok = true;
 
             SelectObject(memDC, oldBmp);
             DeleteObject(dib);
@@ -858,6 +911,78 @@ HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
 
     if (ii.hbmMask)  DeleteObject(ii.hbmMask);
     if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    return ok;
+}
+} // namespace
+
+/*
+ * hr_composite_cursor
+ *
+ * bgra          : capture buffer, width*height*4 bytes, BGRA, row-major,
+ *                 no padding (row pitch == width*4) -- matches
+ *                 hr_dx_capture()'s output that this is always called on.
+ * origin_x/y    : the top-left corner of this buffer in *virtual desktop*
+ *                 screen coordinates (i.e. the captured monitor's
+ *                 DesktopCoordinates.left/top from hr_dx_output_desc) --
+ *                 needed because GetCursorInfo() reports the cursor's
+ *                 position in those same virtual-desktop coordinates, not
+ *                 relative to whichever monitor is being captured.
+ *
+ * See the CursorCache comment above: the expensive GDI rasterization only
+ * runs when the cursor shape has actually (or might have, for an animated
+ * cursor) changed; every other call just blits the cached bitmap.
+ */
+HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
+                                    int origin_x, int origin_y) {
+    if (!bgra || width <= 0 || height <= 0) return;
+
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
+
+    CursorCache &cache = GetCursorCache();
+    std::lock_guard<std::mutex> lock(cache.mtx);
+
+    int64_t now = NowMs();
+    bool need_refresh = (ci.hCursor != cache.handle) ||
+                         !cache.valid ||
+                         (now - cache.last_refresh_ms >= kCursorRefreshIntervalMs);
+    if (need_refresh) {
+        // Record the attempted handle unconditionally (even on failure) so
+        // a cursor that can't be rasterized doesn't defeat the interval
+        // throttle by re-triggering the handle-mismatch check every single
+        // frame. A failed rasterize otherwise leaves cache.bgra/cw/ch
+        // untouched (see RasterizeCursor: it only writes them on success),
+        // so a transient GDI hiccup just means "keep showing the last good
+        // cursor bitmap for one more cycle" instead of losing the cursor.
+        bool ok = RasterizeCursor(ci.hCursor, cache);
+        cache.handle = ci.hCursor;
+        if (ok) cache.valid = true;
+        cache.last_refresh_ms = now;
+    }
+    if (!cache.valid || cache.bgra.empty()) return;
+
+    int cw = cache.cw, ch = cache.ch;
+    int lx = ci.ptScreenPos.x - origin_x - cache.hotspot_x;
+    int ly = ci.ptScreenPos.y - origin_y - cache.hotspot_y;
+    if (lx + cw <= 0 || ly + ch <= 0 || lx >= width || ly >= height) return; // fully off-buffer
+
+    const uint8_t *src = cache.bgra.data();
+    for (int y = 0; y < ch; ++y) {
+        int dy = ly + y;
+        if (dy < 0 || dy >= height) { src += (size_t)cw * 4; continue; }
+        const uint8_t *srow = src;
+        uint8_t *drow = bgra + (size_t)dy * width * 4;
+        for (int x = 0; x < cw; ++x) {
+            int dx = lx + x;
+            if (dx < 0 || dx >= width) continue;
+            const uint8_t *sp = srow + (size_t)x * 4;
+            if (sp[3] == 0) continue; // transparent
+            uint8_t *dp = drow + (size_t)dx * 4;
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = 255;
+        }
+        src += (size_t)cw * 4;
+    }
 }
 #else
 HR_EXPORT void hr_composite_cursor(uint8_t *, int, int, int, int) {}
