@@ -2,6 +2,27 @@ welcome to changelog :D
 
 [Version 2.3] - 2026-09-23 (unreleased)
 
+- Fixed: File > Select Window... capture recorded a dead, frozen crop of
+  the DESKTOP at wherever the window happened to be sitting when you
+  pressed Start, for the entire rest of the recording - drag the window, or
+  switch away to something else entirely, and the exact same screen-space
+  rectangle kept getting recorded regardless (in effect, an unlabeled
+  region capture, not a window capture). Caused by the target window's
+  rect only ever being resolved once, at Start()/EnsurePreview() time - a
+  known, documented limitation in hr_pipeline.cpp, never actually
+  implemented. RecordingController now re-resolves the picked window's live
+  HWND + rect on every SyncOverlays() tick (~20/s, same cadence overlays and
+  the cursor setting already sync at) and re-applies the crop via the
+  existing hr_pl_set_capture_rect() whenever it moved or was resized,
+  instead of only once. Output pipe dimensions are left untouched (already
+  locked in with ffmpeg at Start()), so a resized window keeps recording -
+  just stretched/squashed to fit if its aspect ratio changed - rather than
+  breaking the pipe. If the window closes/minimizes or gets dragged onto a
+  different monitor than the one actually being duplicated, the last good
+  crop is kept and a single warning is logged instead of blanking the
+  recording or spamming the log. Region capture is intentionally untouched
+  - a fixed area is the whole point of that mode. recording_controller.cpp/.h.
+
 - Fixed: window/region capture could still record the whole screen on multi-
   monitor setups. ResolveCaptureSize() passed the monitor's index in
   hr_display_info's list (EnumDisplayMonitors, primary first) straight to DXGI
