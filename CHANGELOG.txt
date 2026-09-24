@@ -2,6 +2,169 @@ welcome to changelog :D
 
 [Version 2.3] - 2026-09-23 (unreleased)
 
+- Fixed: window/region capture could still record the whole screen on multi-
+  monitor setups. ResolveCaptureSize() passed the monitor's index in
+  hr_display_info's list (EnumDisplayMonitors, primary first) straight to DXGI
+  as an output index, but DXGI numbers outputs differently - so DXGI could
+  duplicate a different monitor than the one the crop was computed for. The
+  crop then didn't fit the frame, capture_loop() silently turned cropping off,
+  and the whole desktop was scaled into the window-sized output. The DXGI
+  output is now found by matching desktop coordinates (this also fixes
+  Settings > Monitor picking the wrong display), the pipeline clamps an
+  out-of-range crop instead of dropping it (logged once as a warning), and
+  Start() logs "Capture target (...)" with the resolved rect/monitor/crop.
+  EnableInstantReplay() also re-applies crop/output size to a reused pipeline.
+  recording_controller.cpp, hr_pipeline.cpp.
+
+- Fixed: picking a window in File > Select Window... could still record the whole
+  desktop. The window was re-found at Start() by exact title only, so any title
+  change since picking it (browser tab, "*Untitled", unread counters) silently fell
+  back to full-desktop capture. AppState now remembers the picked HWND
+  (capture_window_hwnd, runtime-only) and HR_ResolveCaptureWindow() tries it first,
+  then exact title, then case-insensitive title. A minimized picked window is now
+  treated as unavailable. Start()/EnableInstantReplay() now REFUSE to start with a
+  clear message (RecordingController::CheckCaptureTarget()) when the chosen window
+  or region is gone/minimized/off-screen, instead of quietly recording everything.
+  File > Select Window.../Select Region... now also refresh the live preview
+  (PreviewCaptureSettings tracks the HWND + region rect) and persist the choice.
+  window_picker_dialog.cpp/.h, recording_controller.cpp/.h, main_frame.cpp/.h,
+  app_state.h.
+
+- Added (settings/commands, todo2.3.md section 3): filename-template tokens
+  extended - {hh}/{min}/{sec} (zero-padded), {preset} (active preset name),
+  and a flexible {date:FMT} strftime-style token (e.g. "{date:%d.%m.%Y}"),
+  resolving the open syntax question in favor of the flexible single-token
+  form. hr_ui_utils.cpp/recording_controller.cpp.
+
+- Added: console command `preset <name>` (and bare `preset` to list what's
+  available) - switches presets the same way File > Set Preset... does,
+  without opening that dialog; gated behind "inwid" like any other settings
+  write. AppState::active_preset_name tracks the currently active one (also
+  updated by the dialog itself) for both this and the new {preset} filename
+  token above. console_window.cpp/.h, preset_dialog.cpp.
+
+- Added: Audio Mixer level meter now shows OBS-style color zones (green /
+  yellow ~-20..-9 dBFS / red - the clipping zone) instead of a smooth
+  gradient with no fixed meaning to any given shade, plus a static marker
+  at the clipping-zone boundary that's visible even while quiet. Thresholds
+  derived from hr_audio_rms_int16's level<->dBFS mapping. audio_panel.cpp.
+
+- Added: arbitrary screen-region capture (File > Select Region... - a
+  full-screen click-drag overlay), alongside the existing Desktop/Window
+  modes. Generalized RecordingController::ResolveCaptureSize()'s
+  crop-to-target-rect logic (previously Window-only) to work the same way
+  for a region; new AppState::region_x/y/w/h. window_picker_dialog.cpp/.h,
+  recording_controller.cpp, app_state.h, hr_str_convert.h,
+  hr_settings_registry.cpp, language.cpp (new "select_region" string).
+
+- Added: scheduled recording start (a "HH:MM" local time, separate from the
+  existing auto-stop-after-N-minutes) - AppState::scheduled_start_enabled/
+  _time, checked once a second by a new HomRecMainFrame::OnScheduleTimer().
+
+- Added: auto-pause/resume recording on microphone silence -
+  AppState::auto_pause_on_silence/silence_threshold_db/silence_duration_sec,
+  checked in RecordingController::PollStats() against the same
+  level<->dBFS mapping the audio-mixer zones above use.
+
+- Added: "hook after recording" - AppState::post_record_hook_enabled/_type
+  (script / move / open_folder) /_path, run once StopFinalizeTail() has a
+  finished output file (RecordingController::RunPostRecordHook()). "script"
+  launches the configured program with the finished file's path as argv[1]
+  (fire-and-forget); "move" relocates the file (drive-crossing safe);
+  "open_folder" opens output_folder, same as the existing button.
+
+  (Scheduled start / auto-pause-on-silence / the post-record hook are all
+  wired end-to-end and persist via HrSettingsRegistry, so they're usable
+  today via console `<key> <value>` or by hand-editing homrec.hrc; none of
+  the three has a Settings-dialog UI yet - left for a follow-up pass.)
+
+- Added (plugins, todo2.3.md section 4): two more Lua lifecycle hooks,
+  on_overlay_added/on_overlay_removed (on_recording_start/_stop/
+  _replay_saved already existed) - fired from both OverlaysDockPanel's
+  own Add*/RemoveAt() methods and the new Lua overlay API below.
+  overlays_dock_panel.cpp/.h, main_frame.cpp.
+
+- Added: Lua overlay-management API - homrec.add_overlay(props),
+  remove_overlay(id), move_overlay(id, x, y[, w, h]), list_overlays() - so
+  a plugin can add/remove/reposition overlays programmatically instead of
+  only being able to react to ones a person added by hand. lua_api.cpp.
+
+- Added: plugin.json permission model - an optional "permissions" object
+  ({"network":, "filesystem":, "store":}, all default true for backward
+  compatibility with every plugin shipped before this existed) gating
+  homrec.http_get()/http_post() (network), homrec.log_to() (filesystem),
+  and homrec.store_get()/store_set() (store). Denied permissions are logged
+  at load time. lua_engine.h/.cpp (manifest parsing), lua_api.cpp
+  (enforcement).
+
+- Added (overlays, todo2.3.md section 1): dynamic tokens in text-overlay
+  content - {fps} (live measured capture rate), {time} (HH:MM:SS),
+  {date} (YYYY-MM-DD) - a live clock/counter baked into the recording
+  itself. The existing per-overlay render cache now keys off the expanded
+  text rather than the literal template, so a token overlay only actually
+  re-renders when its displayed value changes (e.g. once a second for
+  {time}), not every frame. hr_overlay_render.h/.cpp, hr_pipeline.cpp.
+
+  (Section 1's remaining items - a standalone overlay-settings window,
+  text-outline/webcam-chroma-key rendering, 4-corner resize handles, a
+  separate "hide edit borders" preview toggle, screen-corner anchors, and
+  a per-overlay show/hide hotkey - are still open for a follow-up pass.)
+
+- Fixed (perf, game FPS while recording with "Cursor" enabled):
+  hr_composite_cursor() (hr_ui_utils.cpp) runs on the capture thread for
+  every captured frame, up to the full recording fps. It used to redo the
+  entire GDI rasterization pipeline every single call - GetIconInfo(),
+  CreateCompatibleDC/CreateDIBSection, DrawIconEx, then a blocking
+  GdiFlush() (stalls the thread until the GDI batch queue drains), then
+  tore all of it back down with DeleteObject x4 and DeleteDC/ReleaseDC -
+  to redraw the same handful of pixels almost every time, since the
+  cursor's shape only actually changes when its HCURSOR handle changes
+  (or, rarely, on an animated .ani cursor's own cadence), never on every
+  frame. That's ~8 kernel-mode GDI calls plus a synchronous flush per
+  frame competing for CPU with the very game being recorded. Now caches
+  the rasterized cursor bitmap (with real per-pixel alpha, resolved once,
+  instead of a chroma key compared on every composite) keyed on the
+  cursor handle, and only re-runs the GDI pipeline when the handle has
+  changed or a 100ms refresh interval has elapsed (covers animated
+  cursors); every other frame just blits the cached bitmap - plain memory
+  access, no GDI objects created/destroyed, no GdiFlush. Also fixes a
+  smaller pre-existing waste where the old code still called
+  GetIconInfo()/DeleteObject every frame even when the cursor was
+  entirely off the captured area.
+
+- Fixed (merge with a parallel batch of fixes that had drifted out of
+  this file - re-applied and documented here): five independent bugfixes
+  that existed in one tree's code but not the other's, none previously
+  recorded in this changelog:
+    * Instant Replay leaked its entire %TEMP%\HomRec_replay\<N>\ segment
+      folder on every StartInstantReplayEncoder() call (every enable AND
+      every Save Replay) - nothing ever deleted the previous run's
+      seg_*.mp4 files. New DeleteReplayDir() now cleans up the old
+      folder from the destructor, DisableInstantReplay(), and both the
+      empty-buffer and normal-completion paths of SaveReplay() (careful
+      to skip deletion when a failed audio merge leaves a last-resort
+      .wav behind for recovery). recording_controller.cpp.
+    * WASAPI capture's Start() (hr_audio.cpp) leaked the partially-
+      acquired device/client/mix_fmt/data_event/capture handles (plus
+      device's extra AddRef()) on every early-return failure path
+      instead of releasing them - exercisable repeatedly via Settings'
+      device-preview path. Every failure branch now calls the existing
+      close() before returning.
+    * ConsoleWindow's destructor never released the HFONT it created in
+      OnCreate() and handed to its controls via WM_SETFONT - a small
+      per-process GDI handle leak. console_window.cpp.
+    * The "Select Window to Record" picker's thumbnail pass called
+      PrintWindow() on every visible top-level window with no timeout;
+      a single hung/not-responding app anywhere on the desktop froze the
+      whole picker before it even appeared. Now checks IsHungAppWindow()
+      first and falls through to the existing icon-based fallback.
+      window_picker_dialog.cpp.
+    * hr_profile_io.cpp's gzip decompression-bomb / integer-overflow cap
+      (kMaxDecompressedBytes, 64MB) on custom .hrc/.hrl loading had been
+      lost in one tree - a corrupt or hostile profile/language file could
+      once again make _gz_decompress() allocate without bound. Cap
+      reinstated.
+
 - Fixed (data corruption, profile/language JSON round-trip): hr_profile_io.cpp's
   hand-rolled JSON reader (_jget_str()) unescaped "\\n" and "\\r" wrong - it
   just dropped the backslash and copied the following letter as-is, so a
@@ -34,71 +197,6 @@ welcome to changelog :D
   the encode from being starved; the CPU-bound libx264/libx265 path now
   launches at plain NORMAL_PRIORITY_CLASS so it competes for CPU on equal
   footing with everything else instead of ahead of it.
-
-- Fixed (resource leak, mic/system-audio capture): WasapiStream::open()
-  (hr_audio.cpp) leaked its COM objects on every failure path partway
-  through setup - IAudioClient, mix_fmt (CoTaskMemAlloc'd by
-  GetMixFormat), the data_event handle, IAudioCaptureClient, and an extra
-  IMMDevice ref taken at the top of open() - instead of releasing
-  whatever had already been acquired before returning false. Harmless on
-  a clean run, but every retry after a failed device open (unplugged
-  mic, device already in exclusive use elsewhere, a stale device ID in
-  Settings) added a bit more to the leak; Settings' device preview path
-  in particular could exercise this repeatedly in one sitting. Every
-  early return in open() now calls close() (already null-checks each
-  field) before returning, same as the success path's own eventual
-  teardown.
-
-- Fixed (freeze/crash risk, corrupt or hostile .hrc/.hrl file):
-  _gz_decompress() (hr_profile_io.cpp) doubled its output buffer with no
-  upper bound whenever inflate() reported it needed more room. gzip can
-  legally compress at over 1000:1, so a tiny (KB-sized) but corrupted or
-  maliciously crafted profile/language file could make this attempt a
-  huge, effectively unbounded allocation - on the low-spec machines this
-  app specifically targets, that's a freeze (the OS thrashing to satisfy
-  the request) or a bad_alloc crash, just from opening a bad file via
-  Settings > custom language or a shared .hrc profile. Also closed off
-  the wrap-around risk in hr_hrc_read()'s caller-facing size, which is a
-  plain int and could otherwise silently wrap on a very large
-  decompressed size before its caller (language.cpp) sizes a buffer off
-  it. Capped decompressed output at 64MB - generous for a JSON
-  profile/language file, low enough to make a bomb harmless.
-
-- Fixed (minor resource leak): the console's monospace HFONT, created
-  once in ConsoleWindow::OnCreate() (console_window.cpp), was never
-  released with DeleteObject(). Low severity in practice - the console
-  window is created once and reused for the app's lifetime, so this was
-  a single leaked handle per run, not a per-use one - but
-  ConsoleWindow's destructor now cleans it up properly instead of
-  relying on process exit.
-
-- Fixed (UI freeze, "Select Window to Record" picker):
-  CaptureWindowThumbnail() (window_picker_dialog.cpp) called
-  PrintWindow() on every visible top-level window on the desktop before
-  the picker dialog was even shown. PrintWindow has no timeout - it
-  blocks until the target window's own message queue processes the
-  print request - so a single hung/not-responding app anywhere on the
-  desktop (a stuck dialog, a frozen tab, a slow modal save) froze the
-  entire picker, with no window even open yet to show what was wrong.
-  Added an IsHungAppWindow() check before attempting PrintWindow(); a
-  hung window now falls straight through to the existing icon-based
-  fallback instead of risking the indefinite block.
-
-- Fixed (disk space leak, Instant Replay): StartInstantReplayEncoder()
-  (recording_controller.cpp) creates a fresh, uniquely-numbered
-  %TEMP%\HomRec_replay\<N>\ folder for its rolling segment buffer every
-  time it runs - on enabling Instant Replay, and again every single time
-  SaveReplay() restarts buffering after a save - but nothing ever
-  deleted the previous run's folder once its segments were no longer
-  needed. Since pressing Save Replay repeatedly through a long session
-  is exactly Instant Replay's intended use, this silently filled the
-  temp drive with orphaned video segments until writes started failing
-  outright. SaveReplay(), DisableInstantReplay(), and the
-  RecordingController destructor now delete the now-unused segment
-  folder (new DeleteReplayDir() helper) once genuinely done with it -
-  except the one case where a leftover audio file is deliberately kept
-  next to a save as a last-resort recovery after a failed audio mux,
-  which is left alone.
 
 [Version 2.2.2] - 2026-09-19
 
