@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <windows.h>
 
-enum class CaptureMode { Desktop, Window };
+enum class CaptureMode { Desktop, Window, Region };
 enum class RecordingMode { Ultra, Turbo, Balanced, Eco };
 enum class VideoFormat { Mp4, Mkv };
 // "Resolution:" setting in Settings > General - Percent keeps the old
@@ -114,6 +114,50 @@ struct AppState {
     std::string filename_template = "HomRec_{date}_{time}";
     int         auto_stop_min      = 0;
     int         replay_buffer_sec  = 0;
+    // Name of the preset (.hrc file, see preset_dialog.cpp) currently
+    // switched to - "default" until the user ever uses File > Set
+    // Preset... or the console's `preset <name>` command (see
+    // console_window.cpp's CmdPreset). Purely descriptive: switching
+    // presets already fully applies the target file's own settings via
+    // HrcConfig::Load(); this field just remembers *which one* for the
+    // {preset} filename-template token and for `status`/`preset` to
+    // report back.
+    std::string active_preset_name = "default";
+
+    // -- Scheduled recording start (todo2.3.md section 3) -----------------
+    // Separate from auto_stop_min (which ends an already-running
+    // recording after N minutes): this instead delays the *start*.
+    // scheduled_start_time is "HH:MM" (24h, local time); enabling it with
+    // a time already in the past today is treated as "tomorrow at that
+    // time" by the checker (main_frame.cpp), not "start immediately".
+    bool        scheduled_start_enabled = false;
+    std::string scheduled_start_time    = "";
+
+    // -- Auto-pause/resume on microphone silence (todo2.3.md section 3) ---
+    // Independent of scheduled_start above; both can be used together
+    // (start at a set time, then only actually record while someone's
+    // talking). silence_threshold_db is the RMS level (dBFS, so this is
+    // normally a negative number, e.g. -40) below which the mic is
+    // considered silent; silence_duration_sec is how long it has to stay
+    // that quiet before RecordingController auto-pauses, so normal short
+    // gaps between sentences don't constantly toggle pause on/off.
+    bool        auto_pause_on_silence  = false;
+    double      silence_threshold_db   = -40.0;
+    int         silence_duration_sec   = 3;
+
+    // -- Post-recording hook (todo2.3.md section 3) ------------------------
+    // Runs once StopFinalizeTail() has produced the final output file.
+    // "script" launches post_record_hook_path with the finished file's
+    // full path as argv[1] (fire-and-forget, not awaited - see
+    // RecordingController::RunPostRecordHook()); "move" moves the file
+    // into post_record_hook_path (a folder) instead of leaving it in
+    // output_folder; "open_folder" just opens output_folder in Explorer,
+    // same as the existing "Open Folder" button, so post_record_hook_path
+    // is unused for that mode.
+    enum class PostRecordHookType { None, Script, Move, OpenFolder };
+    bool               post_record_hook_enabled = false;
+    PostRecordHookType post_record_hook_type    = PostRecordHookType::None;
+    std::string        post_record_hook_path;
     // Whether Instant Replay's background buffer should be running -
     // RecordingController::EnableInstantReplay()/DisableInstantReplay()
     // are the actual on/off switch; this is just the persisted "user
@@ -172,6 +216,29 @@ struct AppState {
     int          monitor_top   = 0;
     CaptureMode  capture_mode  = CaptureMode::Desktop;
     std::string  capture_window_title;
+    // The exact HWND the person picked in File > Select Window... Runtime-
+    // only (deliberately NOT in HrSettingsRegistry - a handle is meaningless
+    // after a restart, where capture_window_title is all that's left to go
+    // on). Window titles change constantly (browser tabs, "*Untitled" in an
+    // editor, "Recording..." in chat apps), so resolving by exact title
+    // alone used to silently miss the window between picking it and pressing
+    // Start, which quietly fell back to recording the whole desktop.
+    // HR_ResolveCaptureWindow() tries this handle first and only falls back
+    // to the title when it's null or the window is gone.
+    HWND         capture_window_hwnd = nullptr;
+    // -- Region capture (todo2.3.md section 3, "Захват произвольной
+    // области экрана") ---------------------------------------------------
+    // Virtual-desktop pixel coordinates (same coordinate space as a
+    // window's RECT from GetWindowRect - i.e. NOT relative to any one
+    // monitor), set by the region-picker overlay (see
+    // ShowRegionPickerOverlay() in window_picker_dialog.h/.cpp) or
+    // hand-edited in homrec.hrc. Only meaningful when capture_mode is
+    // CaptureMode::Region; ResolveCaptureSize() (recording_controller.cpp)
+    // turns this into the same crop_x_/y_/w_/h_ pipeline that window
+    // capture already uses, so region capture gets monitor-resolution,
+    // hardware-encoder, and overlay support for free instead of needing
+    // a second capture path.
+    int          region_x = 0, region_y = 0, region_w = 0, region_h = 0;
     std::vector<HWND> hidden_capture_windows;
 
     // -- preview ------------------------------------------------------------
