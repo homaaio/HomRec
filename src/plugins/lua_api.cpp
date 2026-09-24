@@ -13,6 +13,8 @@
 #include <fstream>
 #include <ctime>
 #include <mutex>
+#include <atomic>
+#include <algorithm>
 
 extern "C" {
     #include "lua.h"
@@ -42,6 +44,24 @@ struct Upvalues {
 
 Upvalues *GetUpvalues(lua_State *L) {
     return static_cast<Upvalues *>(lua_touserdata(L, lua_upvalueindex(1)));
+}
+
+// Permission check for the plugin.json "permissions" model (todo2.3.md
+// section 4). `which` picks the flag; an unknown manifest (shouldn't
+// normally happen - GetUpvalues() always comes from a plugin that's
+// already loaded) defaults to allowed, same as PluginPermissions' own
+// defaults, rather than breaking a call over a lookup that failed for an
+// unrelated reason.
+enum class Perm { Network, Filesystem, Store };
+bool HasPermission(Upvalues *uv, Perm which) {
+    const PluginManifest *m = uv->engine->GetManifest(uv->plugin_id);
+    if (!m) return true;
+    switch (which) {
+        case Perm::Network:    return m->permissions.network;
+        case Perm::Filesystem: return m->permissions.filesystem;
+        case Perm::Store:      return m->permissions.store;
+    }
+    return true;
 }
 
 // Guards homrec.log_to()'s per-file writes - separate from HrPluginLog's
@@ -145,6 +165,9 @@ int L_show_toast(lua_State *L) {
 
 int L_store_set(lua_State *L) {
     auto *uv = GetUpvalues(L);
+    if (!HasPermission(uv, Perm::Store)) {
+        return luaL_error(L, "store access disabled for this plugin (see permissions in plugin.json)");
+    }
     const char *key = luaL_checkstring(L, 1);
     const char *value = luaL_checkstring(L, 2); // string/number/bool values only, see lua_engine.h's PluginStore note
     PluginStore::Set(uv->plugin_dir, key, value);
@@ -153,6 +176,9 @@ int L_store_set(lua_State *L) {
 
 int L_store_get(lua_State *L) {
     auto *uv = GetUpvalues(L);
+    if (!HasPermission(uv, Perm::Store)) {
+        return luaL_error(L, "store access disabled for this plugin (see permissions in plugin.json)");
+    }
     const char *key = luaL_checkstring(L, 1);
     const char *def = luaL_optstring(L, 2, "");
     std::string v = PluginStore::Get(uv->plugin_dir, key, def);
@@ -317,6 +343,12 @@ int L_emit(lua_State *L) {
 // Lua's stdlib has no networking; these back onto WinINet (already linked
 // for the update checker) since you asked for full network access.
 int L_http_get(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    if (!HasPermission(uv, Perm::Network)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "network access disabled for this plugin (see permissions in plugin.json)");
+        return 2;
+    }
     const char *url = luaL_checkstring(L, 1);
     HINTERNET hInet = InternetOpenA("HomRecPlugin/1.0", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
     if (!hInet) { lua_pushnil(L); lua_pushstring(L, "InternetOpen failed"); return 2; }
@@ -336,6 +368,12 @@ int L_http_get(lua_State *L) {
 }
 
 int L_http_post(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    if (!HasPermission(uv, Perm::Network)) {
+        lua_pushnil(L);
+        lua_pushstring(L, "network access disabled for this plugin (see permissions in plugin.json)");
+        return 2;
+    }
     const char *url = luaL_checkstring(L, 1);
     const char *body_in = luaL_checkstring(L, 2);
     const char *content_type = luaL_optstring(L, 3, "application/x-www-form-urlencoded");
@@ -508,6 +546,10 @@ int L_log(lua_State *L) {
 // and fine, not an error.
 int L_log_to(lua_State *L) {
     auto *uv = GetUpvalues(L);
+    if (!HasPermission(uv, Perm::Filesystem)) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
     const char *filename = luaL_checkstring(L, 1);
     const char *text = luaL_checkstring(L, 2);
 
@@ -532,6 +574,143 @@ int L_log_to(lua_State *L) {
     f << "[" << ts << "] [" << uv->plugin_id << "] " << text << "\n";
 
     lua_pushboolean(L, 1);
+    return 1;
+}
+
+namespace {
+int NextPluginOverlayId() {
+    static std::atomic<int> counter{0};
+    return counter.fetch_add(1);
+}
+} // namespace
+
+int L_add_overlay(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    auto *uv = GetUpvalues(L);
+    RecordingController *rec = uv->engine->recording_controller();
+    if (!rec) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "no active recording session");
+        return 2;
+    }
+
+    lua_getfield(L, 1, "type");
+    std::string type = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+    lua_pop(L, 1);
+    static const char *kValidTypes[] = {"text", "image", "gif", "webcam"};
+    bool valid_type = false;
+    for (const char *t : kValidTypes) if (type == t) { valid_type = true; break; }
+    if (!valid_type) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "type must be one of \"text\"/\"image\"/\"gif\"/\"webcam\"");
+        return 2;
+    }
+
+    auto getInt = [&](const char *name, int def) {
+        lua_getfield(L, 1, name);
+        int v = lua_isnumber(L, -1) ? (int)lua_tonumber(L, -1) : def;
+        lua_pop(L, 1);
+        return v;
+    };
+    auto getStr = [&](const char *name, const char *def) {
+        lua_getfield(L, 1, name);
+        std::string v = lua_isstring(L, -1) ? lua_tostring(L, -1) : def;
+        lua_pop(L, 1);
+        return v;
+    };
+    auto getBool = [&](const char *name, bool def) {
+        lua_getfield(L, 1, name);
+        bool v = lua_isboolean(L, -1) ? (lua_toboolean(L, -1) != 0) : def;
+        lua_pop(L, 1);
+        return v;
+    };
+
+    OverlayDef ov;
+    ov.id = "plugin_ov_" + std::to_string(NextPluginOverlayId());
+    ov.type = type;
+    ov.x = getInt("x", 40);
+    ov.y = getInt("y", 40);
+    ov.w = getInt("w", type == "text" ? 200 : 200);
+    ov.h = getInt("h", type == "text" ? 60 : 150);
+    ov.text = getStr("text", "");
+    ov.text_color = getStr("text_color", "#FFFFFF");
+    ov.font_family = getStr("font_family", "Segoe UI");
+    ov.opacity = getInt("opacity", 100);
+    ov.image_path = getStr("image_path", "");
+    ov.visible = getBool("visible", true);
+    if (type == "webcam") {
+        ov.webcam_index = getInt("webcam_index", 0);
+        ov.webcam_name = getStr("webcam_name", "");
+    }
+
+    rec->state().overlays.push_back(ov);
+    // Same lifecycle hook a hand-added overlay fires (see
+    // overlays_dock_panel.h's on_overlay_added, wired in main_frame.cpp) -
+    // a plugin-added overlay never goes through that panel, so it's
+    // fired directly here instead.
+    uv->engine->EmitHook("on_overlay_added");
+    lua_pushstring(L, ov.id.c_str());
+    return 1;
+}
+
+// homrec.remove_overlay(id) -> bool. Works on any overlay by id,
+// including ones the user added by hand through the panel, not just
+// ones a plugin itself created.
+int L_remove_overlay(lua_State *L) {
+    const char *id = luaL_checkstring(L, 1);
+    auto *uv = GetUpvalues(L);
+    RecordingController *rec = uv->engine->recording_controller();
+    if (!rec) { lua_pushboolean(L, 0); return 1; }
+    auto &overlays = rec->state().overlays;
+    auto it = std::find_if(overlays.begin(), overlays.end(),
+                            [&](const OverlayDef &o) { return o.id == id; });
+    if (it == overlays.end()) { lua_pushboolean(L, 0); return 1; }
+    overlays.erase(it);
+    uv->engine->EmitHook("on_overlay_removed");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+int L_move_overlay(lua_State *L) {
+    const char *id = luaL_checkstring(L, 1);
+    int x = (int)luaL_checknumber(L, 2);
+    int y = (int)luaL_checknumber(L, 3);
+    bool has_w = lua_isnumber(L, 4);
+    bool has_h = lua_isnumber(L, 5);
+    int w = has_w ? (int)lua_tonumber(L, 4) : 0;
+    int h = has_h ? (int)lua_tonumber(L, 5) : 0;
+
+    auto *uv = GetUpvalues(L);
+    RecordingController *rec = uv->engine->recording_controller();
+    if (!rec) { lua_pushboolean(L, 0); return 1; }
+    auto &overlays = rec->state().overlays;
+    auto it = std::find_if(overlays.begin(), overlays.end(),
+                            [&](const OverlayDef &o) { return o.id == id; });
+    if (it == overlays.end()) { lua_pushboolean(L, 0); return 1; }
+    it->x = x; it->y = y;
+    if (has_w) it->w = w;
+    if (has_h) it->h = h;
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+int L_list_overlays(lua_State *L) {
+    auto *uv = GetUpvalues(L);
+    RecordingController *rec = uv->engine->recording_controller();
+    lua_newtable(L);
+    if (!rec) return 1;
+    int i = 1;
+    for (const auto &o : rec->state().overlays) {
+        lua_newtable(L);
+        lua_pushstring(L, o.id.c_str());   lua_setfield(L, -2, "id");
+        lua_pushstring(L, o.type.c_str()); lua_setfield(L, -2, "type");
+        lua_pushnumber(L, o.x);            lua_setfield(L, -2, "x");
+        lua_pushnumber(L, o.y);            lua_setfield(L, -2, "y");
+        lua_pushnumber(L, o.w);            lua_setfield(L, -2, "w");
+        lua_pushnumber(L, o.h);            lua_setfield(L, -2, "h");
+        lua_pushboolean(L, o.visible);     lua_setfield(L, -2, "visible");
+        lua_rawseti(L, -2, i++);
+    }
     return 1;
 }
 
@@ -564,6 +743,10 @@ void *Install(lua_State *L, LuaPluginEngine *engine, const std::string &plugin_i
     registerFn("register_input_overlay", L_register_input_overlay);
     registerFn("register_command", L_register_command);
     registerFn("register_setting", L_register_setting);
+    registerFn("add_overlay", L_add_overlay);
+    registerFn("remove_overlay", L_remove_overlay);
+    registerFn("move_overlay", L_move_overlay);
+    registerFn("list_overlays", L_list_overlays);
     registerFn("print", L_print);
     registerFn("log", L_log);
     registerFn("log_to", L_log_to);
