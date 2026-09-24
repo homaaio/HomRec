@@ -129,6 +129,10 @@ const std::vector<SettingDef> &All() {
             v.push_back(d);
         }
         v.push_back(StrField("capture_window_title", "capture", &AppState::capture_window_title));
+        v.push_back(IntField("region_x", "capture", &AppState::region_x));
+        v.push_back(IntField("region_y", "capture", &AppState::region_y));
+        v.push_back(IntField("region_w", "capture", &AppState::region_w));
+        v.push_back(IntField("region_h", "capture", &AppState::region_h));
         v.push_back(IntField("preview_width", "capture", &AppState::preview_width));
         v.push_back(IntField("preview_height", "capture", &AppState::preview_height));
         v.push_back(IntField("preview_quality_pct", "capture", &AppState::preview_quality_pct));
@@ -174,6 +178,22 @@ const std::vector<SettingDef> &All() {
         v.push_back(IntField("auto_stop_min", "recording_extra", &AppState::auto_stop_min));
         v.push_back(IntField("replay_buffer_sec", "recording_extra", &AppState::replay_buffer_sec));
         v.push_back(BoolField("instant_replay_enabled", "recording_extra", &AppState::instant_replay_enabled));
+        v.push_back(StrField("active_preset_name", "recording_extra", &AppState::active_preset_name));
+        v.push_back(BoolField("scheduled_start_enabled", "recording_extra", &AppState::scheduled_start_enabled));
+        v.push_back(StrField("scheduled_start_time", "recording_extra", &AppState::scheduled_start_time));
+        v.push_back(BoolField("auto_pause_on_silence", "recording_extra", &AppState::auto_pause_on_silence));
+        v.push_back(DblField("silence_threshold_db", "recording_extra", &AppState::silence_threshold_db));
+        v.push_back(IntField("silence_duration_sec", "recording_extra", &AppState::silence_duration_sec));
+        v.push_back(BoolField("post_record_hook_enabled", "recording_extra", &AppState::post_record_hook_enabled));
+        {
+            Def d;
+            d.key = "post_record_hook_type"; d.section = "recording_extra";
+            d.kind = HrSettingsRegistry::Kind::Enum;
+            d.get = [](const AppState &s) { return HrPostRecordHookTypeToStr(s.post_record_hook_type); };
+            d.set = [](AppState &s, const std::string &v) { s.post_record_hook_type = HrPostRecordHookTypeFromStr(v); return true; };
+            v.push_back(d);
+        }
+        v.push_back(StrField("post_record_hook_path", "recording_extra", &AppState::post_record_hook_path));
 
         // -- [ui_toggles] ------------------------------------------------------
         v.push_back(BoolField("always_on_top", "ui_toggles", &AppState::always_on_top));
