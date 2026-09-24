@@ -1263,7 +1263,8 @@ struct Pipeline {
                     // even a future change to this call site can't silently
                     // reopen that hole.
                     try {
-                        overlay_compositor.Apply(frame, eff_w, eff_h, eff_w * 4, overlays_snapshot);
+                        overlay_compositor.Apply(frame, eff_w, eff_h, eff_w * 4, overlays_snapshot,
+                                                  fps_actual.load(std::memory_order_relaxed));
                     } catch (const std::exception &e) {
                         HrLog::Error(std::string("Overlay compositing threw (") + e.what() +
                                      ") -- this frame's overlays were skipped, recording continues.");
