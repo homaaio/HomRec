@@ -102,6 +102,15 @@ private:
     // and the thread-lambda doesn't have to duplicate this. Not meant to
     // be called from anywhere but that lambda.
     void StopFinalizeTail(bool keep_for_preview);
+
+    // "Hook after recording" (todo2.3.md section 3): runs once
+    // StopFinalizeTail() above has a finished output file, per
+    // AppState::post_record_hook_type. Called on finalize_thread_ (same
+    // as StopFinalizeTail() itself), so this must stay safe to run off
+    // the UI thread - CreateProcessW/MoveFileW/ShellExecuteW all are.
+    // Silently returns if post_record_hook_enabled is off, the type is
+    // None, or output_path doesn't actually exist (nothing to hook on,
+    // e.g. a failed recording produced no file).
     void RunPostRecordHook(const std::wstring &output_path);
 
     void FinishPipelineAfterStop(bool keep_for_preview);

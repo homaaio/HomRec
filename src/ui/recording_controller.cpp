@@ -46,6 +46,10 @@ extern "C" {
     int hr_di_get(void *handle, int index, int *x, int *y, int *w, int *h, float *dpi);
     int hr_di_primary(void *handle, int *x, int *y, int *w, int *h, float *dpi);
 
+    int hr_dx_output_count(int adapter_idx);
+    int hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y,
+                           int *out_w, int *out_h, char *name_buf, int name_buf_len);
+
     // hr_capture_ctl.cpp
     void *hr_ctl_create();
     void hr_ctl_destroy(void *handle);
@@ -142,6 +146,21 @@ std::wstring WideFromNarrow(const std::string &s) {
     return w;
 }
 
+// BUGFIX (unbounded temp-disk growth while using Instant Replay):
+// StartInstantReplayEncoder() creates a fresh, uniquely-numbered
+// %TEMP%\HomRec_replay\<N>\ subfolder every time it runs - both when
+// Instant Replay is (re-)enabled and, critically, every single time
+// SaveReplay() restarts buffering after a save - but nothing ever
+// deleted the *previous* folder's seg_*.mp4 files once they were no
+// longer needed. Instant Replay + repeatedly pressing Save Replay
+// (exactly its intended use, e.g. saving highlights through a long
+// session) is precisely "call StartInstantReplayEncoder() many times",
+// so each save left another folder's worth of video segments behind
+// forever. Over a long session this silently ate disk space until
+// writes started failing outright. Segment folders only ever contain
+// flat files directly inside them (no subfolders), so a simple
+// find+delete+RemoveDirectory is enough - no need for a recursive
+// shell delete.
 void DeleteReplayDir(const std::wstring &dir) {
     if (dir.empty()) return;
     WIN32_FIND_DATAW fd;
@@ -422,6 +441,32 @@ void RecordingController::ResolveCaptureSize() {
     state_.monitor_left = mx;
     state_.monitor_top = my;
 
+    // idx above indexes hr_display_info.cpp's list (EnumDisplayMonitors,
+    // re-sorted primary-first), but hr_pl_create() hands it to DXGI's
+    // IDXGIAdapter::EnumOutputs(), which has its OWN ordering - the two
+    // only agree by luck (single monitor, or a lucky multi-monitor layout).
+    // When they disagree, DXGI duplicates a DIFFERENT monitor than the one
+    // the window/region crop was computed for: the crop rect then doesn't
+    // fit the frame that actually arrives (a different-sized monitor), the
+    // pipeline can't apply it, and the whole screen gets scaled down into
+    // the window-sized output instead - i.e. "I picked a window but the
+    // entire screen is recorded". Match by desktop coordinates instead.
+    {
+        const int dx_count = hr_dx_output_count(0);
+        for (int i = 0; i < dx_count; ++i) {
+            int ox = 0, oy = 0, ow = 0, oh = 0;
+            if (!hr_dx_output_desc(0, i, &ox, &oy, &ow, &oh, nullptr, 0)) continue;
+            if (ox == mx && oy == my && ow == mw && oh == mh) {
+                if (i != idx) {
+                    HrLog::Info("Capture: monitor list index " + std::to_string(idx) +
+                                " is DXGI output " + std::to_string(i) + " (orderings differ).");
+                }
+                capture_output_idx_ = i;
+                break;
+            }
+        }
+    }
+
     // capture_w_/capture_h_ MUST equal the monitor's actual native
     // resolution - this is the size DXGI Desktop Duplication actually
     // hands back (it has no "capture at a reduced size" mode), the size
@@ -482,6 +527,15 @@ void RecordingController::ResolveCaptureSize() {
             if (ww > 0 && wh > 0) {
                 crop_x_ = wx; crop_y_ = wy; crop_w_ = ww; crop_h_ = wh;
                 ComputeOutputDims(ww, wh, output_w_, output_h_);
+                HrLog::Info(std::string("Capture target (") + (is_window ? "window" : "region") +
+                            "): screen rect " + std::to_string(r.left) + "," + std::to_string(r.top) +
+                            " -> " + std::to_string(r.right) + "," + std::to_string(r.bottom) +
+                            " on monitor at " + std::to_string(mx) + "," + std::to_string(my) + " " +
+                            std::to_string(mw) + "x" + std::to_string(mh) + " (DXGI output " +
+                            std::to_string(capture_output_idx_) + ") -> crop " +
+                            std::to_string(ww) + "x" + std::to_string(wh) + " at " +
+                            std::to_string(wx) + "," + std::to_string(wy) + ", output " +
+                            std::to_string(output_w_) + "x" + std::to_string(output_h_));
             } else if (is_window) {
                 HrLog::Warn("Window capture: '" + state_.capture_window_title +
                             "' is entirely off the selected monitor - falling back to full desktop.");
@@ -995,11 +1049,18 @@ void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
             HrLog::Warn("Recording: post-record hook is set to \"move\" but no destination folder is configured.");
             break;
         }
+        // Best-effort create - same tolerant approach hr_make_output_dir()
+        // takes for output_folder itself (already-exists is not an error).
         CreateDirectoryW(dest_dir.c_str(), nullptr);
         size_t slash = output_path.find_last_of(L"\\/");
         std::wstring filename = (slash == std::wstring::npos) ? output_path : output_path.substr(slash + 1);
         if (!dest_dir.empty() && dest_dir.back() != L'\\' && dest_dir.back() != L'/') dest_dir += L'\\';
         std::wstring dest_path = dest_dir + filename;
+        // MOVEFILE_REPLACE_EXISTING so re-recording the same {app}/{date}
+        // template into an already-used destination doesn't just silently
+        // fail; MOVEFILE_COPY_ALLOWED so this still works when the
+        // destination folder lives on a different drive than
+        // output_folder (a plain MoveFileW would refuse that).
         if (!MoveFileExW(output_path.c_str(), dest_path.c_str(),
                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
             HrLog::Error("Recording: post-record hook couldn't move the output file to " +
@@ -1015,6 +1076,11 @@ void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
             HrLog::Warn("Recording: post-record hook is set to \"script\" but no script path is configured.");
             break;
         }
+        // Fire-and-forget: quoted script path, then the finished file's
+        // full path as argv[1], same convention as passing a file to
+        // handle on a command line generally. Not awaited - a slow or
+        // hung script shouldn't ever block finalize_thread_ (or, by
+        // extension, a subsequent Start()) from proceeding.
         std::wstring cmdline = L"\"" + script + L"\" \"" + output_path + L"\"";
         STARTUPINFOW si{};
         si.cb = sizeof(si);
@@ -1085,7 +1151,12 @@ void RecordingController::PollStats() {
     hr_ctl_update_stats(ctl_, (long long)(size_mb * 1024.0 * 1024.0));
 
     hr_audio_get_levels(&mic_level_, &sys_level_);
-    
+
+    // Auto-pause/resume on mic silence (todo2.3.md section 3). Mirrors
+    // hr_audio_rms_int16's level<->dBFS mapping (see audio_panel.cpp's
+    // kZoneYellowStart/kZoneRedStart comment for the same derivation) to
+    // turn the configured dB threshold into a level (0..100) comparable
+    // against mic_level_ directly.
     if (state_.auto_pause_on_silence && !mic_muted_) {
         double threshold_rms = 32768.0 * std::pow(10.0, state_.silence_threshold_db / 20.0);
         int threshold_level = (int)(threshold_rms / 150.0);
@@ -1388,6 +1459,15 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
         error_out = L"Failed to start the capture pipeline.";
         return false;
     }
+    // The branch above only configures a pipeline it (re)creates. An
+    // already-running (preview) pipeline was built for whatever target was
+    // selected back then, but StartInstantReplayEncoder() below tells
+    // ffmpeg the CURRENT output_w_/output_h_ - re-apply the crop and output
+    // size so both sides agree (otherwise a window picked after the preview
+    // started leaves the pipeline on the full desktop while ffmpeg expects
+    // window-sized frames).
+    hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+    hr_pl_set_output_size(pipeline_, output_w_, output_h_);
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
     hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
 
