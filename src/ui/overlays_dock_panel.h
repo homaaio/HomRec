@@ -63,6 +63,8 @@ public:
     // that mode (also enters the mode if it wasn't active yet, so it
     // works as a one-click "just show me a current screenshot" too).
     std::function<void(bool refresh)> on_apply_no_preview;
+    std::function<void()> on_overlay_added;
+    std::function<void()> on_overlay_removed;
 
 private:
     // Popup menu anchored under the "+" button; dispatches to one of the
