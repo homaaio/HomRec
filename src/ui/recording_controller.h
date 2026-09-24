@@ -364,6 +364,7 @@ private:
     // factor (was inline in Start() only; EnsurePreview() needs the same
     // logic to size its preview-only pipeline).
     void ResolveCaptureSize();
+    void RetargetWindowCapture();
     // Applies Settings > General's "Preview quality" (preview_quality_pct)
     // to the preview panel's pixel size before it's handed to the
     // pipeline as its thumbnail render target - the pipeline (and the GPU/
@@ -578,11 +579,13 @@ private:
     int pipeline_output_idx_ = -1;
     int output_w_ = 0, output_h_ = 0;   // final encoded size after Settings > Resolution scaling (0 = same as capture)
     // Window-capture crop rect, monitor-relative pixels; crop_w_==0 means
-    // "no crop" (full desktop). Resolved once per ResolveCaptureSize()
-    // call from state_.capture_window_title when capture_mode is Window -
+    // "no crop" (full desktop). Set by ResolveCaptureSize() at Start()/
+    // EnsurePreview() time, then kept live for Window mode by
+    // RetargetWindowCapture() on every SyncOverlays() tick thereafter -
     // see the .cpp for the full explanation and hr_pl_set_capture_rect()
     // in hr_pipeline.cpp for how it's actually applied to captured frames.
     int crop_x_ = 0, crop_y_ = 0, crop_w_ = 0, crop_h_ = 0;
+    bool window_track_lost_warned_ = false;
     float mic_vol_ = 1.0f, sys_vol_ = 1.0f;
     bool mic_muted_ = false, sys_muted_ = false;
     double current_fps_ = 0.0;

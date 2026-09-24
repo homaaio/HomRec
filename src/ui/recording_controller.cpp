@@ -46,6 +46,9 @@ extern "C" {
     int hr_di_get(void *handle, int index, int *x, int *y, int *w, int *h, float *dpi);
     int hr_di_primary(void *handle, int *x, int *y, int *w, int *h, float *dpi);
 
+    // hr_dxgi_capture.cpp - ResolveCaptureSize() maps the chosen monitor
+    // (EnumDisplayMonitors order, see hr_display_info.cpp) onto the DXGI
+    // output index that actually duplicates that same monitor.
     int hr_dx_output_count(int adapter_idx);
     int hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y,
                            int *out_w, int *out_h, char *name_buf, int name_buf_len);
@@ -386,6 +389,11 @@ bool RecordingController::CheckCaptureTarget(std::wstring &error_out) const {
 }
 
 void RecordingController::ResolveCaptureSize() {
+    // Fresh target (or a fresh Start()/EnsurePreview() on the same one) -
+    // don't let a warning already shown for a *previous* recording's lost
+    // window suppress the first warning a new one legitimately earns.
+    window_track_lost_warned_ = false;
+
     void *di = hr_di_create();
     hr_di_refresh(di);
     int mx = 0, my = 0, mw = 1920, mh = 1080;
@@ -556,6 +564,62 @@ void RecordingController::ResolveCaptureSize() {
         // requires region_w/h > 0, and have_target is unconditionally set
         // true for it above).
     }
+}
+
+void RecordingController::RetargetWindowCapture() {
+    if (!pipeline_) return;
+    // Region's whole point is a fixed area of the screen - it must NOT
+    // track anything, so this only ever applies to Window mode.
+    if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) return;
+
+    HWND hwnd = nullptr;
+    RECT r{};
+    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd)) {
+        if (!window_track_lost_warned_) {
+            window_track_lost_warned_ = true;
+            HrLog::Warn("Window capture: '" + state_.capture_window_title +
+                        "' is no longer available (closed or minimized) - keeping the last "
+                        "captured position until it's back.");
+        }
+        return;
+    }
+    // Remember the exact HWND across title changes, same reason
+    // Start()/ResolveCaptureSize() do via HR_ResolveCaptureWindow()'s
+    // preferred_hwnd fast path - so a retitled window (a browser tab, an
+    // app's "*Unsaved" indicator) keeps tracking the SAME window instead of
+    // silently falling back to title matching on every tick.
+    state_.capture_window_hwnd = hwnd;
+
+    // Same monitor-relative clamp ResolveCaptureSize() applies, against
+    // the monitor that pipeline_ is ACTUALLY duplicating right now
+    // (state_.monitor_left/_top, capture_w_/_h_, set once by
+    // ResolveCaptureSize()) - not re-resolving which monitor to capture,
+    // since that's bound into the running pipeline_/DXGI duplication and
+    // isn't something this can safely change mid-recording.
+    int wx = r.left - state_.monitor_left, wy = r.top - state_.monitor_top;
+    int ww = r.right - r.left, wh = r.bottom - r.top;
+    if (wx < 0) { ww += wx; wx = 0; }
+    if (wy < 0) { wh += wy; wy = 0; }
+    if (wx + ww > capture_w_) ww = capture_w_ - wx;
+    if (wy + wh > capture_h_) wh = capture_h_ - wy;
+    if (ww % 2) ww--;
+    if (wh % 2) wh--;
+
+    if (ww <= 0 || wh <= 0) {
+        if (!window_track_lost_warned_) {
+            window_track_lost_warned_ = true;
+            HrLog::Warn("Window capture: '" + state_.capture_window_title +
+                        "' moved off the monitor being recorded - keeping the last "
+                        "captured position until it's back on it.");
+        }
+        return;
+    }
+    window_track_lost_warned_ = false;
+
+    if (wx == crop_x_ && wy == crop_y_ && ww == crop_w_ && wh == crop_h_) return; // hasn't moved/resized
+
+    crop_x_ = wx; crop_y_ = wy; crop_w_ = ww; crop_h_ = wh;
+    hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
 }
 
 bool RecordingController::Start(std::wstring &error_out) {
@@ -1199,6 +1263,7 @@ void RecordingController::SyncOverlays() {
         }
         return;
     }
+    RetargetWindowCapture();
 
     // "Cursor" setting - cheap atomic store, fine to re-apply every tick
     // rather than needing its own change-tracking like the overlay list

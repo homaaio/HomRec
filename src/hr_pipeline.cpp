@@ -487,10 +487,13 @@ struct Pipeline {
     // capture, not by trying to make DXGI itself capture a smaller area
     // (it can't). crop_w == 0 means "no crop" -- the original/default
     // full-desktop behavior, at zero extra cost per frame. Set via
-    // hr_pl_set_capture_rect(); resolved once from the target window's
+    // hr_pl_set_capture_rect(); first resolved from the target window's
     // screen rect by RecordingController at Start()/EnsurePreview() time,
-    // not re-resolved live if the window moves mid-recording (a known,
-    // documented limitation -- see recording_controller.cpp).
+    // then kept in sync with the live window (position/size) for the rest
+    // of the recording by RecordingController::RetargetWindowCapture(),
+    // called on every SyncOverlays() tick -- see its doc comment
+    // (recording_controller.h) for why that's safe to do this often and
+    // what it deliberately does NOT touch (output_w_/output_h_).
     int crop_x = 0, crop_y = 0, crop_w = 0, crop_h = 0;
     // Guards the four crop_* fields above: hr_pl_set_capture_rect() runs on
     // the UI thread while capture_loop() may be mid-frame on this pipeline
