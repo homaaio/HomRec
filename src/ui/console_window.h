@@ -186,6 +186,20 @@ private:
     void CmdRmSystemFiles(const std::wstring &raw);
     void CmdRmSelfApp(const std::wstring &raw);
     void CmdHrc(const std::wstring &raw);
+    // "preset [name]" - console equivalent of File > Set Preset...'s
+    // "Switch to Selected" (preset_dialog.cpp), so a .cfg script or a
+    // custom hotkey can flip presets without opening that dialog (see
+    // todo2.3.md section 3, "Консольная команда переключения пресета").
+    // Bare "preset" (no name) prints the currently active one plus the
+    // list of what's available in presets\ - a query, so it never needs
+    // "inwid". "preset <name>" looks up presets\<name>.hrc (extension
+    // optional), or the special names "main"/"default" for the app's own
+    // homrec.hrc, loads it via HrcConfig::Load() exactly like the dialog
+    // does, re-saves it as the active config so the switch survives a
+    // restart, and updates AppState::active_preset_name. This writes to
+    // disk, so - same as any other settings assignment - it's gated
+    // behind "inwid": CommandNeedsInwid() below.
+    void CmdPreset(const std::wstring &raw);
     // "sethrc <path> <1|true|0|false>" - cfg-only combinator (see
     // commands.md): merges another .hrc file's fields into the *current*
     // in-memory settings right where this line sits in a cfg script (same

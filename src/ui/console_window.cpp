@@ -90,6 +90,12 @@ std::wstring ExtractSettingValue(const std::wstring &raw) {
 // the person didn't just ask to add/refresh.
 bool CommandNeedsInwid(const std::wstring &cmd, const std::wstring &raw) {
     if (cmd == L"rm") return true;
+    if (cmd == L"preset") {
+        std::wistringstream iss(raw);
+        std::wstring first, name;
+        iss >> first >> name;
+        return !name.empty();
+    }
     if (cmd == L"hom") {
         std::wistringstream iss(raw);
         std::wstring first, sub;
@@ -721,6 +727,10 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
     else if (cmd == L"secui") CmdSecUi(raw);
     else if (cmd == L"secp") CmdSecP(raw);
     else if (cmd == L"hrc") CmdHrc(raw);
+    else if (cmd == L"preset") {
+        if (!confirmed && CommandNeedsInwid(cmd, raw)) { RefuseNeedsInwid(raw); return; }
+        CmdPreset(raw);
+    }
     else if (cmd == L"sethrc") CmdSetHrc(raw);
     else if (cmd == L"clip") CmdClip(raw);
     else if (cmd == L"repeat") CmdRepeat(raw);
@@ -1052,6 +1062,76 @@ void ConsoleWindow::CmdHrc(const std::wstring &raw) {
     } else {
         PrintWarn(L"usage: hrc save [path] | hrc load [path]  (default path: homrec_config.hrc next to the exe)");
     }
+}
+
+void ConsoleWindow::CmdPreset(const std::wstring &raw) {
+    static const wchar_t kPresetsDir[] = L"presets";
+
+    std::wistringstream iss(raw);
+    std::wstring cmd, name;
+    iss >> cmd >> name;
+
+    std::vector<std::wstring> names;
+    std::error_code ec;
+    if (std::filesystem::exists(kPresetsDir, ec) && std::filesystem::is_directory(kPresetsDir, ec)) {
+        for (const auto &entry : std::filesystem::directory_iterator(kPresetsDir, ec)) {
+            if (ec) break;
+            if (entry.is_regular_file() && entry.path().extension() == L".hrc") {
+                names.push_back(entry.path().stem().wstring());
+            }
+        }
+    }
+    std::sort(names.begin(), names.end());
+
+    if (name.empty()) {
+        PrintInfo(L"active preset: " + WideFromNarrow(state_.active_preset_name));
+        if (names.empty()) {
+            PrintInfo(L"no presets in .\\presets\\ yet - use File > Set Preset... > Save Current As... to add one");
+        } else {
+            std::wstring list = L"available: main";
+            for (const auto &n : names) list += L", " + n;
+            PrintInfo(list);
+        }
+        PrintInfo(L"usage: preset <name>  (or \"preset main\"/\"preset default\" for homrec.hrc)");
+        return;
+    }
+
+    std::wstring lname = name;
+    std::transform(lname.begin(), lname.end(), lname.begin(), ::towlower);
+
+    std::wstring target_path;
+    bool is_main = (lname == L"main" || lname == L"default" || lname == L"homrec");
+    if (is_main) {
+        target_path = HrcConfig::ResolveSettingsPath(state_);
+    } else {
+        // Case-insensitive match against the enumerated presets - so
+        // "preset Stream" finds "Stream.hrc" without the person needing
+        // to get the exact case right.
+        for (const auto &n : names) {
+            std::wstring ln = n;
+            std::transform(ln.begin(), ln.end(), ln.begin(), ::towlower);
+            if (ln == lname) { target_path = std::wstring(kPresetsDir) + L"\\" + n + L".hrc"; break; }
+        }
+        if (target_path.empty()) {
+            PrintErr(L"no preset named \"" + name + L"\" in .\\presets\\ (try a bare \"preset\" to list them)");
+            return;
+        }
+    }
+
+    if (!HrcConfig::Load(state_, target_path)) {
+        PrintErr(L"couldn't read " + target_path);
+        return;
+    }
+    if (!is_main) {
+        // Re-save as the active config, same as preset_dialog.cpp's
+        // DoSwitch(), so the switch survives a restart.
+        std::wstring active_path = HrcConfig::ResolveSettingsPath(state_);
+        if (!HrcConfig::Save(state_, active_path)) {
+            PrintWarn(L"switched in-session but couldn't persist to the active config file");
+        }
+    }
+    state_.active_preset_name = is_main ? "default" : NarrowFromWide(name);
+    PrintOk(L"switched to preset \"" + name + L"\" (restart may be needed for some fields to take effect)");
 }
 
 void ConsoleWindow::CmdSetHrc(const std::wstring &raw) {
