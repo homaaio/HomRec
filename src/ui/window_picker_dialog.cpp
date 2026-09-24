@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <windowsx.h> // GET_X_LPARAM/GET_Y_LPARAM - ShowRegionPickerOverlay()'s drag tracking
 
 // dwmapi.h ships with this project's MinGW-w64 toolchain (already linked
 // via -ldwmapi, see win32_theme.cpp), but a couple of the attribute
@@ -70,34 +71,71 @@ bool IsCapturableWindow(HWND hwnd) {
 
 } // namespace
 
-bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out_rect) {
-    if (title.empty()) return false;
-    std::wstring wtitle = WideFromNarrow(title);
+namespace {
 
-    struct Ctx {
-        const std::wstring *wanted;
-        HWND found = nullptr;
-    };
-    Ctx ctx{&wtitle};
+// ASCII/BMP-safe case-insensitive equality via the OS (handles non-Latin
+// titles that a naive towlower() loop would get wrong).
+bool TitlesEqualNoCase(const std::wstring &a, const std::wstring &b) {
+    if (a.size() != b.size()) return false;
+    return CompareStringOrdinal(a.c_str(), (int)a.size(), b.c_str(), (int)b.size(), TRUE) == CSTR_EQUAL;
+}
 
-    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
-        auto *c = reinterpret_cast<Ctx *>(lp);
-        if (!IsCapturableWindow(hwnd)) return TRUE;
+std::wstring WindowTitleOf(HWND hwnd) {
+    int len = GetWindowTextLengthW(hwnd);
+    if (len <= 0) return {};
+    std::wstring t(static_cast<size_t>(len) + 1, L'\0');
+    GetWindowTextW(hwnd, t.data(), len + 1);
+    t.resize(wcslen(t.c_str()));
+    return t;
+}
 
-        int len = GetWindowTextLengthW(hwnd);
-        if (len <= 0) return TRUE;
-        std::wstring t(static_cast<size_t>(len) + 1, L'\0');
-        GetWindowTextW(hwnd, t.data(), len + 1);
-        t.resize(wcslen(t.c_str()));
+} // namespace
 
-        if (t == *c->wanted) {
-            c->found = hwnd;
-            return FALSE;  // exact match, stop enumerating
-        }
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&ctx));
+bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out_rect,
+                             HWND preferred_hwnd) {
+    HWND found = nullptr;
 
-    if (!ctx.found) return false;
+    // 1) The exact window that was picked - immune to title changes.
+    if (preferred_hwnd && IsWindow(preferred_hwnd) && IsCapturableWindow(preferred_hwnd)) {
+        found = preferred_hwnd;
+    }
+
+    // 2) Fall back to the stored title (the only thing left after an app
+    //    restart, or once the picked window was closed and re-opened).
+    if (!found && !title.empty()) {
+        std::wstring wtitle = WideFromNarrow(title);
+
+        struct Ctx {
+            const std::wstring *wanted;
+            HWND exact = nullptr;
+            HWND loose = nullptr;   // case-insensitive match, only used if nothing matches exactly
+        };
+        Ctx ctx{&wtitle};
+
+        EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+            auto *c = reinterpret_cast<Ctx *>(lp);
+            if (!IsCapturableWindow(hwnd)) return TRUE;
+
+            std::wstring t = WindowTitleOf(hwnd);
+            if (t.empty()) return TRUE;
+
+            if (t == *c->wanted) {
+                c->exact = hwnd;
+                return FALSE;  // exact match, stop enumerating
+            }
+            if (!c->loose && TitlesEqualNoCase(t, *c->wanted)) c->loose = hwnd;
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&ctx));
+
+        found = ctx.exact ? ctx.exact : ctx.loose;
+    }
+
+    if (!found) return false;
+
+    // A minimized window has no on-screen pixels to crop to (its rect is
+    // parked at -32000,-32000) - treat it as "not available" rather than
+    // letting the caller compute a crop rect that lands off every monitor.
+    if (IsIconic(found)) return false;
 
     // DWMWA_EXTENDED_FRAME_BOUNDS, not GetWindowRect(): on Win10/11,
     // GetWindowRect() includes several pixels of invisible resize-grip
@@ -107,12 +145,12 @@ bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out
     // the window instead of the window itself. The DWM attribute gives
     // the actual visible bounds, matching what the user sees on screen.
     RECT r{};
-    if (FAILED(DwmGetWindowAttribute(ctx.found, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))) {
-        if (!GetWindowRect(ctx.found, &r)) return false;  // last-resort fallback
+    if (FAILED(DwmGetWindowAttribute(found, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))) {
+        if (!GetWindowRect(found, &r)) return false;  // last-resort fallback
     }
-    if (r.right <= r.left || r.bottom <= r.top) return false;  // minimized or degenerate
+    if (r.right <= r.left || r.bottom <= r.top) return false;  // degenerate
 
-    out_hwnd = ctx.found;
+    out_hwnd = found;
     out_rect = r;
     return true;
 }
@@ -204,6 +242,18 @@ HBITMAP CaptureWindowThumbnail(HWND hwnd, int tileW, int tileH) {
     DeleteObject(bg);
 
     bool drew = false;
+    // BUGFIX (UI freeze): PrintWindow() sends WM_PRINT/WM_PAINT-family
+    // messages to hwnd's own message queue and blocks until it's
+    // processed them - it has no timeout. ShowWindowPickerDialog() calls
+    // this once per visible top-level window *before* the picker dialog
+    // is even shown, so a single hung/not-responding app anywhere on the
+    // user's desktop (a common, everyday occurrence - a stuck dialog, a
+    // frozen webpage, a long modal file-save) used to freeze the entire
+    // "Select Window to Record" picker, with no window on screen yet to
+    // even show what's wrong. IsHungAppWindow() is the cheap, documented
+    // way to check first; a hung window just falls through to the
+    // already-existing icon-based fallback below instead of risking the
+    // indefinite block.
     if (!IsIconic(hwnd) && !IsHungAppWindow(hwnd)) {
         HDC srcDC = CreateCompatibleDC(screenDC);
         HBITMAP srcBmp = CreateCompatibleBitmap(screenDC, w, h);
@@ -284,12 +334,15 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int sel = (int)SendMessageW(list, LB_GETCURSEL, 0, 0);
                 if (sel >= 0 && sel < (int)ctx->entries->size()) {
                     ctx->state->capture_window_title = NarrowFromWide((*ctx->entries)[(size_t)sel].title);
+                    // Remember the exact window too - see AppState::capture_window_hwnd.
+                    ctx->state->capture_window_hwnd = (*ctx->entries)[(size_t)sel].hwnd;
                     ctx->state->capture_mode = CaptureMode::Window;
                     DestroyWindow(hwnd);
                 }
             } else if (id == IDC_WP_DESKTOP) {
                 ctx->state->capture_mode = CaptureMode::Desktop;
                 ctx->state->capture_window_title.clear();
+                ctx->state->capture_window_hwnd = nullptr;
                 DestroyWindow(hwnd);
             } else if (id == IDC_WP_LIST && HIWORD(wParam) == LBN_DBLCLK) {
                 // Double-click a row = same as "Record this window", matching
@@ -424,6 +477,13 @@ void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state) {
         SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)entries[i].title.c_str());
         if (NarrowFromWide(entries[i].title) == state.capture_window_title) preselect = (int)i;
     }
+    // The remembered HWND beats a title match (titles can be duplicated or
+    // have changed since the window was picked).
+    if (state.capture_window_hwnd) {
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].hwnd == state.capture_window_hwnd) { preselect = (int)i; break; }
+        }
+    }
     if (preselect >= 0) {
         SendMessageW(list, LB_SETCURSEL, (WPARAM)preselect, 0);
     }
@@ -443,4 +503,184 @@ void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state) {
     }
     EnableWindow(parent, TRUE);
     SetForegroundWindow(parent);
+}
+
+// ---------------------------------------------------------------------------
+// ShowRegionPickerOverlay
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr wchar_t kRegionClassName[] = L"HomRecRegionPicker";
+constexpr int kMinDragPx = 8; // see the .h doc comment - anything smaller is treated as a stray click, not a drag
+
+struct RegionPickerCtx {
+    bool dragging = false;
+    bool have_result = false;
+    POINT start{};   // client coords (== screen coords minus the overlay's own top-left)
+    POINT current{};
+    RECT result{};   // screen (virtual-desktop) coords, filled in on a successful drag
+};
+
+LRESULT CALLBACK RegionPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto *ctx = reinterpret_cast<RegionPickerCtx *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+        case WM_NCCREATE: {
+            auto *cs = reinterpret_cast<CREATESTRUCTW *>(lParam);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+            return TRUE;
+        case WM_LBUTTONDOWN: {
+            if (!ctx) break;
+            ctx->dragging = true;
+            ctx->start.x = GET_X_LPARAM(lParam);
+            ctx->start.y = GET_Y_LPARAM(lParam);
+            ctx->current = ctx->start;
+            SetCapture(hwnd);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            if (!ctx || !ctx->dragging) break;
+            ctx->current.x = GET_X_LPARAM(lParam);
+            ctx->current.y = GET_Y_LPARAM(lParam);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            if (!ctx || !ctx->dragging) break;
+            ctx->dragging = false;
+            ReleaseCapture();
+            int x0 = std::min(ctx->start.x, ctx->current.x);
+            int y0 = std::min(ctx->start.y, ctx->current.y);
+            int x1 = std::max(ctx->start.x, ctx->current.x);
+            int y1 = std::max(ctx->start.y, ctx->current.y);
+            if ((x1 - x0) >= kMinDragPx && (y1 - y0) >= kMinDragPx) {
+                RECT win_rect{};
+                GetWindowRect(hwnd, &win_rect); // overlay's own screen origin -> client coords above are relative to it
+                ctx->result.left = win_rect.left + x0;
+                ctx->result.top = win_rect.top + y0;
+                ctx->result.right = win_rect.left + x1;
+                ctx->result.bottom = win_rect.top + y1;
+                ctx->have_result = true;
+            }
+            // Either way (a real drag or a stray click) the overlay's done
+            // its job - close it. A stray click leaves have_result false,
+            // so ShowRegionPickerOverlay() below just leaves state as-is.
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+            break;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+
+            // Dim backdrop - the whole overlay window is later given
+            // uniform alpha via SetLayeredWindowAttributes() below, so
+            // this doesn't need to be very dark on its own; it just needs
+            // to read as "an overlay is active" and give the bright
+            // selection rectangle something to contrast against.
+            HBRUSH bg = CreateSolidBrush(RGB(20, 20, 24));
+            FillRect(dc, &client, bg);
+            DeleteObject(bg);
+
+            std::wstring hint = L"Drag to select the region to record  \u2014  Esc to cancel";
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(235, 235, 235));
+            HFONT font = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            HFONT oldFont = (HFONT)SelectObject(dc, font);
+            RECT hintRect{client.left, client.top + 24, client.right, client.top + 60};
+            DrawTextW(dc, hint.c_str(), -1, &hintRect, DT_CENTER | DT_SINGLELINE);
+            SelectObject(dc, oldFont);
+            DeleteObject(font);
+
+            if (ctx && ctx->dragging) {
+                int x0 = std::min(ctx->start.x, ctx->current.x);
+                int y0 = std::min(ctx->start.y, ctx->current.y);
+                int x1 = std::max(ctx->start.x, ctx->current.x);
+                int y1 = std::max(ctx->start.y, ctx->current.y);
+
+                // Punch out the selected area so it reads as "unveiled"
+                // rather than just outlined on top of the dim fill.
+                RECT sel{x0, y0, x1, y1};
+                HBRUSH clear = CreateSolidBrush(RGB(60, 120, 220));
+                FrameRect(dc, &sel, clear);
+                DeleteObject(clear);
+
+                HPEN pen = CreatePen(PS_SOLID, 2, RGB(90, 160, 250));
+                HPEN oldPen = (HPEN)SelectObject(dc, pen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
+                Rectangle(dc, x0, y0, x1, y1);
+                SelectObject(dc, oldBrush);
+                SelectObject(dc, oldPen);
+                DeleteObject(pen);
+
+                wchar_t dims[64];
+                swprintf(dims, 64, L"%d x %d", x1 - x0, y1 - y0);
+                RECT dimsRect{x0, y1 + 6, x1, y1 + 30};
+                DrawTextW(dc, dims, -1, &dimsRect, DT_LEFT | DT_SINGLELINE);
+            }
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        default: break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+} // namespace
+
+void ShowRegionPickerOverlay(HWND parent, HINSTANCE hInst, AppState &state) {
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = RegionPickerProc;
+    wc.hInstance = hInst;
+    wc.lpszClassName = kRegionClassName;
+    wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
+    RegisterClassW(&wc);
+
+    RegionPickerCtx ctx;
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED, kRegionClassName, L"",
+                                 WS_POPUP, vx, vy, vw, vh,
+                                 parent, nullptr, hInst, &ctx);
+    if (!hwnd) return;
+    // Uniform alpha over the whole overlay (backdrop + selection UI
+    // together) - the simplest version of the usual screenshot-tool
+    // "dim everything, draw a bright box for the selection" look,
+    // without needing to composite an actual desktop screenshot first.
+    SetLayeredWindowAttributes(hwnd, 0, 190, LWA_ALPHA);
+
+    EnableWindow(parent, FALSE);
+    ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
+    SetFocus(hwnd); // needed for WM_KEYDOWN (Esc) - a WS_POPUP with no WS_TABSTOP children doesn't get it automatically
+
+    MSG msg;
+    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+        if (!IsWindow(hwnd)) break;
+    }
+    EnableWindow(parent, TRUE);
+    SetForegroundWindow(parent);
+
+    if (ctx.have_result) {
+        state.capture_mode = CaptureMode::Region;
+        state.region_x = ctx.result.left;
+        state.region_y = ctx.result.top;
+        state.region_w = ctx.result.right - ctx.result.left;
+        state.region_h = ctx.result.bottom - ctx.result.top;
+    }
 }
