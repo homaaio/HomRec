@@ -65,9 +65,10 @@ public:
     // base_stride bytes (usually capture_w*4). Composites every visible
     // overlay in `overlays` directly onto it, clipped to its bounds.
     void Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
-               const std::vector<HrOverlayDesc> &overlays);
+                const std::vector<HrOverlayDesc> &overlays, double current_fps = 0.0);
 
 private:
+    double current_fps_ = 0.0;
     struct CachedLayer {
         std::vector<uint8_t> bgra; // w*h*4
         int w = 0, h = 0;
