@@ -221,6 +221,7 @@ private:
                 wxMessageBox("Couldn't read homrec.hrc.", "Set Preset", wxOK | wxICON_ERROR, this);
                 return;
             }
+            state_.active_preset_name = "default";
             HrLog::Info("Preset: reloaded the active config (homrec.hrc).");
         } else {
             // Explicit, interactive click on a preset the user picked
@@ -240,6 +241,13 @@ private:
             std::wstring active_path = HrcConfig::ResolveSettingsPath(state_);
             if (!HrcConfig::Save(state_, active_path)) {
                 HrLog::Error("Preset: switched in-session but couldn't persist to the active config file.");
+            }
+            {
+                std::string base(e.display_name.ToUTF8());
+                if (base.size() > 4 && base.compare(base.size() - 4, 4, ".hrc") == 0) {
+                    base.resize(base.size() - 4);
+                }
+                state_.active_preset_name = base;
             }
             HrLog::Info("Preset: switched to " + std::string(e.display_name.ToUTF8()));
         }
