@@ -1016,6 +1016,7 @@ struct Pipeline {
         // actually moved, instead of every single captured frame.
         std::vector<HrOverlayDesc> overlays_snapshot;
         uint64_t last_overlays_gen = (uint64_t)-1; // sentinel: forces the first copy below
+        bool warned_bad_crop = false;              // see the crop clamp below - log it once, not per frame
 
         // The whole loop below now runs inside a try/catch. This
         // thread is started bare (std::thread([pl]{ pl->capture_loop(); }),
@@ -1190,6 +1191,30 @@ struct Pipeline {
             {
                 std::lock_guard<std::mutex> crop_lk(crop_mtx);
                 c_x = crop_x; c_y = crop_y; c_w = crop_w; c_h = crop_h;
+            }
+            // If a crop was requested but doesn't fit the frame DXGI is
+            // actually delivering (e.g. it was computed for a different
+            // monitor/size than the one being duplicated), the old check
+            // just turned cropping OFF for that frame - while the output
+            // size (out_w/out_h, set for the crop) stayed put, so the WHOLE
+            // desktop got scaled down into the window-sized output: the
+            // "I picked a window but the entire screen is recorded" symptom.
+            // Clamp the rect to the real frame instead so what's kept is
+            // still (the visible part of) the requested area, and say so once.
+            if (c_w > 0 && c_h > 0 &&
+                (c_x < 0 || c_y < 0 || c_x + c_w > src_w || c_y + c_h > src_h)) {
+                if (!warned_bad_crop) {
+                    warned_bad_crop = true;
+                    HrLog::Warn("Capture crop " + std::to_string(c_w) + "x" + std::to_string(c_h) + " at " +
+                                std::to_string(c_x) + "," + std::to_string(c_y) +
+                                " doesn't fit the captured frame " + std::to_string(src_w) + "x" +
+                                std::to_string(src_h) + " - clamping it (wrong monitor/size resolved?).");
+                }
+                if (c_x < 0) { c_w += c_x; c_x = 0; }
+                if (c_y < 0) { c_h += c_y; c_y = 0; }
+                if (c_x + c_w > src_w) c_w = src_w - c_x;
+                if (c_y + c_h > src_h) c_h = src_h - c_y;
+                c_w &= ~1; c_h &= ~1;
             }
             const bool do_crop = c_w > 0 && c_h > 0 && c_x >= 0 && c_y >= 0 &&
                                  c_x + c_w <= src_w && c_y + c_h <= src_h;
