@@ -1057,7 +1057,10 @@ void ConsoleWindow::CmdHrc(const std::wstring &raw) {
         if (HrcConfig::Save(state_, path)) PrintOk(L"saved settings to " + path);
         else PrintErr(L"couldn't write " + path);
     } else if (sub == L"load") {
-        if (HrcConfig::Load(state_, path)) PrintOk(L"loaded settings from " + path + L" (restart may be needed for some fields to take effect)");
+        if (HrcConfig::Load(state_, path, /*allow_sensitive_fields=*/!sec_core_)) {
+            PrintOk(L"loaded settings from " + path + L" (restart may be needed for some fields to take effect)");
+            if (sec_core_) PrintInfo(L"(sensitive fields like custom_ffmpeg_args/post_record_hook_path were skipped - \"sec 0\" first to allow them)");
+        }
         else PrintErr(L"couldn't read " + path);
     } else {
         PrintWarn(L"usage: hrc save [path] | hrc load [path]  (default path: homrec_config.hrc next to the exe)");
@@ -1118,7 +1121,13 @@ void ConsoleWindow::CmdPreset(const std::wstring &raw) {
         }
     }
 
-    if (!HrcConfig::Load(state_, target_path)) {
+    // BUGFIX (2.3): same unattended-cfg-script exposure as "hrc load" above -
+    // "preset <name>" can run from an autoexec/config/startrec.cfg with no
+    // interactive user at all, so it needs the same "sec" gate as "sethrc"/
+    // "hrc load" rather than the implicit allow_sensitive_fields=true default
+    // (which is only meant for the interactive Set Preset dialog / manual
+    // Import Settings menu item - see HrcConfig::Load()'s header comment).
+    if (!HrcConfig::Load(state_, target_path, /*allow_sensitive_fields=*/!sec_core_)) {
         PrintErr(L"couldn't read " + target_path);
         return;
     }

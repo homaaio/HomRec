@@ -193,7 +193,12 @@ const std::vector<SettingDef> &All() {
             d.set = [](AppState &s, const std::string &v) { s.post_record_hook_type = HrPostRecordHookTypeFromStr(v); return true; };
             v.push_back(d);
         }
-        v.push_back(StrField("post_record_hook_path", "recording_extra", &AppState::post_record_hook_path));
+        // BUGFIX (2.3): post_record_hook_path (the program HomRec runs after every
+        // recording when the hook type is "Script") could be set through an imported
+        // .hrc file, a cfg script, or a plugin's set_setting() call with no "sec" gate
+        // at all - unlike custom_ffmpeg_args, which got exactly this treatment because
+        // it's also an arbitrary-command vector. Now gated the same way.
+        v.push_back(StrField("post_record_hook_path", "recording_extra", &AppState::post_record_hook_path, {}, /*sensitive=*/true));
 
         // -- [ui_toggles] ------------------------------------------------------
         v.push_back(BoolField("always_on_top", "ui_toggles", &AppState::always_on_top));
