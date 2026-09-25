@@ -22,7 +22,17 @@
 // -------------------------------------------------------------
 // Internal: run a command, return combined stdout+stderr output
 // -------------------------------------------------------------
-static std::wstring run_cmd(const std::wstring& cmd, DWORD timeout_ms = 8000)
+// (2.3) How a run_cmd_ex() call ended. run_cmd() only ever returned the text
+// output, so callers couldn't tell "ffmpeg finished" from "ffmpeg was killed
+// by the timeout halfway through writing its output file".
+struct RunResult {
+    bool  started   = false;  // CreateProcessW succeeded
+    bool  timed_out = false;  // killed because timeout_ms elapsed
+    DWORD exit_code = 1;      // valid only when started && !timed_out
+    bool ok() const { return started && !timed_out && exit_code == 0; }
+};
+
+static std::wstring run_cmd_ex(const std::wstring& cmd, DWORD timeout_ms, RunResult* rr)
 {
     SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE hRead = nullptr, hWrite = nullptr;
@@ -46,6 +56,7 @@ static std::wstring run_cmd(const std::wstring& cmd, DWORD timeout_ms = 8000)
         return {};
     }
     CloseHandle(hWrite);
+    if (rr) rr->started = true;
 
     // Drain the pipe concurrently with waiting for the process to exit -
     // see the comment above run_cmd() for why reading only *after*
@@ -60,7 +71,13 @@ static std::wstring run_cmd(const std::wstring& cmd, DWORD timeout_ms = 8000)
         }
     });
 
-    WaitForSingleObject(pi.hProcess, timeout_ms);
+    const DWORD wait_res = WaitForSingleObject(pi.hProcess, timeout_ms);
+    if (rr) {
+        rr->timed_out = (wait_res == WAIT_TIMEOUT);
+        DWORD ec = 1;
+        // Read the exit code BEFORE TerminateProcess() below - that would overwrite it.
+        if (!rr->timed_out && GetExitCodeProcess(pi.hProcess, &ec)) rr->exit_code = ec;
+    }
     TerminateProcess(pi.hProcess, 0); // harmless no-op if it already exited
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
 
@@ -75,6 +92,11 @@ static std::wstring run_cmd(const std::wstring& cmd, DWORD timeout_ms = 8000)
     std::wstring res(wl, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, res.data(), wl);
     return res;
+}
+
+static std::wstring run_cmd(const std::wstring& cmd, DWORD timeout_ms = 8000)
+{
+    return run_cmd_ex(cmd, timeout_ms, nullptr);
 }
 
 static bool fexists(const std::wstring& p)
@@ -403,14 +425,38 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
             L" \"" + tmp + L"\"";
     }
 
-    run_cmd(cmd, 180000);
+    // BUGFIX (2.3): the fixed 180 s timeout killed ffmpeg mid-write on long
+    // recordings (the stretch path re-encodes the WHOLE video), and the code
+    // below then replaced the finished recording with that truncated temp file -
+    // permanent data loss. The timeout now scales with the video length, and the
+    // original is only replaced when ffmpeg actually exited cleanly.
+    double timeout_sec = 180.0;
+    if (video_dur > 0.0) {
+        const double want = video_dur * (stretch ? 2.0 : 0.5);
+        if (want > timeout_sec) timeout_sec = want;
+    }
+    if (timeout_sec > 6.0 * 3600.0) timeout_sec = 6.0 * 3600.0;
+
+    RunResult rr;
+    run_cmd_ex(cmd, (DWORD)(timeout_sec * 1000.0), &rr);
 
     if (!fexists(tmp)) return 0;
-
-    DeleteFileW(video_file);
-    if (!MoveFileW(tmp.c_str(), video_file)) {
-        CopyFileW(tmp.c_str(), video_file, FALSE);
+    if (!rr.ok()) {
+        HrLog::Error(rr.timed_out
+            ? "Recording: merging audio into the video timed out - keeping the video without audio "
+              "(the separate audio file is kept so nothing is lost)."
+            : "Recording: ffmpeg reported an error while merging audio - keeping the video without audio "
+              "(the separate audio file is kept so nothing is lost).");
         DeleteFileW(tmp.c_str());
+        return 0;
+    }
+
+    // Replace in one step - the old delete-then-move left NO video at all if the
+    // move failed.
+    if (!MoveFileExW(tmp.c_str(), video_file, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+        HrLog::Error("Recording: couldn't replace the video with the merged file - keeping the original.");
+        DeleteFileW(tmp.c_str());
+        return 0;
     }
     return fexists(vf) ? 1 : 0;
 }
@@ -432,7 +478,9 @@ HR_EXPORT int hr_export_mp3(const wchar_t* ffpath, const wchar_t* wav_path, cons
         L" -c:a libmp3lame -q:a 2 -y"
         L" \"" + std::wstring(mp3_path) + L"\"";
 
-    run_cmd(cmd, 60000);
+    RunResult rr;
+    run_cmd_ex(cmd, 120000, &rr);
+    if (!rr.ok()) { DeleteFileW(mp3_path); return 0; } // never leave a half-written .mp3 behind
     return fexists(mp3_path) ? 1 : 0;
 }
 
@@ -446,6 +494,8 @@ HR_EXPORT int hr_concat_segments(const wchar_t* ffpath, const wchar_t* list_path
         L" -c copy -y"
         L" \"" + std::wstring(out_path) + L"\"";
 
-    run_cmd(cmd, 60000);
+    RunResult rr;
+    run_cmd_ex(cmd, 180000, &rr);
+    if (!rr.ok()) { DeleteFileW(out_path); return 0; } // never present a truncated clip as a saved replay
     return fexists(out_path) ? 1 : 0;
 }
