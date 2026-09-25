@@ -14,6 +14,7 @@
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
+  #include "hr_log.h"
   #define HR_EXPORT extern "C" __declspec(dllexport)
 #else
   #define HR_EXPORT extern "C" __attribute__((visibility("default")))
@@ -109,6 +110,38 @@ static LRESULT CALLBACK _WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
+static std::string _DescribeHotkeyCombo(UINT mod, UINT vk) {
+    std::string s;
+    if (mod & MOD_CONTROL) s += "Ctrl+";
+    if (mod & MOD_SHIFT)   s += "Shift+";
+    if (mod & MOD_ALT)     s += "Alt+";
+    if (mod & MOD_WIN)     s += "Win+";
+    UINT scancode = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    wchar_t name[64] = {};
+    if (scancode && GetKeyNameTextW((LONG)(scancode << 16), name, 64) > 0) {
+        int n = WideCharToMultiByte(CP_UTF8, 0, name, -1, nullptr, 0, nullptr, nullptr);
+        if (n > 1) {
+            std::string keyname((size_t)n - 1, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, name, -1, keyname.data(), n, nullptr, nullptr);
+            s += keyname;
+            return s;
+        }
+    }
+    char buf[24];
+    snprintf(buf, sizeof(buf), "VK 0x%02X", vk);
+    s += buf;
+    return s;
+}
+
+static void _RegisterHotkeyChecked(HWND hwnd, int id, UINT mod, UINT vk) {
+    if (vk == 0) return; // an unparsed/blank binding - nothing to register
+    if (!RegisterHotKey(hwnd, id, mod, vk)) {
+        HrLog::Warn("Hotkey: couldn't register " + _DescribeHotkeyCombo(mod, vk) +
+                    " - it's already bound to another HomRec hotkey or to another "
+                    "running application. That hotkey won't respond until it's "
+                    "changed to a combo that's actually free.");
+    }
+}
 
 static DWORD WINAPI _MsgThread(LPVOID param) {
     HotkeyCtx *ctx = static_cast<HotkeyCtx *>(param);
@@ -128,11 +161,11 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     SetWindowLongPtrW(ctx->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
 
     /* Register hotkeys (configurable - see hr_hk_configure()) */
-    RegisterHotKey(ctx->hwnd, HK_START_STOP, ctx->mod_start_stop, ctx->vk_start_stop);
-    RegisterHotKey(ctx->hwnd, HK_PAUSE,      ctx->mod_pause,      ctx->vk_pause);
-    RegisterHotKey(ctx->hwnd, HK_FULLSCREEN, ctx->mod_fullscreen, ctx->vk_fullscreen);
-    RegisterHotKey(ctx->hwnd, HK_SAVE_REPLAY, ctx->mod_save_replay, ctx->vk_save_replay);
-    for (const auto &c : ctx->customs) RegisterHotKey(ctx->hwnd, c.id, c.mod, c.vk);
+    _RegisterHotkeyChecked(ctx->hwnd, HK_START_STOP, ctx->mod_start_stop, ctx->vk_start_stop);
+    _RegisterHotkeyChecked(ctx->hwnd, HK_PAUSE,      ctx->mod_pause,      ctx->vk_pause);
+    _RegisterHotkeyChecked(ctx->hwnd, HK_FULLSCREEN, ctx->mod_fullscreen, ctx->vk_fullscreen);
+    _RegisterHotkeyChecked(ctx->hwnd, HK_SAVE_REPLAY, ctx->mod_save_replay, ctx->vk_save_replay);
+    for (const auto &c : ctx->customs) _RegisterHotkeyChecked(ctx->hwnd, c.id, c.mod, c.vk);
 
     /* Signal ready */
     ctx->running = true;
