@@ -273,6 +273,7 @@ private:
     // day without re-firing every second within the same matching
     // minute.
     std::string schedule_last_matched_minute_;
+    bool schedule_parse_warned_ = false; // avoid re-logging every second while scheduled_start_time is malformed
     int countdown_remaining_ = 0;
     // Session-only (not persisted to settings.json) - resets each launch,
     // same lifetime as the Python original's in-memory dont_show_again

@@ -1435,10 +1435,37 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
     SetStatusState(msg, theme_.warning);
     if (file_lbl_) file_lbl_->SetLabel(msg);
 }
+static bool ParseScheduledTime(const std::string &raw, int &hh, int &mm) {
+    size_t i = 0, n = raw.size();
+    while (i < n && isspace((unsigned char)raw[i])) ++i;
+    size_t j = n;
+    while (j > i && isspace((unsigned char)raw[j - 1])) --j;
+    const size_t colon = raw.find(':', i);
+    if (colon == std::string::npos || colon >= j) return false;
+    const std::string h_str = raw.substr(i, colon - i);
+    const std::string m_str = raw.substr(colon + 1, j - (colon + 1));
+    if (h_str.empty() || h_str.size() > 2 || m_str.empty() || m_str.size() > 2) return false;
+    if (!std::all_of(h_str.begin(), h_str.end(), ::isdigit)) return false;
+    if (!std::all_of(m_str.begin(), m_str.end(), ::isdigit)) return false;
+    hh = atoi(h_str.c_str());
+    mm = atoi(m_str.c_str());
+    return hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
+}
 
 void HomRecMainFrame::OnScheduleTimer(wxTimerEvent &) {
     if (!state_.scheduled_start_enabled || state_.scheduled_start_time.empty()) return;
     if (state_.recording) return;
+
+    int target_hh = 0, target_mm = 0;
+    if (!ParseScheduledTime(state_.scheduled_start_time, target_hh, target_mm)) {
+        if (!schedule_parse_warned_) {
+            schedule_parse_warned_ = true;
+            HrLog::Warn("Recording: scheduled_start_time (\"" + state_.scheduled_start_time +
+                        "\") isn't a valid HH:MM time - scheduled start will never fire until it's fixed.");
+        }
+        return;
+    }
+    schedule_parse_warned_ = false;
 
     time_t now = time(nullptr);
     struct tm *lt = localtime(&now);
@@ -1447,6 +1474,9 @@ void HomRecMainFrame::OnScheduleTimer(wxTimerEvent &) {
     snprintf(buf, sizeof(buf), "%02d:%02d", lt->tm_hour, lt->tm_min);
     std::string current_minute = buf;
 
+    char target_buf[8];
+    snprintf(target_buf, sizeof(target_buf), "%02d:%02d", target_hh, target_mm);
+
     // Only fire the instant the current minute first matches the target
     // (schedule_last_matched_minute_ != current_minute) - without this,
     // "12:00" would re-trigger RequestStart() every second for the
@@ -1454,7 +1484,7 @@ void HomRecMainFrame::OnScheduleTimer(wxTimerEvent &) {
     // target, this naturally re-arms for the same time tomorrow, with no
     // date-tracking needed - a mismatch just means "not the trigger
     // instant right now".
-    if (current_minute == state_.scheduled_start_time && current_minute != schedule_last_matched_minute_) {
+    if (current_minute == target_buf && current_minute != schedule_last_matched_minute_) {
         schedule_last_matched_minute_ = current_minute;
         HrLog::Info("Recording: scheduled start time (" + current_minute + ") reached - starting.");
         RequestStart();
