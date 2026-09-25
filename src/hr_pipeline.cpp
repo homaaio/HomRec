@@ -1313,8 +1313,14 @@ struct Pipeline {
             // holds just the cropped window sub-rectangle of it.
             if (include_cursor.load(std::memory_order_relaxed)) {
                 ensure_work_copy(frame);
+                // BUGFIX (2.3): this used the raw crop_x/crop_y members - read
+                // without crop_mtx while the UI thread may be rewriting them (window
+                // tracking now does that ~20x/s), and not the clamped values the
+                // frame was actually cropped with (c_x/c_y). The cursor could sit a
+                // few pixels off while a tracked window was moving or partly off-screen.
                 hr_composite_cursor(frame, eff_w, eff_h,
-                                     cap_origin_x + crop_x, cap_origin_y + crop_y);
+                                     cap_origin_x + (do_crop ? c_x : 0),
+                                     cap_origin_y + (do_crop ? c_y : 0));
             }
             frame_ptr = frame;
             int extra_slots = 0;
