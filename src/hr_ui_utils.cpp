@@ -334,6 +334,23 @@ struct HrSysStats {
  * Fills HrSysStats.  disk_path is the recordings folder (used for disk stats).
  * Returns 1 on success, 0 if not supported.
  */
+#ifdef _WIN32
+/* BUGFIX (2.3): every path in HomRec is UTF-8, but the *A Win32 functions (and
+ * fopen) read narrow strings in the ANSI code page. With a non-ASCII output
+ * folder (e.g. a Cyrillic user name) the path check failed, a junk mojibake
+ * folder got created, and the free-space/size queries silently returned nothing.
+ * The Windows branches below convert to UTF-16 and call the *W functions. */
+static std::wstring _hr_wide(const char *s) {
+    if (!s) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+    if (n <= 1) return std::wstring();
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, &w[0], n);
+    w.resize((size_t)n - 1);
+    return w;
+}
+#endif
+
 /*
  * hr_get_free_disk_mb
  *
@@ -352,7 +369,7 @@ HR_EXPORT int hr_get_free_disk_mb(const char *path, uint64_t *out_free_mb) {
     if (!path || !path[0] || !out_free_mb) return 0;
 #ifdef _WIN32
     ULARGE_INTEGER free_bytes, total_bytes, free_caller;
-    if (!GetDiskFreeSpaceExA(path, &free_caller, &total_bytes, &free_bytes)) return 0;
+    if (!GetDiskFreeSpaceExW(_hr_wide(path).c_str(), &free_caller, &total_bytes, &free_bytes)) return 0;
     *out_free_mb = free_bytes.QuadPart / (1024ULL * 1024);
     return 1;
 #elif defined(__linux__)
@@ -612,12 +629,22 @@ HR_EXPORT float hr_fps_tracker_tick(void *h) {
  */
 HR_EXPORT float hr_file_size_mb(const char *path) {
     if (!path) return -1.0f;
+#ifdef _WIN32
+    /* Wide + 64-bit: the old fopen()/ftell() version returned -1 for any file over
+     * 2 GB (ftell's `long` is 32-bit on Windows) and for non-ASCII paths. */
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(_hr_wide(path).c_str(), GetFileExInfoStandard, &fad)) return -1.0f;
+    if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return -1.0f;
+    const unsigned long long sz = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    return (float)((double)sz / (1024.0 * 1024.0));
+#else
     FILE *f = fopen(path, "rb");
     if (!f) return -1.0f;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fclose(f);
     return (sz >= 0) ? (float)sz / (1024.0f * 1024.0f) : -1.0f;
+#endif
 }
 
 /* --------------------------------------------------------------------------- */
@@ -633,7 +660,7 @@ HR_EXPORT int hr_make_output_dir(const char *path) {
     if (!path || !path[0]) return 0;
 #ifdef _WIN32
     /* SHCreateDirectoryExA handles nested paths */
-    int rc = SHCreateDirectoryExA(nullptr, path, nullptr);
+    int rc = SHCreateDirectoryExW(nullptr, _hr_wide(path).c_str(), nullptr);
     return (rc == ERROR_SUCCESS || rc == ERROR_ALREADY_EXISTS) ? 1 : 0;
 #else
     /* Recursive mkdir */
@@ -656,7 +683,7 @@ HR_EXPORT int hr_make_output_dir(const char *path) {
 HR_EXPORT void hr_open_folder(const char *path) {
     if (!path || !path[0]) return;
 #ifdef _WIN32
-    ShellExecuteA(nullptr, "open", path, nullptr, nullptr, SW_SHOWNORMAL);
+    ShellExecuteW(nullptr, L"open", _hr_wide(path).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #elif defined(__APPLE__)
     std::string cmd = std::string("open \"") + path + "\"";
     system(cmd.c_str());
@@ -672,12 +699,12 @@ HR_EXPORT void hr_open_folder(const char *path) {
  */
 HR_EXPORT int hr_path_exists(const char *path) {
     if (!path || !path[0]) return 0;
-    FILE *f = fopen(path, "rb");
-    if (f) { fclose(f); return 1; }
 #ifdef _WIN32
-    DWORD attr = GetFileAttributesA(path);
+    DWORD attr = GetFileAttributesW(_hr_wide(path).c_str());
     return (attr != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
 #else
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return 1; }
     struct stat st;
     return stat(path, &st) == 0 ? 1 : 0;
 #endif
@@ -718,6 +745,38 @@ HR_EXPORT int hr_path_exists(const char *path) {
  *
  * out must be at least 256 bytes.
  */
+/* (2.3) Filename-template safety helpers. ---------------------------------- */
+
+/* Replace characters that can't be part of a Windows file name. Used on every
+ * *expanded* token: {date:%H:%M} used to put a ':' in the file name (an NTFS
+ * alternate data stream / an ffmpeg open failure) and {date:%d/%m/%Y} a '/'
+ * (a folder that doesn't exist). */
+static std::string _sanitize_name_segment(const std::string &in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        unsigned char c = (unsigned char)in[i];
+        if (c < 0x20 || strchr("\\/:*?\"<>|", (int)c)) out += '_';
+        else out += (char)c;
+    }
+    return out;
+}
+
+/* Only allow strftime conversions that behave the same on msvcrt and UCRT.
+ * Anything else (%e %F %T %D ... or a dangling '%') can trigger the C runtime's
+ * invalid-parameter handler, which terminates the whole app - from something as
+ * harmless as a typo in the filename template. */
+static bool _is_safe_strftime_fmt(const std::string &fmt) {
+    for (size_t i = 0; i < fmt.size(); ++i) {
+        if (fmt[i] != '%') continue;
+        if (i + 1 >= fmt.size()) return false;
+        const char n = fmt[i + 1];
+        if (n == '\0' || !strchr("aAbBcdHIjmMpSUwWxXyYzZ%", (int)n)) return false;
+        ++i;
+    }
+    return true;
+}
+
 HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
                                          const char *app_name, char *out, int out_len,
                                          const char *preset_name) {
@@ -754,14 +813,16 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
             if (close == std::string::npos) break; // unterminated - leave as-is
             std::string fmt = expanded.substr(pos + open.size(), close - (pos + open.size()));
             char custom[64] = {};
-            if (fmt.empty() || strftime(custom, sizeof(custom), fmt.c_str(), lt) == 0) {
+            if (fmt.empty() || !_is_safe_strftime_fmt(fmt) ||
+                strftime(custom, sizeof(custom), fmt.c_str(), lt) == 0) {
                 // Empty/invalid format (or one that happens to expand to
                 // nothing, e.g. an empty literal) - fall back to yyyymmdd
                 // rather than leaving a blank segment in the filename.
                 snprintf(custom, sizeof(custom), "%s", date_str);
             }
-            expanded.replace(pos, close - pos + 1, custom);
-            pos += strlen(custom);
+            const std::string safe_custom = _sanitize_name_segment(custom);
+            expanded.replace(pos, close - pos + 1, safe_custom);
+            pos += safe_custom.size();
         }
     }
 
@@ -770,8 +831,15 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
     _replace(expanded, "{hh}",  hh_str);
     _replace(expanded, "{min}", min_str);
     _replace(expanded, "{sec}", sec_str);
-    _replace(expanded, "{app}", (app_name && app_name[0]) ? app_name : "Desktop");
-    _replace(expanded, "{preset}", (preset_name && preset_name[0]) ? preset_name : "default");
+    _replace(expanded, "{app}", _sanitize_name_segment((app_name && app_name[0]) ? app_name : "Desktop"));
+    _replace(expanded, "{preset}", _sanitize_name_segment((preset_name && preset_name[0]) ? preset_name : "default"));
+
+    /* Whatever the user typed literally in the template gets the same treatment
+     * (path separators are left alone on purpose). */
+    for (size_t i = 0; i < expanded.size(); ++i) {
+        unsigned char c = (unsigned char)expanded[i];
+        if (c < 0x20 || strchr(":*?\"<>|", (int)c)) expanded[i] = '_';
+    }
 
     std::string result;
     if (folder && folder[0]) {
