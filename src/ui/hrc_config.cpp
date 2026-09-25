@@ -82,6 +82,8 @@ void ReadOverlaysSection(const std::unordered_map<std::string, std::string> &kv,
     overlays.clear();
     if (!has("overlay_count")) return;
     int n = atoi(get("overlay_count").c_str());
+    if (n < 0) n = 0;
+    if (n > 10000) n = 10000; // generous; a real overlay list is a handful
     for (int i = 0; i < n; ++i) {
         std::string p = "overlay_" + std::to_string(i) + "_";
         if (!has((p + "id").c_str())) continue; // tolerate a hand-edited/corrupt file
@@ -129,6 +131,9 @@ void ReadHotkeysSection(const std::unordered_map<std::string, std::string> &kv,
     hotkeys.clear();
     if (!has("custom_hotkey_count")) return;
     int n = atoi(get("custom_hotkey_count").c_str());
+    // BUGFIX (2.3): same unbounded-count hang as overlay_count above.
+    if (n < 0) n = 0;
+    if (n > 10000) n = 10000;
     for (int i = 0; i < n; ++i) {
         std::string p = "custom_hotkey_" + std::to_string(i) + "_";
         if (!has(p + "action")) continue; // tolerate a hand-edited/corrupt file
