@@ -219,6 +219,174 @@ welcome to changelog :D
   launches at plain NORMAL_PRIORITY_CLASS so it competes for CPU on equal
   footing with everything else instead of ahead of it.
 
+- Fixed: pausing a recording never actually paused the audio - hr_audio_pause()
+  existed and worked (WASAPI capture keeps running and discards samples while
+  set) but nothing called it, so the mic/system audio kept recording straight
+  through a pause while the video timeline froze; everything after a pause
+  played back out of sync by however long the pause lasted. TogglePause() now
+  calls hr_audio_pause() alongside hr_pl_pause(). Resuming also resets the
+  silence-auto-pause timer, since the silence that built up while paused used
+  to make auto-pause re-trigger the instant you resumed. recording_controller.cpp.
+
+- Fixed: stopping a recording while it was paused left the kept-alive preview
+  pipeline (and audio) permanently paused - the live preview froze until the
+  next Start(), and if that reused the same pipeline (same size/monitor) it
+  captured nothing at all. FinishPipelineAfterStop() now clears both flags.
+  Also, Start()'s own pipeline-reuse branch was setting the output pixel
+  format AFTER switching recording on, so the very first frame(s) of a reused-
+  pipeline recording could go out in the wrong chroma layout (NV12 vs I420) -
+  reordered. recording_controller.cpp.
+
+- Fixed: Instant Replay could be silently killed several ways and never come
+  back on its own:
+    * Any failed Start() (ffmpeg missing, low disk, the pipeline/encoder
+      failing to start...) paused Instant Replay first and only ever resumed
+      it from Stop() - so a failed Start() left it dead until manually
+      toggled off and on. Start() now resumes it on every early-return path.
+    * Picking a window/region, or changing monitor/fps/preview settings,
+      called RefreshPreviewSettings() -> TeardownPreview(), which destroys the
+      very pipeline Instant Replay's encoder was attached to, while
+      EnableInstantReplay()'s own "already running" check still thought it
+      was active. RefreshPreviewSettings() now stops Instant Replay first and
+      restarts it against the rebuilt pipeline.
+    * Changing the replay buffer length while Instant Replay was already
+      running did nothing (the ring buffer's size is fixed at encoder start).
+      EnableInstantReplay() now restarts the encoder when the length changed.
+  recording_controller.cpp/.h.
+
+- Fixed: Save Replay's ffmpeg concat list was written with a std::wofstream in
+  the "C" locale, which can't encode non-ASCII characters - a %TEMP% path
+  under a non-ASCII Windows user name silently truncated the list and Save
+  Replay failed partway through. Written as UTF-8 now (what ffmpeg's concat
+  demuxer expects). recording_controller.cpp.
+
+- Fixed: the temp-WAV cleanup after every recording (deleting/renaming
+  mic_audio.wav/sys_audio.wav/audio.wav) used std::remove()/std::rename(),
+  which take an ANSI-codepage path on Windows - with a non-ASCII output
+  folder these silently failed to find the files, leaving stray temp WAVs
+  next to the recording. Replaced with UTF-8-correct DeleteFileW/MoveFileExW
+  wrappers everywhere in this file. recording_controller.cpp.
+
+- Fixed: Quick Test still passed the monitor LIST index straight to
+  hr_pl_create() as if it were the DXGI output index - the same
+  wrong-monitor-recorded bug already fixed for real recordings in
+  ResolveCaptureSize(), but missed here. Now matched by desktop coordinates
+  the same way. recording_controller.cpp.
+
+- Fixed: BuildOutputPath()'s filename buffer was only 256 bytes - a long
+  output folder combined with the filename template could get silently cut
+  off, taking the ".mp4" extension with it. Bumped to 1024. Also: ffmpeg
+  always runs with -y, so two recordings that resolve to the same filename
+  (a template without {time}/{sec}, or two clips started in the same second)
+  silently overwrote the earlier one with no warning; BuildOutputPath() now
+  appends _2, _3, ... when the target already exists. recording_controller.cpp.
+
+- Fixed: ComputeOutputDims()'s percentage/scale-factor resolution mode had no
+  floor, unlike the Absolute mode right next to it - a very small
+  scale_factor could compute a 0-width or 0-height output. Clamped to a
+  2px minimum like Absolute mode already was. recording_controller.cpp.
+
+- Optimized: while a tracked window (File > Select Window...) was closed or
+  minimized, RetargetWindowCapture() re-ran a full EnumWindows()+title scan
+  on every ~20Hz overlay/cursor sync tick trying to find it again. Throttled
+  to twice a second. recording_controller.cpp.
+
+- Fixed: the cursor overlay ("Cursor" setting) composited at the raw
+  crop_x/crop_y pipeline members - read without the lock that protects them
+  from the UI thread rewriting them mid-loop (window tracking above now does
+  that ~20x/s), and not the clamped c_x/c_y values the frame was actually
+  cropped with. The drawn cursor could sit a few pixels off, worst around a
+  window that's moving or partly off-screen. hr_pipeline.cpp.
+
+- Fixed (data loss): merging the separate audio WAV into the recorded video
+  (hr_merge_av) ran ffmpeg under a fixed 180-second timeout and then, if that
+  timeout was hit, replaced the finished recording with whatever ffmpeg had
+  written so far anyway - on a long recording, or the "stretch" re-encode path
+  for a dropped-frames recording, this silently swapped a complete video for a
+  truncated one. The timeout now scales with the video's length, and the
+  original file is only replaced when ffmpeg actually exited with code 0;
+  otherwise the video is left as-is (audio-less, with the separate WAV kept)
+  and an error is logged. The replace step itself now also uses a single
+  atomic MoveFileExW instead of delete-then-move, so a failed move can no
+  longer leave no video file at all. hr_export_mp3()/hr_concat_segments() were
+  given the same "don't leave a corrupt/truncated file behind on failure"
+  treatment. hr_tools.cpp.
+
+- Fixed: every file-path Win32 call in hr_ui_utils.cpp (hr_path_exists,
+  hr_make_output_dir, hr_open_folder, hr_get_free_disk_mb, hr_file_size_mb)
+  used the *A (ANSI-codepage) functions or fopen() on a UTF-8 path - with a
+  non-ASCII output folder (e.g. a Cyrillic Windows user name) these silently
+  failed: the "does it exist" check said no, a mojibake folder could get
+  created next to the real one, and free-space/size queries returned nothing.
+  Switched to the *W functions via a small UTF-8->UTF-16 helper.
+  hr_file_size_mb() is also now 64-bit (the old ftell()-based version
+  returned -1 for any file over ~2GB). hr_ui_utils.cpp.
+
+- Fixed: the filename template's {date:FMT} custom strftime formatting had no
+  allowlist - a template with an unsupported conversion (e.g. %e, %F, or a
+  trailing lone %) could hit the C runtime's invalid-parameter handler, which
+  terminates the whole process, from nothing more than a typo in Settings.
+  Only the conversions that behave consistently are accepted now; anything
+  else falls back to yyyymmdd like an empty/failed format already did. Also,
+  none of the expanded template segments ({date:...}'s output, {app},
+  {preset}, or the template's own literal text) were sanitized against
+  characters that aren't legal in a Windows filename - a custom format like
+  {date:%H:%M} or an app/preset name containing "/" or ":" produced a broken
+  path. All of it is sanitized now. hr_ui_utils.cpp.
+
+- Fixed: importing a .hrc file (Import Settings, a preset, or "hrc load"/
+  "sethrc" at the console) read overlay_count/custom_hotkey_count with a bare
+  atoi() and no bound - a corrupt or hand-edited file (or a preset shared by
+  someone else) with a huge count like "overlay_count=2000000000" made the
+  import hang doing that many map lookups. Both are now clamped to a generous
+  10,000. hrc_config.cpp.
+
+- Fixed (security): custom_ffmpeg_args is gated behind the console's "sec"
+  fuse when set through an unattended path (a cfg/autoexec.cfg-style script,
+  or an imported .hrc) since it's written straight onto ffmpeg's command
+  line - but two of the paths that can run unattended from
+  cfg/autoexec.cfg|config.cfg|startrec.cfg never actually applied that gate:
+  the console's "hrc load <path>" (CmdHrc) always imported with
+  allow_sensitive_fields defaulted to true, and "preset <name>" (CmdPreset)
+  did the same. Only "sethrc" was gating it correctly. Both now respect the
+  "sec" fuse exactly like "sethrc" does. Also added post_record_hook_path
+  (the program run after every recording when the post-record hook is set to
+  "Script") to the set of fields this gate protects - it's the same class of
+  "arbitrary command written from an unattended import" risk custom_ffmpeg_args
+  is, and had no gate on it at all before. console_window.cpp,
+  hr_settings_registry.cpp.
+
+- Fixed: Settings > Advanced > Scheduled Start (scheduled_start_time, set via
+  .hrc / the console / a plugin - it has no dedicated dialog control yet)
+  required an exact "HH:MM" match with zero-padded digits; "9:30", " 09:30 "
+  or "09:30:00" all looked like plausible times but would simply never fire,
+  with nothing telling the person their schedule was silently dead. Parsing
+  is tolerant now (leading/trailing whitespace, single-digit hour/minute),
+  and a malformed value now logs a one-time warning instead of failing
+  silently forever. main_frame.cpp/.h.
+
+- Housekeeping: the installer script (installer/HomRec.iss, its default
+  MyAppVersion and the /D example in installer/README.md), the README's
+  version badge, and a comment in hr_app_logic.cpp still said 2.2-b.4/2.2.2
+  from before src/ui/version.h (the actual single source of truth,
+  HR_APP_VERSION) was bumped to 2.3. Brought in line.
+
+- Fixed: RegisterHotKey()'s return value was never checked for any of the
+  four fixed hotkeys or the custom hotkeys list. Two bindings sharing the
+  same combo (two HomRec actions bound to the same keys, or a combo another
+  running application already registered globally) made the OS call fail for
+  whichever one registered second - that hotkey then simply never fired,
+  with absolutely nothing telling the person it was dead. Failures are now
+  logged with the combo that couldn't be registered, so it's at least
+  visible in the log instead of a silent no-op. hr_hotkey.cpp.
+
+- Noted, not changed: src/ui/advanced_settings_dialog.cpp/.h is dead code -
+  not referenced by either the Makefile or CMakeLists.txt, and not called
+  from anywhere else in the codebase. Its own header comment already flags
+  it as an incomplete port superseded by settings_dialog.cpp +
+  HrSettingsRegistry. Left in place rather than deleted, since it isn't
+  shipped either way; worth actually removing or finishing in a future pass.
+
 [Version 2.2.2] - 2026-09-19
 
 - Fixed: starting a manual recording while Instant Replay was buffering
