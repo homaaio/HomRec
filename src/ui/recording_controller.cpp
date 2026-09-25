@@ -13,6 +13,8 @@
 #include <cstring>
 #include <algorithm>
 #include <fstream>
+#include <cstdio>     // FILE / _wfopen - SaveReplay()'s concat list
+#include <functional>  // Start()'s Instant Replay resume-on-failure guard
 
 extern "C" {
     // hr_tools.cpp (wide-string API)
@@ -147,6 +149,19 @@ std::wstring WideFromNarrow(const std::string &s) {
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
     if (!w.empty() && w.back() == L'\0') w.pop_back();
     return w;
+}
+
+// BUGFIX (2.3): std::remove()/std::rename() take an ANSI-codepage path on
+// Windows, but every path in this file is UTF-8 - so a temp WAV inside an
+// output folder with non-ASCII characters (e.g. a Cyrillic user name) was
+// never found/deleted/renamed. These go through the wide APIs instead;
+// MoveFileExW also replaces an existing target like a real "rename over".
+bool RemoveFileUtf8(const std::string &p) {
+    return DeleteFileW(WideFromNarrow(p).c_str()) != 0;
+}
+bool RenameFileUtf8(const std::string &from, const std::string &to) {
+    return MoveFileExW(WideFromNarrow(from).c_str(), WideFromNarrow(to).c_str(),
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0;
 }
 
 // BUGFIX (unbounded temp-disk growth while using Instant Replay):
@@ -312,11 +327,30 @@ std::string RecordingController::ResolveCaptureAppName() const {
 }
 
 std::wstring RecordingController::BuildOutputPath() {
-    char buf[256] = {};
+    // BUGFIX (2.3): was a 256-byte buffer - a long output folder + template
+    // got silently cut off, taking the ".mp4" extension with it.
+    char buf[1024] = {};
     std::string app_name = ResolveCaptureAppName();
     hr_filename_from_template(state_.filename_template.c_str(), state_.output_folder.c_str(),
-                               app_name.c_str(), buf, 256, state_.active_preset_name.c_str());
-    return WideFromNarrow(buf);
+                               app_name.c_str(), buf, (int)sizeof(buf), state_.active_preset_name.c_str());
+    std::wstring path = WideFromNarrow(buf);
+
+    // BUGFIX (2.3): ffmpeg is always run with -y, so a template that isn't
+    // unique per recording (e.g. "{app}_{date}", or two clips in the same
+    // minute with "{hh}-{min}") silently overwrote the earlier file.
+    // Append _2, _3, ... instead.
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        const size_t dot = path.find_last_of(L'.');
+        const size_t sep = path.find_last_of(L"\\/");
+        const bool has_ext = dot != std::wstring::npos && (sep == std::wstring::npos || dot > sep);
+        const std::wstring stem = has_ext ? path.substr(0, dot) : path;
+        const std::wstring ext = has_ext ? path.substr(dot) : std::wstring();
+        for (int n = 2; n < 10000; ++n) {
+            std::wstring cand = stem + L"_" + std::to_wstring(n) + ext;
+            if (GetFileAttributesW(cand.c_str()) == INVALID_FILE_ATTRIBUTES) { path = cand; break; }
+        }
+    }
+    return path;
 }
 
 void RecordingController::ScaledPreviewSize(int &out_w, int &out_h) const {
@@ -352,6 +386,10 @@ void RecordingController::ComputeOutputDims(int src_w, int src_h, int &out_w, in
     }
     if (out_w % 2) out_w--;
     if (out_h % 2) out_h--;
+    // BUGFIX (2.3): Percent mode had no floor (a tiny/zero scale_factor gave a
+    // 0x0 output); Absolute mode already clamped to 2.
+    if (out_w < 2) out_w = 2;
+    if (out_h < 2) out_h = 2;
 }
 
 bool RecordingController::CheckCaptureTarget(std::wstring &error_out) const {
@@ -571,6 +609,9 @@ void RecordingController::RetargetWindowCapture() {
     // Region's whole point is a fixed area of the screen - it must NOT
     // track anything, so this only ever applies to Window mode.
     if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) return;
+    // OPTIMIZATION (2.3): while the tracked window is gone, every ~20 Hz overlay
+    // tick used to run a full EnumWindows()+title scan. Retry twice a second.
+    if (window_track_lost_warned_ && std::chrono::steady_clock::now() < next_window_retarget_) return;
 
     HWND hwnd = nullptr;
     RECT r{};
@@ -581,6 +622,7 @@ void RecordingController::RetargetWindowCapture() {
                         "' is no longer available (closed or minimized) - keeping the last "
                         "captured position until it's back.");
         }
+        next_window_retarget_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
         return;
     }
     // Remember the exact HWND across title changes, same reason
@@ -633,6 +675,17 @@ bool RecordingController::Start(std::wstring &error_out) {
     // what "I picked a window but my entire screen got recorded" was.
     if (!CheckCaptureTarget(error_out)) return false;
 
+    // BUGFIX (2.3): Instant Replay gets paused just below, and only Stop()
+    // ever resumed it - so ANY failed Start() (ffmpeg missing, low disk,
+    // encoder/pipeline failed to start...) left Instant Replay silently dead.
+    // This guard resumes it on every early `return false`; it is disarmed once
+    // the recording has really started.
+    struct StartFailGuard {
+        std::function<void()> resume;
+        bool armed = true;
+        ~StartFailGuard() { if (armed && resume) resume(); }
+    } start_guard;
+
     // Instant Replay and a manual recording share this class's one
     // pipeline_ and hr_pl_set_recording()'s one active pipe_fd (see the
     // header comment on EnableInstantReplay()) - if the background
@@ -644,6 +697,16 @@ bool RecordingController::Start(std::wstring &error_out) {
         StopInstantReplayEncoderAsync();
         instant_replay_active_ = false;
         HrLog::Info("Instant Replay: paused for a manual recording.");
+        start_guard.resume = [this]() {
+            if (!instant_replay_enabled_ || state_.recording) return;
+            JoinPendingInstantReplayStop();
+            std::wstring e;
+            if (EnableInstantReplay(e)) {
+                HrLog::Info("Instant Replay: resumed after the recording failed to start.");
+            } else {
+                HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume after a failed start - " + e));
+            }
+        };
     }
 
     if (!hr_path_exists(state_.output_folder.c_str())) {
@@ -743,6 +806,14 @@ bool RecordingController::Start(std::wstring &error_out) {
         pipeline_output_idx_ == capture_output_idx_) {
         hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
         hr_pl_set_output_size(pipeline_, output_w_, output_h_);
+        // BUGFIX (2.3): the pixel format used to be set only AFTER recording had
+        // already been switched on, so the very first frame(s) of a recording that
+        // reused the preview pipeline could go out in the previous encoder's chroma
+        // layout (NV12 vs I420). Also clear a stale "paused" flag: a recording that
+        // was stopped while paused left the kept-alive pipeline paused, and the next
+        // recording then captured nothing.
+        hr_pl_pause(pipeline_, 0);
+        hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         reused_preview_pipeline = true;
     } else {
@@ -809,6 +880,7 @@ bool RecordingController::Start(std::wstring &error_out) {
 
     if (state_.audio_out_channels > 0) {
         hr_audio_set_max_buffer_sec(0);
+        hr_audio_pause(0); // never start with audio left paused by a previous recording
         hr_audio_reset_buffers();
         hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
         const auto t_audio_go = std::chrono::steady_clock::now();
@@ -822,6 +894,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     hr_ctl_set_output_path(ctl_, NarrowFromWide(current_output_path_).c_str());
     hr_ctl_start(ctl_);
 
+    start_guard.armed = false; // recording is really running now
     state_.recording = true;
     state_.paused = false;
     state_.frame_count = 0;
@@ -900,6 +973,11 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
 }
 
 void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
+    // BUGFIX (2.3): Stop while paused left the pipeline (and audio) paused. With the
+    // live preview on the pipeline is kept alive, so the preview froze and the NEXT
+    // recording reused a paused pipeline and captured nothing.
+    if (pipeline_) hr_pl_pause(pipeline_, 0);
+    hr_audio_pause(0);
     if (pipeline_) hr_pl_set_priority_boost(pipeline_, 0);
 
     if (instant_replay_enabled_) {
@@ -985,21 +1063,21 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     bool have_audio_file = false;
     if (mic_written && sys_written) {
         if (hr_audio_mix_wav(mic_wav.c_str(), sys_wav.c_str(), audio_wav.c_str()) == 0) {
-            std::remove(mic_wav.c_str());
-            std::remove(sys_wav.c_str());
+            RemoveFileUtf8(mic_wav);
+            RemoveFileUtf8(sys_wav);
             have_audio_file = true;
         } else {
             // Mixing failed - fall back to whichever single track exists
             // (mic preferred).
-            std::remove(sys_wav.c_str());
-            std::rename(mic_wav.c_str(), audio_wav.c_str());
+            RemoveFileUtf8(sys_wav);
+            RenameFileUtf8(mic_wav, audio_wav);
             have_audio_file = true;
         }
     } else if (mic_written) {
-        std::rename(mic_wav.c_str(), audio_wav.c_str());
+        RenameFileUtf8(mic_wav, audio_wav);
         have_audio_file = true;
     } else if (sys_written) {
-        std::rename(sys_wav.c_str(), audio_wav.c_str());
+        RenameFileUtf8(sys_wav, audio_wav);
         have_audio_file = true;
     }
 
@@ -1048,13 +1126,13 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
             std::string mp3_path = stem + ".mp3";
             if (hr_export_mp3(ffmpeg_path_.c_str(), WideFromNarrow(audio_wav).c_str(),
                                WideFromNarrow(mp3_path).c_str())) {
-                std::remove(audio_wav.c_str());
+                RemoveFileUtf8(audio_wav);
             } else {
                 HrLog::Warn("Recording: couldn't export a separate MP3 -- leaving '" +
                             audio_wav + "' (WAV) instead.");
             }
         } else {
-            std::remove(audio_wav.c_str());
+            RemoveFileUtf8(audio_wav);
         }
     }
 
@@ -1172,6 +1250,15 @@ void RecordingController::TogglePause() {
     int new_state = hr_ctl_pause_toggle(ctl_);
     state_.paused = (new_state == 2 /* HR_STATE_PAUSED */);
     if (pipeline_) hr_pl_pause(pipeline_, state_.paused ? 1 : 0);
+    // BUGFIX (2.3): audio was never paused (hr_audio_pause() was declared but not
+    // called anywhere), so it kept recording while the video timeline stood still
+    // and everything after a pause was out of sync by the pause length. While
+    // paused the audio workers still read + meter (needed for silence auto-resume)
+    // but throw the samples away.
+    hr_audio_pause(state_.paused ? 1 : 0);
+    // Resuming counts as "just heard something" - otherwise the silence that
+    // built up while paused made auto-pause fire again immediately.
+    if (!state_.paused) last_loud_time_ = std::chrono::steady_clock::now();
     HrLog::Info(state_.paused ? "Recording paused" : "Recording resumed");
 }
 
@@ -1351,6 +1438,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     CreateDirectoryW(replay_dir_.c_str(), nullptr);
 
     int buf_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
+    replay_applied_buffer_sec_ = buf_sec;
     // +1 segment of slack so the oldest segment still needed for a
     // full-length Save Replay isn't wrapped-over right as it's about to
     // be read, and a sane hard ceiling (720 * 5s = 1hr) so a huge/typo'd
@@ -1491,7 +1579,15 @@ void RecordingController::StopInstantReplayEncoderAsync() {
 
 bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
     instant_replay_enabled_ = true;
-    if (instant_replay_active_) return true; // already running
+    if (instant_replay_active_) {
+        // BUGFIX (2.3): changing the buffer length while Instant Replay was already
+        // running was ignored (the ring size is fixed when the encoder starts).
+        const int want_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
+        if (want_sec == replay_applied_buffer_sec_ || state_.recording) return true; // already running
+        HrLog::Info("Instant Replay: buffer length changed - restarting the buffer.");
+        DisableInstantReplay();
+        instant_replay_enabled_ = true;
+    }
     if (state_.recording) return true;       // Stop() will start it once the manual recording ends
 
     if (!ffmpeg_found_) {
@@ -1643,25 +1739,29 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
         bool sys_written = want_sys && (ar & 0x2) && hr_path_exists(sys_wav_a.c_str());
         if (mic_written && sys_written) {
             if (hr_audio_mix_wav(mic_wav_a.c_str(), sys_wav_a.c_str(), audio_wav_a.c_str()) == 0) {
-                std::remove(mic_wav_a.c_str());
-                std::remove(sys_wav_a.c_str());
+                RemoveFileUtf8(mic_wav_a);
+                RemoveFileUtf8(sys_wav_a);
             } else {
-                std::remove(sys_wav_a.c_str());
-                std::rename(mic_wav_a.c_str(), audio_wav_a.c_str());
+                RemoveFileUtf8(sys_wav_a);
+                RenameFileUtf8(mic_wav_a, audio_wav_a);
             }
             have_replay_audio = true;
         } else if (mic_written) {
-            std::rename(mic_wav_a.c_str(), audio_wav_a.c_str());
+            RenameFileUtf8(mic_wav_a, audio_wav_a);
             have_replay_audio = true;
         } else if (sys_written) {
-            std::rename(sys_wav_a.c_str(), audio_wav_a.c_str());
+            RenameFileUtf8(sys_wav_a, audio_wav_a);
             have_replay_audio = true;
         }
     }
 
     std::wstring list_path = dir_to_read + L"concat_list.txt";
     {
-        std::wofstream out(list_path.c_str(), std::ios::binary);
+        // BUGFIX (2.3): this was a std::wofstream in the "C" locale, which can't
+        // encode non-ASCII characters - a temp path under a non-ASCII user name
+        // cut the list off and Save Replay failed. Written as UTF-8 instead (what
+        // ffmpeg's concat demuxer expects).
+        FILE *out = _wfopen(list_path.c_str(), L"wb");
         for (const auto &s : segs) {
             // ffmpeg concat-demuxer lines are single-quoted; escape any
             // literal single quote the format's own way ('\'') - not
@@ -1672,8 +1772,12 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
                 esc.replace(pos, 1, L"'\\''");
                 pos += 4;
             }
-            out << L"file '" << esc << L"'\n";
+            if (out) {
+                const std::string line = "file '" + NarrowFromWide(esc) + "'\n";
+                fwrite(line.data(), 1, line.size(), out);
+            }
         }
+        if (out) fclose(out);
     }
 
     current_output_path_ = BuildOutputPath();
@@ -1690,7 +1794,7 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
         // stream-copy path.
         if (hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
                          WideFromNarrow(audio_wav_a).c_str(), 0.0, 0.0) != 0) {
-            std::remove(audio_wav_a.c_str());
+            RemoveFileUtf8(audio_wav_a);
         } else {
             HrLog::Error("Instant Replay: merging the captured audio into the saved replay "
                          "failed -- keeping '" + audio_wav_a + "' next to the (silent) clip "
@@ -1882,6 +1986,17 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
         hr_di_primary(di, &mx, &my, &mw, &mh, &dpi);
     }
     hr_di_destroy(di);
+    // BUGFIX (2.3): `idx` indexes the monitor LIST, but hr_pl_create() wants the
+    // DXGI output index; the two only agree by luck. Match by desktop coordinates
+    // like ResolveCaptureSize() does, otherwise the test records another monitor.
+    {
+        const int dx_count = hr_dx_output_count(0);
+        for (int i = 0; i < dx_count; ++i) {
+            int ox = 0, oy = 0, ow = 0, oh = 0;
+            if (!hr_dx_output_desc(0, i, &ox, &oy, &ow, &oh, nullptr, 0)) continue;
+            if (ox == mx && oy == my && ow == mw && oh == mh) { idx = i; break; }
+        }
+    }
     if (mw <= 0 || mh <= 0) { mw = 1920; mh = 1080; }
     if (mw % 2) mw--;
     if (mh % 2) mh--;
@@ -2091,26 +2206,24 @@ void RecordingController::RefreshPreviewSettings() {
     now.preview_quality_pct = state_.preview_quality_pct;
 
     if (!applied_preview_capture_settings_valid_ || !(now == applied_preview_capture_settings_)) {
+        // BUGFIX (2.3): TeardownPreview() destroys the pipeline, but when Instant
+        // Replay is buffering that very pipeline feeds its encoder - so picking a
+        // window/region (or changing monitor/fps/preview settings) silently killed
+        // the replay buffer while EnableInstantReplay() still saw it as "active".
+        // Stop the replay first, rebuild, then start it again on the new pipeline.
+        const bool replay_was_on = instant_replay_active_ && !state_.recording;
+        if (replay_was_on) DisableInstantReplay();
         TeardownPreview();
-        // Re-enabling preview (Settings > "Disable live preview"
-        // unchecked) used to just call EnsurePreview() and leave
-        // preview_retry_streak_/next_preview_retry_ exactly as they were.
-        // Those only ever get cleared on a *successful* EnsurePreview(), so
-        // if preview had already backed off before being disabled (DXGI
-        // hiccup, RDP, etc. - see EnsurePreview()'s comment), turning it
-        // back on inherited that same escalated backoff. If this explicit,
-        // user-initiated attempt then also failed just once (e.g. the
-        // display hadn't quite settled yet), SyncOverlays()'s automatic
-        // retry wouldn't fire again for up to kPreviewRetryMaxSeconds - the
-        // preview panel just sits on "Preview loading..." for a long
-        // stretch, looking stuck, until something unrelated (minimizing/
-        // restoring the window) calls EnsurePreview() directly again and
-        // happens to catch it after the real issue cleared. Always start
-        // an explicit re-enable with a clean slate instead, so a failure
-        // here retries at the fast base cadence, not wherever the old
-        // backoff had escalated to.
         ResetPreviewRetryState();
-        EnsurePreview();
+        bool replay_back = false;
+        if (replay_was_on) {
+            std::wstring replay_err;
+            replay_back = EnableInstantReplay(replay_err);
+            if (!replay_back) {
+                HrLog::Error(NarrowFromWide(L"Instant Replay: couldn't restart after the capture settings changed - " + replay_err));
+            }
+        }
+        if (!replay_back) EnsurePreview();
         applied_preview_capture_settings_ = now;
         applied_preview_capture_settings_valid_ = true;
     }

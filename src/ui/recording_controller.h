@@ -399,6 +399,7 @@ private:
     bool   instant_replay_active_  = false; // actually buffering right now (false while state_.recording is true)
     void  *replay_ff_ = nullptr;            // hr_ff_create() handle for the background segment-writer process
     std::wstring replay_dir_;               // current run's segment subfolder (see StartInstantReplayEncoder())
+    int    replay_applied_buffer_sec_ = 0;   // buffer length the running Instant Replay encoder was started with
     int    replay_run_seq_ = 0;             // bumped per StartInstantReplayEncoder() call - keeps each run's folder unique
     static constexpr int kReplaySegmentSec = 5; // segment length - Save Replay's trim is accurate to within this many seconds
 
@@ -586,6 +587,7 @@ private:
     // in hr_pipeline.cpp for how it's actually applied to captured frames.
     int crop_x_ = 0, crop_y_ = 0, crop_w_ = 0, crop_h_ = 0;
     bool window_track_lost_warned_ = false;
+    std::chrono::steady_clock::time_point next_window_retarget_{}; // throttles re-resolving a lost window
     float mic_vol_ = 1.0f, sys_vol_ = 1.0f;
     bool mic_muted_ = false, sys_muted_ = false;
     double current_fps_ = 0.0;
