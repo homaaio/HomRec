@@ -214,6 +214,11 @@ public:
                   });
     }
 
+    // Parallel replacement for the old single-threaded bgra_downscale() -
+    // banded by DESTINATION row (each output row is fully independent, no
+    // chroma-pairing constraint, hence row_align=1). See bgra_downscale_band()
+    // for the actual box-filter/nearest-neighbour math; this just fans it
+    // out across the pool's existing worker threads.
     void Downscale(const uint8_t *src, uint8_t *dst, int sw, int sh, int dw, int dh) {
         RunBanded((long long)dw * dh, dh, 1,
                   [src, dst, sw, sh, dw, dh](int y0, int y1) {
@@ -234,6 +239,25 @@ private:
         unsigned hw = std::thread::hardware_concurrency();
         int n_bands = 1;
         if (total_pixels >= kMinPixelsForThreads && hw > 1) {
+            // BUGFIX (game FPS drop while recording, worst on quad/hexa-
+            // core machines): this used to be std::min(hw - 1, 4), which
+            // only ever held back a single core for "the capture thread
+            // (DXGI grab + overlay compositing + BGRA->YUV) and everything
+            // else (audio, UI)" the comment on this class promises -
+            // despite that comment's own wording ("just holding a couple
+            // back"). On an 8+ core machine that 1-core margin is plenty
+            // (this class already caps at 4 bands total), but on the
+            // 4-6 core CPUs a lot of gaming PCs/laptops actually have, it
+            // meant 3 of 4 cores (75%) or 4 of 6 (67%) going straight to
+            // color conversion alone, on top of the separately-boosted
+            // capture/writer threads - leaving the game itself starved of
+            // CPU for the entire recording, which is exactly the
+            // "Minecraft drops from 100+ fps to 60-90 while recording"
+            // report this was causing. Now actually reserves 2 cores
+            // (matching the comment's own stated intent) before deciding
+            // how many bands to split into, still capped at 4 bands so
+            // nothing changes on the higher-core-count machines this was
+            // already fine for.
             static constexpr unsigned kReservedCores = 2;
             unsigned usable = (hw > kReservedCores) ? (hw - kReservedCores) : 1;
             n_bands = (int)std::min<unsigned>(usable, 4);
@@ -255,6 +279,9 @@ private:
                 cv_start_.wait(lk, [&] { return stop_ || round_ != seen_round; });
                 if (stop_) return;
                 seen_round = round_;
+                // Copy the job (and the small ints alongside it) out while
+                // still under the lock, same as the old raw-pointer version
+                // did - then run it unlocked below.
                 job = job_; total_rows = total_rows_; band_h = band_h_;
             }
             {
@@ -445,6 +472,13 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
         }
     }
 }
+
+// Plain, non-threaded, whole-frame entry point - not called from the hot
+// capture_loop path anymore (that now goes through
+// Yuv420pWorkerPool::Downscale() for the parallel version above), kept for
+// any other/future caller that just wants a single-shot downscale without
+// needing a Yuv420pWorkerPool instance around. Marked maybe_unused since
+// that's currently nobody, to keep -Wall/-Wextra quiet about it.
 [[maybe_unused]] static void bgra_downscale(const uint8_t* __restrict src,
                             uint8_t*       __restrict dst,
                             int sw, int sh, int dw, int dh)
@@ -474,6 +508,12 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
 // self-deleted state so shutdown can wait on it via hr_pl_wait_all_detached()
 // below instead of racing it blind.
 static std::atomic<int> g_handed_off_pipelines{0};
+
+// Process-wide counter behind Pipeline::pv_seq. Global (not per-pipeline) on
+// purpose: RecordingController tears preview pipelines down and creates new
+// ones during a session, and a per-pipeline counter restarting at 1 could
+// collide with the "last seen" value the UI still holds from the old
+// pipeline and make the UI think a brand-new frame is unchanged.
 static std::atomic<uint64_t> g_pv_seq_counter{0};
 
 // ---------------------------------------------------------------------------
@@ -691,6 +731,7 @@ struct Pipeline {
         }
     }
     bool logged_lost_ = false; // edge-trigger for the DX_LOST diagnostic below
+    bool logged_reset_fail_ = false; // edge-trigger for the reset-failed diagnostic below
     std::chrono::steady_clock::time_point next_reset_attempt_{};
 
     std::atomic<int64_t> frames_captured{0};
@@ -1118,6 +1159,23 @@ struct Pipeline {
                     if (!is_recording_now) frame_ns_idle = compute_frame_ns_idle();
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
+                    // MINOR BUGFIX: fps_acc_frames/fps_acc_start_ns (the
+                    // "measured actual capture fps" stat shown in the UI)
+                    // used to keep accumulating across this switch. Idle
+                    // preview paces at preview_fps (15 by default - see
+                    // the .hrc's [capture] preview_fps) which is much
+                    // slower than a real recording's target_fps; starting
+                    // a new recording on a pipeline kept alive from the
+                    // previous one's preview (the normal case - see
+                    // hr_pl_set_recording()) could report roughly that
+                    // slower idle rate for up to a second after Start(),
+                    // even though real capture had already sped back up,
+                    // simply because the 1-second averaging window
+                    // straddled the switch. Restarting the window exactly
+                    // on the switch makes the very next reading reflect
+                    // only the new pacing.
+                    fps_acc_frames = 0;
+                    fps_acc_start_ns = 0;
 #ifdef _WIN32
                     if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
 #endif
@@ -1213,14 +1271,39 @@ struct Pipeline {
 #ifdef _WIN32
                 auto now = std::chrono::steady_clock::now();
                 if (g_libs.dx_reset && now >= next_reset_attempt_) {
-                    g_libs.dx_reset(dx_ctx);
-                    // Whether or not that succeeded, don't try again for a
-                    // full second - if it failed because something (e.g. a
-                    // game) still holds exclusive fullscreen, back-to-back
-                    // retries just burn GPU/driver time neither of us can
-                    // spare. A successful reset also isn't free to redo
-                    // constantly, and the very next AcquireNextFrame() will
-                    // tell us immediately if it actually worked anyway.
+                    // CRASHFIX: this return value used to be thrown away
+                    // ("whether or not that succeeded" - see below), so a
+                    // reset that failed to re-acquire the duplication
+                    // interface (e.g. a game briefly holds exclusive
+                    // fullscreen right after the very mode change that
+                    // caused the loss - routine, not fatal) left dx_ctx's
+                    // duplication pointer null with nothing to show for
+                    // it in the log. hr_dx_capture() now refuses to
+                    // dereference that null pointer itself (see its own
+                    // comment - that null deref is exactly what the
+                    // supplied crash dump's 0xC0000005 was), so this is
+                    // belt-and-suspenders: log it once so a reset that
+                    // keeps failing is visible instead of silently
+                    // retrying forever with only the original "resetting"
+                    // line to go on.
+                    int reset_ok = g_libs.dx_reset(dx_ctx);
+                    if (!reset_ok) {
+                        if (!logged_reset_fail_) {
+                            HrLog::Warn("DXGI reset failed (capture surface still unavailable - "
+                                        "common right after the mode change that caused the loss, "
+                                        "e.g. a game briefly holding exclusive fullscreen) -- will "
+                                        "keep retrying once a second.");
+                            logged_reset_fail_ = true;
+                        }
+                    } else {
+                        logged_reset_fail_ = false;
+                    }
+                    // Don't try again for a full second regardless of the
+                    // outcome above - if it failed, back-to-back retries
+                    // just burn GPU/driver time neither of us can spare. A
+                    // successful reset also isn't free to redo constantly,
+                    // and the very next AcquireNextFrame() will tell us
+                    // immediately if it actually worked anyway.
                     next_reset_attempt_ = now + std::chrono::seconds(1);
                 }
 #endif
@@ -1466,6 +1549,11 @@ struct Pipeline {
                         if (scaling) {
                             const size_t scaled_needed = (size_t)req_w * req_h * 4;
                             if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
+                            // PERF: was bgra_downscale(...) - a single-threaded
+                            // pass on this (already highest/boosted-priority)
+                            // capture thread. Now fanned out across the same
+                            // worker threads Convert() (right below) uses -
+                            // see Yuv420pWorkerPool::Downscale()'s comment.
                             yuv_pool.Downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
                             enc_src = scaled_buf.data();
                         }
@@ -2135,8 +2223,35 @@ HR_EXPORT int hr_pl_end_recording_segment(void* handle, int timeout_ms) {
         [pl] { return pl->pending_close_done.load(std::memory_order_acquire); });
     if (!done) {
         HrLog::Warn("Pipeline: writer thread didn't close the previous recording's pipe in time "
-                    "(it may be stuck writing) - the ffmpeg process for it likely won't finalize cleanly.");
-        pl->pending_close_requested.store(false, std::memory_order_release); // don't leave it armed for the next recording
+                    "(it may be stuck writing) - the ffmpeg process for it likely won't finalize cleanly yet, "
+                    "still waiting for it in the background.");
+        // BUGFIX (recordings always took the full ~30s "still finalizing" /
+        // "force-stopping" path above AND still came out corrupt - every
+        // single time the writer thread had any backlog left to drain at
+        // Stop, e.g. right after a load spike like the "Recording
+        // overloaded: dropping frames" warnings that precede this in the
+        // reported log): this used to unconditionally clear
+        // pending_close_requested right here on a timeout, with the
+        // comment "don't leave it armed for the next recording" - but
+        // hr_pl_set_recording(handle, /*active=*/1, ...) (the ONLY other
+        // place a "next recording" begins) already clears this same flag
+        // itself the moment that next recording actually starts (see its
+        // own comment above), specifically so a stale request can never
+        // reach across and close the wrong pipe. Clearing it here too was
+        // redundant for that case - and actively harmful for the far more
+        // common one: the writer thread hasn't drained its backlog yet
+        // (still busy, not stuck), so the request hasn't been honored at
+        // all, and clearing the flag out from under it here permanently
+        // cancels the ONLY close this pipe's ffmpeg was ever going to get.
+        // With the flag left set, the writer thread just honors it
+        // whenever its queue actually empties - a few seconds later under
+        // load, same as everything else that's backed up - so
+        // StopFinalizeTail()'s own 10s/20s waits (which is what this
+        // function's caller relies on next) see a real EOF instead of
+        // ffmpeg sitting blocked on a pipe nothing will ever close, and
+        // the file finalizes properly instead of being force-killed
+        // mid-write. Only report "not done yet" to the caller; whether
+        // this ever completes no longer determines whether it's requested.
     }
     return done ? 1 : 0;
 #endif
