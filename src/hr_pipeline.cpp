@@ -29,6 +29,7 @@
 #include <string>
 #include <cstdio>
 #include <exception>
+#include <functional>
 #include "hr_log.h"
 #include "hr_overlay_render.h"
 
@@ -113,8 +114,29 @@ static bool ensure_libs() {
     return g_libs.loaded;
 }
 
+// Forward decl - Yuv420pWorkerPool::Downscale() (below) dispatches per-band
+// calls into this from worker threads, but its real definition (converted
+// from the old single-threaded bgra_downscale(), see that function's own
+// comment) lives further down this file next to bgra_to_thumb(). Needs to
+// be visible up here already since the class comes first.
+static void bgra_downscale_band(const uint8_t* __restrict src,
+                                 uint8_t*       __restrict dst,
+                                 int sw, int sh, int dw, int dh,
+                                 int dy0, int dy1);
+
 // ---------------------------------------------------------------------------
-// BGRA→YUV420p, split across a few worker threads by scanline band.
+// Generic scanline-band worker pool. Originally just BGRA->YUV420p; now
+// also drives the Settings > Resolution downscale (see Downscale() below) -
+// PERF: that downscale used to run as a single, unthreaded pass on the
+// capture thread, BEFORE the (already-threaded) color conversion below it.
+// For anyone recording at a non-native output resolution (e.g. this class's
+// original motivating case, but also just "downscale my 1440p/1080p desktop
+// to a lighter 900p/720p recording"), that was a fully serial chunk of the
+// per-frame budget sitting right in the middle of an otherwise-parallel
+// pipeline. Downscale() now reuses these SAME worker threads (started once,
+// already boosted in step with the capture thread) for its own bands
+// instead of running alone - no extra threads spun up, no extra cores
+// reserved beyond what Convert() already needed.
 //----------------------------------------------------------------------------
 
 class Yuv420pWorkerPool {
@@ -143,37 +165,60 @@ public:
         threads_.clear();
     }
 
-    // Splits [0,h) into worker_count()+1 horizontal bands (same split the
-    // old per-frame version used) and blocks until every worker-owned band
-    // is done. Falls back to converting the whole frame on the calling
-    // thread if the pool ends up with zero workers (single-core machine,
-    // or a frame small enough that kMinPixelsForThreads decided threading
-    // wasn't worth it for this session).
-    void Convert(const uint8_t *bgra, uint8_t *yuv, int w, int h) {
-        EnsureStarted((long long)w * h);
+    // Splits [0,total_rows) into worker_count()+1 bands (rounded up to a
+    // multiple of row_align - 2 for YUV's chroma-paired rows, 1 for
+    // anything else) and blocks until every worker-owned band AND the
+    // caller's own last band have run fn(y0,y1). Falls back to running the
+    // whole range on the calling thread if the pool ends up with zero
+    // workers (single-core machine, or a frame small enough that
+    // kMinPixelsForThreads decided threading wasn't worth it for this
+    // session). total_pixels_hint only matters on the very first call ever
+    // made on this pool (see EnsureStarted) - later calls (whether from
+    // Convert() or Downscale()) just reuse whatever got decided then.
+    template <class Fn>
+    void RunBanded(long long total_pixels_hint, int total_rows, int row_align, Fn &&fn) {
+        EnsureStarted(total_pixels_hint);
         int n = (int)threads_.size();
         if (n == 0) {
-            convert_band_(bgra, yuv, w, h, 0, h);
+            fn(0, total_rows);
             return;
         }
         int n_bands = n + 1;
-        int band_h = ((h / n_bands) + 1) & ~1;
-        if (band_h < 2) band_h = 2;
+        int band_h = (total_rows / n_bands) + 1;
+        if (row_align > 1) band_h = (band_h + (row_align - 1)) & ~(row_align - 1);
+        if (band_h < row_align) band_h = row_align;
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
-            bgra_ = bgra; yuv_ = yuv; w_ = w; h_ = h; band_h_ = band_h;
-            pending_ = n;
+            job_        = std::function<void(int, int)>(std::forward<Fn>(fn));
+            total_rows_ = total_rows;
+            band_h_     = band_h;
+            pending_    = n;
             ++round_;
         }
         cv_start_.notify_all();
 
         // Main/calling thread does the last band itself, same as before.
         int y0 = band_h * n;
-        if (y0 < h) convert_band_(bgra, yuv, w, h, y0, h);
+        if (y0 < total_rows) job_(y0, total_rows);
 
         std::unique_lock<std::mutex> lk(mtx_);
         cv_done_.wait(lk, [this] { return pending_ == 0; });
+    }
+
+    void Convert(const uint8_t *bgra, uint8_t *yuv, int w, int h) {
+        auto band_fn = convert_band_;
+        RunBanded((long long)w * h, h, 2,
+                  [bgra, yuv, w, h, band_fn](int y0, int y1) {
+                      band_fn(bgra, yuv, w, h, y0, y1);
+                  });
+    }
+
+    void Downscale(const uint8_t *src, uint8_t *dst, int sw, int sh, int dw, int dh) {
+        RunBanded((long long)dw * dh, dh, 1,
+                  [src, dst, sw, sh, dw, dh](int y0, int y1) {
+                      bgra_downscale_band(src, dst, sw, sh, dw, dh, y0, y1);
+                  });
     }
 
 private:
@@ -189,25 +234,6 @@ private:
         unsigned hw = std::thread::hardware_concurrency();
         int n_bands = 1;
         if (total_pixels >= kMinPixelsForThreads && hw > 1) {
-            // BUGFIX (game FPS drop while recording, worst on quad/hexa-
-            // core machines): this used to be std::min(hw - 1, 4), which
-            // only ever held back a single core for "the capture thread
-            // (DXGI grab + overlay compositing + BGRA->YUV) and everything
-            // else (audio, UI)" the comment on this class promises -
-            // despite that comment's own wording ("just holding a couple
-            // back"). On an 8+ core machine that 1-core margin is plenty
-            // (this class already caps at 4 bands total), but on the
-            // 4-6 core CPUs a lot of gaming PCs/laptops actually have, it
-            // meant 3 of 4 cores (75%) or 4 of 6 (67%) going straight to
-            // color conversion alone, on top of the separately-boosted
-            // capture/writer threads - leaving the game itself starved of
-            // CPU for the entire recording, which is exactly the
-            // "Minecraft drops from 100+ fps to 60-90 while recording"
-            // report this was causing. Now actually reserves 2 cores
-            // (matching the comment's own stated intent) before deciding
-            // how many bands to split into, still capped at 4 bands so
-            // nothing changes on the higher-core-count machines this was
-            // already fine for.
             static constexpr unsigned kReservedCores = 2;
             unsigned usable = (hw > kReservedCores) ? (hw - kReservedCores) : 1;
             n_bands = (int)std::min<unsigned>(usable, 4);
@@ -222,13 +248,14 @@ private:
         int seen_round = 0;
         int applied_prio = THREAD_PRIORITY_NORMAL;
         for (;;) {
-            const uint8_t *bgra; uint8_t *yuv; int w, h, band_h;
+            std::function<void(int, int)> job;
+            int total_rows, band_h;
             {
                 std::unique_lock<std::mutex> lk(mtx_);
                 cv_start_.wait(lk, [&] { return stop_ || round_ != seen_round; });
                 if (stop_) return;
                 seen_round = round_;
-                bgra = bgra_; yuv = yuv_; w = w_; h = h_; band_h = band_h_;
+                job = job_; total_rows = total_rows_; band_h = band_h_;
             }
             {
                 int want = boost_.load(std::memory_order_relaxed) ? THREAD_PRIORITY_HIGHEST
@@ -236,8 +263,8 @@ private:
                 if (want != applied_prio) { SetThreadPriority(GetCurrentThread(), want); applied_prio = want; }
             }
             int y0 = band_h * idx;
-            int y1 = std::min(h, y0 + band_h);
-            if (y0 < y1) convert_band_(bgra, yuv, w, h, y0, y1);
+            int y1 = std::min(total_rows, y0 + band_h);
+            if (y0 < y1) job(y0, y1);
             {
                 std::lock_guard<std::mutex> lk(mtx_);
                 if (--pending_ == 0) cv_done_.notify_one();
@@ -253,9 +280,8 @@ private:
     bool started_ = false;
     int round_ = 0;
     int pending_ = 0;
-    const uint8_t *bgra_ = nullptr;
-    uint8_t *yuv_ = nullptr;
-    int w_ = 0, h_ = 0, band_h_ = 0;
+    std::function<void(int, int)> job_;
+    int total_rows_ = 0, band_h_ = 0;
     void (*convert_band_)(const uint8_t*, uint8_t*, int, int, int, int) = &hr_bgra_to_yuv420p_band;
 };
 #endif  // _WIN32
@@ -328,14 +354,45 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
 // (thumb is display-only, this feeds the encoder so channel order must be
 // preserved); alpha is irrelevant either way (hr_bgra_to_yuv420p never
 // reads it) so it's just written as opaque.
+//
+// PERF: this used to do the whole [0,dh) range in one single-threaded pass,
+// run directly on the capture thread - the one and only unthreaded, CPU-
+// bound step left in the per-frame path (color conversion right after it
+// has been split across the Yuv420pWorkerPool's worker threads since that
+// pool existed at all). On a recording set to any non-native output
+// resolution (Settings > Resolution), that meant a full extra serial box-
+// filter/nearest-neighbour pass sitting in the middle of an otherwise-
+// parallel pipeline, on exactly the machines (weak/old hardware, per the
+// comment below) that can least afford spending part of their frame budget
+// running single-core. Split into a banded core (this function, takes a
+// destination row range) plus Yuv420pWorkerPool::Downscale() (declared near
+// the top of this file), which fans those bands out across the SAME worker
+// threads Convert() already uses - see that method's own comment for why
+// that's free (no new threads, no extra reserved cores). The original
+// single-shot entry point is kept as a thin wrapper below for anything that
+// still wants a plain, non-threaded call.
 // ---------------------------------------------------------------------------
-static void bgra_downscale(const uint8_t* __restrict src,
-                            uint8_t*       __restrict dst,
-                            int sw, int sh, int dw, int dh)
+static void bgra_downscale_band(const uint8_t* __restrict src,
+                                 uint8_t*       __restrict dst,
+                                 int sw, int sh, int dw, int dh,
+                                 int dy0, int dy1)
 {
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    if (dy0 < 0) dy0 = 0;
+    if (dy1 > dh) dy1 = dh;
+    if (dy0 >= dy1) return;
+
     if (sw == dw && sh == dh) {
-        std::memcpy(dst, src, (size_t)sw * sh * 4);
+        // Whole-frame identity copy - independent per row, so still just
+        // copies this band's rows rather than special-casing a single
+        // whole-buffer memcpy (this path can now be entered from several
+        // worker threads at once, each with its own [dy0,dy1)). Not
+        // actually reachable from the capture_loop call site (which only
+        // calls Downscale() when sizes differ - see its own comment), kept
+        // here only for any other caller of the plain wrapper below.
+        std::memcpy(dst + (size_t)dy0 * dw * 4,
+                    src + (size_t)dy0 * sw * 4,
+                    (size_t)(dy1 - dy0) * dw * 4);
         return;
     }
 
@@ -347,7 +404,7 @@ static void bgra_downscale(const uint8_t* __restrict src,
         // always land here).
         int rx = sw / dw, ry = sh / dh;
         int bsz = rx * ry;
-        for (int y = 0; y < dh; ++y) {
+        for (int y = dy0; y < dy1; ++y) {
             // same row-base hoist as bgra_to_thumb() above.
             uint8_t* orow = dst + (size_t)y * dw * 4;
             int sy0 = y * ry;
@@ -375,16 +432,24 @@ static void bgra_downscale(const uint8_t* __restrict src,
         // monitor's native size) - cheaper than a general box filter and
         // plenty for a downscale destined for lossy video encoding.
         float rx = (float)sw / dw, ry = (float)sh / dh;
-        for (int y = 0; y < dh; ++y) {
+        for (int y = dy0; y < dy1; ++y) {
             int sy = (int)(y * ry); if (sy >= sh) sy = sh - 1;
+            const uint8_t* srow = src + (size_t)sy * sw * 4;
+            uint8_t*       orow = dst + (size_t)y  * dw * 4;
             for (int x = 0; x < dw; ++x) {
                 int sx = (int)(x * rx); if (sx >= sw) sx = sw - 1;
-                const uint8_t* s = src + ((size_t)sy * sw + sx) * 4;
-                uint8_t*       d = dst + ((size_t)y  * dw + x ) * 4;
+                const uint8_t* s = srow + (size_t)sx * 4;
+                uint8_t*       d = orow + (size_t)x  * 4;
                 d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
             }
         }
     }
+}
+[[maybe_unused]] static void bgra_downscale(const uint8_t* __restrict src,
+                            uint8_t*       __restrict dst,
+                            int sw, int sh, int dw, int dh)
+{
+    bgra_downscale_band(src, dst, sw, sh, dw, dh, 0, dh);
 }
 
 // ---------------------------------------------------------------------------
@@ -409,12 +474,6 @@ static void bgra_downscale(const uint8_t* __restrict src,
 // self-deleted state so shutdown can wait on it via hr_pl_wait_all_detached()
 // below instead of racing it blind.
 static std::atomic<int> g_handed_off_pipelines{0};
-
-// Process-wide counter behind Pipeline::pv_seq. Global (not per-pipeline) on
-// purpose: RecordingController tears preview pipelines down and creates new
-// ones during a session, and a per-pipeline counter restarting at 1 could
-// collide with the "last seen" value the UI still holds from the old
-// pipeline and make the UI think a brand-new frame is unchanged.
 static std::atomic<uint64_t> g_pv_seq_counter{0};
 
 // ---------------------------------------------------------------------------
@@ -1407,7 +1466,7 @@ struct Pipeline {
                         if (scaling) {
                             const size_t scaled_needed = (size_t)req_w * req_h * 4;
                             if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
-                            bgra_downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
+                            yuv_pool.Downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
                             enc_src = scaled_buf.data();
                         }
                         yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
