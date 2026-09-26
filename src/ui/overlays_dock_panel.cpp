@@ -137,7 +137,7 @@ enum { kMenuAddText = 1, kMenuAddImage, kMenuAddGif, kMenuAddWebcam, kMenuAddExt
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the per-row right-click
 // menu -- same reasoning as kMenuAdd* above, a separate numbering space
 // local to this file.
-enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete, kCtxApplyNoPreview, kCtxRefreshSnapshot };
+enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete };
 
 } // namespace
 
@@ -221,16 +221,12 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, kCtxToggle, ov.visible ? L"Hide" : L"Show");
     AppendMenuW(menu, MF_STRING, kCtxRename, L"Rename\u2026");
-    AppendMenuW(menu, MF_STRING, kCtxEdit,   L"Edit Parameters\u2026");
+    // Opens the merged position + settings + preview window (see
+    // overlay_editor_dialog.h) - replaces what used to be two separate
+    // items here ("Edit Parameters..." and "Position Overlays...").
+    AppendMenuW(menu, MF_STRING, kCtxEdit,   L"Edit Overlay\u2026");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCtxDelete, L"Delete");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // Opens the "Position Overlays" window (see overlay_placement_dialog.h)
-    // over a screenshot of the screen - that window has its own
-    // Refresh/Apply buttons now, so the separate "Refresh screenshot" menu
-    // item this used to need (to refresh an in-place editing mode with no
-    // window of its own) isn't needed any more.
-    AppendMenuW(menu, MF_STRING, kCtxApplyNoPreview, L"Position Overlays\u2026");
 
     SetForegroundWindow(owner);
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
@@ -240,9 +236,8 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
     switch (cmd) {
         case kCtxToggle: ToggleVisibility(idx); break;
         case kCtxRename: RenameAt(idx); break;
-        case kCtxEdit:   EditParametersAt(idx); break;
+        case kCtxEdit:   if (on_edit_overlay) on_edit_overlay(idx); break;
         case kCtxDelete: RemoveAt(idx); break;
-        case kCtxApplyNoPreview: if (on_apply_no_preview) on_apply_no_preview(false); break;
         default: break; // dismissed without a choice
     }
 }
@@ -471,114 +466,6 @@ void OverlaysDockPanel::RenameAt(size_t idx) {
         return;
     }
     state_.overlays[idx].name = NarrowFromWide(value);
-    Refresh();
-    SendMessageW(list_, LB_SETCURSEL, (WPARAM)idx, 0);
-}
-
-void OverlaysDockPanel::EditParametersAt(size_t idx) {
-    if (idx >= state_.overlays.size() || !list_) return;
-    HWND parent = GetParent(hwnd_);
-    HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE);
-    OverlayDef &ov = state_.overlays[idx];
-
-    if (ov.type == "text") {
-        std::wstring value = WideFromNarrow(ov.text);
-        if (!HrPromptForText(parent, hInst, L"Edit Text Overlay", L"Text to display:", value)) return;
-        ov.text = NarrowFromWide(value);
-    } else if (ov.type == "image") {
-        std::string path = PickOpenFile(parent,
-            L"Image files (*.png;*.jpg;*.jpeg;*.bmp)\0*.png;*.jpg;*.jpeg;*.bmp\0All files\0*.*\0",
-            L"Change Image");
-        if (path.empty()) return;
-        ov.image_path = path;
-    } else if (ov.type == "gif") {
-        std::string path = PickOpenFile(parent,
-            L"GIF files (*.gif)\0*.gif\0All files\0*.*\0",
-            L"Change GIF");
-        if (path.empty()) return;
-        ov.image_path = path;
-    } else if (ov.type == "webcam") {
-        std::vector<HrWebcamDevice> devices = HrEnumerateWebcams();
-        if (devices.empty()) {
-            MessageBoxW(parent,
-                        L"No webcam was found. Make sure a camera is connected "
-                        L"(and isn't already in use by another app), then try again.",
-                        L"No Webcam Found", MB_OK | MB_ICONWARNING);
-            return;
-        }
-        size_t chosen = 0;
-        if (!HrPromptForWebcamDevice(parent, hInst, devices, chosen)) return;
-        ov.webcam_index = devices[chosen].index;
-        ov.webcam_name  = devices[chosen].name;
-    } else if (ov.type == "input_overlay") {
-        // Covers both how an input_overlay can be added -- a manually-picked
-        // "External Overlay" .json+.png pair, or a plugin-registered preset
-        // -- by simply letting the user re-pick both files, same as adding
-        // an External Overlay does. That's a strict superset of "re-pick a
-        // preset", since any registered preset is itself just a .json+.png
-        // pair on disk (see hr_input_overlay_registry.h).
-        std::string json_path = PickOpenFile(parent, L"Overlay layout (*.json)\0*.json\0",
-                                              L"Choose the .json layout");
-        if (json_path.empty()) return;
-        std::string png_path = PickOpenFile(parent, L"Spritesheet image (*.png)\0*.png\0",
-                                             L"Choose the .png spritesheet");
-        if (png_path.empty()) return;
-
-        HrInputOverlayLayout layout;
-        if (!layout.Load(json_path)) {
-            MessageBoxW(parent,
-                        L"That .json file couldn't be read as an input-overlay layout. "
-                        L"Make sure it's the plain layout file, not something else.",
-                        L"Couldn't Change Overlay", MB_OK | MB_ICONWARNING);
-            return;
-        }
-        ov.input_json_path = json_path;
-        ov.input_png_path  = png_path;
-    } else {
-        return;
-    }
-
-    // Opacity applies to every overlay type - prompted last so cancelling
-    // it doesn't discard whatever type-specific edit above already
-    // succeeded. Reuses the plain text prompt rather than a dedicated
-    // slider dialog; a non-numeric or out-of-range entry just leaves
-    // ov.opacity unchanged instead of erroring.
-    {
-        std::wstring opacity_str = std::to_wstring(ov.opacity);
-        if (HrPromptForText(parent, hInst, L"Overlay Opacity",
-                             L"Opacity, 0-100 (100 = fully opaque):", opacity_str)) {
-            try {
-                int v = std::stoi(NarrowFromWide(opacity_str));
-                if (v < 0) v = 0;
-                if (v > 100) v = 100;
-                ov.opacity = v;
-            } catch (...) {
-                // not a plain number - leave the existing opacity alone
-                // rather than silently zeroing it out.
-            }
-        }
-    }
-
-    if (ov.type == "text") {
-        // "Segoe UI" is the original hardcoded default (still the
-        // fallback if a saved overlay's font_family is empty or the
-        // named font isn't installed - see hr_overlay_render.cpp's
-        // RenderTextBgra()). Open Sans and Roboto are the two free/
-        // open-license additions requested - both very commonly already
-        // present (bundled with a lot of other software), and if either
-        // genuinely isn't installed on a given machine, GDI just falls
-        // back to its own default font rather than failing.
-        static const std::vector<std::wstring> kFonts = { L"Segoe UI", L"Open Sans", L"Roboto" };
-        size_t cur = 0;
-        for (size_t i = 0; i < kFonts.size(); ++i) {
-            if (NarrowFromWide(kFonts[i]) == ov.font_family) { cur = i; break; }
-        }
-        size_t chosen = cur;
-        if (HrPromptForChoice(parent, hInst, L"Text Font", L"Choose a font:", kFonts, chosen)) {
-            ov.font_family = NarrowFromWide(kFonts[chosen]);
-        }
-    }
-
     Refresh();
     SendMessageW(list_, LB_SETCURSEL, (WPARAM)idx, 0);
 }

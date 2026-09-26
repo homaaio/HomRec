@@ -161,8 +161,9 @@ private:
 
     // -- direct overlay drag/resize on the preview -------------------------
     // Overlays previously could only be repositioned via a
-    // separate full-screen "Position Overlays" window opened from the
-    // Overlay Manager dialog. Users expect to just grab the overlay on the
+    // separate full-screen "Position Overlays" window (now the merged
+    // "Edit Overlay..." window, see overlay_editor_dialog.h) opened from
+    // the overlay row context menu. Users expect to just grab the overlay on the
     // live preview shown in the main window instead -- this makes that the
     // primary way to move/resize them.
     int drag_overlay_index_ = -1;

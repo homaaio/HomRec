@@ -4,7 +4,7 @@
 #include "preset_dialog.h"
 // (overlay_manager.h removed - see overlays_dock_panel.h)
 #include "welcome_dialog.h"
-#include "overlay_placement_dialog.h"
+#include "overlay_editor_dialog.h"
 #include "pc_analytics_dialog.h"
 #include "log_viewer_dialog.h"
 #include "window_picker_dialog.h"
@@ -386,8 +386,8 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
     // Draw a frame around EVERY overlay (with its name/type above it and a
     // resize handle on the top-left and bottom-right corners) directly on
     // top of the preview, so it can be clicked, moved and resized right
-    // here instead of only through the separate "Position Overlays..."
-    // window. A clicked overlay stays selected (gold, thicker frame) after
+    // here instead of only through the "Edit Overlay..." window
+    // (overlay_editor_dialog.h). A clicked overlay stays selected (gold, thicker frame) after
     // the mouse button is released, so it's always obvious which one is
     // being edited.
     wxRect prevRect;
@@ -603,7 +603,7 @@ void PreviewPanel::EndDrag() {
     drag_overlay_index_ = -1; // selected_overlay_index_ stays - the frame stays highlighted
     drag_corner_ = Corner::kNone;
     // This in-place drag-on-the-preview path bypasses both
-    // OverlaysDockPanel::Refresh() and ShowOverlayPlacementDialog() (the
+    // OverlaysDockPanel::Refresh() and ShowOverlayEditorDialog() (the
     // other places that persist state_.overlays), so a finished drag has to
     // save itself - but only if the overlay actually moved: a plain click
     // used to rewrite the whole autosave file for nothing.
@@ -1170,12 +1170,21 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
             Layout();
         }
     };
-    // "Position Overlays..." (row context menu, see overlays_dock_panel.h) -
+    // "Edit Overlay..." (row context menu, see overlays_dock_panel.h) -
+    // opens the merged position + settings + preview window for that one
+    // overlay (overlay_editor_dialog.h), replacing the old separate
+    // "Edit Parameters..."/"Position Overlays..." pair (and the standalone,
+    // every-overlay-at-once ShowOverlayPlacementDialog() that backed the
+    // latter - now unused and removed, see overlay_editor_dialog.h).
     // OverlaysDockPanel has no access to RecordingController/theme_ itself,
-    // so it just asks main_frame.cpp to open the window.
-    overlays_panel_->on_apply_no_preview = [this](bool /*unused - see header*/) {
-        if (!rec_raw_) return;
-        ShowOverlayPlacementDialog(this, state_, rec_raw_, theme_);
+    // so it just asks main_frame.cpp to open the window; re-Refresh()es the
+    // panel afterward so a renamed/re-typed overlay's row label picks up
+    // the change right away.
+    overlays_panel_->on_edit_overlay = [this](size_t idx) {
+        if (!rec_raw_ || !overlays_panel_) return;
+        if (ShowOverlayEditorDialog(this, state_, idx, rec_raw_, theme_)) {
+            overlays_panel_->Refresh();
+        }
     };
     overlays_panel_->on_overlay_added = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_added"); };
     overlays_panel_->on_overlay_removed = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_removed"); };
@@ -1435,6 +1444,15 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
     SetStatusState(msg, theme_.warning);
     if (file_lbl_) file_lbl_->SetLabel(msg);
 }
+
+// BUGFIX (2.3): scheduled_start_time has no dedicated settings-dialog control
+// yet (set via .hrc / the console's "<key> = <value>" / a plugin's
+// set_setting()), and this used to require an exact byte-for-byte match
+// against a strictly zero-padded "%02d:%02d" - so "9:30", " 09:30", "09:30 "
+// or "09:30:00" all parsed as valid-looking times that would simply never
+// fire, with nothing telling the person their schedule was silently dead.
+// Parses tolerantly now and logs once if the string can't be understood at
+// all, instead of just doing nothing forever.
 static bool ParseScheduledTime(const std::string &raw, int &hh, int &mm) {
     size_t i = 0, n = raw.size();
     while (i < n && isspace((unsigned char)raw[i])) ++i;

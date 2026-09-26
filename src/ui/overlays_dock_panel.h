@@ -21,13 +21,21 @@
 // UPDATE: the separate "Show/Hide"/"Remove" buttons that used to sit below
 // the list are gone -- right-clicking a row (or selecting it and pressing
 // the Menu/Shift+F10 key) now opens a context menu with Hide/Show, Rename,
-// Edit Parameters, and Delete for that row instead, freeing up the vertical
+// Edit Overlay, and Delete for that row instead, freeing up the vertical
 // space those two buttons took for the list itself. "Rename" sets
 // OverlayDef::name (a free-form label shown in place of the row's usual
-// auto-generated one). "Edit Parameters" re-runs the same prompt used when
-// the overlay was added (text content, image file, webcam device, or the
-// .json/.png pair for input/external overlays) against the existing entry
-// instead of creating a new one.
+// auto-generated one).
+//
+// UPDATE: the old "Edit Parameters..." (a sequence of raw text-entry
+// popups - text/image path/webcam device, opacity, then a font picker for
+// text overlays) and "Position Overlays..." (a separate full-screen,
+// every-overlay-at-once drag window, ShowOverlayPlacementDialog - now
+// deleted along with overlay_placement_dialog.h/.cpp, superseded below)
+// context menu items are now a single "Edit Overlay..." item, per an
+// explicit ask: this panel has no access to RecordingController/theme_
+// itself (main_frame owns both), so it asks main_frame.cpp to open the
+// merged position+settings+preview window (see overlay_editor_dialog.h)
+// via on_edit_overlay instead of doing either of the two old flows itself.
 //
 // Like AudioPanel (see audio_panel.h), this panel is created once at a
 // fixed rect and doesn't reflow on WM_SIZE.
@@ -54,15 +62,12 @@ public:
 
     HWND hwnd() const { return hwnd_; }
 
-    // "Apply with preview off" (row context menu) - this panel has no
-    // access to RecordingController/PreviewPanel (main_frame.cpp owns
-    // both), so it can't grab a screenshot or draw overlays over it
-    // itself; it just asks main_frame.cpp to. `refresh` is false for the
-    // menu item that (re-)enters the mode and takes the first shot, true
-    // for the "Refresh screenshot" item that re-takes it while already in
-    // that mode (also enters the mode if it wasn't active yet, so it
-    // works as a one-click "just show me a current screenshot" too).
-    std::function<void(bool refresh)> on_apply_no_preview;
+    // "Edit Overlay..." (row context menu) - opens the merged position +
+    // settings + preview window for the overlay at this index (see the
+    // header comment above and overlay_editor_dialog.h). This panel has no
+    // access to RecordingController/theme_ itself (main_frame owns both),
+    // so it just asks main_frame.cpp to open it.
+    std::function<void(size_t idx)> on_edit_overlay;
     std::function<void()> on_overlay_added;
     std::function<void()> on_overlay_removed;
 
@@ -92,7 +97,6 @@ private:
     void ToggleVisibility(size_t idx);
     void RemoveAt(size_t idx);
     void RenameAt(size_t idx);
-    void EditParametersAt(size_t idx);
     void ClosePanel();
 
     // Right-click / keyboard context-menu support for a single row --
