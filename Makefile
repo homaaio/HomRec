@@ -49,7 +49,7 @@ OBJS := \
 	src/ui/window_picker_dialog.o \
 	src/ui/hide_window_dialog.o \
 	src/ui/overlays_dock_panel.o \
-	src/ui/overlay_placement_dialog.o \
+	src/ui/overlay_editor_dialog.o \
 	src/hr_log.o \
 	src/hr_log_paths.o \
 	src/hr_plugin_log.o \

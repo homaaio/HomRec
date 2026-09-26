@@ -45,7 +45,7 @@ set(HR_SOURCES
     src/ui/window_picker_dialog.cpp
     src/ui/hide_window_dialog.cpp
     src/ui/overlays_dock_panel.cpp
-    src/ui/overlay_placement_dialog.cpp
+    src/ui/overlay_editor_dialog.cpp
     src/hr_log.cpp
     src/hr_log_paths.cpp
     src/hr_plugin_log.cpp
