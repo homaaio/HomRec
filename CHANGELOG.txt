@@ -1,6 +1,64 @@
 welcome to changelog :D
 
-[Version 2.3] - 2026-09-23 (unreleased)
+[Version 2.3.1] - 2026-09-27
+
+- Fixed (src/hr_dxgi_capture.cpp, src/hr_pipeline.cpp): a null-pointer read
+  access violation (0xC0000005) that crashed the app a few seconds after
+  "DXGI capture lost (display mode change, UAC prompt, or GPU reset) --
+  resetting" was logged, with nothing else in between - confirmed against
+  a user-supplied crash dump (exception in hr.exe itself, read at address
+  0x0, right where the log cuts off). DxCapCtx::reset() (hr_dx_reset(),
+  called from capture_loop()'s HR_DX_LOST branch) always tears down the
+  old IDXGIOutputDuplication up front before trying to acquire a new one -
+  if that re-acquire then fails (routine right after a real mode change,
+  e.g. a game briefly holding exclusive fullscreen - DuplicateOutput()
+  itself already retries this for a bit), reset() returns failure and
+  leaves `duplication` null, but capture_loop() was never checking that
+  return value and just called back into hr_dx_capture() on the very next
+  tick anyway, which unconditionally called AcquireNextFrame() through
+  the now-null COM pointer. hr_dx_capture() now returns HR_DX_LOST
+  instead of dereferencing a null `duplication` (capture_loop() already
+  knows how to handle that - falls back to re-encoding the last good
+  frame and retries the reset a second later, same as every other "can't
+  capture right now" case); capture_loop() also now logs once when a
+  reset attempt itself fails, instead of the silent retry loop that made
+  this so hard to tell apart from a hang.
+
+- Fixed (src/hr_pipeline.cpp): Stop routinely took ~30 seconds to actually
+  finish and produced a corrupt/incomplete video with the audio left as a
+  separate .wav next to it instead of merged in - every time, not just
+  under heavy load, matching the reported log exactly ("Pipeline: writer
+  thread didn't close the previous recording's pipe in time" -> "ffmpeg is
+  still finalizing... waiting longer" -> "didn't finish on its own after
+  30s total -- force-stopping" -> "merging the captured audio into the
+  video failed"). hr_pl_end_recording_segment() asks the writer thread to
+  close ffmpeg's stdin once its queue drains, but only waited 3 seconds
+  before giving up - and, on that timeout, cleared the pending-close flag
+  itself with the comment "don't leave it armed for the next recording".
+  That clear was redundant (hr_pl_set_recording()'s active=1 path already
+  clears the same flag when a genuinely new recording starts, specifically
+  to guard against this) and, far more often, actively harmful: the writer
+  thread hadn't actually failed, just hadn't finished draining whatever
+  backlog piled up under load (the exact "Recording overloaded: dropping
+  frames" condition already seen earlier in every affected session) - and
+  clearing the flag out from under it permanently canceled the only close
+  that pipe's ffmpeg was ever going to get, guaranteeing the later 10s/20s
+  waits in StopFinalizeTail() timed out and force-killed ffmpeg mid-write.
+  The flag is now left armed on a timeout (just logged as "still waiting
+  in the background" rather than treated as failed) - the writer thread
+  honors it whenever it does catch up, however many seconds later, so
+  StopFinalizeTail()'s waits see a real EOF and the file finalizes and
+  merges normally instead of always being force-killed.
+
+- Fixed (src/hr_pipeline.cpp): the live "capture fps" stat could read the
+  idle/preview pacing rate (preview_fps, 15 by default) for up to a second
+  right after starting a recording on a pipeline kept alive from the
+  previous one's preview (the normal case), even though real capture had
+  already sped back up to the recording's target fps - the 1-second
+  averaging window wasn't reset on the idle<->recording pacing switch, so
+  it could straddle both rates. Now reset exactly on that switch.
+
+[Version 2.3] - 2026-09-26
 
 - Changed (overlays): the row context menu's "Edit Parameters..." (a
   sequence of raw text-entry popups - one for text/image path/webcam
