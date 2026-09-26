@@ -293,6 +293,30 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     if (!handle || !out_bgra) return HR_DX_ERROR;
     auto *ctx = static_cast<DxCapCtx *>(handle);
 
+    // CRASHFIX (0xC0000005 null-pointer read a few ms after "DXGI capture
+    // lost -- resetting", nothing else logged in between - matches the
+    // supplied crash dump exactly: exception in hr.exe itself, read access
+    // violation at address 0x0). reset() (called from hr_dx_reset() after
+    // HR_DX_LOST, see capture_loop()'s HR_DX_LOST branch) unconditionally
+    // does `duplication.Reset()` up front before trying to re-acquire a
+    // new IDXGIOutputDuplication - if that re-acquire then fails (e.g. a
+    // game is holding exclusive fullscreen right after the display mode
+    // change that caused the loss in the first place - a completely normal,
+    // expected condition DuplicateOutput() itself already retries for, see
+    // reset()'s own loop), duplication is left null and reset() returns a
+    // failure HRESULT. capture_loop() logs the "resetting" message and
+    // kicks reset() off but was never checking that return value, so on
+    // the very next tick it called back in here anyway - and every call
+    // below assumes ctx->duplication is a live object. Calling a virtual
+    // method (AcquireNextFrame) through a null ComPtr reads the vtable
+    // pointer from address 0, which is exactly this crash. Reporting
+    // HR_DX_LOST here (instead of dereferencing) makes this call site
+    // behave the same way it already does for every OTHER "capture isn't
+    // currently possible" case: capture_loop() falls back to re-encoding
+    // the last good frame and retries dx_reset() again in a second,
+    // instead of taking the whole app down.
+    if (!ctx->duplication) return HR_DX_LOST;
+
     /* Release any previously acquired frame */
     if (ctx->acquired) {
         ctx->duplication->ReleaseFrame();
