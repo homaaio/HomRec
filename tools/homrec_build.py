@@ -138,21 +138,76 @@ def step_version():
 # Step 3: build + ffmpeg
 # ---------------------------------------------------------------------------
 
-def run_cmd(args, cwd):
-    print(f"  $ {' '.join(args)}")
-    try:
-        result = subprocess.run(args, cwd=cwd)
-        return result.returncode == 0
-    except FileNotFoundError:
-        print(f"  '{args[0]}' not found in PATH.")
+# ---------------------------------------------------------------------------
+# MSYS2 MINGW64 discovery
+#
+# `make`/`mingw32-make` found on a plain Windows PATH is *not* the same
+# thing as running inside an "MSYS2 MINGW64" shell: the whole point of that
+# environment is the PATH/MSYSTEM setup its shell profile does, which is
+# what puts the mingw-w64 g++/windres/pkg-config (and, via LUA_CFLAGS/
+# LUA_LDFLAGS below, the matching lua54) in front of `make`. Running plain
+# `make` from a normal `cmd.exe`/PowerShell prompt - which is what this
+# script used to do - either fails outright (no make on PATH at all) or,
+# worse, silently picks up some other make/gcc that isn't set up for this
+# project's wx/Lua/ffmpeg headers and libs. So instead of invoking `make`
+# directly, this shells out to MSYS2's own bash with MSYSTEM=MINGW64 set,
+# which is exactly what launching "MSYS2 MINGW64" from the Start Menu does
+# and is the one environment the Makefile (see its LUA_CFLAGS/LDFLAGS
+# comments) is written against.
+MSYS2_ROOT_CANDIDATES = (
+    r"C:\msys64",
+    r"C:\tools\msys64",
+)
+
+
+def find_msys2_bash():
+    env_root = os.environ.get("MSYS2_ROOT")
+    candidates = ([env_root] if env_root else []) + list(MSYS2_ROOT_CANDIDATES)
+    for root in candidates:
+        bash = os.path.join(root, "usr", "bin", "bash.exe")
+        if os.path.isfile(bash):
+            return bash
+    return None
+
+
+def to_msys_path(win_path):
+    """C:\\foo\\bar -> /c/foo/bar, the way MSYS2's bash expects a path."""
+    drive, rest = os.path.splitdrive(win_path)
+    rest = rest.replace("\\", "/")
+    if drive:
+        return f"/{drive[0].lower()}{rest}"
+    return rest
+
+
+def run_in_mingw64(shell_cmd, cwd):
+    """Runs `shell_cmd` (a single bash command line) inside an MSYS2 MINGW64
+    login shell, cd'd into `cwd` - i.e. the same environment "MSYS2 MINGW64"
+    from the Start Menu gives you, not whatever `make`/`gcc` a plain Windows
+    PATH happens to resolve to."""
+    bash = find_msys2_bash()
+    if not bash:
+        print("  MSYS2 not found (looked in MSYS2_ROOT and "
+              f"{', '.join(MSYS2_ROOT_CANDIDATES)}). Install MSYS2 "
+              "(https://www.msys2.org/) and its mingw-w64-x86_64-toolchain "
+              "package, or set MSYS2_ROOT to point at an existing install.")
         return False
 
+    env = os.environ.copy()
+    env["MSYSTEM"] = "MINGW64"
+    # CHERE_INVOKING=1 is the documented MSYS2 flag that makes a login shell
+    # keep the directory it was launched from instead of cd'ing to $HOME -
+    # same mechanism the "MSYS2 MINGW64" shortcut's own -l flag relies on.
+    env["CHERE_INVOKING"] = "1"
 
-def find_make():
-    for candidate in ("mingw32-make", "make"):
-        if shutil.which(candidate):
-            return candidate
-    return None
+    msys_cwd = to_msys_path(cwd)
+    full_cmd = f"cd '{msys_cwd}' && {shell_cmd}"
+    print(f"  $ [MSYS2 MINGW64] {shell_cmd}")
+    try:
+        result = subprocess.run([bash, "-lc", full_cmd], cwd=cwd, env=env)
+        return result.returncode == 0
+    except FileNotFoundError:
+        print(f"  '{bash}' could not be run.")
+        return False
 
 
 def step_build():
@@ -160,19 +215,23 @@ def step_build():
     hr_exe = os.path.join(REPO_ROOT, "hr.exe")
     hom_exe = os.path.join(REPO_ROOT, "hom.exe")
 
-    if ask_yes_no("Rebuild hr.exe and hom.exe now (make clean && make && make hom)?"):
-        make = find_make()
-        if not make:
-            print("  make/mingw32-make not found in PATH - skipping the build, "
-                  "will use whatever is already sitting in the repo root.")
-        else:
-            ok = run_cmd([make, "clean"], REPO_ROOT)
-            ok = run_cmd([make], REPO_ROOT) and ok
-            ok = run_cmd([make, "hom"], REPO_ROOT) and ok
-            if not ok:
-                print("  Build finished with an error.")
-                if not ask_yes_no("Continue with the old hr.exe/hom.exe (if any)?", default_yes=False):
-                    sys.exit(1)
+    if ask_yes_no("Rebuild hr.exe and hom.exe now (make clean && make && make hom, "
+                  "in MSYS2 MINGW64)?"):
+        # Same LUA_CFLAGS/LUA_LDFLAGS the Makefile itself defaults to
+        # (see its `?=` lines) - overridable via env vars for anyone whose
+        # lua54 isn't installed at C:\lua54.
+        lua_cflags = os.environ.get("LUA_CFLAGS", "-IC:/lua54/include")
+        lua_ldflags = os.environ.get("LUA_LDFLAGS", "-LC:/lua54/lib")
+        make_cmd = (
+            f"make clean && "
+            f"make LUA_CFLAGS=\"{lua_cflags}\" LUA_LDFLAGS=\"{lua_ldflags}\" && "
+            f"make hom"
+        )
+        ok = run_in_mingw64(make_cmd, REPO_ROOT)
+        if not ok:
+            print("  Build finished with an error.")
+            if not ask_yes_no("Continue with the old hr.exe/hom.exe (if any)?", default_yes=False):
+                sys.exit(1)
 
     if not os.path.isfile(hr_exe):
         print("  hr.exe not found in the repo root - the 'full' and "
@@ -186,6 +245,12 @@ def step_build():
 
 def find_ffmpeg():
     section("ffmpeg")
+    # No more "use this ffmpeg.exe for the full build?" yes/no here - the
+    # 'full' vs 'portable' choice made in step_archives() *is* the "add
+    # ffmpeg or not" decision; asking again here was a second prompt for
+    # the same choice. If an ffmpeg.exe is found (or given), 'full'
+    # archives get it automatically; 'portable' archives never get it
+    # regardless, by definition of the preset - see collect_files().
     candidates = [
         os.path.join(REPO_ROOT, "ffmpeg", "ffmpeg.exe"),
         os.path.join(REPO_ROOT, "ffmpeg.exe"),  # legacy location, still honored if present
@@ -197,79 +262,37 @@ def find_ffmpeg():
             found = which
 
     if found:
-        print(f"Found: {found}")
-        if ask_yes_no("Use this ffmpeg.exe for the 'full' build?"):
-            return found
+        print(f"Found: {found} (will be bundled in 'full' archives)")
+        return found
 
-    manual = ask("Path to the ffmpeg.exe to bundle (Enter to skip)", default="")
+    manual = ask("Path to the ffmpeg.exe to bundle in 'full' archives (Enter to skip)", default="")
     if manual and os.path.isfile(manual):
         return manual
     if manual:
         print("  File not found at that path - skipping ffmpeg.")
     else:
-        print("  ffmpeg skipped - the 'full' archive will be built like 'portable'.")
+        print("  ffmpeg not found - 'full' archives will be built without it (like 'portable').")
     return None
-
-
-# ---------------------------------------------------------------------------
-# Step 3b: Windows installer (Inno Setup)
-# ---------------------------------------------------------------------------
-
-def find_iscc():
-    candidates = [
-        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        r"C:\Program Files\Inno Setup 6\ISCC.exe",
-    ]
-    found = next((c for c in candidates if os.path.isfile(c)), None)
-    if found:
-        return found
-    return shutil.which("iscc") or shutil.which("ISCC")
-
-
-def step_installer(version, hr_exe):
-    section("Windows installer (Inno Setup)")
-    iss_path = os.path.join(REPO_ROOT, "installer", "HomRec.iss")
-    if not os.path.isfile(iss_path):
-        print("  installer\\HomRec.iss not found - skipping.")
-        return None
-    if not hr_exe:
-        print("  hr.exe wasn't built - skipping the installer (it packages "
-              "whatever's already sitting in the repo root).")
-        return None
-    if not ask_yes_no("Build the Windows installer too (installer\\HomRec.iss)?"):
-        return None
-
-    iscc = find_iscc()
-    if not iscc:
-        print("  ISCC.exe (Inno Setup Compiler) not found. Install Inno Setup "
-              "(https://jrsoftware.org/isinfo.php) or put iscc.exe on PATH, then try again.")
-        return None
-
-    os.makedirs(DIST_DIR, exist_ok=True)
-    ok = run_cmd([iscc, f"/DMyAppVersion={version}", iss_path], REPO_ROOT)
-    if not ok:
-        print("  Inno Setup compile failed - see its output above.")
-        return None
-
-    out_path = os.path.join(DIST_DIR, f"HomRec-Setup-{version}.exe")
-    if not os.path.isfile(out_path):
-        print("  ISCC reported success but " + out_path + " wasn't found - "
-              "check OutputDir/OutputBaseFilename in installer/HomRec.iss.")
-        return None
-    size_mb = os.path.getsize(out_path) / (1024 * 1024)
-    print(f"  Done: {out_path} ({size_mb:.1f} MB)")
-    return out_path
 
 
 # ---------------------------------------------------------------------------
 # Step 4: archives
 # ---------------------------------------------------------------------------
 
-BASE_DOCS = [
-    "README.md", "LICENSE", "FREE.txt", "SUPPORT.md",
-    "commands.md", "CHANGELOG.txt", "CONTRIBUTORS.md",
-]
-BASE_DIRS = ["cfg", "plugins"]
+# README.md/LICENSE/CHANGELOG.txt are the only docs actual end users of a
+# release archive need. commands.md (console command reference), SUPPORT.md
+# and CONTRIBUTORS.md are contributor/dev-facing docs that don't belong in
+# a binary release archive; they're still in the repo (and in the
+# 'source' preset below, which packages the repo as-is) for anyone
+# building from source, just not duplicated into every 'full'/'portable'
+# zip. Likewise "plugins" here used to mean *this repo's own*
+# src/plugins (bundled Lua examples, not a user-facing thing) getting
+# copied into every release archive under a top-level plugins/ folder -
+# removed for the same reason; a fresh install's own plugins/ directory
+# (where .hrp packages get installed via File > Import Plugin) is created
+# by the app itself, not shipped pre-populated.
+BASE_DOCS = ["README.md", "LICENSE", "FREE.txt", "CHANGELOG.txt"]
+BASE_DIRS = ["cfg"]
 
 # Archive formats offered in the menu. 7z is always listed - not just when
 # a 7z/7za binary happens to already be on PATH - since "add the .7z build
@@ -393,7 +416,7 @@ def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
     count = ask_int("How many archives to prepare", default=1, lo=1, hi=6)
 
     preset_options = [
-        ("full", "Full (hr.exe + hom.exe + ffmpeg.exe + docs + cfg + plugins)"),
+        ("full", "Full (hr.exe + hom.exe + ffmpeg.exe + docs + cfg)"),
         ("portable", "Portable (same, but without ffmpeg.exe)"),
         ("source", "Source-only (source code, no binaries)"),
     ]
@@ -410,7 +433,7 @@ def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
             print("  Nothing to archive (no files for this preset) - skipping.")
             continue
 
-        out_name = f"HomRec-{version}-{label}.{fmt}"
+        out_name = f"homrec-{version}-{label}.{fmt}"
         out_path = os.path.join(DIST_DIR, out_name)
         print(f"  Building {out_name} ({len(files)} files)...")
         try:
@@ -476,20 +499,22 @@ def extract_release_notes(version):
     return notes_path
 
 
-def suggest_git_commands(version, installer_path):
+def suggest_git_commands(version):
     section("Git (nothing is run automatically)")
     tag = f"v{version}"
     print("Once everything checks out, tag and push - by hand:")
-    print(f'  git tag -a {tag} -m "HomRec {version}"')
+    print(f'  git tag -a {tag} -m "homrec {version}"')
     print(f"  git push origin {tag}")
     print("\nThen create the GitHub Release for that tag and attach the archives")
     print(f"from {DIST_DIR} as release assets.")
-    if installer_path:
-        print(f"\nIMPORTANT for auto-update: attach {os.path.basename(installer_path)} itself")
-        print("(not just the zip/tar.gz) to the release. Existing installs' Help > Check")
-        print("for Updates (src/hr_update.cpp) looks at the latest release for an asset")
-        print("whose name ends in .exe and offers to silently install it - skip this and")
-        print("auto-update simply won't find anything to offer.")
+    print("\nThe Windows installer (installer\\HomRec.iss) is no longer built by this")
+    print("script - build it yourself in a separate Inno Setup window (ISCC.exe or the")
+    print("Inno Setup Compiler GUI) and attach the resulting Setup .exe to the release")
+    print("by hand. IMPORTANT for auto-update: it has to be the installer .exe itself")
+    print("(not just the zip/tar.gz) - existing installs' Help > Check for Updates")
+    print("(src/hr_update.cpp) looks at the latest release for an asset whose name ends")
+    print("in .exe and offers to silently install it; skip this and auto-update simply")
+    print("won't find anything to offer.")
 
 
 def main():
@@ -504,24 +529,22 @@ def main():
     version = step_version()
     hr_exe, hom_exe = step_build()
     ffmpeg_path = find_ffmpeg()
-    installer_path = step_installer(version, hr_exe)
     produced = step_archives(version, hr_exe, hom_exe, ffmpeg_path)
 
     section("Other bits")
-    write_checksums(produced + ([installer_path] if installer_path else []))
+    write_checksums(produced)
     notes_path = extract_release_notes(version)
     if notes_path:
         print(f"Release notes (from CHANGELOG.txt) saved to {notes_path}")
     else:
         print("Could not pull a section out of CHANGELOG.txt - no release notes were created.")
-    suggest_git_commands(version, installer_path)
+    suggest_git_commands(version)
 
     elapsed = time.time() - start_time
     section("Done")
-    all_produced = produced + ([installer_path] if installer_path else [])
-    if all_produced:
-        print(f"Archives built: {len(all_produced)} in {elapsed:.1f}s.")
-        for p in all_produced:
+    if produced:
+        print(f"Archives built: {len(produced)} in {elapsed:.1f}s.")
+        for p in produced:
             print(f"  - {p}")
         print(f"\nEverything is in {DIST_DIR} - ready to upload to GitHub Releases/mirrors.")
     else:
