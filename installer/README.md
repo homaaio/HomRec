@@ -10,7 +10,7 @@ Install Inno Setup 6 (Windows only - it doesn't cross-compile), then either:
   ```
   make
   make hom
-  iscc /DMyAppVersion=2.2-b.4 installer\HomRec.iss
+  iscc /DMyAppVersion=2.3 installer\HomRec.iss
   ```
   matching `/DMyAppVersion` to `HR_APP_VERSION` in `src/ui/version.h`.
 
