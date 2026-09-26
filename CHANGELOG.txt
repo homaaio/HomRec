@@ -2,6 +2,26 @@ welcome to changelog :D
 
 [Version 2.3] - 2026-09-23 (unreleased)
 
+- Changed (overlays): the row context menu's "Edit Parameters..." (a
+  sequence of raw text-entry popups - one for text/image path/webcam
+  device, then opacity, then a font picker for text overlays) and
+  "Position Overlays..." (a separate full-screen window that dragged
+  every overlay at once against a screenshot, no per-overlay settings)
+  are now a single "Edit Overlay..." window per overlay: a screenshot-
+  backed canvas at top shows that one overlay - rendered with an actual
+  preview of its content (text/image/gif/webcam label/input-overlay
+  spritesheet), not a bare rectangle - and can be dragged/resized right
+  there, with all of that overlay's own settings (name, visibility,
+  opacity, and whatever its type needs: text/font/color, image/gif file,
+  webcam device, or layout+spritesheet files) laid out below using the
+  same themed controls (LabeledSlider, wxColourPickerCtrl, etc.)
+  settings_dialog.cpp's tabs use, instead of a chain of plain message-box
+  prompts. Nothing is written to state.overlays or disk until Save is
+  clicked; Cancel/[X] discards the whole edit, same contract the old
+  "Position Overlays..." window had. New src/ui/overlay_editor_dialog.h/
+  .cpp; the now-fully-replaced overlay_placement_dialog.h/.cpp were
+  deleted; overlays_dock_panel.h/.cpp, main_frame.cpp updated to match.
+
 - Fixed: File > Select Window... capture recorded a dead, frozen crop of
   the DESKTOP at wherever the window happened to be sitting when you
   pressed Start, for the entire rest of the recording - drag the window, or
