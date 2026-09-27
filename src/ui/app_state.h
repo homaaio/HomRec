@@ -124,36 +124,13 @@ struct AppState {
     // report back.
     std::string active_preset_name = "default";
 
-    // -- Scheduled recording start (todo2.3.md section 3) -----------------
-    // Separate from auto_stop_min (which ends an already-running
-    // recording after N minutes): this instead delays the *start*.
-    // scheduled_start_time is "HH:MM" (24h, local time); enabling it with
-    // a time already in the past today is treated as "tomorrow at that
-    // time" by the checker (main_frame.cpp), not "start immediately".
     bool        scheduled_start_enabled = false;
     std::string scheduled_start_time    = "";
 
-    // -- Auto-pause/resume on microphone silence (todo2.3.md section 3) ---
-    // Independent of scheduled_start above; both can be used together
-    // (start at a set time, then only actually record while someone's
-    // talking). silence_threshold_db is the RMS level (dBFS, so this is
-    // normally a negative number, e.g. -40) below which the mic is
-    // considered silent; silence_duration_sec is how long it has to stay
-    // that quiet before RecordingController auto-pauses, so normal short
-    // gaps between sentences don't constantly toggle pause on/off.
     bool        auto_pause_on_silence  = false;
     double      silence_threshold_db   = -40.0;
     int         silence_duration_sec   = 3;
 
-    // -- Post-recording hook (todo2.3.md section 3) ------------------------
-    // Runs once StopFinalizeTail() has produced the final output file.
-    // "script" launches post_record_hook_path with the finished file's
-    // full path as argv[1] (fire-and-forget, not awaited - see
-    // RecordingController::RunPostRecordHook()); "move" moves the file
-    // into post_record_hook_path (a folder) instead of leaving it in
-    // output_folder; "open_folder" just opens output_folder in Explorer,
-    // same as the existing "Open Folder" button, so post_record_hook_path
-    // is unused for that mode.
     enum class PostRecordHookType { None, Script, Move, OpenFolder };
     bool               post_record_hook_enabled = false;
     PostRecordHookType post_record_hook_type    = PostRecordHookType::None;

@@ -23,16 +23,6 @@
 // state.capture_window_title / state.capture_window_hwnd directly (no separate "OK/Cancel, then
 // commit" step).
 void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state);
-
-// Full-screen click-and-drag rectangle selector (todo2.3.md section 3,
-// "Захват произвольной области экрана") - sets state.capture_mode to
-// CaptureMode::Region and state.region_x/y/w/h to the dragged rect (in
-// virtual-desktop pixel coordinates, spanning however many monitors are
-// connected - same coordinate space GetWindowRect() uses). Esc, or a
-// click-drag that ends up under 8x8 pixels (a stray click, not a real
-// drag), cancels without changing state at all. Modal in the same sense
-// ShowWindowPickerDialog() above is (blocks pumping parent's message
-// loop until it closes).
 void ShowRegionPickerOverlay(HWND parent, HINSTANCE hInst, AppState &state);
 
 // Resolves a window title (as stored in AppState::capture_window_title)

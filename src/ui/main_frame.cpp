@@ -1445,14 +1445,6 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
     if (file_lbl_) file_lbl_->SetLabel(msg);
 }
 
-// BUGFIX (2.3): scheduled_start_time has no dedicated settings-dialog control
-// yet (set via .hrc / the console's "<key> = <value>" / a plugin's
-// set_setting()), and this used to require an exact byte-for-byte match
-// against a strictly zero-padded "%02d:%02d" - so "9:30", " 09:30", "09:30 "
-// or "09:30:00" all parsed as valid-looking times that would simply never
-// fire, with nothing telling the person their schedule was silently dead.
-// Parses tolerantly now and logs once if the string can't be understood at
-// all, instead of just doing nothing forever.
 static bool ParseScheduledTime(const std::string &raw, int &hh, int &mm) {
     size_t i = 0, n = raw.size();
     while (i < n && isspace((unsigned char)raw[i])) ++i;
