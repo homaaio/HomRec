@@ -299,12 +299,16 @@ create/
 
 # HomRec files
 
+docs/*.md
 *.hrc
 *.hrl
 recordings/
 create/
 icons/
 plugins/
+Hom/plugins/*
+!Hom/plugins/*.hrp
+!Hom/plugins/index.json
 *.png
 *.jpg
 *.webp
