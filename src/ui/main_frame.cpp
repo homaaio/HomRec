@@ -64,6 +64,11 @@ extern "C" {
     // (hrc_config.h) replace it. Only the one-time migration read path
     // above (get_* + load) is still needed, for upgrading an install that
     // only ever had homrec_settings.json.
+
+    // hr_dxgi_capture.cpp - one-shot GPU vendor probe, used only on a
+    // genuine first launch (see the first_launch branch below) to pick a
+    // sane default encoder instead of always defaulting to software libx264.
+    int hr_dx_recommend_codec(char *out_buf, int buf_chars);
 }
 
 // FromColorref/ColorButton/StatusDot moved to themed_widgets.cpp.
@@ -813,6 +818,33 @@ HomRecMainFrame::HomRecMainFrame()
         } else {
             state_.output_folder = "recordings";
             state_.first_launch = true;
+
+            // First-ever launch (no .hrc, no legacy homrec_settings.json):
+            // state_.video_codec is about to be left at its compiled-in
+            // "libx264" default (AppState::video_codec's in-class
+            // initializer) for good, since nothing else runs before this
+            // point to override it and the very next thing that touches
+            // this settings object is Save() writing whatever's in state_
+            // back out. That default never checked what's actually in the
+            // machine, so every fresh install re-encoded on the CPU even
+            // with a perfectly capable NVENC/QSV/AMF GPU sitting idle right
+            // there - a structural reason HomRec could run meaningfully
+            // hotter than OBS at identical settings on such a machine (OBS
+            // does this same GPU-first pick itself), separate from either
+            // app's own capture/compositing efficiency. hr_dx_recommend_codec()
+            // (hr_dxgi_capture.cpp) walks the adapter list once here, only
+            // on this one-time first-launch path, and only ever picks a
+            // *hardware* codec when it actually found one - existing
+            // installs that already saved "libx264" (by detection or by
+            // the user's own choice) are untouched, and anyone whose
+            // hardware encoder misbehaves can still switch back by hand in
+            // Settings > Video.
+            char rec_codec[32] = {};
+            if (hr_dx_recommend_codec(rec_codec, sizeof(rec_codec))) {
+                state_.video_codec = rec_codec;
+                HrLog::Info(std::string("First launch: auto-selected hardware encoder \"") +
+                            rec_codec + "\" (Settings > Video > Codec to change).");
+            }
         }
         hr_settings_destroy(settings);
     }
@@ -1445,6 +1477,14 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
     if (file_lbl_) file_lbl_->SetLabel(msg);
 }
 
+// scheduled_start_time has no dedicated settings-dialog control
+// yet (set via .hrc / the console's "<key> = <value>" / a plugin's
+// set_setting()), and this used to require an exact byte-for-byte match
+// against a strictly zero-padded "%02d:%02d" - so "9:30", " 09:30", "09:30 "
+// or "09:30:00" all parsed as valid-looking times that would simply never
+// fire, with nothing telling the person their schedule was silently dead.
+// Parses tolerantly now and logs once if the string can't be understood at
+// all, instead of just doing nothing forever.
 static bool ParseScheduledTime(const std::string &raw, int &hh, int &mm) {
     size_t i = 0, n = raw.size();
     while (i < n && isspace((unsigned char)raw[i])) ++i;
@@ -2278,7 +2318,7 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
     // background thread could still wxQueueEvent() onto a frame that's
     // about to be freed. See the comment on g_frame's declaration.
     if (g_frame == this) g_frame = nullptr;
-    // BUGFIX (app froze ~3-6s on close while Instant Replay was on - log:
+    // (app froze ~3-6s on close while Instant Replay was on - log:
     // "HomRec closing" then, 3s later, "Instant Replay: segment writer didn't
     // finish gracefully in time - killing it"): TeardownPreview() below
     // detaches pipeline_ (sets it to nullptr) even though Instant Replay's
