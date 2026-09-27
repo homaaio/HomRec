@@ -146,7 +146,7 @@ bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path) {
                     total += read;
                 }
                 out.close();
-                // BUGFIX: a read error / short download used to count as success
+                // A read error / short download used to count as success
                 // (any total > 0), and the half-downloaded installer was then
                 // launched. Require a clean end of stream, a matching
                 // Content-Length when the server sent one, and a PE header.

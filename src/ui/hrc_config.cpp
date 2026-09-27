@@ -131,6 +131,7 @@ void ReadHotkeysSection(const std::unordered_map<std::string, std::string> &kv,
     hotkeys.clear();
     if (!has("custom_hotkey_count")) return;
     int n = atoi(get("custom_hotkey_count").c_str());
+    // Same unbounded-count hang as overlay_count above.
     if (n < 0) n = 0;
     if (n > 10000) n = 10000;
     for (int i = 0; i < n; ++i) {

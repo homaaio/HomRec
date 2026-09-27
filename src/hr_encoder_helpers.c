@@ -147,7 +147,7 @@ HR_EXPORT void hr_rgb_to_yuv420p(
  *   k_csc_tv   - studio/TV range (Y 16..235, C 16..240) -> NV12, fed to
  *                NVENC/QSV/AMF, tagged "-color_range tv".
  *
- * BUGFIX: hr_bgra_to_nv12_band() used to reuse the full-range maths while
+ * hr_bgra_to_nv12_band() used to reuse the full-range maths while
  * hr_ffmpeg_runner.cpp already tags hardware-encoder output as limited
  * range ("-color_range tv", see CHANGELOG "hardware-encoded recordings came
  * out dark/dull").  Full-range samples decoded as limited range crush every

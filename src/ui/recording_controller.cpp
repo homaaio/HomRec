@@ -151,7 +151,7 @@ std::wstring WideFromNarrow(const std::string &s) {
     return w;
 }
 
-// BUGFIX (2.3): std::remove()/std::rename() take an ANSI-codepage path on
+// Std::remove()/std::rename() take an ANSI-codepage path on
 // Windows, but every path in this file is UTF-8 - so a temp WAV inside an
 // output folder with non-ASCII characters (e.g. a Cyrillic user name) was
 // never found/deleted/renamed. These go through the wide APIs instead;
@@ -164,7 +164,7 @@ bool RenameFileUtf8(const std::string &from, const std::string &to) {
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0;
 }
 
-// BUGFIX (unbounded temp-disk growth while using Instant Replay):
+// 
 // StartInstantReplayEncoder() creates a fresh, uniquely-numbered
 // %TEMP%\HomRec_replay\<N>\ subfolder every time it runs - both when
 // Instant Replay is (re-)enabled and, critically, every single time
@@ -327,7 +327,7 @@ std::string RecordingController::ResolveCaptureAppName() const {
 }
 
 std::wstring RecordingController::BuildOutputPath() {
-    // BUGFIX (2.3): was a 256-byte buffer - a long output folder + template
+    // Was a 256-byte buffer - a long output folder + template
     // got silently cut off, taking the ".mp4" extension with it.
     char buf[1024] = {};
     std::string app_name = ResolveCaptureAppName();
@@ -335,7 +335,7 @@ std::wstring RecordingController::BuildOutputPath() {
                                app_name.c_str(), buf, (int)sizeof(buf), state_.active_preset_name.c_str());
     std::wstring path = WideFromNarrow(buf);
 
-    // BUGFIX (2.3): ffmpeg is always run with -y, so a template that isn't
+    // Ffmpeg is always run with -y, so a template that isn't
     // unique per recording (e.g. "{app}_{date}", or two clips in the same
     // minute with "{hh}-{min}") silently overwrote the earlier file.
     // Append _2, _3, ... instead.
@@ -386,7 +386,7 @@ void RecordingController::ComputeOutputDims(int src_w, int src_h, int &out_w, in
     }
     if (out_w % 2) out_w--;
     if (out_h % 2) out_h--;
-    // BUGFIX (2.3): Percent mode had no floor (a tiny/zero scale_factor gave a
+    // Percent mode had no floor (a tiny/zero scale_factor gave a
     // 0x0 output); Absolute mode already clamped to 2.
     if (out_w < 2) out_w = 2;
     if (out_h < 2) out_h = 2;
@@ -675,7 +675,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     // what "I picked a window but my entire screen got recorded" was.
     if (!CheckCaptureTarget(error_out)) return false;
 
-    // BUGFIX (2.3): Instant Replay gets paused just below, and only Stop()
+    // Instant Replay gets paused just below, and only Stop()
     // ever resumed it - so ANY failed Start() (ffmpeg missing, low disk,
     // encoder/pipeline failed to start...) left Instant Replay silently dead.
     // This guard resumes it on every early `return false`; it is disarmed once
@@ -806,7 +806,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         pipeline_output_idx_ == capture_output_idx_) {
         hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
         hr_pl_set_output_size(pipeline_, output_w_, output_h_);
-        // BUGFIX (2.3): the pixel format used to be set only AFTER recording had
+        // The pixel format used to be set only AFTER recording had
         // already been switched on, so the very first frame(s) of a recording that
         // reused the preview pipeline could go out in the previous encoder's chroma
         // layout (NV12 vs I420). Also clear a stale "paused" flag: a recording that
@@ -934,7 +934,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // switched out of recording mode (not stopped) further down.
     bool keep_for_preview = pipeline_ && !state_.disable_preview;
 
-    // BUGFIX (Stop button freezes the whole app for a second or two):
+    // 
     // hr_pl_stop() itself waits (with a timeout) for the capture thread
     // and then the writer thread to each signal that they've actually
     // stopped - up to ~1s per thread, by design (see its own comment in
@@ -951,7 +951,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     if (!keep_for_preview) {
         hr_pl_stop(pipeline_);
     } else {
-        // BUGFIX (recordings always took ~30s to "finalize" and came out
+        // (recordings always took ~30s to "finalize" and came out
         // corrupt whenever preview was left on - see
         // hr_pl_end_recording_segment()'s comment for the full story):
         // hr_pl_stop() above is what used to be the *only* thing that
@@ -973,7 +973,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
 }
 
 void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
-    // BUGFIX (2.3): Stop while paused left the pipeline (and audio) paused. With the
+    // Stop while paused left the pipeline (and audio) paused. With the
     // live preview on the pipeline is kept alive, so the preview froze and the NEXT
     // recording reused a paused pipeline and captured nothing.
     if (pipeline_) hr_pl_pause(pipeline_, 0);
@@ -1250,7 +1250,7 @@ void RecordingController::TogglePause() {
     int new_state = hr_ctl_pause_toggle(ctl_);
     state_.paused = (new_state == 2 /* HR_STATE_PAUSED */);
     if (pipeline_) hr_pl_pause(pipeline_, state_.paused ? 1 : 0);
-    // BUGFIX (2.3): audio was never paused (hr_audio_pause() was declared but not
+    // Audio was never paused (hr_audio_pause() was declared but not
     // called anywhere), so it kept recording while the video timeline stood still
     // and everything after a pause was out of sync by the pause length. While
     // paused the audio workers still read + meter (needed for silence auto-resume)
@@ -1517,7 +1517,7 @@ void RecordingController::StopInstantReplayEncoder() {
     replay_ff_ = nullptr;
 }
 
-// BUGFIX (preview freezes for a second or two right after clicking
+// (preview freezes for a second or two right after clicking
 // Start/Record): Start() below pauses a running Instant Replay buffer by
 // calling StopInstantReplayEncoder() - which used to be this same
 // synchronous function, called directly on whichever thread called
@@ -1546,7 +1546,7 @@ void RecordingController::StopInstantReplayEncoderAsync() {
     JoinPendingInstantReplayStop();
     hr_pl_end_recording_segment(pl, 1500);
     instant_replay_stop_thread_ = std::thread([h]() {
-        // BUGFIX (std::terminate() crash a moment after "Instant Replay:
+        // (std::terminate() crash a moment after "Instant Replay:
         // segment writer didn't finish gracefully in time - killing it"):
         // this is a bare std::thread with no exception handler anywhere
         // above it on the call stack (tracked/joined now instead of
@@ -1580,7 +1580,7 @@ void RecordingController::StopInstantReplayEncoderAsync() {
 bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
     instant_replay_enabled_ = true;
     if (instant_replay_active_) {
-        // BUGFIX (2.3): changing the buffer length while Instant Replay was already
+        // Changing the buffer length while Instant Replay was already
         // running was ignored (the ring size is fixed when the encoder starts).
         const int want_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
         if (want_sec == replay_applied_buffer_sec_ || state_.recording) return true; // already running
@@ -1757,7 +1757,7 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
 
     std::wstring list_path = dir_to_read + L"concat_list.txt";
     {
-        // BUGFIX (2.3): this was a std::wofstream in the "C" locale, which can't
+        // This was a std::wofstream in the "C" locale, which can't
         // encode non-ASCII characters - a temp path under a non-ASCII user name
         // cut the list off and Save Replay failed. Written as UTF-8 instead (what
         // ffmpeg's concat demuxer expects).
@@ -1986,7 +1986,7 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
         hr_di_primary(di, &mx, &my, &mw, &mh, &dpi);
     }
     hr_di_destroy(di);
-    // BUGFIX (2.3): `idx` indexes the monitor LIST, but hr_pl_create() wants the
+    // `idx` indexes the monitor LIST, but hr_pl_create() wants the
     // DXGI output index; the two only agree by luck. Match by desktop coordinates
     // like ResolveCaptureSize() does, otherwise the test records another monitor.
     {
@@ -2206,7 +2206,7 @@ void RecordingController::RefreshPreviewSettings() {
     now.preview_quality_pct = state_.preview_quality_pct;
 
     if (!applied_preview_capture_settings_valid_ || !(now == applied_preview_capture_settings_)) {
-        // BUGFIX (2.3): TeardownPreview() destroys the pipeline, but when Instant
+        // TeardownPreview() destroys the pipeline, but when Instant
         // Replay is buffering that very pipeline feeds its encoder - so picking a
         // window/region (or changing monitor/fps/preview settings) silently killed
         // the replay buffer while EnableInstantReplay() still saw it as "active".

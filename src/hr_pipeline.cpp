@@ -239,7 +239,7 @@ private:
         unsigned hw = std::thread::hardware_concurrency();
         int n_bands = 1;
         if (total_pixels >= kMinPixelsForThreads && hw > 1) {
-            // BUGFIX (game FPS drop while recording, worst on quad/hexa-
+            // (game FPS drop while recording, worst on quad/hexa-
             // core machines): this used to be std::min(hw - 1, 4), which
             // only ever held back a single core for "the capture thread
             // (DXGI grab + overlay compositing + BGRA->YUV) and everything
@@ -549,7 +549,7 @@ struct Pipeline {
     // encoder path), so this couldn't be fixed by simply not creating one.
     std::atomic<bool> preview_needed{true};
 
-    // BUGFIX (data race): pipe_handle and `recording` are written by the UI
+    // pipe_handle and `recording` are written by the UI
     // thread (hr_pl_set_recording()/hr_pl_end_recording_segment()) while the
     // capture and writer threads read - and the writer thread also zeroes -
     // them, with no synchronisation at all. Plain non-atomic reads/writes
@@ -828,7 +828,7 @@ struct Pipeline {
     // -------------------------------------------------------------------------
     void writer_loop() {
 #ifdef _WIN32
-        // BUGFIX (game FPS drop while Instant Replay is just buffering in
+        // (game FPS drop while Instant Replay is just buffering in
         // the background, no manual recording active): this used to set
         // THREAD_PRIORITY_HIGHEST unconditionally here, once, on thread
         // start - regardless of `boost_priority`. That's the exact same
@@ -960,7 +960,7 @@ struct Pipeline {
                          "stopping instead of crashing the app.");
         }
 
-        // BUGFIX (broken ~1KB output file): pipe_handle is the same OS
+        // pipe_handle is the same OS
         // handle as ffmpeg's stdin. hr_ff_stop_graceful() (hr_ffmpeg_runner.cpp)
         // used to close that handle itself, unconditionally, the moment
         // Stop was pressed - including while this thread might still be
@@ -1159,7 +1159,7 @@ struct Pipeline {
                     if (!is_recording_now) frame_ns_idle = compute_frame_ns_idle();
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
-                    // MINOR BUGFIX: fps_acc_frames/fps_acc_start_ns (the
+                    // fps_acc_frames/fps_acc_start_ns (the
                     // "measured actual capture fps" stat shown in the UI)
                     // used to keep accumulating across this switch. Idle
                     // preview paces at preview_fps (15 by default - see
@@ -1455,7 +1455,7 @@ struct Pipeline {
             // holds just the cropped window sub-rectangle of it.
             if (include_cursor.load(std::memory_order_relaxed)) {
                 ensure_work_copy(frame);
-                // BUGFIX (2.3): this used the raw crop_x/crop_y members - read
+                // This used the raw crop_x/crop_y members - read
                 // without crop_mtx while the UI thread may be rewriting them (window
                 // tracking now does that ~20x/s), and not the clamped values the
                 // frame was actually cropped with (c_x/c_y). The cursor could sit a
@@ -2164,7 +2164,7 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
 #endif
 }
 
-// BUGFIX (a manual recording, or an Instant Replay segment, never
+// (a manual recording, or an Instant Replay segment, never
 // finalizes on its own whenever the pipeline stays alive afterward -
 // i.e. almost always, since that's exactly what happens when live
 // preview is left on, the default, and it's *also* what always happens
@@ -2225,7 +2225,7 @@ HR_EXPORT int hr_pl_end_recording_segment(void* handle, int timeout_ms) {
         HrLog::Warn("Pipeline: writer thread didn't close the previous recording's pipe in time "
                     "(it may be stuck writing) - the ffmpeg process for it likely won't finalize cleanly yet, "
                     "still waiting for it in the background.");
-        // BUGFIX (recordings always took the full ~30s "still finalizing" /
+        // (recordings always took the full ~30s "still finalizing" /
         // "force-stopping" path above AND still came out corrupt - every
         // single time the writer thread had any backlog left to drain at
         // Stop, e.g. right after a load spike like the "Recording

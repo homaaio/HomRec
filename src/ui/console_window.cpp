@@ -1121,7 +1121,7 @@ void ConsoleWindow::CmdPreset(const std::wstring &raw) {
         }
     }
 
-    // BUGFIX (2.3): same unattended-cfg-script exposure as "hrc load" above -
+    // Same unattended-cfg-script exposure as "hrc load" above -
     // "preset <name>" can run from an autoexec/config/startrec.cfg with no
     // interactive user at all, so it needs the same "sec" gate as "sethrc"/
     // "hrc load" rather than the implicit allow_sensitive_fields=true default

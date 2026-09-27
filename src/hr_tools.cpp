@@ -255,7 +255,7 @@ HR_EXPORT int hr_build_codec_args_ex(const wchar_t* codec,
     if (is_nvenc) {
         ss << L" -preset p1 -tune ull -rc constqp -qp " << qp << L" -g " << gop;
     } else if (is_qsv) {
-        // BUGFIX: this used to pass "-qp N". h264_qsv has NO "qp" option
+        // This used to pass "-qp N". h264_qsv has NO "qp" option
         // (ffmpeg only prints "Codec AVOption qp ... has not been used for
         // any stream" and carries on), so the Quality slider did nothing for
         // Intel QSV and the encoder silently ran at ffmpeg's built-in QSV
@@ -425,7 +425,7 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
             L" \"" + tmp + L"\"";
     }
 
-    // BUGFIX (2.3): the fixed 180 s timeout killed ffmpeg mid-write on long
+    // The fixed 180 s timeout killed ffmpeg mid-write on long
     // recordings (the stretch path re-encodes the WHOLE video), and the code
     // below then replaced the finished recording with that truncated temp file -
     // permanent data loss. The timeout now scales with the video length, and the

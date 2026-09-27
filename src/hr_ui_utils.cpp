@@ -335,7 +335,7 @@ struct HrSysStats {
  * Returns 1 on success, 0 if not supported.
  */
 #ifdef _WIN32
-/* BUGFIX (2.3): every path in HomRec is UTF-8, but the *A Win32 functions (and
+/* Every path in HomRec is UTF-8, but the *A Win32 functions (and
  * fopen) read narrow strings in the ANSI code page. With a non-ASCII output
  * folder (e.g. a Cyrillic user name) the path check failed, a junk mojibake
  * folder got created, and the free-space/size queries silently returned nothing.

@@ -177,7 +177,7 @@ struct WasapiStream {
         device   = dev;
         device->AddRef();
 
-        // BUGFIX (handle/COM leak on any Start() that fails partway):
+        // (handle/COM leak on any Start() that fails partway):
         // every early-return below used to just `return false` once
         // device/client/mix_fmt/data_event/capture had already been
         // partially acquired - leaking whichever of those had already been
@@ -818,7 +818,7 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
     // there's no window where a worker thread could sneak in one more insert().
     g_state->buffering.store(false);
 
-    // PERF/BUGFIX: the buffers are swapped out under the lock and the WAV is
+    // PERF: The buffers are swapped out under the lock and the WAV is
     // written AFTER releasing it. The swap also hands the (potentially
     // hundreds of MB) capacity to the local vector, which frees it when this
     // function returns - the old clear()+shrink_to_fit() did the same job but

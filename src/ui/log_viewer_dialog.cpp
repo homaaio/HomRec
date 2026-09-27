@@ -56,7 +56,7 @@ void LoadLogInto(HWND edit, const std::wstring &logPath) {
 
 LRESULT CALLBACK LogViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static std::wstring *logPath = nullptr; // set once at WM_CREATE, lives for the window's lifetime
-    // BUGFIX: the EDIT control's font (created below, WM_SETFONT'd in)
+    // The EDIT control's font (created below, WM_SETFONT'd in)
     // was never DeleteObject()'d anywhere. WM_SETFONT doesn't transfer
     // ownership - the OS destroying the EDIT control on WM_DESTROY
     // doesn't free a font handle we created ourselves, so every time this

@@ -242,7 +242,7 @@ HBITMAP CaptureWindowThumbnail(HWND hwnd, int tileW, int tileH) {
     DeleteObject(bg);
 
     bool drew = false;
-    // BUGFIX (UI freeze): PrintWindow() sends WM_PRINT/WM_PAINT-family
+    // PrintWindow() sends WM_PRINT/WM_PAINT-family
     // messages to hwnd's own message queue and blocks until it's
     // processed them - it has no timeout. ShowWindowPickerDialog() calls
     // this once per visible top-level window *before* the picker dialog
