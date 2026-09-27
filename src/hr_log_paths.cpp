@@ -67,6 +67,10 @@ std::wstring SanitizeLogFilename(const std::wstring &requested) {
                _wcsicmp(cleaned.c_str() + cleaned.size() - n, ext) == 0;
     };
     if (!hasExt(L".log") && !hasExt(L".txt")) cleaned += L".log";
+    auto isReserved = [&](const wchar_t *reserved) { return _wcsicmp(cleaned.c_str(), reserved) == 0; };
+    if (isReserved(L"homrec.log") || isReserved(L"pc.log") || isReserved(L"plugins.log")) {
+        cleaned.insert(cleaned.size() - 4, L"_custom"); // before the ".log" we just ensured is there
+    }
 
     return cleaned;
 }
