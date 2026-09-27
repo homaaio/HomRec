@@ -1,0 +1,93 @@
+name: Release
+
+# Fires when you do:
+#   git tag v2.3          (or 2.3, v2.3.0, ... - anything matching the patterns below)
+#   git push origin v2.3
+#
+# It does NOT fire on a local "git tag" alone - the tag has to be pushed to
+# GitHub for Actions to see it. It does not build hr.exe (see the "assets"
+# comment near the bottom for how to wire that in later); it just turns the
+# pushed tag into a GitHub Release with notes pulled from CHANGELOG.txt.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*"
+      - "*.*.*"
+      - "*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history, so changelog/tag lookups below work
+
+      - name: Extract this version's notes from CHANGELOG.txt
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Turn "refs/tags/v2.3" into "2.3" (strip the leading v, if any).
+          RAW_TAG="${GITHUB_REF_NAME}"
+          VERSION="${RAW_TAG#v}"
+
+          echo "Looking for a CHANGELOG.txt section matching version: $VERSION"
+
+          if [ -f CHANGELOG.txt ]; then
+            # Pull everything from the "[Version X.Y ...]" line that matches
+            # this tag down to (but not including) the next "[Version " line.
+            NOTES="$(awk -v ver="$VERSION" '
+              BEGIN { found=0 }
+              /^\[Version /  {
+                if (found) exit
+                if (index($0, "[Version " ver "]") == 1 || index($0, "[Version " ver " ") == 1) {
+                  found=1
+                  next
+                }
+                next
+              }
+              found { print }
+            ' CHANGELOG.txt)"
+          else
+            NOTES=""
+          fi
+
+          # Trim leading/trailing blank lines; fall back to a generic note
+          # if nothing matched (e.g. the changelog entry uses a different
+          # version string than the tag, or hasn't been written yet).
+          NOTES="$(printf '%s\n' "$NOTES" | sed -e '/./,$!d' -e ':a' -e '/^\n*$/{$d;N;ba' -e '}')"
+          if [ -z "$NOTES" ]; then
+            NOTES="No matching section found in CHANGELOG.txt for \`$RAW_TAG\` - see the file for full history, or edit this release's notes by hand."
+          fi
+
+          # Multiline strings need GITHUB_OUTPUT's heredoc form.
+          {
+            echo "body<<HOMREC_NOTES_EOF"
+            echo "$NOTES"
+            echo "HOMREC_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
+          # A tag with a dash right after the numbers (v2.3-rc1, v2.3-beta)
+          # is published as a pre-release automatically.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          draft: false
+          # To attach a built hr.exe / installer to the release automatically,
+          # add a build job before this one (e.g. running tools/homrec_build.py
+          # on windows-latest) and list its output path(s) here, e.g.:
+          #   files: |
+          #     dist/hr.exe
+          #     installer/HomRecSetup.exe
