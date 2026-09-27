@@ -242,7 +242,7 @@ HR_EXPORT int hr_dx_get_size(void *handle, int *out_w, int *out_h) {
 /* -------------------------------------------------------------------------
  * hr_dx_set_output_size
  *
- * BUGFIX (diagonal line/pixel corruption + the bottom slice of the frame
+ * (diagonal line/pixel corruption + the bottom slice of the frame
  * missing, seen recording fullscreen games -- e.g. older Source titles --
  * running at a lower exclusive-fullscreen resolution than the desktop,
  * such as 1366x768 on a 1600x900 desktop):
@@ -508,4 +508,82 @@ HR_EXPORT int hr_dx_output_desc(int adapter_idx, int output_idx,
 #else
     return 0;
 #endif
+}
+
+/* -------------------------------------------------------------------------
+ * hr_dx_recommend_codec
+ *
+ * First-launch-only helper (see main_frame.cpp's `first_launch` branch):
+ * HomRec's compiled-in default encoder used to be a flat "libx264" for
+ * every install (AppState::video_codec's in-class initializer), regardless
+ * of what's actually in the machine. OBS auto-picks a GPU encoder
+ * (NVENC/QSV/AMF) when one's available and only falls back to software
+ * x264 when it isn't - HomRec never did, so identical recording settings
+ * on a machine with a capable GPU meant HomRec was doing real-time video
+ * encoding on the CPU while OBS was doing it on the GPU, a large and
+ * entirely avoidable CPU gap that had nothing to do with how efficient
+ * either app's *own* code was.
+ *
+ * Walks the same IDXGIAdapter1 list hr_dx_adapter_count()/hr_dx_create()
+ * already enumerate (adapter 0 is what capture actually binds to), skips
+ * the software/WARP adapter DXGI always reports, and scores every
+ * recognized vendor's adapter so a real discrete GPU (NVIDIA/AMD) outranks
+ * an Intel iGPU on a laptop that has both, and a bigger card outranks a
+ * smaller one of the same vendor. Writes the matching ffmpeg encoder name
+ * into out_buf ("h264_nvenc" / "h264_amf" / "h264_qsv") and returns 1, or
+ * writes "libx264" and returns 0 if nothing recognized was found (old GPU,
+ * remote/RDP session, or a vendor this function doesn't know about yet -
+ * software encode is always a safe, working fallback).
+ *
+ * Deliberately just a static vendor-ID check, not a real "does ffmpeg's
+ * h264_nvenc actually initialize on this driver" probe (that would mean
+ * spawning ffmpeg and doing a throwaway encode before the user has even
+ * seen the main window) - Settings > Video already lets anyone whose
+ * hardware encoder turns out not to work switch back to libx264 by hand.
+ * ---------------------------------------------------------------------- */
+HR_EXPORT int hr_dx_recommend_codec(char *out_buf, int buf_chars) {
+    const char *codec = "libx264";
+    int found_gpu = 0;
+#ifdef _WIN32
+    ComPtr<IDXGIFactory1> factory;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+                  reinterpret_cast<void **>(factory.GetAddressOf())))) {
+        UINT best_vendor = 0;
+        unsigned long long best_score = 0;
+        int cnt = 0;
+        ComPtr<IDXGIAdapter1> a;
+        while (factory->EnumAdapters1((UINT)cnt, &a) != DXGI_ERROR_NOT_FOUND) {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (SUCCEEDED(a->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+                bool known = desc.VendorId == 0x10DE /* NVIDIA */ ||
+                             desc.VendorId == 0x1002 /* AMD/ATI */ ||
+                             desc.VendorId == 0x1022 /* AMD (older ID) */ ||
+                             desc.VendorId == 0x8086 /* Intel */;
+                if (known) {
+                    // Intel here is (almost) always an iGPU; treat NVIDIA/AMD
+                    // with meaningful dedicated VRAM as "discrete" and always
+                    // prefer it over Intel, then break ties by VRAM size.
+                    bool discrete = desc.VendorId != 0x8086 &&
+                                     desc.DedicatedVideoMemory > (SIZE_T)(256ull * 1024 * 1024);
+                    unsigned long long score = (unsigned long long)desc.DedicatedVideoMemory +
+                                                (discrete ? (1ull << 40) : 0ull);
+                    if (best_vendor == 0 || score > best_score) {
+                        best_score = score;
+                        best_vendor = desc.VendorId;
+                    }
+                }
+            }
+            a.Reset();
+            ++cnt;
+        }
+        if (best_vendor == 0x10DE) { codec = "h264_nvenc"; found_gpu = 1; }
+        else if (best_vendor == 0x1002 || best_vendor == 0x1022) { codec = "h264_amf"; found_gpu = 1; }
+        else if (best_vendor == 0x8086) { codec = "h264_qsv"; found_gpu = 1; }
+    }
+#endif
+    if (out_buf && buf_chars > 0) {
+        strncpy(out_buf, codec, (size_t)buf_chars - 1);
+        out_buf[buf_chars - 1] = '\0';
+    }
+    return found_gpu;
 }
