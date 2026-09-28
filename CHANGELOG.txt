@@ -1,49 +1,18 @@
 welcome to changelog :D
 
-[Version 2.3] - 2026-09-26 (unreleased)
+[Version 2.3.2] - 2026-09-28
 
-- Fixed (security, src/hr_log_paths.cpp): HrLogPaths::SanitizeLogFilename()'s
-  own header comment already promised that a plugin calling
-  homrec.log_to() "can't [...] clobber homrec.log/pc.log/plugins.log
-  themselves", but the function never actually checked for those three
-  reserved names - only path separators, drive letters and disallowed
-  characters were stripped. A plugin with filesystem permission calling
-  homrec.log_to("homrec.log", "...") (or "pc.log" / "plugins.log",
-  matched case-insensitively) sailed straight through every existing
-  check and resolved to the exact same file hr_log.cpp / hr_pc_log.cpp /
-  hr_plugin_log.cpp write to - each guarded by its own independent
-  mutex that assumes it's the only writer, so this could interleave or
-  truncate the app's own core/PC-stats/plugin-system logs, or let a
-  plugin spoof entries in them, none of which any of those three mutexes
-  ever synchronized against. The three reserved names now get diverted
-  to a distinct "<name>_custom.log" instead of silently colliding.
+- Fixed: manual recordings kept the whole mic/system PCM track in RAM until Stop() (RAM climbing ~20MB/min). 
+  Added incremental WAV streaming (wav_stream_open/append/close)
 
-- Added (src/hr_dxgi_capture.cpp, src/ui/main_frame.cpp): a fresh install
-  used to hardcode "libx264" (software encode) as the default video codec
-  no matter what was actually in the machine (AppState::video_codec's
-  in-class initializer) - unlike OBS, which auto-picks a GPU encoder
-  (NVENC/QSV/AMF) when one's available and only falls back to software
-  x264 when it isn't. On a machine with a capable GPU this could mean
-  HomRec was doing real-time H.264 encoding on the CPU for a recording
-  that OBS, with identical settings, was doing on the GPU - a structural,
-  avoidable source of extra CPU load that has nothing to do with either
-  app's own capture/compositing code being more or less efficient (both of
-  which already got their own dedicated perf passes - see e.g. the
-  cursor-caching and overlay-caching entries elsewhere in this file). New
-  hr_dx_recommend_codec() walks the same IDXGIAdapter1 list used for
-  capture/monitor enumeration, skips the software/WARP adapter, and scores
-  recognized vendors (NVIDIA/AMD preferred over an Intel iGPU when a
-  laptop has both; more dedicated VRAM breaks ties within a vendor).
-  main_frame.cpp calls it exactly once, only on a genuine first launch (no
-  .hrc, no legacy homrec_settings.json found) - existing installs that
-  already saved a codec, by detection or by hand, are never touched, and
-  Settings > Video still lets anyone whose hardware encoder misbehaves
-  switch back to libx264.
+- Changed: hr_audio_reset_buffers(mic_path, sys_path) now opens streams; nullptr keeps Instant Replay's in-RAM ring buffer.
 
-- Cleanup: stripped the `BUGFIX:`/`BUGFIX (...):` tag prefix from every
-  existing comment in src/ (40 instances) - see docs/CODE_COMMENTS.md for
-  the convention going forward (explain the fix directly, no tag word).
-  No wording inside the comments themselves changed, only the tag.
+- Added: hr_audio_flush_buffered() drains buffers to disk.
+
+- Fixed: RefreshPreviewSettings() marked settings "applied" even when a running recording 
+  prevented rebuild, so the change was lost; now only when not recording. Also live-applies Target FPS to an idle pipeline.
+  
+[Version 2.3.1] - 2026-09-27
 
 - Fixed (src/hr_dxgi_capture.cpp, src/hr_pipeline.cpp): a null-pointer read
   access violation (0xC0000005) that crashed the app a few seconds after
@@ -100,6 +69,8 @@ welcome to changelog :D
   already sped back up to the recording's target fps - the 1-second
   averaging window wasn't reset on the idle<->recording pacing switch, so
   it could straddle both rates. Now reset exactly on that switch.
+
+[Version 2.3] - 2026-09-26
 
 - Changed (overlays): the row context menu's "Edit Parameters..." (a
   sequence of raw text-entry popups - one for text/image path/webcam
