@@ -72,6 +72,64 @@ static bool wav_write(const char* path,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Incremental WAV streaming
+//
+// A manual recording used to hold its ENTIRE mic/system audio track as raw
+// 16-bit PCM in mic_buf/sys_buf (see AudioState::max_buffer_sec's comment -
+// 0 during a manual recording means "don't trim, keep everything") until
+// Stop() finally called wav_write() once with the whole thing. At 44.1kHz
+// stereo that's ~176KB/sec per stream (~350KB/sec for both), so a 10-minute
+// recording held over 200MB of raw audio in RAM for its whole duration on
+// top of everything else the app was already using - exactly the steady,
+// recording-length-proportional RAM growth ("оперативка утекает", 164MB ->
+// 210MB and climbing) users were seeing, even though every byte of it *was*
+// eventually freed at Stop() (not a leak in the classic sense, just an
+// unbounded working set for as long as the recording ran).
+//
+// Fix: write the header up front with placeholder sizes, append PCM
+// straight to disk as it's periodically flushed out of mic_buf/sys_buf
+// (see hr_audio_flush_buffered(), called from RecordingController's
+// existing stats-poll timer), and patch the header's size fields in place
+// when the stream closes. RAM now only ever holds a few seconds of audio
+// (whatever's accumulated since the last flush) regardless of how long the
+// recording runs.
+static FILE* wav_stream_open(const char* path)
+{
+    if (!path || !path[0]) return nullptr;
+    FILE* f = fopen(path, "wb");
+    if (!f) return nullptr;
+    WavHeader h; // placeholder - real channel/rate/size patched in on close
+    if (fwrite(&h, sizeof(h), 1, f) != 1) { fclose(f); return nullptr; }
+    return f;
+}
+
+static void wav_stream_append(FILE* f, const int16_t* data, size_t n)
+{
+    if (!f || !data || n == 0) return;
+    fwrite(data, 2, n, f);
+}
+
+// Seeks back to patch the header now that the real channel count/rate/byte
+// count are known, then closes the file. Safe to call with data_bytes == 0
+// (an empty stream, e.g. a muted mic that never produced samples) - still
+// leaves a valid, playable (silent) WAV rather than a truncated one.
+static void wav_stream_close(FILE* f, uint16_t channels, uint32_t rate, uint64_t data_bytes)
+{
+    if (!f) return;
+    WavHeader h;
+    h.num_channels = channels;
+    h.sample_rate  = rate;
+    h.bits_per_smp = 16;
+    h.block_align  = (uint16_t)(channels * 2);
+    h.byte_rate    = rate * channels * 2;
+    h.data_size    = (uint32_t)data_bytes;
+    h.chunk_size   = 36 + (uint32_t)data_bytes;
+    fseek(f, 0, SEEK_SET);
+    fwrite(&h, sizeof(h), 1, f);
+    fclose(f);
+}
+
 static bool wav_read(const char* path,
                      std::vector<int16_t>& pcm,
                      uint16_t& channels,
@@ -454,6 +512,11 @@ struct AudioState {
     // hr_audio_capture_to_wav()/hr_audio_stop() (Stop()/app exit).
     std::atomic<bool>   buffering{false};
     std::atomic<int>    max_buffer_sec{0};
+    std::mutex stream_mutex; // serializes hr_audio_flush_buffered() (UI thread) vs stream close (finalize thread)
+    FILE*    mic_stream_file  = nullptr;
+    FILE*    sys_stream_file  = nullptr;
+    uint64_t mic_stream_bytes = 0;
+    uint64_t sys_stream_bytes = 0;
 
     // Volume/mute (written from the UI thread, read from the audio threads)
     std::atomic<float>  mic_vol{1.0f};
@@ -781,7 +844,15 @@ HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
     (for the live level meters), so without this the file would include
     whatever was captured while the app just sat idle before Start was
     clicked. */
-HR_EXPORT void hr_audio_reset_buffers()
+// mic_wav_path/sys_wav_path (new): when non-null, this is a manual
+// recording - open incremental WAV streams at these paths right away (see
+// wav_stream_open()'s comment) so hr_audio_flush_buffered() has somewhere
+// to send PCM as it's periodically drained from RAM instead of it
+// accumulating for the whole recording. Pass nullptr for either/both to
+// keep the old fully-in-RAM behavior (Instant Replay's rolling window,
+// which needs random access to "the last N seconds" and can't be streamed
+// straight to disk).
+HR_EXPORT void hr_audio_reset_buffers(const char* mic_wav_path, const char* sys_wav_path)
 {
     if (!g_state) return;
     {
@@ -792,9 +863,62 @@ HR_EXPORT void hr_audio_reset_buffers()
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
         g_state->sys_buf.clear();
     }
+    // Belt-and-suspenders: close out any stream left open from a previous
+    // recording (should already be closed by hr_audio_capture_to_wav()) so
+    // we never leak a FILE* or write two recordings' audio into one file.
+    std::lock_guard<std::mutex> slk(g_state->stream_mutex);
+    if (g_state->mic_stream_file) { fclose(g_state->mic_stream_file); g_state->mic_stream_file = nullptr; }
+    if (g_state->sys_stream_file) { fclose(g_state->sys_stream_file); g_state->sys_stream_file = nullptr; }
+    g_state->mic_stream_bytes = 0;
+    g_state->sys_stream_bytes = 0;
+    g_state->mic_stream_file = wav_stream_open(mic_wav_path);
+    g_state->sys_stream_file = wav_stream_open(sys_wav_path);
     // Start buffering PCM again now that an actual recording is underway
     // - see AudioState::buffering's comment for why this was off.
     g_state->buffering.store(true);
+}
+
+/*  hr_audio_flush_buffered()
+    Drains whatever's currently sitting in mic_buf/sys_buf out to their
+    open incremental WAV streams (see wav_stream_open()'s comment) and
+    clears the in-RAM copy, so a long manual recording's memory use stays
+    flat instead of growing for its entire duration. No-op for either
+    stream that doesn't have a stream file open (Instant Replay's ring
+    buffer, or a manual recording whose hr_audio_reset_buffers() call
+    wasn't given a path for that channel) - that stream keeps behaving
+    exactly as before, fully in RAM.
+
+    Meant to be called periodically (a few times a second is plenty - see
+    RecordingController::PollStats(), which already runs on a timer for
+    the whole duration of a recording) while state_.recording is true; also
+    called once more from hr_audio_capture_to_wav() to catch whatever
+    accumulated since the last periodic call before the stream closes. */
+HR_EXPORT void hr_audio_flush_buffered()
+{
+    if (!g_state) return;
+    std::lock_guard<std::mutex> slk(g_state->stream_mutex);
+    if (g_state->mic_stream_file) {
+        std::vector<int16_t> chunk;
+        {
+            std::lock_guard<std::mutex> lk(g_state->mic_mutex);
+            chunk.swap(g_state->mic_buf);
+        }
+        if (!chunk.empty()) {
+            wav_stream_append(g_state->mic_stream_file, chunk.data(), chunk.size());
+            g_state->mic_stream_bytes += chunk.size() * 2;
+        }
+    }
+    if (g_state->sys_stream_file) {
+        std::vector<int16_t> chunk;
+        {
+            std::lock_guard<std::mutex> lk(g_state->sys_mutex);
+            chunk.swap(g_state->sys_buf);
+        }
+        if (!chunk.empty()) {
+            wav_stream_append(g_state->sys_stream_file, chunk.data(), chunk.size());
+            g_state->sys_stream_bytes += chunk.size() * 2;
+        }
+    }
 }
 
 /*  hr_audio_capture_to_wav(mic_wav_path, sys_wav_path)
@@ -818,27 +942,53 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
     // there's no window where a worker thread could sneak in one more insert().
     g_state->buffering.store(false);
 
-    // PERF: The buffers are swapped out under the lock and the WAV is
-    // written AFTER releasing it. The swap also hands the (potentially
-    // hundreds of MB) capacity to the local vector, which frees it when this
-    // function returns - the old clear()+shrink_to_fit() did the same job but
-    // kept the capture thread blocked on the mutex for the whole disk write.
-    std::vector<int16_t> mic_out, sys_out;
-    int mic_rate = 0, sys_rate = 0;
-    {
-        std::lock_guard<std::mutex> lk(g_state->mic_mutex);
-        mic_out.swap(g_state->mic_buf);
-        mic_rate = g_state->mic_stream.rate;
+    // Catch whatever accumulated since the last periodic
+    // hr_audio_flush_buffered() call (see its own comment) before closing
+    // the streams out below - otherwise the tail end of the recording
+    // (up to one flush interval's worth) would be silently dropped.
+    hr_audio_flush_buffered();
+
+    std::lock_guard<std::mutex> slk(g_state->stream_mutex);
+    if (g_state->mic_stream_file) {
+        // Streaming was open for this recording (hr_audio_reset_buffers()
+        // was given a real mic path) - finalize that file's header now
+        // that the real byte count is known, regardless of mic_wav_path
+        // here: the caller may pass nullptr for a muted mic even though a
+        // (silent - mute zeroes samples rather than skipping them, see
+        // mic_worker()) stream was still opened and written the whole
+        // time, and it needs a valid, non-corrupt header either way.
+        wav_stream_close(g_state->mic_stream_file, 2, g_state->mic_stream.rate, g_state->mic_stream_bytes);
+        g_state->mic_stream_file = nullptr;
+        if (mic_wav_path && g_state->mic_stream_bytes > 0) result |= 0x1;
+        g_state->mic_stream_bytes = 0;
+    } else if (mic_wav_path) {
+        // Fallback for a caller that never opened streaming (e.g. an older
+        // hr_audio_reset_buffers(nullptr, ...) call site, or Instant
+        // Replay's "Save Replay" reusing this function) - same one-shot
+        // write hr_audio_capture_to_wav() always used to do.
+        std::vector<int16_t> mic_out;
+        {
+            std::lock_guard<std::mutex> lk(g_state->mic_mutex);
+            mic_out.swap(g_state->mic_buf);
+        }
+        if (!mic_out.empty() && wav_write(mic_wav_path, mic_out, 2, g_state->mic_stream.rate))
+            result |= 0x1;
     }
-    {
-        std::lock_guard<std::mutex> lk(g_state->sys_mutex);
-        sys_out.swap(g_state->sys_buf);
-        sys_rate = g_state->sys_stream.rate;
+
+    if (g_state->sys_stream_file) {
+        wav_stream_close(g_state->sys_stream_file, 2, g_state->sys_stream.rate, g_state->sys_stream_bytes);
+        g_state->sys_stream_file = nullptr;
+        if (sys_wav_path && g_state->sys_stream_bytes > 0) result |= 0x2;
+        g_state->sys_stream_bytes = 0;
+    } else if (sys_wav_path) {
+        std::vector<int16_t> sys_out;
+        {
+            std::lock_guard<std::mutex> lk(g_state->sys_mutex);
+            sys_out.swap(g_state->sys_buf);
+        }
+        if (!sys_out.empty() && wav_write(sys_wav_path, sys_out, 2, g_state->sys_stream.rate))
+            result |= 0x2;
     }
-    if (mic_wav_path && !mic_out.empty() && wav_write(mic_wav_path, mic_out, 2, mic_rate))
-        result |= 0x1;
-    if (sys_wav_path && !sys_out.empty() && wav_write(sys_wav_path, sys_out, 2, sys_rate))
-        result |= 0x2;
     return result;
 }
 
