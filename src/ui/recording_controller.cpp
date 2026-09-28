@@ -90,6 +90,7 @@ extern "C" {
     void hr_pl_set_output_size(void *handle, int w, int h);
     void hr_pl_set_output_pixfmt(void *handle, int nv12);
     void hr_pl_set_preview_fps(void *handle, int fps);
+    void hr_pl_set_fps(void *handle, int fps);
     void hr_pl_set_preview_needed(void *handle, int enabled);
     int hr_pl_end_recording_segment(void *handle, int timeout_ms);
 
@@ -120,7 +121,13 @@ extern "C" {
     void hr_audio_set_volumes(float mic_vol, float sys_vol, int mic_mute, int sys_mute);
     void hr_audio_get_levels(int *out_mic, int *out_sys);
     void hr_audio_pause(int paused);
-    void hr_audio_reset_buffers();
+    // mic_wav_path/sys_wav_path: pass real paths for a manual recording so
+    // audio streams straight to disk instead of accumulating in RAM for the
+    // whole recording (see hr_audio_flush_buffered()'s comment) - pass
+    // nullptr for either/both to keep the old fully-in-RAM rolling-window
+    // behavior (Instant Replay).
+    void hr_audio_reset_buffers(const char *mic_wav_path, const char *sys_wav_path);
+    void hr_audio_flush_buffered();
     int hr_audio_capture_to_wav(const char *mic_wav_path, const char *sys_wav_path);
     int hr_audio_mix_wav(const char *mic_path, const char *sys_path, const char *out_path);
 }
@@ -814,6 +821,13 @@ bool RecordingController::Start(std::wstring &error_out) {
         // recording then captured nothing.
         hr_pl_pause(pipeline_, 0);
         hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
+        // A reused preview pipeline keeps whatever fps it was created with,
+        // but ffmpeg above was just told state_.target_fps - if they differ
+        // (e.g. Target FPS changed while the pipeline couldn't be rebuilt),
+        // frames arrive at the old rate and the recording silently comes out
+        // at that rate (the "set 30, got 15" bug). Push the current value in
+        // BEFORE recording starts so both sides agree.
+        hr_pl_set_fps(pipeline_, state_.target_fps);
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         reused_preview_pipeline = true;
     } else {
@@ -881,7 +895,19 @@ bool RecordingController::Start(std::wstring &error_out) {
     if (state_.audio_out_channels > 0) {
         hr_audio_set_max_buffer_sec(0);
         hr_audio_pause(0); // never start with audio left paused by a previous recording
-        hr_audio_reset_buffers();
+        // Same _mic_tmp.wav/_sys.wav paths StopFinalizeTail() below builds
+        // from current_output_path_ (already resolved above, before ffmpeg
+        // was even started) - opening the incremental WAV streams at these
+        // exact paths right now, instead of only writing a WAV once
+        // everything's been held in RAM until Stop(), is what keeps a long
+        // recording's memory use flat (see hr_audio_flush_buffered()'s
+        // comment in hr_audio.cpp for the full story).
+        std::string audio_base = NarrowFromWide(current_output_path_);
+        size_t audio_dot = audio_base.find_last_of('.');
+        std::string audio_stem = (audio_dot == std::string::npos) ? audio_base : audio_base.substr(0, audio_dot);
+        std::string mic_wav_path = audio_stem + "_mic_tmp.wav";
+        std::string sys_wav_path = audio_stem + "_sys.wav";
+        hr_audio_reset_buffers(mic_wav_path.c_str(), sys_wav_path.c_str());
         hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
         const auto t_audio_go = std::chrono::steady_clock::now();
         av_start_skew_sec_ = std::chrono::duration<double>(t_audio_go - t_video_go).count();
@@ -1057,6 +1083,11 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
     bool want_sys = !sys_muted_;
     int audio_result = hr_audio_capture_to_wav(want_mic ? mic_wav.c_str() : nullptr,
                                                 want_sys ? sys_wav.c_str() : nullptr);
+    // Incremental streaming (see hr_audio_reset_buffers()) always opens both
+    // WAVs at Start(), so a channel that's muted here still left a silent
+    // file behind - remove it so no stray *_mic_tmp.wav/_sys.wav remains.
+    if (!want_mic) RemoveFileUtf8(mic_wav);
+    if (!want_sys) RemoveFileUtf8(sys_wav);
     bool mic_written = want_mic && (audio_result & 0x1) && hr_path_exists(mic_wav.c_str());
     bool sys_written = want_sys && (audio_result & 0x2) && hr_path_exists(sys_wav.c_str());
 
@@ -1303,6 +1334,11 @@ void RecordingController::PollStats() {
 
     hr_audio_get_levels(&mic_level_, &sys_level_);
 
+    // Drain buffered mic/system PCM to the incremental WAV streams so RAM
+    // use stays flat for the whole recording (see hr_audio.cpp
+    // hr_audio_flush_buffered()). Cheap no-op when no stream is open.
+    if (!finalizing_) hr_audio_flush_buffered();
+
     // Auto-pause/resume on mic silence (todo2.3.md section 3). Mirrors
     // hr_audio_rms_int16's level<->dBFS mapping (see audio_panel.cpp's
     // kZoneYellowStart/kZoneRedStart comment for the same derivation) to
@@ -1495,7 +1531,13 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     // uncapped from Start() to Stop() - see hr_audio_set_max_buffer_sec()).
     if (state_.audio_out_channels > 0 && !state_.recording) {
         hr_audio_set_max_buffer_sec(wrap * kReplaySegmentSec);
-        hr_audio_reset_buffers();
+        // nullptr, nullptr -- this is the rolling ring buffer, not a manual
+        // recording, so it must stay fully in RAM (SaveReplay() needs
+        // random access to "the last N seconds" on demand); see
+        // hr_audio_reset_buffers()'s comment (hr_audio.cpp) for why real
+        // paths there mean something different (a streamed-to-disk manual
+        // recording).
+        hr_audio_reset_buffers(nullptr, nullptr);
         hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
     }
     return true;
@@ -2224,10 +2266,21 @@ void RecordingController::RefreshPreviewSettings() {
             }
         }
         if (!replay_back) EnsurePreview();
-        applied_preview_capture_settings_ = now;
-        applied_preview_capture_settings_valid_ = true;
+        // TeardownPreview()/EnsurePreview() are both no-ops while a
+        // recording owns pipeline_, so nothing was actually applied in that
+        // case. Only remember these settings as "applied" when a rebuild
+        // really could happen; otherwise the change (e.g. Target FPS made
+        // mid-recording) was forgotten forever and the kept-alive pipeline
+        // kept its stale values for every later recording.
+        if (!state_.recording) {
+            applied_preview_capture_settings_ = now;
+            applied_preview_capture_settings_valid_ = true;
+        }
     }
     if (pipeline_) {
+        // Live-apply Target FPS to an idle pipeline (never mid-recording:
+        // ffmpeg was already started with the old rate).
+        if (!state_.recording) hr_pl_set_fps(pipeline_, state_.target_fps);
         hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
         // Covers the case TeardownPreview()/EnsurePreview() above don't:
         // a recording already in progress owns pipeline_ and keeps it
