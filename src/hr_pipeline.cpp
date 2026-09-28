@@ -521,7 +521,7 @@ static std::atomic<uint64_t> g_pv_seq_counter{0};
 // ---------------------------------------------------------------------------
 struct Pipeline {
     int src_w = 0, src_h = 0;
-    int fps   = 30;
+    std::atomic<int> fps{30};
     int pv_w  = 960, pv_h = 540;
     // "Preview:" settings (Settings > General) - separate from the
     // recording fps/size above, since the live preview thumbnail costs
@@ -1052,9 +1052,11 @@ struct Pipeline {
         }
 #endif
 #endif
-        const int64_t frame_ns_recording = (fps > 0)
-                                 ? (1'000'000'000LL / fps)
-                                 : (1'000'000'000LL / 30);
+        auto compute_frame_ns_recording = [&]() -> int64_t {
+            const int f = fps.load(std::memory_order_relaxed);
+            return (f > 0) ? (1'000'000'000LL / f) : (1'000'000'000LL / 30);
+        };
+        int64_t frame_ns_recording = compute_frame_ns_recording();
         // Preview-only mode (not recording) never needs more than a
         // handful of frames/sec - the thumbnail shown in the UI is
         // already throttled by the preview-fps check further down.
@@ -1070,8 +1072,13 @@ struct Pipeline {
             return std::max(frame_ns_recording, (int64_t)(1'000'000'000LL / want_fps));
         };
         int64_t frame_ns_idle = compute_frame_ns_idle();
-        int64_t frame_ns = frame_ns_recording;
         bool was_recording = recording.load(std::memory_order_acquire);
+        // Start at the pace matching the CURRENT mode. This used to be
+        // initialised to frame_ns_recording unconditionally, so a
+        // preview-only pipeline (recording == false, no transition ever
+        // fires to correct it) captured at the full target fps the whole
+        // time it sat idle - the "idle app still eats ~10% CPU" bug.
+        int64_t frame_ns = was_recording ? frame_ns_recording : frame_ns_idle;
         bool was_boosted = boost_priority.load(std::memory_order_relaxed);
         yuv_pool.SetBoost(was_boosted);
 #ifdef _WIN32
@@ -1153,6 +1160,21 @@ struct Pipeline {
             // priority once when the thread was first created.
             {
                 const bool is_recording_now = recording.load(std::memory_order_acquire);
+                // Live-apply Target FPS / Preview FPS changes (cheap atomic
+                // loads) even when the recording state itself didn't flip.
+                {
+                    const int64_t new_rec_ns = compute_frame_ns_recording();
+                    if (new_rec_ns != frame_ns_recording) {
+                        frame_ns_recording = new_rec_ns;
+                        next_frame_ns = 0; // resync pacing to the new cadence
+                    }
+                    frame_ns_idle = compute_frame_ns_idle();
+                    const int64_t want_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
+                    if (want_ns != frame_ns) {
+                        frame_ns = want_ns;
+                        next_frame_ns = 0;
+                    }
+                }
                 if (is_recording_now != was_recording) {
                     was_recording = is_recording_now;
                     last_yuv_valid = false;   // pixel format / size may differ next recording
