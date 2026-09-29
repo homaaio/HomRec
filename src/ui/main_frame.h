@@ -69,6 +69,10 @@ enum MenuCommandId {
     ID_FILE_OPEN_PROGRAM_FILES = 1027,
     ID_FILE_IMPORT_HRP      = 1028,
     ID_FILE_SELECT_REGION   = 1029,
+    // ID_PERF_ULTRA            = 1030,
+    // ID_PERF_TURBO            = 1031,
+    // ID_PERF_BALANCED         = 1032,
+    // ID_PERF_ECO              = 1033,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel

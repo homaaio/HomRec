@@ -945,11 +945,7 @@ HomRecMainFrame::HomRecMainFrame()
     schedule_timer_.Start(1000);
     RestartLevelMeterTimer();
 
-    // Upper bound extended to ID_FILE_IMPORT_HRP (1028) - it's the
-    // newest menu ID and this Bind() is an inclusive ID *range*, so
-    // adding an ID after ID_FILE_SET_PRESET without updating this bound
-    // would silently leave its menu item's clicks unhandled.
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_IMPORT_HRP);
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_PERF_ECO);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
     Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
@@ -1044,6 +1040,34 @@ void HomRecMainFrame::BuildMenuBar() {
     viewMenu->Append(ID_VIEW_PC_ANALYTICS, wxString::FromUTF8(lang_.Get("pc_analytics")));
     viewMenu->Append(ID_VIEW_LOG, wxString::FromUTF8(lang_.Get("show_log")));
     menuBar->Append(viewMenu, wxString::FromUTF8(lang_.Get("view_menu")));
+
+    // // Quick FPS presets. The "ultra"/"turbo"/"balanced"/"eco" strings (each
+    // // naming its own target FPS - see language.cpp) and AppState::
+    // // recording_mode/HrRecordingModeToStr/FromStr have existed since before
+    // // this file's own git history goes back, fully translated and fully
+    // // round-tripped through the .hrc/profile save format - but nothing
+    // // anywhere ever built this menu or read the enum back to actually
+    // // change target_fps, so picking a "mode" (the .hrc/profile format has
+    // // carried a recording_mode value this whole time) never did anything.
+    // // AppendRadioItem instead of four independent AppendCheckItems - the
+    // // four are mutually exclusive (exactly one FPS preset is ever "active"),
+    // // and a contiguous radio group is exactly what that means in a wx menu.
+    // auto *perfMenu = new wxMenu();
+    // perfMenu->AppendRadioItem(ID_PERF_ULTRA,    wxString::FromUTF8(lang_.Get("ultra")));
+    // perfMenu->AppendRadioItem(ID_PERF_TURBO,    wxString::FromUTF8(lang_.Get("turbo")));
+    // perfMenu->AppendRadioItem(ID_PERF_BALANCED, wxString::FromUTF8(lang_.Get("balanced")));
+    // perfMenu->AppendRadioItem(ID_PERF_ECO,      wxString::FromUTF8(lang_.Get("eco")));
+    // {
+    //     int checked_id = ID_PERF_BALANCED;
+    //     switch (state_.recording_mode) {
+    //         case RecordingMode::Ultra:    checked_id = ID_PERF_ULTRA;    break;
+    //         case RecordingMode::Turbo:    checked_id = ID_PERF_TURBO;    break;
+    //         case RecordingMode::Balanced: checked_id = ID_PERF_BALANCED; break;
+    //         case RecordingMode::Eco:      checked_id = ID_PERF_ECO;      break;
+    //     }
+    //     perfMenu->Check(checked_id, true);
+    // }
+    // menuBar->Append(perfMenu, wxString::FromUTF8(lang_.Get("performance_menu")));
 
     auto *themeMenu = new wxMenu();
     themeMenu->Append(ID_THEME_DARK, wxString::FromUTF8(lang_.Get("dark")));
@@ -2098,6 +2122,32 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             state_.current_theme = "light"; theme_ = GetBuiltinTheme("light"); ApplyThemeColours();
             PersistSettings();
             break;
+        case ID_PERF_ULTRA:
+        case ID_PERF_TURBO:
+        case ID_PERF_BALANCED:
+        case ID_PERF_ECO: {
+            // Quick FPS presets (see BuildMenuBar()'s comment on perfMenu
+            // for why these did nothing until now). Each one is just "set
+            // recording_mode + the FPS its own menu label already promises,
+            // then reuse exactly the same apply/persist path the Target FPS
+            // field on Settings > Capture already uses" - RefreshPreviewSettings()
+            // live-applies target_fps to an idle preview pipeline and defers
+            // it (without losing it) until Stop() if a recording is in
+            // progress, exactly like typing a new value into that field
+            // already does. Reusing it here means this can't drift from
+            // that field's own (already-fixed) behavior.
+            int fps;
+            switch (evt.GetId()) {
+                case ID_PERF_ULTRA: state_.recording_mode = RecordingMode::Ultra; fps = 60; break;
+                case ID_PERF_TURBO: state_.recording_mode = RecordingMode::Turbo; fps = 30; break;
+                case ID_PERF_ECO:   state_.recording_mode = RecordingMode::Eco;   fps = 8;  break;
+                default:            state_.recording_mode = RecordingMode::Balanced; fps = 15; break;
+            }
+            state_.target_fps = fps;
+            if (rec_raw_) rec_raw_->RefreshPreviewSettings();
+            PersistSettings();
+            break;
+        }
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_, lang_, rec_raw_) && rec_raw_) {
                 // Settings dialog's General tab can now change
