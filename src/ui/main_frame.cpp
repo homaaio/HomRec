@@ -945,7 +945,7 @@ HomRecMainFrame::HomRecMainFrame()
     schedule_timer_.Start(1000);
     RestartLevelMeterTimer();
 
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_PERF_ECO);
+    // Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_PERF_ECO);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
     Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
