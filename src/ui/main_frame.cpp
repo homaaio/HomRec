@@ -2122,32 +2122,32 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             state_.current_theme = "light"; theme_ = GetBuiltinTheme("light"); ApplyThemeColours();
             PersistSettings();
             break;
-        case ID_PERF_ULTRA:
-        case ID_PERF_TURBO:
-        case ID_PERF_BALANCED:
-        case ID_PERF_ECO: {
-            // Quick FPS presets (see BuildMenuBar()'s comment on perfMenu
-            // for why these did nothing until now). Each one is just "set
-            // recording_mode + the FPS its own menu label already promises,
-            // then reuse exactly the same apply/persist path the Target FPS
-            // field on Settings > Capture already uses" - RefreshPreviewSettings()
-            // live-applies target_fps to an idle preview pipeline and defers
-            // it (without losing it) until Stop() if a recording is in
-            // progress, exactly like typing a new value into that field
-            // already does. Reusing it here means this can't drift from
-            // that field's own (already-fixed) behavior.
-            int fps;
-            switch (evt.GetId()) {
-                case ID_PERF_ULTRA: state_.recording_mode = RecordingMode::Ultra; fps = 60; break;
-                case ID_PERF_TURBO: state_.recording_mode = RecordingMode::Turbo; fps = 30; break;
-                case ID_PERF_ECO:   state_.recording_mode = RecordingMode::Eco;   fps = 8;  break;
-                default:            state_.recording_mode = RecordingMode::Balanced; fps = 15; break;
-            }
-            state_.target_fps = fps;
-            if (rec_raw_) rec_raw_->RefreshPreviewSettings();
-            PersistSettings();
-            break;
-        }
+        // case ID_PERF_ULTRA:
+        // case ID_PERF_TURBO:
+        // case ID_PERF_BALANCED:
+        // case ID_PERF_ECO: {
+        //     // Quick FPS presets (see BuildMenuBar()'s comment on perfMenu
+        //     // for why these did nothing until now). Each one is just "set
+        //     // recording_mode + the FPS its own menu label already promises,
+        //     // then reuse exactly the same apply/persist path the Target FPS
+        //     // field on Settings > Capture already uses" - RefreshPreviewSettings()
+        //     // live-applies target_fps to an idle preview pipeline and defers
+        //     // it (without losing it) until Stop() if a recording is in
+        //     // progress, exactly like typing a new value into that field
+        //     // already does. Reusing it here means this can't drift from
+        //     // that field's own (already-fixed) behavior.
+        //     int fps;
+        //     switch (evt.GetId()) {
+        //         case ID_PERF_ULTRA: state_.recording_mode = RecordingMode::Ultra; fps = 60; break;
+        //         case ID_PERF_TURBO: state_.recording_mode = RecordingMode::Turbo; fps = 30; break;
+        //         case ID_PERF_ECO:   state_.recording_mode = RecordingMode::Eco;   fps = 8;  break;
+        //         default:            state_.recording_mode = RecordingMode::Balanced; fps = 15; break;
+        //     }
+        //     state_.target_fps = fps;
+        //     if (rec_raw_) rec_raw_->RefreshPreviewSettings();
+        //     PersistSettings();
+        //     break;
+        // }
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_, lang_, rec_raw_) && rec_raw_) {
                 // Settings dialog's General tab can now change
