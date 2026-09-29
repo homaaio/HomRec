@@ -1,3 +1,5 @@
+# `make LUA_CFLAGS="-IC:/lua54/include" LUA_LDFLAGS="-LC:/lua54/lib"` (C:\lua54 folder) or your lua54 path. download from lua.org
+
 CXX := g++
 CC  := cc
 
