@@ -20,8 +20,13 @@ bug reports that turned into fixes, docs, translations, or plugins.
     UHD Graphics", "German translation (.hrl)", "bter plugin").
 -->
 
-- *(this project is looking for its first outside contributor - see
-  below!)*
+- *(This project is looking for its first outside contributor! Check out our open [Issues](https://github.com) or look for the `good first issue` label).*
+
+## How to work with HomRec
+
+1. **Fork** the repository and **clone** it locally (`git clone`).
+2. Make your changes. For build instructions and dependencies, please refer to [CONTRIBUTING.md](CONTRIBUTING.md) (uses `make` (See [Makefile](Makefile))).
+3. Open a **Pull Request** against the `main` (or `develop`) branch.
 
 ## How this file works
 
@@ -46,20 +51,3 @@ they'll still get you listed if you'd like.
 **What doesn't count on its own:** opening an Issue with no further
 follow-through, or a PR that doesn't get merged. That's still useful
 and appreciated, just not what this particular file tracks.
-
-## Want to contribute?
-
-There's no separate CONTRIBUTING.md yet - for now:
-
-1. For code changes, see the "Build from source" section of
-   [README.md](README.md#option-b---build-from-source) to get a local
-   build working first.
-2. Check [SUPPORT.md](SUPPORT.md) for how bug reports and feature
-   requests are handled, and open an Issue before a large PR so the
-   approach can be agreed on first - HomRec's whole design goal is
-   staying light on CPU/RAM for weak PCs, so changes that trade that
-   away for features need discussion up front.
-3. Plugins don't need a PR to this repo at all - see
-   [plugins/READMEplugins.md](plugins/READMEplugins.md) and
-   [Hom/README.md](Hom/README.md) for publishing one independently
-   through `hom`, HomRec's plugin package manager.
