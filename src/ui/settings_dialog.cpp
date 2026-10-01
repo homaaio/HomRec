@@ -500,6 +500,24 @@ private:
         custom_args_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.custom_ffmpeg_args));
         pageRoot->Add(custom_args_edit_, 0, wxEXPAND | wxALL, 16);
 
+        AddSectionHeading(page, pageRoot, accent, bg, "GPU acceleration");
+        gpu_convert_chk_ = AddCheck(page, pageRoot, text, bg,
+            "GPU colour conversion (hardware encoders: crop/scale/convert on the GPU, less CPU)",
+            state_.gpu_convert);
+        gpu_convert_chk_->SetToolTip(
+            "Uses the D3D11 video processor (works on integrated GPUs too) to turn the desktop into NV12\n"
+            "on the GPU. Only 1.5 bytes/pixel are read back instead of 4 and the CPU does no conversion.\n"
+            "Used automatically while no overlay is visible; overlays are drawn on the CPU, so showing\n"
+            "one switches back to the CPU converter by itself. Software encoders (libx264/libx265) keep the CPU path.");
+        gpu_ddagrab_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Full-GPU capture via ffmpeg ddagrab (experimental, ffmpeg 6+, hardware encoders)",
+            state_.gpu_capture_ddagrab);
+        gpu_ddagrab_chk_->SetToolTip(
+            "ffmpeg captures and encodes entirely on the GPU: the lowest possible CPU use.\n"
+            "Cannot be used together with HomRec overlays or plugins, pause / silence auto-pause,\n"
+            "window tracking or a reduced output resolution - in those cases HomRec silently uses\n"
+            "its normal pipeline. If ffmpeg can't start it, the normal pipeline is used as well.");
+
         auto *note = new wxStaticText(page, wxID_ANY,
             "Note: only Video codec (above) is written to the settings file -\n"
             "the rest of this tab applies for this session, and round-trips\n"
@@ -978,6 +996,8 @@ private:
         crf_spin_->SetValue(18);
         pixfmt_combo_->SetValue("yuv420p");
         custom_args_edit_->SetValue("");
+        gpu_convert_chk_->SetValue(true);
+        gpu_ddagrab_chk_->SetValue(false);
 
         mic_choice_->SetSelection(0);
         sample_rate_spin_->SetValue(44100);
@@ -1071,6 +1091,8 @@ private:
         state_.enc_crf = crf_spin_->GetValue();
         state_.pix_fmt = pixfmt_combo_->GetValue().ToUTF8().data();
         state_.custom_ffmpeg_args = custom_args_edit_->GetValue().ToUTF8().data();
+        state_.gpu_convert = gpu_convert_chk_->GetValue();
+        state_.gpu_capture_ddagrab = gpu_ddagrab_chk_->GetValue();
 
         // -- Audio -------------------------------------------------------
         {
@@ -1201,6 +1223,7 @@ private:
     wxComboBox *codec_combo_ = nullptr, *hwaccel_combo_ = nullptr, *preset_combo_ = nullptr,
                *pixfmt_combo_ = nullptr;
     wxTextCtrl *custom_args_edit_ = nullptr;
+    wxCheckBox *gpu_convert_chk_ = nullptr, *gpu_ddagrab_chk_ = nullptr;
     wxSpinCtrl *crf_spin_ = nullptr;
     wxButton *test_btn_ = nullptr;
     wxStaticText *test_status_lbl_ = nullptr;
