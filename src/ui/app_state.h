@@ -106,6 +106,17 @@ struct AppState {
     int         enc_crf            = 18;
     std::string custom_ffmpeg_args;
     std::string pix_fmt            = "yuv420p";
+    // GPU colour conversion: with a hardware encoder (NV12 output) and nothing to
+    // composite on the CPU, crop/scale/BGRA->NV12 run on the GPU via the D3D11
+    // video processor and only 1.5 bytes/pixel are read back. Any active overlay
+    // switches back to the CPU converter automatically. Works on integrated GPUs.
+    bool        gpu_convert        = true;
+    // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg
+    // captures AND encodes entirely on the GPU. Fastest option, but HomRec
+    // overlays/plugins, pause, silence auto-pause, window tracking and
+    // downscaling are unavailable, so it is opt-in and used only when a
+    // recording doesn't need any of them.
+    bool        gpu_capture_ddagrab = false;
 
     int         audio_sample_rate   = 44100;
     std::string audio_aac_bitrate   = "192k";
