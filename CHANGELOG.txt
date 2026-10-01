@@ -2,6 +2,92 @@ welcome to changelog :D
 
 [Version 2.3.2] - 2026-09-28
 
+- Added (src/hr_dxgi_capture.cpp): unchanged frames are skipped. DXGI's
+  AcquireNextFrame() also returns when only the mouse pointer moved
+  (LastPresentTime == 0 and AccumulatedFrames == 0 - the desktop image itself
+  is identical). Those frames used to be copied GPU->staging->RAM (~8MB at
+  1080p) and re-converted by the pipeline on every tick; they are now released
+  immediately and reported as "nothing new", which capture_loop() already
+  turns into a cheap "repeat the last picture". Requires BOTH counters to be
+  zero, so a driver that reports only one can never cause a lost update.
+
+- Added (src/hr_dxgi_capture.cpp): dirty-rectangle readback. The frame's
+  dirty/move rectangles are folded into one bounding box; only that region is
+  copied GPU->staging and memcpy'd into the caller's BGRA buffer (a blinking
+  caret or a clock now costs a few KB, not 8MB). Per-staging-texture "stale"
+  regions keep the double-buffered ring exactly correct, and one full copy is
+  forced every 120 changed frames as a safety net against a driver that
+  under-reports dirty rects. Rotated outputs and stretched output sizes always
+  copy everything.
+
+- Added (src/hr_pipeline.cpp, src/hr_encoder_helpers.c API reuse): partial
+  YUV re-conversion. When DXGI says only rows [y0,y1) changed and nothing is
+  composited on the CPU (no crop/scale/overlay/cursor), the previous converted
+  picture is kept and only those rows are re-converted (NV12 and I420).
+  New native tests in scripts/tests/test_encoder_helpers.cpp prove the result
+  is byte-identical to a full conversion.
+
+- Changed (src/hr_pipeline.cpp): "Cursor" no longer defeats the static-screen
+  shortcut. The pipeline now samples the pointer (visibility, position,
+  handle, 100ms bucket for animated cursors) and keeps re-sending the cached
+  picture while it looks exactly the same. Previously any recording with the
+  cursor enabled converted every single tick even on a frozen screen.
+  Overlays that exist but are hidden (visible == false / zero size) no longer
+  force the CPU path or the 8MB working copy either.
+
+- Added (src/hr_dxgi_capture.cpp, src/hr_pipeline.cpp, src/hr_ui_utils.cpp,
+  Settings > Video > "GPU colour conversion", default ON): GPU scaling and
+  BGRA->NV12 conversion through the D3D11 Video Processor. With a hardware
+  encoder (NV12 output) and no visible overlay, the desktop is cropped,
+  scaled and converted to BT.601 limited-range NV12 on the GPU (same maths as
+  the CPU converter) and only 1.5 bytes/pixel are read back instead of 4; the
+  CPU does no colour conversion at all. Works on integrated GPUs. The pointer
+  is drawn straight into the NV12 frame (hr_composite_cursor_nv12), the live
+  preview is rebuilt from the NV12 frame, window-tracking crop rectangles are
+  honoured per frame. Overlays are composited on the CPU, so the moment one
+  becomes visible the pipeline falls back to the CPU converter by itself (and
+  back again when it goes away) - a persistent GPU-side copy of the desktop
+  makes that switch glitch-free even on a completely static screen. If the
+  adapter/driver can't do it, or it fails at runtime, the pipeline logs one
+  warning and stays on the CPU path.
+
+- Added (ffmpeg/hr_ffmpeg_runner.cpp, src/hr_tools.cpp, src/ui/
+  recording_controller.cpp, Settings > Video > "Full-GPU capture via ffmpeg
+  ddagrab", default OFF): ffmpeg 6.0+ "ddagrab" fast path. ffmpeg captures
+  AND encodes on the GPU (nvenc/amf directly, qsv via hwmap), no pipe, no
+  readback - the lowest possible CPU use. It cannot use HomRec overlays or
+  plugins, so it is only used when the recording needs none of what the
+  pipeline provides: hardware encoder, no visible overlay, not window-capture,
+  no auto-pause-on-silence, output size == capture size, no custom -vf/-filter.
+  Otherwise (or if this ffmpeg has no ddagrab, or ffmpeg dies during the first
+  seconds) the normal pipeline is used automatically and the reason is logged.
+  Region capture maps to ddagrab's offset/video_size. Pause is unavailable in
+  this mode (logged once instead of desynchronizing the audio).
+
+- Fixed (src/hr_dxgi_capture.cpp): the LAST change before the screen went
+  quiet was never delivered. Frame delivery is deliberately one call behind
+  (so Map() never stalls), but a DXGI timeout just returned "nothing new", so
+  the newest picture - the dialog that just opened, the final typed character -
+  stayed in the second staging texture and was missing from the recording
+  until something else changed on screen. A timeout / pointer-only update now
+  flushes it.
+
+- Fixed (src/hr_pipeline.cpp): a frame queued while overlays were active could
+  be "re-sent" as the static picture once the overlays were gone (the cached
+  picture was only invalidated on the OK path). The cache is now dropped
+  whenever a conversion includes overlays.
+
+- Fixed (src/hr_dxgi_capture.cpp): hr_dx_set_output_size() now forgets what it
+  knew about the caller's buffer, so a re-allocated buffer that happens to land
+  at the same address is never patched incrementally.
+
+- Added: capture statistics line in the log when the pipeline ends
+  (DXGI frames, pointer-only skipped, partial/full readbacks, GPU NV12 frames,
+  partial YUV conversions).
+
+- Added: two settings (gpu_convert, gpu_capture_ddagrab) in the registry and
+  Settings > Video; version bumped to 2.3.3 (src/ui/version.h).
+
 - Fixed: manual recordings kept the whole mic/system PCM track in RAM until Stop() (RAM climbing ~20MB/min). 
   Added incremental WAV streaming (wav_stream_open/append/close)
 
