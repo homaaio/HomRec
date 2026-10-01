@@ -1,6 +1,6 @@
 # HomRec (Hardware Optimized Mechanism Recorder)
 
-[![Version](https://img.shields.io/badge/version-2.3-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
+[![Version](https://img.shields.io/badge/version-2.3.2-blue?style=flat-square)](https://github.com/homaaio/homrec/releases)
 [![Discord](https://img.shields.io/badge/Discord-0047ab?style=flat-square&logo=discord)](https://discord.gg/Gv4t6Xhy7E)
 [![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
 [![Boosty](https://img.shields.io/badge/support-boosty-orange?style=flat-square)](https://boosty.to/homa4ella/donate)
@@ -41,6 +41,7 @@ The application is 100% native C/C++: UI, capture pipeline, audio, plugin host, 
 - **Custom languages** - `.hrl` translation files, applied without restarting
 - **Plugin system** - Lua-scripted, filesystem/network access, lifecycle hooks
 - **Console** - built-in command console with optional autorun scripts
+- **GPU-assisted capture** - unchanged desktop frames are skipped, only the changed screen region is read back and re-converted, and with a hardware encoder the D3D11 video processor scales + converts to NV12 on the GPU (Settings > Video > GPU colour conversion). Optional full-GPU capture + encode through ffmpeg 6+ `ddagrab` (no overlays/plugins/pause) - falls back to the normal pipeline automatically
 - **Performance controls** - live preview can be disabled at the pipeline level (not just hidden in the UI), with independently adjustable preview resolution/FPS when left on
 - **System integration** - system tray, always-on-top, desktop shortcut, launch-at-startup, in-app self-update
 
