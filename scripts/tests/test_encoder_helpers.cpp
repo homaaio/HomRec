@@ -131,3 +131,77 @@ TEST_CASE("hr_build_thumbnail_lq: rejects a non-integer scale factor instead of 
     std::vector<uint8_t> src(5 * 5 * 3, 0), dst(2 * 2 * 3, 0);
     CHECK(hr_build_thumbnail_lq(src.data(), dst.data(), 5, 5, 2, 2) == 0); // 5 % 2 != 0
 }
+
+// ---------------------------------------------------------------------------
+// Partial re-conversion (capture_loop(): DXGI dirty rows -> re-convert only
+// those rows of the previously converted picture). The result must be
+// byte-identical to converting the whole new frame from scratch, for both
+// output layouts, or the recording would show stale/garbled bands.
+// ---------------------------------------------------------------------------
+extern "C" {
+    void hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
+    void hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *nv12, int w, int h, int y0, int y1);
+}
+
+namespace {
+std::vector<uint8_t> NoisyBgra(int w, int h, unsigned seed) {
+    std::vector<uint8_t> buf((size_t)w * h * 4);
+    unsigned s = seed;
+    for (size_t i = 0; i < buf.size(); ++i) { s = s * 1664525u + 1013904223u; buf[i] = (uint8_t)(s >> 24); }
+    return buf;
+}
+
+// Same row-copy rule as copy_yuv_rows() in hr_pipeline.cpp.
+void CopyYuvRows(uint8_t *dst, const uint8_t *src, int w, int h, int y0, int y1, bool nv12) {
+    std::memcpy(dst + (size_t)y0 * w, src + (size_t)y0 * w, (size_t)(y1 - y0) * w);
+    const size_t base = (size_t)w * h;
+    if (nv12) {
+        std::memcpy(dst + base + (size_t)(y0 / 2) * w, src + base + (size_t)(y0 / 2) * w,
+                    (size_t)((y1 - y0) / 2) * w);
+    } else {
+        const size_t cw = (size_t)w / 2, plane = cw * (size_t)(h / 2);
+        for (int pl = 0; pl < 2; ++pl) {
+            const size_t off = base + (size_t)pl * plane + (size_t)(y0 / 2) * cw;
+            std::memcpy(dst + off, src + off, (size_t)((y1 - y0) / 2) * cw);
+        }
+    }
+}
+
+void CheckPartialMatchesFull(bool nv12) {
+    const int w = 64, h = 48;
+    const size_t yuv_bytes = (size_t)w * h * 3 / 2;
+    auto convert_band = nv12 ? hr_bgra_to_nv12_band : hr_bgra_to_yuv420p_band;
+
+    auto frame_a = NoisyBgra(w, h, 1);
+    auto frame_b = frame_a;
+    // Change a block of rows [10, 21) in the new frame.
+    for (int y = 10; y < 21; ++y)
+        for (int x = 0; x < w; ++x)
+            for (int c = 0; c < 4; ++c)
+                frame_b[((size_t)y * w + x) * 4 + c] = (uint8_t)(frame_b[((size_t)y * w + x) * 4 + c] + 77);
+
+    std::vector<uint8_t> yuv_a(yuv_bytes), yuv_full_b(yuv_bytes);
+    convert_band(frame_a.data(), yuv_a.data(), w, h, 0, h);
+    convert_band(frame_b.data(), yuv_full_b.data(), w, h, 0, h);
+
+    // What capture_loop() does: baseline copy + band re-convert, rows rounded
+    // outward to even boundaries, then the cached picture patched row-wise.
+    int dy0 = 10, dy1 = 21;
+    dy0 &= ~1; dy1 = (dy1 + 1) & ~1;                // -> [10, 22)
+    std::vector<uint8_t> yuv_partial = yuv_a;
+    convert_band(frame_b.data(), yuv_partial.data(), w, h, dy0, dy1);
+    CHECK(yuv_partial == yuv_full_b);
+
+    std::vector<uint8_t> cached = yuv_a;
+    CopyYuvRows(cached.data(), yuv_partial.data(), w, h, dy0, dy1, nv12);
+    CHECK(cached == yuv_full_b);
+}
+} // namespace
+
+TEST_CASE("partial re-conversion of dirty rows == full conversion (NV12)") {
+    CheckPartialMatchesFull(true);
+}
+
+TEST_CASE("partial re-conversion of dirty rows == full conversion (planar I420)") {
+    CheckPartialMatchesFull(false);
+}
