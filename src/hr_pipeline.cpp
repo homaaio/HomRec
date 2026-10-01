@@ -69,6 +69,17 @@ extern "C" {
                              int *out_w, int *out_h, char *name_buf, int name_buf_len);
     unsigned long hr_dx_last_error(void);
     void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
+    void  hr_composite_cursor_nv12(uint8_t *nv12, int width, int height, int origin_x, int origin_y,
+                                    float scale_x, float scale_y);
+    int   hr_cursor_state(int *visible, int *x, int *y, unsigned long long *handle);
+    int   hr_dx_get_dirty_rows(void *handle, int *y0, int *y1);
+    void  hr_dx_get_stats(void *handle, unsigned long long *acquired, unsigned long long *skipped,
+                           unsigned long long *partial, unsigned long long *full,
+                           unsigned long long *gpu_frames);
+    int   hr_dx_gpu_enable(void *handle, int out_w, int out_h, const uint8_t *cur_bgra);
+    int   hr_dx_gpu_ready(void *handle);
+    int   hr_dx_capture_nv12(void *handle, uint8_t *out_nv12, int timeout_ms,
+                              int src_l, int src_t, int src_r, int src_b);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
     void  hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
@@ -219,6 +230,19 @@ public:
     // chroma-pairing constraint, hence row_align=1). See bgra_downscale_band()
     // for the actual box-filter/nearest-neighbour math; this just fans it
     // out across the pool's existing worker threads.
+    // PERF: re-converts only rows [y0,y1) (y0 even) of an otherwise up-to-date
+    // frame - used when DXGI told us which rows actually changed.
+    void ConvertRows(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1) {
+        if (y1 <= y0) return;
+        auto band_fn = convert_band_;
+        RunBanded((long long)w * (y1 - y0), y1 - y0, 2,
+                  [bgra, yuv, w, h, y0, band_fn](int a, int b) {
+                      band_fn(bgra, yuv, w, h, y0 + a, y0 + b);
+                  });
+    }
+
+    bool IsNv12() const { return convert_band_ == &hr_bgra_to_nv12_band; }
+
     void Downscale(const uint8_t *src, uint8_t *dst, int sw, int sh, int dw, int dh) {
         RunBanded((long long)dw * dh, dh, 1,
                   [src, dst, sw, sh, dw, dh](int y0, int y1) {
@@ -360,6 +384,39 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
                 uint8_t*       d = dst  + ((size_t)y  * dw + x ) * 3;
                 d[0] = s[2]; d[1] = s[1]; d[2] = s[0];  // BGR→RGB
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NV12 -> thumbnail (RGB), nearest-neighbour. Used for the live preview while
+// the GPU colour-conversion path is active: no BGRA picture exists on the CPU
+// then, only the finished NV12 frame. Samples ~preview-size pixels (a few
+// hundred thousand at most), BT.601 studio range - the inverse of what the
+// converter and the D3D11 video processor produce.
+// ---------------------------------------------------------------------------
+static void nv12_to_thumb(const uint8_t* __restrict nv12,
+                           uint8_t*       __restrict dst,
+                           int sw, int sh, int dw, int dh)
+{
+    if (sw <= 1 || sh <= 1 || dw <= 0 || dh <= 0) return;
+    const uint8_t* Y  = nv12;
+    const uint8_t* UV = nv12 + (size_t)sw * (size_t)sh;
+    auto c8 = [](int v) -> uint8_t { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); };
+    for (int y = 0; y < dh; ++y) {
+        int sy = (int)((int64_t)y * sh / dh); if (sy >= sh) sy = sh - 1;
+        const uint8_t* yrow  = Y  + (size_t)sy * sw;
+        const uint8_t* uvrow = UV + (size_t)(sy / 2) * sw;
+        uint8_t* o = dst + (size_t)y * dw * 3;
+        for (int x = 0; x < dw; ++x) {
+            int sx = (int)((int64_t)x * sw / dw); if (sx >= sw) sx = sw - 1;
+            const int l  = ((int)yrow[sx] - 16) * 298;
+            const int cb = (int)uvrow[(sx & ~1) + 0] - 128;
+            const int cr = (int)uvrow[(sx & ~1) + 1] - 128;
+            o[0] = c8((l + 409 * cr + 128) >> 8);
+            o[1] = c8((l - 100 * cb - 208 * cr + 128) >> 8);
+            o[2] = c8((l + 516 * cb + 128) >> 8);
+            o += 3;
         }
     }
 }
@@ -774,6 +831,25 @@ struct Pipeline {
     std::vector<uint8_t> last_yuv;
     bool last_yuv_valid = false;
     int  last_yuv_w = 0, last_yuv_h = 0;
+    // true when last_yuv was converted straight from bgra_buf (no crop,
+    // overlay, cursor or scaling in between) - only then can DXGI's "these
+    // rows changed" hint be applied on top of it (partial re-conversion).
+    bool last_yuv_direct = false;
+
+    // ====== GPU COLOUR CONVERSION (Settings > Video > "GPU colour conversion") ======
+    // While recording with NV12 output and nothing to composite on the CPU,
+    // capture_loop() asks the D3D11 video processor (hr_dx_capture_nv12) to
+    // crop/scale/convert BGRA->NV12 on the GPU instead of reading back BGRA
+    // and converting it here. Overlays are drawn on the CPU, so any active
+    // overlay switches ticks back to the normal path; the cursor is drawn
+    // straight into the NV12 frame (hr_composite_cursor_nv12).
+    std::atomic<bool> gpu_convert{false};
+    bool gpu_failed = false;                  // capture thread only: give up for this pipeline
+    bool nv12_valid = false;                  // nv12_buf holds a complete GPU-converted frame
+    std::vector<uint8_t> nv12_buf;            // latest clean GPU-converted frame
+    const uint8_t* frame_nv12 = nullptr;      // set on GPU ticks so update_preview() can use it
+    int  nv12_w = 0, nv12_h = 0;
+    uint64_t st_partial_conv = 0, st_gpu_ticks = 0;
 
     std::queue<std::vector<uint8_t>> free_bufs;
     std::mutex free_bufs_mtx;
@@ -1016,7 +1092,10 @@ struct Pipeline {
         std::lock_guard<std::mutex> lock(pv_mtx);
         if (pv_buf.size() != pv_sz) pv_buf.resize(pv_sz);
 
-        bgra_to_thumb(frame_ptr ? frame_ptr : bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
+        if (frame_nv12 && nv12_w > 0 && nv12_h > 0)
+            nv12_to_thumb(frame_nv12, pv_buf.data(), nv12_w, nv12_h, tw, th);
+        else
+            bgra_to_thumb(frame_ptr ? frame_ptr : bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
         pv_actual_w = tw;
         pv_actual_h = th;
         pv_native_w = eff_w;
@@ -1125,6 +1204,11 @@ struct Pipeline {
         // refreshed (under overlays_mtx) when the generation counter has
         // actually moved, instead of every single captured frame.
         std::vector<HrOverlayDesc> overlays_snapshot;
+        // True only if some overlay would actually be DRAWN (same visibility/size
+        // test OverlayCompositor::Apply() uses). A configured-but-hidden overlay
+        // must not keep the cheap paths (GPU conversion, static-frame reuse,
+        // partial re-conversion) switched off.
+        bool overlays_active = false;
         uint64_t last_overlays_gen = (uint64_t)-1; // sentinel: forces the first copy below
         bool warned_bad_crop = false;              // see the crop clamp below - log it once, not per frame
 
@@ -1143,6 +1227,121 @@ struct Pipeline {
         // turns that into "this one pipeline stops, logged, app keeps
         // running" instead - same outcome a clean Stop()/TeardownPreview()
         // would have produced.
+        // ---- helpers shared by the classic (BGRA) and the GPU (NV12) path ----------
+        // Pointer look-alike signature: visibility, position, cursor handle and a
+        // 100ms time bucket (the cursor raster cache refreshes at that rate, so
+        // animated cursors keep animating). Two equal signatures = "compositing
+        // the pointer again would produce the same pixels".
+        struct CursorSig {
+            int vis = 0, x = 0, y = 0;
+            unsigned long long handle = 0;
+            int64_t bucket = -1;
+            bool operator==(const CursorSig &o) const {
+                return vis == o.vis && x == o.x && y == o.y && handle == o.handle && bucket == o.bucket;
+            }
+        };
+        auto read_cursor_sig = [&]() -> CursorSig {
+            CursorSig sg;
+#ifdef _WIN32
+            hr_cursor_state(&sg.vis, &sg.x, &sg.y, &sg.handle);
+#endif
+            sg.bucket = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count() / 100;
+            return sg;
+        };
+        CursorSig last_yuv_sig;      // pointer state baked into last_yuv
+        CursorSig gpu_emit_sig;      // pointer state baked into the last GPU-path frame we queued
+        bool gpu_emit_valid = false; // the picture at the back of the queue came from the GPU path
+
+        // Make the frame at the back of the queue last `1 + extra` slots longer.
+        auto try_merge_last = [&](int extra) -> bool {
+            std::lock_guard<std::mutex> lock(pipe_queue_mtx);
+            if (pipe_queue.empty()) return false;
+            int r = pipe_queue.back().repeat + 1 + extra;
+            pipe_queue.back().repeat = std::min(r, 240);
+            return true;
+        };
+        // Conversion writes into a buffer recycled from the free-list (filled by
+        // the writer thread once it's done with a frame) - no per-frame heap
+        // allocation.
+        auto take_free_buf = [&](size_t needed) -> std::vector<uint8_t> {
+            std::vector<uint8_t> b;
+            {
+                std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                if (!free_bufs.empty()) {
+                    b = std::move(free_bufs.front());
+                    free_bufs.pop();
+                }
+            }
+            if (b.size() != needed) b.resize(needed);
+            return b;
+        };
+        // Copy rows [y0,y1) (both even) of a planar-I420 / NV12 frame.
+        auto copy_yuv_rows = [](uint8_t *dst, const uint8_t *src, int w, int h, int y0, int y1, bool nv12) {
+            if (y1 <= y0) return;
+            std::memcpy(dst + (size_t)y0 * w, src + (size_t)y0 * w, (size_t)(y1 - y0) * w);
+            const size_t base = (size_t)w * h;
+            if (nv12) {
+                std::memcpy(dst + base + (size_t)(y0 / 2) * w, src + base + (size_t)(y0 / 2) * w,
+                            (size_t)((y1 - y0) / 2) * w);
+            } else {
+                const size_t cw = (size_t)w / 2, plane = cw * (size_t)(h / 2);
+                for (int pl = 0; pl < 2; ++pl) {
+                    const size_t off = base + (size_t)pl * plane + (size_t)(y0 / 2) * cw;
+                    std::memcpy(dst + off, src + off, (size_t)((y1 - y0) / 2) * cw);
+                }
+            }
+        };
+        // Hand a finished frame to the writer thread (moved, not copied).
+        // A frame is only dropped when the queue is genuinely full (the writer
+        // really is behind), matching the MAX_QUEUE_SIZE backpressure the queue
+        // is designed to provide.
+        auto enqueue_frame = [&](std::vector<uint8_t> &yuv_frame, int extra_slots_) {
+            std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
+            int carried_repeat = 0;        // timeline slots owned by an evicted entry
+            {
+                std::lock_guard<std::mutex> lock(pipe_queue_mtx);
+
+                // Backpressure: the queue is capped at MAX_QUEUE_SIZE
+                // entries. A full queue means the writer/ffmpeg really is
+                // behind, so the oldest entry is evicted (and counted as
+                // a drop) instead of letting memory grow without bound
+                // (see the earlier "freeze + memory growth after Stop on
+                // a long recording" fix - that bug was catch-up frames
+                // bypassing this cap, which the repeat count can no
+                // longer do: it costs no extra buffers at all).
+                if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
+                    dropped = std::move(pipe_queue.front().data);
+                    // A/V SYNC FIX: an evicted entry used to take its
+                    // timeline slots with it, so every drop made the
+                    // video 1+ frame shorter than real time while the
+                    // audio kept its full length - heard as audio
+                    // lagging behind the picture after an "overloaded:
+                    // dropping frames" warning. The newest frame now
+                    // inherits the evicted entry's slots (the picture
+                    // holds for that moment instead of the clock
+                    // slipping). Capped so one long stall can't
+                    // become a multi-second burst of writes.
+                    carried_repeat = pipe_queue.front().repeat;
+                    pipe_queue.pop();
+                    frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                    frames_stalled.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                QueuedFrame qf;
+                qf.data   = std::move(yuv_frame);
+                qf.repeat = std::min(1 + extra_slots_ + carried_repeat, 240);
+                pipe_queue.push(std::move(qf));
+                pipe_queue_cv.notify_one();
+            }
+
+            if (!dropped.empty()) {
+                std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                if (free_bufs.size() < MAX_FREE_BUFS)
+                    free_bufs.push(std::move(dropped));
+            }
+        };
+
         try {
         while (running.load(std::memory_order_relaxed)) {
             if (paused.load(std::memory_order_relaxed)) {
@@ -1248,13 +1447,110 @@ struct Pipeline {
 
             if (!running.load(std::memory_order_relaxed)) break;
 
+            // Overlay list: refreshed here (once per overlay-config change, see
+            // overlays_gen) rather than after the capture, because whether any
+            // overlay is active decides which capture path this tick can use.
+            {
+                uint64_t gen = overlays_gen.load(std::memory_order_relaxed);
+                if (gen != last_overlays_gen) {
+                    std::lock_guard<std::mutex> lock(overlays_mtx);
+                    overlays_snapshot = overlays;
+                    last_overlays_gen = gen;
+                    overlays_active = false;
+                    for (const auto &o : overlays_snapshot)
+                        if (o.visible && o.w > 0 && o.h > 0) { overlays_active = true; break; }
+                }
+            }
+
+            int c_x, c_y, c_w, c_h;
+            {
+                std::lock_guard<std::mutex> crop_lk(crop_mtx);
+                c_x = crop_x; c_y = crop_y; c_w = crop_w; c_h = crop_h;
+            }
+            // If a crop was requested but doesn't fit the frame DXGI is
+            // actually delivering (e.g. it was computed for a different
+            // monitor/size than the one being duplicated), the old check
+            // just turned cropping OFF for that frame - while the output
+            // size (out_w/out_h, set for the crop) stayed put, so the WHOLE
+            // desktop got scaled down into the window-sized output: the
+            // "I picked a window but the entire screen is recorded" symptom.
+            // Clamp the rect to the real frame instead so what's kept is
+            // still (the visible part of) the requested area, and say so once.
+            if (c_w > 0 && c_h > 0 &&
+                (c_x < 0 || c_y < 0 || c_x + c_w > src_w || c_y + c_h > src_h)) {
+                if (!warned_bad_crop) {
+                    warned_bad_crop = true;
+                    HrLog::Warn("Capture crop " + std::to_string(c_w) + "x" + std::to_string(c_h) + " at " +
+                                std::to_string(c_x) + "," + std::to_string(c_y) +
+                                " doesn't fit the captured frame " + std::to_string(src_w) + "x" +
+                                std::to_string(src_h) + " - clamping it (wrong monitor/size resolved?).");
+                }
+                if (c_x < 0) { c_w += c_x; c_x = 0; }
+                if (c_y < 0) { c_h += c_y; c_y = 0; }
+                if (c_x + c_w > src_w) c_w = src_w - c_x;
+                if (c_y + c_h > src_h) c_h = src_h - c_y;
+                c_w &= ~1; c_h &= ~1;
+            }
+            const bool do_crop = c_w > 0 && c_h > 0 && c_x >= 0 && c_y >= 0 &&
+                                 c_x + c_w <= src_w && c_y + c_h <= src_h;
+
+            // ====== PATH SELECTION: GPU colour conversion or classic BGRA ======
+            // GPU path (D3D11 video processor: crop + scale + BGRA->NV12 all on
+            // the GPU, 1.5 bytes/pixel read back instead of 4, no CPU colour
+            // conversion) needs: recording with NV12 output, the setting on,
+            // nothing to composite on the CPU (overlays), and the desktop still
+            // the size the buffers were sized for. Anything else -> classic path.
+            bool gpu_tick = false;
+            int  gpu_enc_w = 0, gpu_enc_h = 0;
+#ifdef _WIN32
+            if (!gpu_failed && gpu_convert.load(std::memory_order_relaxed) &&
+                recording.load(std::memory_order_acquire) && yuv_pool.IsNv12() &&
+                !overlays_active && g_libs.dx_get_size) {
+                int real_w = 0, real_h = 0;
+                g_libs.dx_get_size(dx_ctx, &real_w, &real_h);
+                const int src_rw = do_crop ? c_w : src_w;
+                const int src_rh = do_crop ? c_h : src_h;
+                const int rq_w = out_w.load(std::memory_order_relaxed);
+                const int rq_h = out_h.load(std::memory_order_relaxed);
+                gpu_enc_w = (rq_w > 0) ? rq_w : src_rw;
+                gpu_enc_h = (rq_h > 0) ? rq_h : src_rh;
+                if (real_w == src_w && real_h == src_h && src_rw > 0 && src_rh > 0 &&
+                    gpu_enc_w >= 2 && gpu_enc_h >= 2 && !(gpu_enc_w & 1) && !(gpu_enc_h & 1)) {
+                    if (!hr_dx_gpu_enable(dx_ctx, gpu_enc_w, gpu_enc_h, bgra_buf.data())) {
+                        gpu_failed = true;
+                        HrLog::Warn("GPU colour conversion unavailable on this adapter (D3D11 video "
+                                    "processor cannot do BGRA->NV12) -- using the CPU converter.");
+                    } else if (hr_dx_gpu_ready(dx_ctx)) {
+                        const size_t nv_need = (size_t)gpu_enc_w * gpu_enc_h * 3 / 2;
+                        if (nv12_buf.size() != nv_need) { nv12_buf.assign(nv_need, 0); nv12_valid = false; }
+                        gpu_tick = true;
+                    }
+                }
+            }
+#endif
+
             // Capture
 #ifdef _WIN32
             if (!g_libs.dx_capture) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-            int ret = g_libs.dx_capture(dx_ctx, bgra_buf.data(), timeout_ms);
+            int ret;
+            if (gpu_tick) {
+                const int sl = do_crop ? c_x : 0,           st = do_crop ? c_y : 0;
+                const int sr = do_crop ? c_x + c_w : src_w, sb = do_crop ? c_y + c_h : src_h;
+                ret = hr_dx_capture_nv12(dx_ctx, nv12_buf.data(), timeout_ms, sl, st, sr, sb);
+                if (ret == HR_DX_ERROR) {
+                    // Not fatal for the pipeline: stop using the GPU path and let
+                    // the classic one (which resyncs from the GPU-side desktop copy)
+                    // take over on the next tick.
+                    HrLog::Warn("GPU colour conversion failed at runtime -- falling back to the CPU converter.");
+                    gpu_failed = true;
+                    continue;
+                }
+            } else {
+                ret = g_libs.dx_capture(dx_ctx, bgra_buf.data(), timeout_ms);
+            }
 #else
             int ret = HR_DX_ERROR;
 #endif
@@ -1354,37 +1650,61 @@ struct Pipeline {
             // to know about cropping. The crop rect is snapshotted into
             // locals and re-validated because hr_pl_set_capture_rect() can
             // run on the UI thread mid-loop.
-            int c_x, c_y, c_w, c_h;
-            {
-                std::lock_guard<std::mutex> crop_lk(crop_mtx);
-                c_x = crop_x; c_y = crop_y; c_w = crop_w; c_h = crop_h;
-            }
-            // If a crop was requested but doesn't fit the frame DXGI is
-            // actually delivering (e.g. it was computed for a different
-            // monitor/size than the one being duplicated), the old check
-            // just turned cropping OFF for that frame - while the output
-            // size (out_w/out_h, set for the crop) stayed put, so the WHOLE
-            // desktop got scaled down into the window-sized output: the
-            // "I picked a window but the entire screen is recorded" symptom.
-            // Clamp the rect to the real frame instead so what's kept is
-            // still (the visible part of) the requested area, and say so once.
-            if (c_w > 0 && c_h > 0 &&
-                (c_x < 0 || c_y < 0 || c_x + c_w > src_w || c_y + c_h > src_h)) {
-                if (!warned_bad_crop) {
-                    warned_bad_crop = true;
-                    HrLog::Warn("Capture crop " + std::to_string(c_w) + "x" + std::to_string(c_h) + " at " +
-                                std::to_string(c_x) + "," + std::to_string(c_y) +
-                                " doesn't fit the captured frame " + std::to_string(src_w) + "x" +
-                                std::to_string(src_h) + " - clamping it (wrong monitor/size resolved?).");
+            int extra_slots = 0;
+            if (gpu_tick) {
+                // ====== GPU PATH: the frame is already a finished NV12 picture ======
+                eff_w = do_crop ? c_w : src_w;
+                eff_h = do_crop ? c_h : src_h;
+                if (ret == HR_DX_OK) nv12_valid = true;
+                if (!nv12_valid) continue;           // nothing to send yet
+                frame_ptr  = nullptr;
+                frame_nv12 = nv12_buf.data();        // live preview reads this
+                nv12_w = gpu_enc_w; nv12_h = gpu_enc_h;
+                last_yuv_valid = false;              // classic path's cached picture is now stale
+#ifdef _WIN32
+                if (sw_ctx && g_libs.sw_elapsed_ns) {
+                    static constexpr int kMaxCatchupFrames = 90;
+                    int64_t now_ns = g_libs.sw_elapsed_ns(sw_ctx);
+                    int64_t behind = now_ns - next_frame_ns;
+                    if (behind > frame_ns) {
+                        extra_slots = (int)std::min<int64_t>(behind / frame_ns, kMaxCatchupFrames);
+                        next_frame_ns += (int64_t)extra_slots * frame_ns;
+                    }
                 }
-                if (c_x < 0) { c_w += c_x; c_x = 0; }
-                if (c_y < 0) { c_h += c_y; c_y = 0; }
-                if (c_x + c_w > src_w) c_w = src_w - c_x;
-                if (c_y + c_h > src_h) c_h = src_h - c_y;
-                c_w &= ~1; c_h &= ~1;
-            }
-            const bool do_crop = c_w > 0 && c_h > 0 && c_x >= 0 && c_y >= 0 &&
-                                 c_x + c_w <= src_w && c_y + c_h <= src_h;
+#endif
+                const bool cur_on = include_cursor.load(std::memory_order_relaxed);
+                const CursorSig cur_now = cur_on ? read_cursor_sig() : CursorSig{};
+                const size_t needed = (size_t)gpu_enc_w * gpu_enc_h * 3 / 2;
+                // Nothing changed on screen AND the pointer looks the same as in the
+                // picture already queued -> just hold that picture one slot longer.
+                bool merged = false;
+                if (ret != HR_DX_OK && gpu_emit_valid && (!cur_on || cur_now == gpu_emit_sig))
+                    merged = try_merge_last(extra_slots);
+                if (!merged) {
+                    std::vector<uint8_t> yuv_frame = take_free_buf(needed);
+                    std::memcpy(yuv_frame.data(), nv12_buf.data(), needed);
+#ifdef _WIN32
+                    if (cur_on) {
+                        hr_composite_cursor_nv12(yuv_frame.data(), gpu_enc_w, gpu_enc_h,
+                                                  cap_origin_x + (do_crop ? c_x : 0),
+                                                  cap_origin_y + (do_crop ? c_y : 0),
+                                                  (float)gpu_enc_w / (float)eff_w,
+                                                  (float)gpu_enc_h / (float)eff_h);
+                    }
+#endif
+                    enqueue_frame(yuv_frame, extra_slots);
+                }
+                gpu_emit_valid = true;
+                gpu_emit_sig   = cur_now;
+                ++st_gpu_ticks;
+            } else {
+            gpu_emit_valid = false;
+            frame_nv12 = nullptr;
+            const bool cursor_on_now = include_cursor.load(std::memory_order_relaxed);
+            // Sampled BEFORE the pointer is drawn (see CursorSig): if it moves in
+            // between, the recorded signature is the older one and the next tick
+            // simply re-converts - never the other way round.
+            const CursorSig cur_sig_now = cursor_on_now ? read_cursor_sig() : CursorSig{};
             uint8_t* frame = bgra_buf.data();   // what overlays/cursor/encode read this tick
             if (do_crop) {
                 eff_w = c_w;
@@ -1436,14 +1756,11 @@ struct Pipeline {
             // relaxed atomic load per frame instead of a mutex acquisition
             // and a std::vector<HrOverlayDesc> copy.
             {
-                uint64_t gen = overlays_gen.load(std::memory_order_relaxed);
-                if (gen != last_overlays_gen) {
-                    std::lock_guard<std::mutex> lock(overlays_mtx);
-                    overlays_snapshot = overlays;
-                    last_overlays_gen = gen;
-                }
+                // (overlays_snapshot itself is refreshed before the capture
+                // call above - the GPU path needs to know whether anything
+                // has to be composited on the CPU BEFORE choosing a path.)
                 if (!overlays_snapshot.empty()) {
-                    ensure_work_copy(frame);
+                    if (overlays_active) ensure_work_copy(frame);   // hidden-only: nothing is drawn, no 8MB copy
                     // Belt-and-suspenders alongside the try/catch
                     // now inside OverlayCompositor::Apply() itself (see
                     // hr_overlay_render.cpp) -- this loop runs on a bare
@@ -1487,7 +1804,6 @@ struct Pipeline {
                                      cap_origin_y + (do_crop ? c_y : 0));
             }
             frame_ptr = frame;
-            int extra_slots = 0;
 #ifdef _WIN32
             if (recording.load(std::memory_order_acquire) && sw_ctx && g_libs.sw_elapsed_ns) {
                 static constexpr int kMaxCatchupFrames = 90; // ~1.5-3s of duplicate frames, whichever fps
@@ -1531,111 +1847,90 @@ struct Pipeline {
                 int enc_w = eff_w, enc_h = eff_h;
                 const bool scaling = req_w > 0 && req_h > 0 && (req_w != eff_w || req_h != eff_h);
                 if (scaling) { enc_w = req_w; enc_h = req_h; }
+                const bool overlays_on = overlays_active;
+                // `frame` still IS bgra_buf: no crop, overlay or pointer was
+                // baked in, and (below) no scaling -> the converted picture is a
+                // pure function of bgra_buf, so DXGI's changed-rows hint applies.
+                const bool direct = (frame == bgra_buf.data()) && !scaling;
 
-                // PERF: static desktop (DXGI timeout) with nothing composited on
-                // top -> the picture is identical to the last one we converted.
-                // Re-send it instead of downscaling + converting the same pixels
-                // again (typical for tutorials/desktop recordings: most ticks).
+                // PERF: static desktop (DXGI timeout) -> the picture is identical
+                // to the last one we converted. Re-send it instead of downscaling
+                // + converting the same pixels again (typical for tutorials/
+                // desktop recordings: most ticks). With "Cursor" on that used to
+                // be impossible (the pointer is baked into every frame); now it
+                // still holds while the pointer looks exactly as it did in the
+                // cached picture (same handle/position/visibility).
                 const bool reuse_last = (ret == HR_DX_TIMEOUT) && last_yuv_valid &&
-                                        overlays_snapshot.empty() &&
-                                        !include_cursor.load(std::memory_order_relaxed) &&
+                                        !overlays_on &&
+                                        (!cursor_on_now || cur_sig_now == last_yuv_sig) &&
                                         last_yuv_w == enc_w && last_yuv_h == enc_h;
                 bool merged_into_queue = false;
                 if (reuse_last) {
                     // Cheapest: the previous frame is still waiting in the queue ->
                     // just make it last one slot longer, no copy at all.
-                    std::lock_guard<std::mutex> lock(pipe_queue_mtx);
-                    if (!pipe_queue.empty()) {
-                        int r = pipe_queue.back().repeat + 1 + extra_slots;
-                        pipe_queue.back().repeat = std::min(r, 240);
-                        merged_into_queue = true;
-                    }
+                    merged_into_queue = try_merge_last(extra_slots);
                 }
 
                 std::vector<uint8_t> yuv_frame;
                 if (!merged_into_queue) {
-                    {
-                        std::lock_guard<std::mutex> lock(free_bufs_mtx);
-                        if (!free_bufs.empty()) {
-                            yuv_frame = std::move(free_bufs.front());
-                            free_bufs.pop();
-                        }
-                    }
-
                     const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
-                    if (yuv_frame.size() != needed) yuv_frame.resize(needed);
+                    yuv_frame = take_free_buf(needed);
 
                     if (reuse_last) {
                         std::memcpy(yuv_frame.data(), last_yuv.data(), needed);   // 3MB copy vs full convert
                     } else {
-                        if (scaling) {
-                            const size_t scaled_needed = (size_t)req_w * req_h * 4;
-                            if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
-                            // PERF: was bgra_downscale(...) - a single-threaded
-                            // pass on this (already highest/boosted-priority)
-                            // capture thread. Now fanned out across the same
-                            // worker threads Convert() (right below) uses -
-                            // see Yuv420pWorkerPool::Downscale()'s comment.
-                            yuv_pool.Downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
-                            enc_src = scaled_buf.data();
-                        }
-                        yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
-                        // Keep a private copy so a following static tick can reuse it.
-                        if (ret == HR_DX_OK) {
-                            last_yuv.assign(yuv_frame.begin(), yuv_frame.end());
-                            last_yuv_valid = true;
-                            last_yuv_w = enc_w; last_yuv_h = enc_h;
+                        // PERF: DXGI reported exactly which rows changed since the
+                        // previous delivery, and last_yuv is the conversion of that
+                        // previous picture -> keep it and re-convert only those rows.
+                        int dy0 = 0, dy1 = 0;
+                        const bool partial = direct && ret == HR_DX_OK && !overlays_on &&
+                                             last_yuv_valid && last_yuv_direct &&
+                                             last_yuv_w == enc_w && last_yuv_h == enc_h &&
+                                             hr_dx_get_dirty_rows(dx_ctx, &dy0, &dy1);
+                        if (partial) {
+                            dy0 = std::max(0, dy0) & ~1;
+                            dy1 = std::min(enc_h, (dy1 + 1) & ~1);
+                            std::memcpy(yuv_frame.data(), last_yuv.data(), needed);
+                            yuv_pool.ConvertRows(enc_src, yuv_frame.data(), enc_w, enc_h, dy0, dy1);
+                            ++st_partial_conv;
+                            // Keep the cached picture current with just the touched rows.
+                            copy_yuv_rows(last_yuv.data(), yuv_frame.data(), enc_w, enc_h, dy0, dy1,
+                                          yuv_pool.IsNv12());
+                            last_yuv_sig = cur_sig_now;
+                        } else {
+                            if (scaling) {
+                                const size_t scaled_needed = (size_t)req_w * req_h * 4;
+                                if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
+                                // PERF: was bgra_downscale(...) - a single-threaded
+                                // pass on this (already highest/boosted-priority)
+                                // capture thread. Now fanned out across the same
+                                // worker threads Convert() (right below) uses -
+                                // see Yuv420pWorkerPool::Downscale()'s comment.
+                                yuv_pool.Downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
+                                enc_src = scaled_buf.data();
+                            }
+                            yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
+                            // Keep a private copy so a following static tick can reuse
+                            // it - for ANY conversion whose result depends only on
+                            // bgra_buf + the pointer (i.e. no overlays: those animate).
+                            // (Used to be OK ticks only, which is what made "Cursor on"
+                            // unable to reuse anything.)
+                            if (!overlays_on) {
+                                last_yuv.assign(yuv_frame.begin(), yuv_frame.end());
+                                last_yuv_valid = true;
+                                last_yuv_w = enc_w; last_yuv_h = enc_h;
+                                last_yuv_direct = direct;
+                                last_yuv_sig = cur_sig_now;
+                            } else {
+                                last_yuv_valid = false;
+                            }
                         }
                     }
                 }
-                if (!merged_into_queue) {
-
-                std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
-                int carried_repeat = 0;        // timeline slots owned by an evicted entry
-                {
-                    std::lock_guard<std::mutex> lock(pipe_queue_mtx);
-
-                    // Backpressure: the queue is capped at MAX_QUEUE_SIZE
-                    // entries. A full queue means the writer/ffmpeg really is
-                    // behind, so the oldest entry is evicted (and counted as
-                    // a drop) instead of letting memory grow without bound
-                    // (see the earlier "freeze + memory growth after Stop on
-                    // a long recording" fix - that bug was catch-up frames
-                    // bypassing this cap, which the repeat count can no
-                    // longer do: it costs no extra buffers at all).
-                    if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
-                        dropped = std::move(pipe_queue.front().data);
-                        // A/V SYNC FIX: an evicted entry used to take its
-                        // timeline slots with it, so every drop made the
-                        // video 1+ frame shorter than real time while the
-                        // audio kept its full length - heard as audio
-                        // lagging behind the picture after an "overloaded:
-                        // dropping frames" warning. The newest frame now
-                        // inherits the evicted entry's slots (the picture
-                        // holds for that moment instead of the clock
-                        // slipping). Capped so one long stall can't
-                        // become a multi-second burst of writes.
-                        carried_repeat = pipe_queue.front().repeat;
-                        pipe_queue.pop();
-                        frames_dropped.fetch_add(1, std::memory_order_relaxed);
-                        frames_stalled.fetch_add(1, std::memory_order_relaxed);
-                    }
-
-                    QueuedFrame qf;
-                    qf.data   = std::move(yuv_frame);
-                    qf.repeat = std::min(1 + extra_slots + carried_repeat, 240);
-                    pipe_queue.push(std::move(qf));
-                    pipe_queue_cv.notify_one();
-                }
-
-                if (!dropped.empty()) {
-                    std::lock_guard<std::mutex> lock(free_bufs_mtx);
-                    if (free_bufs.size() < MAX_FREE_BUFS)
-                        free_bufs.push(std::move(dropped));
-                }
-                }   // if (!merged_into_queue)
+                if (!merged_into_queue) enqueue_frame(yuv_frame, extra_slots);
             }
 #endif
+            }   // else (classic BGRA path)
             // Catch-up reps count as captured (they keep the timeline
             // correct) but are also counted as "stalled" duplicates in the
             // stats, same bucket the TIMEOUT/LOST paths above already use
@@ -1693,6 +1988,24 @@ struct Pipeline {
             running.store(false, std::memory_order_relaxed);
         }
 
+#ifdef _WIN32
+        // One line of capture-efficiency numbers per pipeline lifetime, so it is
+        // visible in the log how much work the "skip unchanged"/dirty-rect/GPU
+        // paths actually saved (only when something was captured at all).
+        if (dx_ctx) {
+            unsigned long long acq = 0, skp = 0, prt = 0, ful = 0, gpf = 0;
+            hr_dx_get_stats(dx_ctx, &acq, &skp, &prt, &ful, &gpf);
+            if (acq > 0 || gpf > 0) {
+                HrLog::Info("Capture stats: DXGI frames " + std::to_string(acq) +
+                            ", pointer-only (skipped, no copy) " + std::to_string(skp) +
+                            ", partial readbacks " + std::to_string(prt) +
+                            ", full readbacks " + std::to_string(ful) +
+                            ", GPU NV12 frames " + std::to_string(gpf) +
+                            ", partial YUV conversions " + std::to_string((unsigned long long)st_partial_conv) +
+                            ", GPU-path ticks " + std::to_string((unsigned long long)st_gpu_ticks));
+            }
+        }
+#endif
         // Signal writer thread to stop
         writer_running.store(false, std::memory_order_relaxed);
         pipe_queue_cv.notify_all();
@@ -2168,6 +2481,20 @@ HR_EXPORT void hr_pl_set_output_pixfmt(void* handle, int nv12) {
     if (!handle) return;
 #ifdef _WIN32
     static_cast<Pipeline*>(handle)->yuv_pool.SetUseNv12(nv12 != 0);
+#endif
+}
+
+// Settings > Video > "GPU colour conversion": lets the capture loop use the
+// D3D11 video processor (BGRA->NV12 + scale on the GPU) whenever recording
+// with NV12 output and nothing has to be composited on the CPU. Takes effect
+// on the next captured frame; a pipeline that hit a GPU error stays on the
+// CPU path for the rest of its life.
+HR_EXPORT void hr_pl_set_gpu_convert(void* handle, int enabled) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->gpu_convert.store(enabled != 0, std::memory_order_relaxed);
+#else
+    (void)enabled;
 #endif
 }
 
