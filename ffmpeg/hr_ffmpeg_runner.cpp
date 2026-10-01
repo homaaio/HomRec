@@ -76,6 +76,18 @@ struct FfmpegCtx {
     // on the way to the encoder, not by lying about the raw input size.
     int output_width{0}, output_height{0};
     bool pipe_input{false};  /* true → read raw BGRA from stdin */
+
+    /* ---- ffmpeg "ddagrab" fast path (ffmpeg 6.0+) ---------------------------
+     * ffmpeg captures the desktop itself (DXGI Desktop Duplication, frames stay
+     * in GPU memory as D3D11 textures) and hands them straight to a hardware
+     * encoder: no readback, no CPU colour conversion, no pipe. Fastest option,
+     * but HomRec's overlays/plugins never see a frame. stdin is used ONLY as
+     * the "q\n" graceful-stop channel here (pipe_input stays false). */
+    bool gpu_capture{false};
+    int  grab_output_idx{0};
+    int  grab_off_x{0}, grab_off_y{0};
+    int  grab_w{0}, grab_h{0};   /* 0x0 = the whole output */
+    bool grab_cursor{true};
 };
 
 /* -- Helpers ---------------------------------------------------------------- */
@@ -139,18 +151,28 @@ static bool _create_overlapped_stdin_pipe(HANDLE *out_read, HANDLE *out_write) {
 
 static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
     HANDLE hReadStdin{}, hWriteStdin{};
+    // stdin is redirected in pipe mode (raw frames) and in ddagrab mode (only
+    // the "q\n" stop command). Only pipe mode needs the overlapped variant.
+    const bool want_stdin = ctx->pipe_input || ctx->gpu_capture;
 
     if (ctx->pipe_input) {
         // hRead comes back already inheritable (sa_inherit above); hWrite
         // (CreateNamedPipeW's server handle) is not inheritable by default,
         // same as the SetHandleInformation(..., 0) call this replaces.
         if (!_create_overlapped_stdin_pipe(&hReadStdin, &hWriteStdin)) return false;
+    } else if (ctx->gpu_capture) {
+        // Plain synchronous anonymous pipe: hr_ff_stop_graceful() writes the
+        // two bytes "q\n" with an ordinary WriteFile(), which is not allowed on
+        // an overlapped handle.
+        SECURITY_ATTRIBUTES sa_inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        if (!CreatePipe(&hReadStdin, &hWriteStdin, &sa_inherit, 0)) return false;
+        SetHandleInformation(hWriteStdin, HANDLE_FLAG_INHERIT, 0);   // child must only inherit the read end
     }
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
-    if (ctx->pipe_input) {
+    if (want_stdin) {
         si.hStdInput = hReadStdin;
         si.dwFlags  |= STARTF_USESTDHANDLES;
         si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -164,20 +186,20 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
         (_wants_hw_pixfmt(ctx->codec_args) ? ABOVE_NORMAL_PRIORITY_CLASS
                                             : NORMAL_PRIORITY_CLASS);
     bool ok = (CreateProcessW(nullptr, mut_cmd.data(),
-                               nullptr, nullptr, ctx->pipe_input ? TRUE : FALSE,
+                               nullptr, nullptr, want_stdin ? TRUE : FALSE,
                                priority_class,
                                nullptr, nullptr, &si, &pi) != 0);
 
-    if (ctx->pipe_input && hReadStdin) CloseHandle(hReadStdin);
+    if (want_stdin && hReadStdin) CloseHandle(hReadStdin);
 
     if (!ok) {
-        if (ctx->pipe_input && hWriteStdin) CloseHandle(hWriteStdin);
+        if (want_stdin && hWriteStdin) CloseHandle(hWriteStdin);
         return false;
     }
 
     ctx->hProcess = pi.hProcess;
     ctx->hThread  = pi.hThread;
-    if (ctx->pipe_input) ctx->hStdin = hWriteStdin;
+    if (want_stdin) ctx->hStdin = hWriteStdin;
     ctx->running = true;
     return true;
 }
@@ -239,6 +261,30 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     const wchar_t *raw_pixfmt = _wants_hw_pixfmt(ctx->codec_args) ? L"nv12" : L"yuv420p";
 
     ss << Q(ctx->ffmpeg_path);
+
+    if (ctx->gpu_capture) {
+        /* ddagrab fast path. Documented ffmpeg recipes (doc/filters.texi):
+         *   NVENC / AMF : -filter_complex ddagrab=0            -c:v h264_nvenc ...
+         *   QSV         : -init_hw_device d3d11va -filter_complex ddagrab=0,hwmap=derive_device=qsv,format=qsv
+         * The frames are D3D11 hardware frames end to end, so NO -pix_fmt /
+         * -color_* / -vf scale here (any of them would force a download). */
+        const bool is_qsv = ctx->codec_args.find("qsv") != std::string::npos;
+        std::wostringstream grab;
+        grab << L"ddagrab=output_idx=" << ctx->grab_output_idx
+             << L":framerate=" << ctx->fps
+             << L":draw_mouse=" << (ctx->grab_cursor ? 1 : 0);
+        if (ctx->grab_w > 0 && ctx->grab_h > 0) {
+            grab << L":offset_x=" << ctx->grab_off_x << L":offset_y=" << ctx->grab_off_y
+                 << L":video_size=" << ctx->grab_w << L"x" << ctx->grab_h;
+        }
+        if (is_qsv) ss << L" -init_hw_device d3d11va";
+        ss << L" -filter_complex \"" << grab.str();
+        if (is_qsv) ss << L",hwmap=derive_device=qsv,format=qsv";
+        ss << L"\"";
+        if (!ctx->codec_args.empty()) ss << L" " << _utf8_to_wide(ctx->codec_args);
+        ss << L" -y " << Q(ctx->output_path);
+        return ss.str();
+    }
 
     if (ctx->pipe_input) {
         /* Pipe mode: read raw BGRA from stdin */
@@ -388,6 +434,29 @@ HR_EXPORT void hr_ff_set_output_size(void *h, int out_w, int out_h) {
     ctx->output_width = out_w; ctx->output_height = out_h;
 }
 
+/*
+ * hr_ff_set_gpu_capture  (ffmpeg "ddagrab" fast path, ffmpeg 6.0+)
+ * enable   : 1 = ffmpeg captures + encodes on the GPU by itself (no pipe).
+ * output_idx : DXGI output index (same numbering as hr_dx_create()).
+ * off_x/off_y/w/h : region relative to that output; w/h 0 = the whole output.
+ * draw_mouse : let ddagrab draw the pointer.
+ * Only sensible with a hardware encoder (nvenc/qsv/amf) and when output size
+ * == captured size (ddagrab has no scaler). The caller decides that.
+ */
+HR_EXPORT void hr_ff_set_gpu_capture(void *h, int enable, int output_idx,
+                                      int off_x, int off_y, int w, int h2, int draw_mouse) {
+    if (!h) return;
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    ctx->gpu_capture     = (enable != 0);
+    ctx->grab_output_idx = output_idx < 0 ? 0 : output_idx;
+    ctx->grab_off_x = off_x < 0 ? 0 : off_x;
+    ctx->grab_off_y = off_y < 0 ? 0 : off_y;
+    ctx->grab_w = w > 0 ? w : 0;
+    ctx->grab_h = h2 > 0 ? h2 : 0;
+    ctx->grab_cursor = (draw_mouse != 0);
+    if (ctx->gpu_capture) ctx->pipe_input = false;
+}
+
 HR_EXPORT void hr_ff_set_pipe_input(void *h, int enable) {
     if (!h) return;
     static_cast<FfmpegCtx *>(h)->pipe_input = (enable != 0);
@@ -424,7 +493,7 @@ HR_EXPORT int hr_ff_start(void *handle) {
     auto *ctx = static_cast<FfmpegCtx *>(handle);
     if (ctx->running) return HR_FF_RUNNING;
     if (ctx->ffmpeg_path.empty() || ctx->output_path.empty()) return HR_FF_ERROR;
-    if (!ctx->pipe_input && ctx->input_path.empty()) return HR_FF_ERROR;
+    if (!ctx->pipe_input && !ctx->gpu_capture && ctx->input_path.empty()) return HR_FF_ERROR;
 
     std::wstring cmdline = _build_cmdline(ctx);
 
