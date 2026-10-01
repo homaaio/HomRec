@@ -150,6 +150,8 @@ const std::vector<SettingDef> &All() {
         // same as HrcConfig::Load()'s allow_sensitive_fields already did.
         v.push_back(StrField("custom_ffmpeg_args", "video", &AppState::custom_ffmpeg_args, {}, /*sensitive=*/true));
         v.push_back(StrField("pix_fmt", "video", &AppState::pix_fmt));
+        v.push_back(BoolField("gpu_convert", "video", &AppState::gpu_convert));
+        v.push_back(BoolField("gpu_capture_ddagrab", "video", &AppState::gpu_capture_ddagrab));
         {
             Def d;
             d.key = "video_format"; d.section = "video";
