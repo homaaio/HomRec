@@ -223,6 +223,23 @@ HR_EXPORT int hr_probe_gpu(const wchar_t* ffpath, wchar_t* out_enc, int out_len)
 }
 
 // -------------------------------------------------------------
+// hr_probe_ddagrab
+// 1 if this ffmpeg build has the "ddagrab" source filter (ffmpeg 6.0+ with
+// D3D11 support): DXGI desktop capture whose frames stay on the GPU. Only
+// checks that the filter is compiled in (`ffmpeg -filters`, ~50 ms) - it
+// cannot know whether it will really initialize on this machine; the caller
+// still verifies the first seconds of a real recording and falls back to the
+// normal pipeline if ffmpeg dies.
+// -------------------------------------------------------------
+HR_EXPORT int hr_probe_ddagrab(const wchar_t* ffpath)
+{
+    if (!ffpath || !*ffpath) return 0;
+    std::wstring cmd = L"\"" + std::wstring(ffpath) + L"\" -hide_banner -filters";
+    std::wstring res = run_cmd(cmd, 8000);
+    return res.find(L"ddagrab") != std::wstring::npos ? 1 : 0;
+}
+
+// -------------------------------------------------------------
 // hr_build_codec_args
 // Returns space-separated ffmpeg argument string in out_buf.
 // -------------------------------------------------------------
