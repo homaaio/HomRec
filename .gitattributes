@@ -16,6 +16,8 @@ tools/homrec_check.py linguist-generated=true
 
 # Auto detect text files and perform LF normalization
 * text=auto
+plugins/* export-ignore
+Hom/plugins/* export-ignore
 
 # Specific file types
 *.cpp text eol=lf
