@@ -1052,6 +1052,109 @@ HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
         src += (size_t)cw * 4;
     }
 }
+
+/*
+ * hr_cursor_state
+ *
+ * Cheap "would the pointer look different?" probe for the capture loop:
+ * visible flag, screen position and cursor handle, without touching the
+ * raster cache. Returns 0 (and visible=0) if the cursor is hidden or the
+ * query failed. Lets the pipeline keep re-sending an unchanged picture
+ * while the mouse rests on a static screen even with "Cursor" turned on.
+ */
+HR_EXPORT int hr_cursor_state(int *visible, int *x, int *y, unsigned long long *handle) {
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    bool ok = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor;
+    if (visible) *visible = ok ? 1 : 0;
+    if (x) *x = ok ? (int)ci.ptScreenPos.x : 0;
+    if (y) *y = ok ? (int)ci.ptScreenPos.y : 0;
+    if (handle) *handle = ok ? (unsigned long long)(uintptr_t)ci.hCursor : 0ull;
+    return ok ? 1 : 0;
+}
+
+HR_EXPORT void hr_composite_cursor_nv12(uint8_t *nv12, int width, int height,
+                                         int origin_x, int origin_y,
+                                         float scale_x, float scale_y) {
+    if (!nv12 || width < 2 || height < 2) return;
+    if (scale_x <= 0.0f) scale_x = 1.0f;
+    if (scale_y <= 0.0f) scale_y = 1.0f;
+
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
+
+    CursorCache &cache = GetCursorCache();
+    std::lock_guard<std::mutex> lock(cache.mtx);
+
+    int64_t now = NowMs();
+    bool need_refresh = (ci.hCursor != cache.handle) || !cache.valid ||
+                        (now - cache.last_refresh_ms >= kCursorRefreshIntervalMs);
+    if (need_refresh) {
+        bool ok = RasterizeCursor(ci.hCursor, cache);
+        cache.handle = ci.hCursor;
+        if (ok) cache.valid = true;
+        cache.last_refresh_ms = now;
+    }
+    if (!cache.valid || cache.bgra.empty()) return;
+
+    const int cw = cache.cw, ch = cache.ch;
+    int dw = (int)(cw * scale_x + 0.5f); if (dw < 1) dw = 1;
+    int dh = (int)(ch * scale_y + 0.5f); if (dh < 1) dh = 1;
+    const int lx = (int)(((float)(ci.ptScreenPos.x - origin_x - cache.hotspot_x)) * scale_x + 0.5f);
+    const int ly = (int)(((float)(ci.ptScreenPos.y - origin_y - cache.hotspot_y)) * scale_y + 0.5f);
+    if (lx + dw <= 0 || ly + dh <= 0 || lx >= width || ly >= height) return; // fully off-frame
+
+    uint8_t *Yp  = nv12;
+    uint8_t *UVp = nv12 + (size_t)width * (size_t)height;
+
+    const int bx0 = std::max(lx, 0) & ~1;
+    const int by0 = std::max(ly, 0) & ~1;
+    const int bx1 = std::min(lx + dw, width);
+    const int by1 = std::min(ly + dh, height);
+
+    auto clamp8 = [](int v) -> int { return v < 0 ? 0 : (v > 255 ? 255 : v); };
+
+    for (int by = by0; by < by1; by += 2) {
+        for (int bx = bx0; bx < bx1; bx += 2) {
+            int sum_a = 0, rs = 0, gs = 0, bs = 0;   // alpha-weighted colour of this 2x2 block
+            for (int j = 0; j < 2; ++j) {
+                const int py = by + j;
+                if (py < ly || py >= ly + dh || py >= height) continue;
+                const int sy = (int)((int64_t)(py - ly) * ch / dh);
+                for (int i = 0; i < 2; ++i) {
+                    const int px = bx + i;
+                    if (px < lx || px >= lx + dw || px >= width) continue;
+                    const int sx = (int)((int64_t)(px - lx) * cw / dw);
+                    const uint8_t *sp = cache.bgra.data() + ((size_t)sy * cw + sx) * 4;
+                    const int a = sp[3];
+                    if (a == 0) continue;                 // fully transparent
+                    const int b = sp[0], g = sp[1], r = sp[2];
+                    const int yc = (16829 * r + 33039 * g + 6416 * b + 32768 + (16 << 16)) >> 16;
+                    uint8_t &yd = Yp[(size_t)py * width + px];
+                    yd = (uint8_t)((yc * a + (int)yd * (255 - a) + 127) / 255);   // straight-alpha blend
+                    rs += r * a; gs += g * a; bs += b * a; sum_a += a;
+                }
+            }
+            if (sum_a == 0) continue;
+            // Mean cursor colour of the block, scaled to a 4-pixel sum exactly like
+            // the 2x2 sums hr_bgra_to_nv12_band feeds its chroma coefficients.
+            const int r4 = rs * 4 / sum_a, g4 = gs * 4 / sum_a, b4 = bs * 4 / sum_a;
+            const int cb = clamp8(((-9714 * r4 - 19071 * g4 + 28785 * b4 + (1 << 17)) >> 18) + 128);
+            const int cr = clamp8(((28785 * r4 - 24103 * g4 - 4682 * b4 + (1 << 17)) >> 18) + 128);
+            // Coverage of the block (0..1020 => 4 pixels * 255): keep the rest of the
+            // underlying chroma where the pointer is transparent or only partly covers.
+            const int cov = std::min(sum_a, 1020);
+            uint8_t *uv = UVp + (size_t)(by / 2) * width + bx;
+            uv[0] = (uint8_t)((uv[0] * (1020 - cov) + cb * cov + 510) / 1020);
+            uv[1] = (uint8_t)((uv[1] * (1020 - cov) + cr * cov + 510) / 1020);
+        }
+    }
+}
 #else
 HR_EXPORT void hr_composite_cursor(uint8_t *, int, int, int, int) {}
+HR_EXPORT int hr_cursor_state(int *visible, int *x, int *y, unsigned long long *handle) {
+    if (visible) *visible = 0; if (x) *x = 0; if (y) *y = 0; if (handle) *handle = 0; return 0;
+}
+HR_EXPORT void hr_composite_cursor_nv12(uint8_t *, int, int, int, int, float, float) {}
 #endif
