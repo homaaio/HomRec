@@ -461,6 +461,15 @@ private:
     void *ctl_ = nullptr;        // hr_ctl_create() handle
     void *ffproc_ = nullptr;     // hr_ff_create() handle
 
+    // ffmpeg "ddagrab" fast path (Settings > Video > GPU acceleration): true while
+    // the CURRENT recording is captured + encoded entirely by ffmpeg on the GPU
+    // (no HomRec pipeline attached, so no overlays/pause). See TryStartDdagrab().
+    bool ddagrab_active_ = false;
+    bool ddagrab_pause_warned_ = false;
+    int  ddagrab_probe_ = 0;     // 0 = not probed yet, 1 = ffmpeg has ddagrab, 2 = it doesn't
+    bool TryStartDdagrab(const std::wstring &codec_args, bool codec_is_hw,
+                         std::chrono::steady_clock::time_point &t_video_go);
+
     bool ffmpeg_found_ = false;
     std::wstring ffmpeg_path_;
     std::wstring hw_encoder_;    // empty if no GPU encoder available -> software fallback

@@ -20,6 +20,7 @@ extern "C" {
     // hr_tools.cpp (wide-string API)
     int hr_check_ffmpeg(const wchar_t *hint, wchar_t *out, int out_len);
     int hr_probe_gpu(const wchar_t *ffpath, wchar_t *out_enc, int out_len);
+    int hr_probe_ddagrab(const wchar_t *ffpath);
     int hr_build_codec_args(const wchar_t *codec, int quality, int fps, int cpu_count,
                              wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
     int hr_build_codec_args_ex(const wchar_t *codec, int quality, int fps, int cpu_count,
@@ -89,6 +90,7 @@ extern "C" {
     void hr_pl_set_capture_rect(void *handle, int x, int y, int w, int h);
     void hr_pl_set_output_size(void *handle, int w, int h);
     void hr_pl_set_output_pixfmt(void *handle, int nv12);
+    void hr_pl_set_gpu_convert(void *handle, int enabled);
     void hr_pl_set_preview_fps(void *handle, int fps);
     void hr_pl_set_fps(void *handle, int fps);
     void hr_pl_set_preview_needed(void *handle, int enabled);
@@ -104,6 +106,8 @@ extern "C" {
     void hr_ff_set_video_params(void *h, int w, int h2, int fps);
     void hr_ff_set_output_size(void *h, int out_w, int out_h);
     void hr_ff_set_pipe_input(void *h, int enable);
+    void hr_ff_set_gpu_capture(void *h, int enable, int output_idx, int off_x, int off_y,
+                                int w, int h2, int draw_mouse);
     int hr_ff_start(void *handle);
     intptr_t hr_ff_get_stdin_handle(void *handle);
     int hr_ff_stop_graceful(void *handle);
@@ -671,6 +675,100 @@ void RecordingController::RetargetWindowCapture() {
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
 }
 
+// ---------------------------------------------------------------------------
+// TryStartDdagrab
+//
+// Full-GPU recording via ffmpeg's "ddagrab" source (ffmpeg 6.0+): ffmpeg
+// duplicates the desktop itself and feeds the D3D11 textures straight into a
+// hardware encoder, so neither pixels nor colour conversion ever touch the CPU
+// and HomRec's own capture pipeline isn't involved at all.
+//
+// Because HomRec's pipeline is bypassed, this is only used when the recording
+// needs nothing the pipeline provides. Returns false WITHOUT side effects when
+// it can't / shouldn't be used (the caller then starts the normal pipeline);
+// returns true with ffproc_ running and verified.
+// ---------------------------------------------------------------------------
+bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool codec_is_hw,
+                                          std::chrono::steady_clock::time_point &t_video_go) {
+    if (!state_.gpu_capture_ddagrab) return false;
+
+    const int src_w = (crop_w_ > 0) ? crop_w_ : capture_w_;
+    const int src_h = (crop_h_ > 0) ? crop_h_ : capture_h_;
+    bool any_overlay = false;
+    for (const auto &o : state_.overlays)
+        if (o.visible && o.w > 0 && o.h > 0) { any_overlay = true; break; }
+
+    const char *why = nullptr;
+    if (!ffmpeg_found_)                                   why = "ffmpeg not found";
+    else if (!codec_is_hw)                                why = "a software encoder is selected (ddagrab needs nvenc/qsv/amf)";
+    else if (state_.capture_mode == CaptureMode::Window)  why = "window capture follows a moving window";
+    else if (any_overlay)                                 why = "overlays/plugins are active and need the CPU pipeline";
+    else if (state_.auto_pause_on_silence)                why = "auto-pause on silence needs the pipeline's pause";
+    else if (src_w <= 0 || src_h <= 0 ||
+             output_w_ != src_w || output_h_ != src_h)    why = "the output resolution differs from the captured size";
+    else if (state_.custom_ffmpeg_args.find("-vf") != std::string::npos ||
+             state_.custom_ffmpeg_args.find("-filter") != std::string::npos)
+                                                          why = "custom ffmpeg filters";
+    if (!why) {
+        if (ddagrab_probe_ == 0)
+            ddagrab_probe_ = hr_probe_ddagrab(ffmpeg_path_.c_str()) ? 1 : 2;
+        if (ddagrab_probe_ == 2) why = "this ffmpeg build has no ddagrab filter (needs ffmpeg 6.0+)";
+    }
+    if (why) {
+        HrLog::Info(std::string("Recording: full-GPU (ddagrab) capture not used - ") + why +
+                    " -> using the normal capture pipeline.");
+        return false;
+    }
+
+    void *ff = hr_ff_create();
+    if (!ff) return false;
+    hr_ff_set_ffmpeg_path(ff, NarrowFromWide(ffmpeg_path_).c_str());
+    hr_ff_set_output_path(ff, NarrowFromWide(current_output_path_).c_str());
+    hr_ff_set_codec_args(ff, NarrowFromWide(codec_args).c_str());
+    hr_ff_set_video_params(ff, src_w, src_h, state_.target_fps);
+    hr_ff_set_gpu_capture(ff, /*enable=*/1, capture_output_idx_,
+                          crop_x_, crop_y_, crop_w_, crop_h_,
+                          state_.cursor_enabled ? 1 : 0);
+    if (hr_ff_start(ff) != 0) {
+        HrLog::Warn("Recording: couldn't launch ffmpeg for ddagrab capture -> using the normal capture pipeline.");
+        hr_ff_destroy(ff);
+        return false;
+    }
+
+    // ffmpeg writes the container header only once the first captured frame has
+    // gone through the filter graph and the encoder is initialised, so "the
+    // output file has content" == "capture is really running". A process that
+    // exits during this window (no ddagrab, no D3D11 device, encoder rejects the
+    // frames, ...) means we fall back. Polled, not slept, so the common case
+    // costs only as long as ffmpeg itself needs to start.
+    const std::string out_path = NarrowFromWide(current_output_path_);
+    const auto t0 = std::chrono::steady_clock::now();
+    bool capturing = false, died = false;
+    for (;;) {
+        if (!hr_ff_is_running(ff)) { died = true; break; }
+        if (hr_file_size_mb(out_path.c_str()) > 0.0f) { capturing = true; break; }
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(3000)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    if (died) {
+        HrLog::Warn("Recording: ffmpeg exited while starting ddagrab capture (unsupported on this "
+                    "GPU/driver/ffmpeg build?) -> falling back to the normal capture pipeline.");
+        hr_ff_destroy(ff);
+        RemoveFileUtf8(out_path);
+        return false;
+    }
+    if (!capturing) {
+        HrLog::Warn("Recording: ddagrab capture is still initialising after 3s - continuing; "
+                    "a failure from here on is reported like any ffmpeg crash.");
+    }
+
+    ffproc_ = ff;
+    t_video_go = std::chrono::steady_clock::now();
+    ddagrab_pause_warned_ = false;
+    HrLog::Info("Recording: full-GPU capture + encode via ffmpeg ddagrab (HomRec overlays/plugins/pause unavailable).");
+    return true;
+}
+
 bool RecordingController::Start(std::wstring &error_out) {
     if (state_.recording) { error_out = L"Already recording."; return false; }
     if (finalizing_) { error_out = L"The previous recording is still being saved - try again in a moment."; return false; }
@@ -759,138 +857,159 @@ bool RecordingController::Start(std::wstring &error_out) {
     HrLog::Info("Recording: encoding with " + NarrowFromWide(codec) +
                 (codec_is_hw ? " (hardware)" : " (software)"));
 
-    ffproc_ = hr_ff_create();
-    hr_ff_set_ffmpeg_path(ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
-    hr_ff_set_output_path(ffproc_, NarrowFromWide(current_output_path_).c_str());
-    hr_ff_set_codec_args(ffproc_, NarrowFromWide(codec_args).c_str());
-    // Video params tell ffmpeg's rawvideo demuxer the size of the frames
-    // that will actually arrive on the pipe - that's the CROPPED size in
-    // window-capture mode (crop_w_/crop_h_ > 0), not the monitor's native
-    // capture_w_/capture_h_, since hr_pl_set_capture_rect() below makes
-    // the pipeline crop before writing to the pipe. Getting this wrong is
-    // exactly the "garbled/green/tiled recording" failure mode the big
-    // comment in ResolveCaptureSize() warns about, just triggered from
-    // window-capture mode instead of a stale scale_factor.
-    int pipe_w = output_w_;
-    int pipe_h = output_h_;
-    hr_ff_set_video_params(ffproc_, pipe_w, pipe_h, state_.target_fps);
-    hr_ff_set_output_size(ffproc_, pipe_w, pipe_h);
-    hr_ff_set_pipe_input(ffproc_, 1);
-
-    if (hr_ff_start(ffproc_) != 0) {
-        error_out = L"Failed to start the ffmpeg process.";
-        HrLog::Error("Start failed: ffmpeg process didn't start");
-        hr_ff_destroy(ffproc_);
-        ffproc_ = nullptr;
-        return false;
-    }
-
-    // The pipeline writes captured frames straight into ffmpeg's stdin
-    // pipe, so it needs the real write-end HANDLE ffmpeg was launched
-    // with - not a placeholder. hr_ff_start() above creates that pipe
-    // internally; this is the only way to get it back out.
-    intptr_t ff_stdin = hr_ff_get_stdin_handle(ffproc_);
-    if (ff_stdin == 0) {
-        error_out = L"Failed to start the ffmpeg process.";
-        HrLog::Error("Start failed: ffmpeg stdin pipe handle unavailable");
-        hr_ff_kill(ffproc_);
-        hr_ff_destroy(ffproc_);
-        ffproc_ = nullptr;
-        return false;
-    }
-
-    // Pipeline handles the actual DXGI capture + frame conversion + piping
-    // frames into ffmpeg's stdin. pv_w/pv_h come from AppState's preview
-    // panel size (set by main_window on layout).
-    //
-    // If EnsurePreview() already has a preview-only pipeline running at
-    // the same capture size, just flip it into recording mode instead of
-    // destroying and recreating it - keeps the live preview seamless
-    // right through Start() instead of it blinking out and back.
-    // ffmpeg expects.
-    bool reused_preview_pipeline = false;
-    if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h &&
-        pipeline_output_idx_ == capture_output_idx_) {
-        hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
-        hr_pl_set_output_size(pipeline_, output_w_, output_h_);
-        // The pixel format used to be set only AFTER recording had
-        // already been switched on, so the very first frame(s) of a recording that
-        // reused the preview pipeline could go out in the previous encoder's chroma
-        // layout (NV12 vs I420). Also clear a stale "paused" flag: a recording that
-        // was stopped while paused left the kept-alive pipeline paused, and the next
-        // recording then captured nothing.
-        hr_pl_pause(pipeline_, 0);
-        hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
-        // A reused preview pipeline keeps whatever fps it was created with,
-        // but ffmpeg above was just told state_.target_fps - if they differ
-        // (e.g. Target FPS changed while the pipeline couldn't be rebuilt),
-        // frames arrive at the old rate and the recording silently comes out
-        // at that rate (the "set 30, got 15" bug). Push the current value in
-        // BEFORE recording starts so both sides agree.
-        hr_pl_set_fps(pipeline_, state_.target_fps);
-        hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
-        reused_preview_pipeline = true;
-    } else {
+    // ---- optional full-GPU path: ffmpeg's own "ddagrab" capture -------------
+    // Settings > Video > GPU acceleration. Used only when this recording needs
+    // nothing HomRec's pipeline provides (overlays, pause, window tracking,
+    // downscaling); TryStartDdagrab() verifies that ffmpeg really started
+    // capturing and otherwise cleans up after itself so the normal pipeline
+    // below takes over exactly as before.
+    ddagrab_active_ = false;
+    std::chrono::steady_clock::time_point t_video_go{};
+    if (TryStartDdagrab(codec_args, codec_is_hw, t_video_go)) {
+        ddagrab_active_ = true;
+        // A preview-only pipeline may keep running for the live preview, but it
+        // must not be attached to a recording (nothing to pipe into).
         JoinPendingInstantReplayStop();
-        if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
-        // See JoinPendingPreviewTeardown()'s comment
-        // (recording_controller.h) - without this, starting a recording
-        // shortly after preview was torn down (e.g. "Disable live preview"
-        // is on, or the user just closed "Position Overlays...") could
-        // race that async teardown's DXGI duplication release and fail
-        // here with "Failed to start the capture pipeline", looking like
-        // recording just can't start with preview off until the app is
-        // restarted.
-        JoinPendingPreviewTeardown();
-        int pvw = 0, pvh = 0;
-        ScaledPreviewSize(pvw, pvh);
-        pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
-                                 pvw, pvh, capture_output_idx_);
-        pipeline_output_idx_ = capture_output_idx_;
-        last_overlays_sent_valid_ = false;
-    }
-    // Must be set every Start() (not only on fresh pipeline creation) -
-    // a reused preview pipeline may have been left in the opposite format
-    // by a previous recording that used a different encoder.
-    if (pipeline_) hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
-    bool pipeline_started = reused_preview_pipeline;
-    if (pipeline_ && !reused_preview_pipeline) {
-        hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
-        hr_pl_set_output_size(pipeline_, output_w_, output_h_);
-        pipeline_started = hr_pl_start(pipeline_) != 0;
-    }
-    if (pipeline_) {
-        hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
-        // A manual recording always needs a real Pipeline (it's also the
-        // encoder path) regardless of the "Disable live preview" setting,
-        // but there's no reason for it to keep generating an unread
-        // thumbnail every preview_fps tick when that setting is on - see
-        // Pipeline::preview_needed's own comment (hr_pipeline.cpp).
-        hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
-    }
-    if (!pipeline_ || !pipeline_started) {
-        error_out = L"Failed to start the capture pipeline.";
-        HrLog::Error("Start failed: capture pipeline didn't start");
-        hr_ff_kill(ffproc_);
-        hr_ff_destroy(ffproc_);
-        ffproc_ = nullptr;
-        if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
-        return false;
-    }
+        if (pipeline_) {
+            hr_pl_pause(pipeline_, 0);
+            hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
+            hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+            hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+        }
+    } else {
+        ffproc_ = hr_ff_create();
+        hr_ff_set_ffmpeg_path(ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
+        hr_ff_set_output_path(ffproc_, NarrowFromWide(current_output_path_).c_str());
+        hr_ff_set_codec_args(ffproc_, NarrowFromWide(codec_args).c_str());
+        // Video params tell ffmpeg's rawvideo demuxer the size of the frames
+        // that will actually arrive on the pipe - that's the CROPPED size in
+        // window-capture mode (crop_w_/crop_h_ > 0), not the monitor's native
+        // capture_w_/capture_h_, since hr_pl_set_capture_rect() below makes
+        // the pipeline crop before writing to the pipe. Getting this wrong is
+        // exactly the "garbled/green/tiled recording" failure mode the big
+        // comment in ResolveCaptureSize() warns about, just triggered from
+        // window-capture mode instead of a stale scale_factor.
+        int pipe_w = output_w_;
+        int pipe_h = output_h_;
+        hr_ff_set_video_params(ffproc_, pipe_w, pipe_h, state_.target_fps);
+        hr_ff_set_output_size(ffproc_, pipe_w, pipe_h);
+        hr_ff_set_pipe_input(ffproc_, 1);
 
-    // Belt-and-suspenders: hr_pl_create() (fresh pipeline) already turns
-    // recording on internally, and the reuse branch above already called
-    // this too - but re-asserting here is a harmless no-op either way and
-    // guards against either path's default ever silently changing.
-    hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
-    const auto t_video_go = std::chrono::steady_clock::now();
+        if (hr_ff_start(ffproc_) != 0) {
+            error_out = L"Failed to start the ffmpeg process.";
+            HrLog::Error("Start failed: ffmpeg process didn't start");
+            hr_ff_destroy(ffproc_);
+            ffproc_ = nullptr;
+            return false;
+        }
 
-    // A manual recording is genuinely happening now (as opposed to just
-    // Instant Replay's background buffer, which also sets `recording` via
-    // hr_pl_set_recording() above but should stay at ordinary priority -
-    // see boost_priority's comment in hr_pipeline.cpp / bug #5) - this is
-    // the one place that's actually true, so bump the capture thread.
-    hr_pl_set_priority_boost(pipeline_, 1);
+        // The pipeline writes captured frames straight into ffmpeg's stdin
+        // pipe, so it needs the real write-end HANDLE ffmpeg was launched
+        // with - not a placeholder. hr_ff_start() above creates that pipe
+        // internally; this is the only way to get it back out.
+        intptr_t ff_stdin = hr_ff_get_stdin_handle(ffproc_);
+        if (ff_stdin == 0) {
+            error_out = L"Failed to start the ffmpeg process.";
+            HrLog::Error("Start failed: ffmpeg stdin pipe handle unavailable");
+            hr_ff_kill(ffproc_);
+            hr_ff_destroy(ffproc_);
+            ffproc_ = nullptr;
+            return false;
+        }
+
+        // Pipeline handles the actual DXGI capture + frame conversion + piping
+        // frames into ffmpeg's stdin. pv_w/pv_h come from AppState's preview
+        // panel size (set by main_window on layout).
+        //
+        // If EnsurePreview() already has a preview-only pipeline running at
+        // the same capture size, just flip it into recording mode instead of
+        // destroying and recreating it - keeps the live preview seamless
+        // right through Start() instead of it blinking out and back.
+        // ffmpeg expects.
+        bool reused_preview_pipeline = false;
+        if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h &&
+            pipeline_output_idx_ == capture_output_idx_) {
+            hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+            hr_pl_set_output_size(pipeline_, output_w_, output_h_);
+            // The pixel format used to be set only AFTER recording had
+            // already been switched on, so the very first frame(s) of a recording that
+            // reused the preview pipeline could go out in the previous encoder's chroma
+            // layout (NV12 vs I420). Also clear a stale "paused" flag: a recording that
+            // was stopped while paused left the kept-alive pipeline paused, and the next
+            // recording then captured nothing.
+            hr_pl_pause(pipeline_, 0);
+            hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
+            // A reused preview pipeline keeps whatever fps it was created with,
+            // but ffmpeg above was just told state_.target_fps - if they differ
+            // (e.g. Target FPS changed while the pipeline couldn't be rebuilt),
+            // frames arrive at the old rate and the recording silently comes out
+            // at that rate (the "set 30, got 15" bug). Push the current value in
+            // BEFORE recording starts so both sides agree.
+            hr_pl_set_fps(pipeline_, state_.target_fps);
+            hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
+            reused_preview_pipeline = true;
+        } else {
+            JoinPendingInstantReplayStop();
+            if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+            // See JoinPendingPreviewTeardown()'s comment
+            // (recording_controller.h) - without this, starting a recording
+            // shortly after preview was torn down (e.g. "Disable live preview"
+            // is on, or the user just closed "Position Overlays...") could
+            // race that async teardown's DXGI duplication release and fail
+            // here with "Failed to start the capture pipeline", looking like
+            // recording just can't start with preview off until the app is
+            // restarted.
+            JoinPendingPreviewTeardown();
+            int pvw = 0, pvh = 0;
+            ScaledPreviewSize(pvw, pvh);
+            pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
+                                     pvw, pvh, capture_output_idx_);
+            pipeline_output_idx_ = capture_output_idx_;
+            last_overlays_sent_valid_ = false;
+        }
+        // Must be set every Start() (not only on fresh pipeline creation) -
+        // a reused preview pipeline may have been left in the opposite format
+        // by a previous recording that used a different encoder.
+        if (pipeline_) hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
+        bool pipeline_started = reused_preview_pipeline;
+        if (pipeline_ && !reused_preview_pipeline) {
+            hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
+            hr_pl_set_output_size(pipeline_, output_w_, output_h_);
+            pipeline_started = hr_pl_start(pipeline_) != 0;
+        }
+        if (pipeline_) {
+            hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+            // A manual recording always needs a real Pipeline (it's also the
+            // encoder path) regardless of the "Disable live preview" setting,
+            // but there's no reason for it to keep generating an unread
+            // thumbnail every preview_fps tick when that setting is on - see
+            // Pipeline::preview_needed's own comment (hr_pipeline.cpp).
+            hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+        }
+        if (!pipeline_ || !pipeline_started) {
+            error_out = L"Failed to start the capture pipeline.";
+            HrLog::Error("Start failed: capture pipeline didn't start");
+            hr_ff_kill(ffproc_);
+            hr_ff_destroy(ffproc_);
+            ffproc_ = nullptr;
+            if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+            return false;
+        }
+
+        // Belt-and-suspenders: hr_pl_create() (fresh pipeline) already turns
+        // recording on internally, and the reuse branch above already called
+        // this too - but re-asserting here is a harmless no-op either way and
+        // guards against either path's default ever silently changing.
+        hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
+        t_video_go = std::chrono::steady_clock::now();
+
+        // A manual recording is genuinely happening now (as opposed to just
+        // Instant Replay's background buffer, which also sets `recording` via
+        // hr_pl_set_recording() above but should stay at ordinary priority -
+        // see boost_priority's comment in hr_pipeline.cpp / bug #5) - this is
+        // the one place that's actually true, so bump the capture thread.
+        hr_pl_set_priority_boost(pipeline_, 1);
+    }
 
     if (state_.audio_out_channels > 0) {
         hr_audio_set_max_buffer_sec(0);
@@ -974,7 +1093,13 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     hr_ff_stop_graceful(ffproc_);
 
     finalize_thread_ = std::thread([this, keep_for_preview, on_done]() {
-    if (!keep_for_preview) {
+    if (ddagrab_active_) {
+        // ffmpeg captured by itself (no pipe was ever attached to this recording),
+        // so there is no recording segment to close; the graceful "q" sent above
+        // is all it needs. Only a preview pipeline that isn't wanted any more
+        // goes away.
+        if (!keep_for_preview) hr_pl_stop(pipeline_);
+    } else if (!keep_for_preview) {
         hr_pl_stop(pipeline_);
     } else {
         // (recordings always took ~30s to "finalize" and came out
@@ -1278,6 +1403,17 @@ void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
 
 void RecordingController::TogglePause() {
     if (!state_.recording) return;
+    if (ddagrab_active_) {
+        // ffmpeg owns the capture in this mode; there is no frame clock of ours to
+        // freeze, and pausing only the audio would desynchronize the recording.
+        if (!ddagrab_pause_warned_) {
+            ddagrab_pause_warned_ = true;
+            HrLog::Warn("Pause is unavailable during a full-GPU (ddagrab) recording -- "
+                        "turn off \"Full-GPU capture via ffmpeg ddagrab\" in Settings > Video "
+                        "to be able to pause.");
+        }
+        return;
+    }
     int new_state = hr_ctl_pause_toggle(ctl_);
     state_.paused = (new_state == 2 /* HR_STATE_PAUSED */);
     if (pipeline_) hr_pl_pause(pipeline_, state_.paused ? 1 : 0);
@@ -1393,6 +1529,9 @@ void RecordingController::SyncOverlays() {
     // below (which is expensive enough per-tick to be worth skipping when
     // unchanged).
     hr_pl_set_include_cursor(pipeline_, state_.cursor_enabled ? 1 : 0);
+    // GPU colour conversion (Settings > Video): only ever takes effect for NV12
+    // output, i.e. hardware encoders - the capture loop checks that itself.
+    hr_pl_set_gpu_convert(pipeline_, state_.gpu_convert ? 1 : 0);
 
     // "#RRGGBB" -> (r,g,b); falls back to white on anything malformed
     // (missing '#', wrong length, non-hex digits) so a bad/empty value never
