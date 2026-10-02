@@ -633,6 +633,7 @@ struct Pipeline {
     // while a *manual* recording (or an Instant Replay clip actually being
     // saved) is genuinely in progress - see hr_pl_set_priority_boost().
     std::atomic<bool> boost_priority{false};
+    std::atomic<bool> light_cpu_path{false};
 
     // ====== WINDOW CAPTURE (crop rect) ======
     // src_w/src_h above MUST stay the full monitor's native resolution --
@@ -904,29 +905,8 @@ struct Pipeline {
     // -------------------------------------------------------------------------
     void writer_loop() {
 #ifdef _WIN32
-        // (game FPS drop while Instant Replay is just buffering in
-        // the background, no manual recording active): this used to set
-        // THREAD_PRIORITY_HIGHEST unconditionally here, once, on thread
-        // start - regardless of `boost_priority`. That's the exact same
-        // "system-wide-contending priority for a feature explicitly
-        // designed to sit there unnoticed" problem boost_priority's own
-        // comment on the Pipeline struct describes fixing for the CAPTURE
-        // thread (see capture_loop()'s want_boost handling below) - the
-        // fix just never made it to this thread. Instant Replay's
-        // background segment writer keeps this thread genuinely busy
-        // (continuously draining pipe_queue to disk) for as long as the
-        // feature is on, which on a gaming PC is "the whole time the game
-        // is running" - competing at Windows' highest normal-class
-        // priority against the game's own render/sim threads the entire
-        // time, even though nothing the user actually asked for is
-        // happening yet. Now this thread honors boost_priority the same
-        // way capture_loop() does: HIGHEST only while a manual recording
-        // (or an Instant Replay clip actually being saved) is genuinely in
-        // progress, ABOVE_NORMAL the rest of the time - checked once here
-        // at start, then re-checked every loop iteration below since
-        // boost_priority can flip independently of this thread's lifetime
-        // (Start()/Stop() toggle it without tearing the writer down).
-        bool writer_was_boosted = boost_priority.load(std::memory_order_relaxed);
+        bool writer_was_boosted = boost_priority.load(std::memory_order_relaxed) &&
+                                  !light_cpu_path.load(std::memory_order_relaxed);
         SetThreadPriority(GetCurrentThread(), writer_was_boosted
                                                    ? THREAD_PRIORITY_HIGHEST
                                                    : THREAD_PRIORITY_ABOVE_NORMAL);
@@ -956,7 +936,8 @@ struct Pipeline {
             // needs to be checked every iteration, not just once at
             // thread-start, exactly like capture_loop()'s own want_boost
             // check.
-            bool writer_want_boost = boost_priority.load(std::memory_order_relaxed);
+            bool writer_want_boost = boost_priority.load(std::memory_order_relaxed) &&
+                                     !light_cpu_path.load(std::memory_order_relaxed);
             if (writer_want_boost != writer_was_boosted) {
                 writer_was_boosted = writer_want_boost;
                 SetThreadPriority(GetCurrentThread(), writer_want_boost
@@ -1159,6 +1140,7 @@ struct Pipeline {
         // time it sat idle - the "idle app still eats ~10% CPU" bug.
         int64_t frame_ns = was_recording ? frame_ns_recording : frame_ns_idle;
         bool was_boosted = boost_priority.load(std::memory_order_relaxed);
+        bool thread_is_high_prio = was_boosted;   // mirrors the SetThreadPriority() just below
         yuv_pool.SetBoost(was_boosted);
 #ifdef _WIN32
         // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
@@ -1404,22 +1386,15 @@ struct Pipeline {
             }
 
 #ifdef _WIN32
-            // Checked every iteration (not just on the is_recording_now
-            // edge above) since boost_priority can now change - via
-            // hr_pl_set_priority_boost() - independently of `recording`:
-            // Instant Replay's background buffer sets `recording` true
-            // without setting boost_priority, so its capture thread runs
-            // at plain ABOVE_NORMAL (see boost_priority's own comment)
-            // until/unless a real manual recording actually starts. See
-            // the matching comment above (~line 702) for why HIGHEST, not
-            // TIME_CRITICAL - starving the UI thread is exactly the
-            // "preview freezes" report this priority scheme already had
-            // to fix once.
             bool want_boost = boost_priority.load(std::memory_order_relaxed);
+            const bool want_high_prio = want_boost && !light_cpu_path.load(std::memory_order_relaxed);
             if (want_boost != was_boosted) {
                 was_boosted = want_boost;
                 yuv_pool.SetBoost(want_boost);
-                SetThreadPriority(GetCurrentThread(), want_boost
+            }
+            if (want_high_prio != thread_is_high_prio) {
+                thread_is_high_prio = want_high_prio;
+                SetThreadPriority(GetCurrentThread(), want_high_prio
                                       ? THREAD_PRIORITY_HIGHEST
                                       : THREAD_PRIORITY_ABOVE_NORMAL);
             }
@@ -1531,6 +1506,10 @@ struct Pipeline {
 
             // Capture
 #ifdef _WIN32
+            // Tell the priority logic (this thread, next iteration, and the
+            // writer thread) whether this tick is on the cheap GPU path.
+            if (light_cpu_path.load(std::memory_order_relaxed) != gpu_tick)
+                light_cpu_path.store(gpu_tick, std::memory_order_relaxed);
             if (!g_libs.dx_capture) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
