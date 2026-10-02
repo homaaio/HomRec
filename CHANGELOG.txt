@@ -1,6 +1,68 @@
 welcome to changelog :D
 
-[Version 2.3.2] - 2026-09-28
+[Version 2.3.3] - 2026-10-01
+
+Game FPS while recording. 2.3.3 cut HomRec's CPU use, but the in-game FPS did
+not move: a GPU-bound game does not care how idle the CPU is, it cares how much
+GPU time and how many scheduler pre-emptions the recorder costs it. This
+release goes after those. (Not measurable from the source alone - please compare
+FPS before/after on your machine; see the notes at the end of this entry.)
+
+- Changed (src/hr_dxgi_capture.cpp): the D3D11 video processor used for the
+  GPU colour conversion is now created with D3D11_VIDEO_USAGE_OPTIMAL_SPEED
+  instead of PLAYBACK_NORMAL, i.e. the driver's cheapest crop/scale/convert
+  mode. This blit runs on the same GPU as the game. If a driver rejects the
+  hint the enumerator is rebuilt with the old value, so nothing can stop
+  working because of it.
+
+- Fixed (src/hr_dxgi_capture.cpp): the capture device forced its GPU scheduling
+  priority to 7 (maximum). Without admin rights Windows ignores that, but when
+  HomRec ran elevated every capture copy/blit pre-empted the game's own GPU
+  work - lower game FPS with perfectly healthy-looking CPU graphs. It is now
+  the normal priority (kCaptureGpuPriority = 0). The constant is documented in
+  the file if you ever want the old behaviour back (fewer dropped capture
+  frames on a 100%-busy GPU, at the cost of game FPS).
+
+- Changed (src/hr_pipeline.cpp): new Pipeline::light_cpu_path flag, set by
+  capture_loop() every tick. While the GPU colour-conversion path is active the
+  capture thread and the pipe writer thread run at ABOVE_NORMAL instead of
+  HIGHEST. On that path the CPU only copies a finished NV12 frame, so the boost
+  bought nothing - but a HIGHEST thread waking 30-60 times a second still
+  pre-empts a game's worker threads and migrates them between cores, which
+  costs FPS without showing up as CPU load. The CPU (BGRA) path keeps the
+  HIGHEST boost it needs. Priorities switch automatically when an overlay makes
+  the pipeline change paths.
+
+- Fixed (src/ui/recording_controller.cpp, src/ui/recording_controller.h):
+  while a recording (or Instant Replay) was running with HomRec minimized or
+  hidden in the tray, the pipeline kept downscaling a live-preview thumbnail
+  15 times a second for a window nobody could see, because
+  SetPreviewVisible() returned early whenever state_.recording was set. It now
+  only switches the thumbnail generation off/on (the pipeline itself is
+  untouched). New RecordingController::preview_window_visible_ and
+  PreviewNeededFlag() (0 when the preview is disabled in Settings OR the window
+  is hidden) replace the four copies of "state_.disable_preview ? 0 : 1";
+  restoring the window re-enables the thumbnails even when the pipeline was
+  kept alive by Instant Replay or left over from a finished recording.
+
+- Changed (src/ui/version.h): version bumped to 2.3.3.
+
+  Notes (what this release can NOT fix):
+    * DXGI Desktop Duplication itself forces Windows to composite the game's
+      frames through the DWM instead of presenting them directly (no
+      "Independent Flip"). That costs some FPS in borderless/windowed games
+      for every recorder built on Desktop Duplication, including OBS's
+      "Display Capture", and cannot be removed from inside HomRec. Only a
+      game-hook or Windows.Graphics.Capture backend avoids it.
+    * With a hardware encoder the encoder load itself is mostly off the 3D
+      engine (NVENC/VCN), but QSV shares the iGPU/memory with the CPU.
+    * If FPS is still unchanged, the log's "Capture stats" line at the end of a
+      recording (GPU NV12 frames vs full readbacks) tells whether the GPU path
+      was really used; if "GPU NV12 frames" is 0, an overlay or a software
+      encoder forced the CPU path and these changes do not apply.
+
+Capture performance: less CPU while recording, especially on mostly-static
+desktops (tutorials, talking-head + slides, coding sessions).
 
 - Added (src/hr_dxgi_capture.cpp): unchanged frames are skipped. DXGI's
   AcquireNextFrame() also returns when only the mouse pointer moved
@@ -87,6 +149,8 @@ welcome to changelog :D
 
 - Added: two settings (gpu_convert, gpu_capture_ddagrab) in the registry and
   Settings > Video; version bumped to 2.3.3 (src/ui/version.h).
+
+[Version 2.3.2] - 2026-09-28
 
 - Fixed: manual recordings kept the whole mic/system PCM track in RAM until Stop() (RAM climbing ~20MB/min). 
   Added incremental WAV streaming (wav_stream_open/append/close)
