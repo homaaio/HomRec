@@ -396,6 +396,15 @@ private:
     // pipeline's thumbnail generator back on (Disable live preview is on)
     // and the matching EndSnapshotEditing().
     bool   snapshot_forced_preview_ = false;
+
+    // Last visibility reported through SetPreviewVisible() (false = window
+    // minimized / hidden in the tray). While it is false a pipeline that has to
+    // stay alive (manual recording, Instant Replay) stops generating live
+    // preview thumbnails nobody can see - see PreviewNeededFlag().
+    bool   preview_window_visible_ = true;
+    // Value to pass to hr_pl_set_preview_needed(): 0 when the live preview is
+    // disabled in Settings OR the window can't be seen, 1 otherwise.
+    int    PreviewNeededFlag() const { return (state_.disable_preview || !preview_window_visible_) ? 0 : 1; }
     bool   instant_replay_active_  = false; // actually buffering right now (false while state_.recording is true)
     void  *replay_ff_ = nullptr;            // hr_ff_create() handle for the background segment-writer process
     std::wstring replay_dir_;               // current run's segment subfolder (see StartInstantReplayEncoder())

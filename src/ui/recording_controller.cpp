@@ -874,7 +874,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_pl_pause(pipeline_, 0);
             hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
             hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
-            hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+            hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
     } else {
         ffproc_ = hr_ff_create();
@@ -984,7 +984,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             // but there's no reason for it to keep generating an unread
             // thumbnail every preview_fps tick when that setting is on - see
             // Pipeline::preview_needed's own comment (hr_pipeline.cpp).
-            hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+            hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
         if (!pipeline_ || !pipeline_started) {
             error_out = L"Failed to start the capture pipeline.";
@@ -1811,7 +1811,7 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     hr_pl_set_output_size(pipeline_, output_w_, output_h_);
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
-    hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+    hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
 
     if (!StartInstantReplayEncoder(error_out)) return false;
     instant_replay_active_ = true;
@@ -2428,7 +2428,7 @@ void RecordingController::RefreshPreviewSettings() {
         // live preview" mid-recording needs to reach the existing
         // pipeline directly rather than only affecting the next preview-
         // only pipeline EnsurePreview() would create.
-        hr_pl_set_preview_needed(pipeline_, state_.disable_preview ? 0 : 1);
+        hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
     }
 
     // Picking a different microphone in Settings had no effect
@@ -2448,7 +2448,18 @@ void RecordingController::RefreshPreviewSettings() {
 }
 
 void RecordingController::SetPreviewVisible(bool visible) {
-    if (state_.recording) return; // recording owns the pipeline until Stop()
+    preview_window_visible_ = visible;
+    if (state_.recording) {
+        // The recording owns the pipeline until Stop(), so it can't be torn
+        // down here - but its live-preview thumbnails (a downscale + copy of
+        // every Nth frame, plus a repaint request to a window nobody can see)
+        // are pure waste while HomRec sits minimized or in the tray, which is
+        // exactly where it is while you are playing the game being recorded.
+        // Switch just that part off/on. (Snapshot editing forces it on itself.)
+        if (pipeline_ && !snapshot_forced_preview_)
+            hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
+        return;
+    }
     if (visible) {
         // Used to call EnsurePreview() directly here and nothing else.
         // If the preview had already backed off before being hidden (DXGI
@@ -2468,6 +2479,10 @@ void RecordingController::SetPreviewVisible(bool visible) {
         // this for, so it gets the same clean slate.
         ResetPreviewRetryState();
         EnsurePreview();
+        // EnsurePreview() returns early when a pipeline is already running
+        // (kept alive by Instant Replay, or left over from a recording that
+        // ended while the window was hidden) - re-enable its thumbnails.
+        if (pipeline_ && !state_.disable_preview) hr_pl_set_preview_needed(pipeline_, 1);
     } else {
         TeardownPreview();
     }
