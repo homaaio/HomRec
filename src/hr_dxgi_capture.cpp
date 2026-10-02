@@ -78,6 +78,10 @@ struct DxBox {
  * ~120 changed frames. */
 static constexpr int kFullRefreshEvery = 120;
 
+/* GPU scheduler priority of the capture D3D11 device, -7..7 (0 = normal).
+ * See hr_dx_create() for why this is no longer 7. */
+static constexpr int kCaptureGpuPriority = 0;
+
 struct DxCapCtx {
     ComPtr<ID3D11Device>           device;
     ComPtr<ID3D11DeviceContext>    context;
@@ -261,8 +265,18 @@ struct DxCapCtx {
         cd.OutputFrameRate  = {60, 1};
         cd.OutputWidth      = (UINT)nv_w;
         cd.OutputHeight     = (UINT)nv_h;
-        cd.Usage            = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
-        if (FAILED(vdev->CreateVideoProcessorEnumerator(&cd, &venum))) { gpu_release(); return false; }
+        /* OPTIMAL_SPEED asks the driver for its cheapest video-processing mode
+         * (no extra filtering/rate-conversion stages) - this blit runs on the
+         * same GPU the game is rendering on, so every microsecond of it is a
+         * microsecond the game doesn't get. PLAYBACK_NORMAL ("balanced") was
+         * what this used before. If a driver rejects the speed hint the
+         * enumerator is simply rebuilt with the old value. */
+        cd.Usage            = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
+        if (FAILED(vdev->CreateVideoProcessorEnumerator(&cd, &venum))) {
+            venum.Reset();
+            cd.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+            if (FAILED(vdev->CreateVideoProcessorEnumerator(&cd, &venum))) { gpu_release(); return false; }
+        }
 
         UINT fmt_in = 0, fmt_out = 0;
         if (FAILED(venum->CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM, &fmt_in)) ||
@@ -483,15 +497,9 @@ HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
             &ctx->device, &fl, &ctx->context);
     }
     if (FAILED(hr)) { g_last_dx_error = hr; delete ctx; return nullptr; }
-
-    // Ask the GPU scheduler to run our desktop-copy ahead of the game's own
-    // queued work (OBS does the same).  Without this, CopyResource()/Map()
-    // wait behind the game's frames, capture misses its deadline and frames
-    // are dropped exactly when the GPU is busiest.  Priorities above 0 need
-    // an elevated process; when refused this is a harmless no-op.
     {
         ComPtr<IDXGIDevice> gpu_dev;
-        if (SUCCEEDED(ctx->device.As(&gpu_dev))) gpu_dev->SetGPUThreadPriority(7);
+        if (SUCCEEDED(ctx->device.As(&gpu_dev))) gpu_dev->SetGPUThreadPriority(kCaptureGpuPriority);
     }
 
     hr = ctx->reset();
