@@ -92,7 +92,7 @@ std::wstring WindowTitleOf(HWND hwnd) {
 } // namespace
 
 bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out_rect,
-                             HWND preferred_hwnd) {
+                             HWND preferred_hwnd, bool client_only) {
     HWND found = nullptr;
 
     // 1) The exact window that was picked - immune to title changes.
@@ -149,6 +149,15 @@ bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out
         if (!GetWindowRect(found, &r)) return false;  // last-resort fallback
     }
     if (r.right <= r.left || r.bottom <= r.top) return false;  // degenerate
+
+    if (client_only) {
+        RECT cr{};
+        POINT origin{0, 0};
+        if (GetClientRect(found, &cr) && ClientToScreen(found, &origin) && cr.right > 0 && cr.bottom > 0) {
+            RECT c{origin.x, origin.y, origin.x + cr.right, origin.y + cr.bottom};
+            if (c.right > c.left && c.bottom > c.top) r = c;
+        }
+    }
 
     out_hwnd = found;
     out_rect = r;

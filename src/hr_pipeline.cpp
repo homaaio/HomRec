@@ -32,6 +32,7 @@
 #include <functional>
 #include "hr_log.h"
 #include "hr_overlay_render.h"
+#include "hr_wgc_capture.h"   // 2.4: Windows.Graphics.Capture window source
 
 static constexpr int HR_DX_OK      =  0;
 static constexpr int HR_DX_TIMEOUT =  1;
@@ -90,15 +91,31 @@ extern "C" {
     int64_t hr_sw_elapsed_ns(void *handle);
 }
 
+// 2.4 - the DXGI duplication source and the Windows.Graphics.Capture window source share one
+// create / capture / size / reset / destroy shape. These wrappers pick the right one from the
+// handle itself, so every existing g_libs.dx_* call site in this file keeps working untouched.
+static void PlDxDestroy(void *h) { if (HrWgcIsHandle(h)) HrWgcDestroy(h); else hr_dx_destroy(h); }
+static int  PlDxCapture(void *h, uint8_t *buf, int timeout_ms) {
+    return HrWgcIsHandle(h) ? HrWgcCapture(h, buf, timeout_ms) : hr_dx_capture(h, buf, timeout_ms);
+}
+static int  PlDxGetSize(void *h, int *w, int *hh) {
+    return HrWgcIsHandle(h) ? HrWgcGetSize(h, w, hh) : hr_dx_get_size(h, w, hh);
+}
+static int  PlDxReset(void *h) { return HrWgcIsHandle(h) ? HrWgcReset(h) : hr_dx_reset(h); }
+static void PlDxSetOutputSize(void *h, int w, int hh) {
+    if (HrWgcIsHandle(h)) return;     // the window canvas has a fixed size
+    hr_dx_set_output_size(h, w, hh);
+}
+
 struct LibHandles {
     bool loaded = false;
 
     void *(*dx_create)(int, int)                       = &hr_dx_create;
-    void  (*dx_destroy)(void*)                          = &hr_dx_destroy;
-    int   (*dx_capture)(void*, uint8_t*, int)           = &hr_dx_capture;
-    int   (*dx_get_size)(void*, int*, int*)             = &hr_dx_get_size;
-    int   (*dx_reset)(void*)                            = &hr_dx_reset;
-    void  (*dx_set_output_size)(void*, int, int)        = &hr_dx_set_output_size;
+    void  (*dx_destroy)(void*)                          = &PlDxDestroy;
+    int   (*dx_capture)(void*, uint8_t*, int)           = &PlDxCapture;
+    int   (*dx_get_size)(void*, int*, int*)             = &PlDxGetSize;
+    int   (*dx_reset)(void*)                            = &PlDxReset;
+    void  (*dx_set_output_size)(void*, int, int)        = &PlDxSetOutputSize;
     unsigned long (*dx_last_error)(void)                = &hr_dx_last_error;
     void  (*bgra_to_yuv)(const uint8_t*, uint8_t*, int, int) = &hr_bgra_to_yuv420p;
     void *(*sw_create)()                                = &hr_sw_create;
@@ -690,6 +707,9 @@ struct Pipeline {
 
     void* dx_ctx = nullptr;
     void* sw_ctx = nullptr;
+    // 2.4: dx_ctx is a Windows.Graphics.Capture window source (hr_wgc_capture.cpp), not a DXGI
+    // duplication. It has no GPU-NV12 path, no dirty rectangles and draws the cursor itself.
+    bool  wgc_mode = false;
 
     Yuv420pWorkerPool yuv_pool;
 
@@ -1478,7 +1498,7 @@ struct Pipeline {
             bool gpu_tick = false;
             int  gpu_enc_w = 0, gpu_enc_h = 0;
 #ifdef _WIN32
-            if (!gpu_failed && gpu_convert.load(std::memory_order_relaxed) &&
+            if (!gpu_failed && !wgc_mode && gpu_convert.load(std::memory_order_relaxed) &&
                 recording.load(std::memory_order_acquire) && yuv_pool.IsNv12() &&
                 !overlays_active && g_libs.dx_get_size) {
                 int real_w = 0, real_h = 0;
@@ -1562,7 +1582,8 @@ struct Pipeline {
                 // bgra_buf from the last real frame.
             } else if (ret == HR_DX_LOST) {
                 if (!logged_lost_) {
-                    HrLog::Warn("DXGI capture lost (display mode change, UAC prompt, or GPU reset) -- resetting");
+                    HrLog::Warn(wgc_mode ? "Window capture lost (GPU reset) -- resetting"
+                                         : "DXGI capture lost (display mode change, UAC prompt, or GPU reset) -- resetting");
                     logged_lost_ = true;
                 }
 #ifdef _WIN32
@@ -1862,7 +1883,7 @@ struct Pipeline {
                         // previous delivery, and last_yuv is the conversion of that
                         // previous picture -> keep it and re-convert only those rows.
                         int dy0 = 0, dy1 = 0;
-                        const bool partial = direct && ret == HR_DX_OK && !overlays_on &&
+                        const bool partial = !wgc_mode && direct && ret == HR_DX_OK && !overlays_on &&
                                              last_yuv_valid && last_yuv_direct &&
                                              last_yuv_w == enc_w && last_yuv_h == enc_h &&
                                              hr_dx_get_dirty_rows(dx_ctx, &dy0, &dy1);
@@ -1971,7 +1992,7 @@ struct Pipeline {
         // One line of capture-efficiency numbers per pipeline lifetime, so it is
         // visible in the log how much work the "skip unchanged"/dirty-rect/GPU
         // paths actually saved (only when something was captured at all).
-        if (dx_ctx) {
+        if (dx_ctx && !wgc_mode) {
             unsigned long long acq = 0, skp = 0, prt = 0, ful = 0, gpf = 0;
             hr_dx_get_stats(dx_ctx, &acq, &skp, &prt, &ful, &gpf);
             if (acq > 0 || gpf > 0) {
@@ -2069,6 +2090,47 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
         g_libs.dx_destroy(pl->dx_ctx); delete pl; return nullptr;
     }
 
+    return pl;
+#endif
+}
+
+/*  hr_pl_create_window  (2.4)
+    Same as hr_pl_create(), but the picture comes from ONE WINDOW (Windows.Graphics.Capture) instead
+    of a monitor duplication: the whole window is recorded even when other windows cover it. w x h is
+    the canvas the window is fitted into (its size when recording starts - see hr_wgc_capture.h).
+    Returns nullptr when the window can't be captured that way; the caller then falls back to
+    hr_pl_create() + hr_pl_set_capture_rect() (the pre-2.4 screen crop). */
+HR_EXPORT void* hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h,
+                                    void* hwnd, int client_only, int draw_cursor) {
+#ifndef _WIN32
+    (void)w; (void)h; (void)fps; (void)pipe_fd; (void)pv_w; (void)pv_h; (void)hwnd; (void)client_only; (void)draw_cursor;
+    return nullptr;
+#else
+    if (!ensure_libs() || !hwnd) return nullptr;
+    void* src = HrWgcCreate(static_cast<HWND>(hwnd), w, h, client_only != 0, draw_cursor != 0);
+    if (!src) return nullptr;
+
+    auto* pl = new Pipeline();
+    pl->src_w       = w & ~1;
+    pl->src_h       = h & ~1;
+    pl->eff_w       = pl->src_w;
+    pl->eff_h       = pl->src_h;
+    pl->fps         = fps;
+    pl->pv_w        = pv_w;
+    pl->pv_h        = pv_h;
+    pl->pipe_handle.store(pipe_fd, std::memory_order_release);
+    pl->recording.store(pipe_fd != 0 && pipe_fd != -1, std::memory_order_release);
+    pl->dx_ctx   = src;
+    pl->wgc_mode = true;
+    pl->cap_origin_x = pl->cap_origin_y = 0;
+
+    pl->sw_ctx = g_libs.sw_create();
+    if (!pl->sw_ctx) {
+        HrLog::Error("Pipeline create failed: sw_create() (frame pacing/stopwatch) returned null");
+        HrWgcDestroy(src);
+        delete pl;
+        return nullptr;
+    }
     return pl;
 #endif
 }
@@ -2389,7 +2451,14 @@ HR_EXPORT void hr_pl_pause(void* handle, int flag) {
 HR_EXPORT void hr_pl_set_include_cursor(void* handle, int flag) {
     if (!handle) return;
 #ifdef _WIN32
-    static_cast<Pipeline*>(handle)->include_cursor.store(flag != 0, std::memory_order_relaxed);
+    auto *pl = static_cast<Pipeline*>(handle);
+    if (pl->wgc_mode) {
+        // Windows.Graphics.Capture draws the cursor into the window's own picture (and only
+        // when it is over that window); the pipeline's desktop-coordinate compositor stays off.
+        HrWgcSetCursor(pl->dx_ctx, flag != 0);
+        return;
+    }
+    pl->include_cursor.store(flag != 0, std::memory_order_relaxed);
 #endif
 }
 

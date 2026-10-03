@@ -1,7 +1,9 @@
 #include "recording_controller.h"
 #include "window_picker_dialog.h"  // HR_ResolveCaptureWindow()
+#include "../hr_wgc_capture.h"      // 2.4: HrWgcSupported()/HrWgcProbeWindow()
 #include "../hr_log.h"
 #include "../hr_overlay_render.h"
+#include "../hr_str_convert.h"   // HrVideoFormatExt() (2.4 container choice)
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
                       // QueryFullProcessImageNameA (kernel32) - ResolveCaptureAppName()'s {app} lookup
 #include <shellapi.h> // ShellExecuteW - RunPostRecordHook()'s "open_folder" mode
@@ -30,12 +32,17 @@ extern "C" {
                      double real_elapsed_sec, double av_start_skew_sec);
     int hr_export_mp3(const wchar_t *ffpath, const wchar_t *wav_path, const wchar_t *mp3_path);
     int hr_concat_segments(const wchar_t *ffpath, const wchar_t *list_path, const wchar_t *out_path);
+    // 2.4
+    int hr_remux_copy(const wchar_t *ffpath, const wchar_t *in_path, const wchar_t *out_path);
+    int hr_decode_audio_to_wav(const wchar_t *ffpath, const wchar_t *in_path, const wchar_t *wav_path);
 
     // hr_ui_utils.cpp (narrow-string API - see README audit note: the core
     // is split between wide- and narrow-string exports depending on which
     // file it landed in; this class just calls each the way it expects).
     void hr_filename_from_template(const char *tmpl, const char *folder, const char *app_name, char *out, int out_len,
                                     const char *preset_name);
+    void hr_filename_from_template_ex(const char *tmpl, const char *folder, const char *app_name, char *out, int out_len,
+                                       const char *preset_name, const char *ext);
     int hr_make_output_dir(const char *path);
     int hr_path_exists(const char *path);
     float hr_file_size_mb(const char *path);
@@ -72,6 +79,9 @@ extern "C" {
 
     // hr_pipeline.cpp
     void *hr_pl_create(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h, int output_idx);
+    // 2.4: one window via Windows.Graphics.Capture (nullptr if it can't be captured that way)
+    void *hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h,
+                              void *hwnd, int client_only, int draw_cursor);
     void hr_pl_destroy(void *handle);
     int hr_pl_start(void *handle);
     void hr_pl_stop(void *handle);
@@ -134,6 +144,16 @@ extern "C" {
     void hr_audio_flush_buffered();
     int hr_audio_capture_to_wav(const char *mic_wav_path, const char *sys_wav_path);
     int hr_audio_mix_wav(const char *mic_path, const char *sys_path, const char *out_path);
+    // 2.4 - extra Audio Mixer channels (another mic / browser / window / audio file)
+    int  hr_audio_mix_wav_list(const char *inputs, const char *out_path);
+    int  hr_audio_extra_add(int kind, const wchar_t *target, unsigned long pid, float vol, int mute);
+    void hr_audio_extra_remove(int id);
+    void hr_audio_extra_set_volume(int id, float vol, int mute);
+    int  hr_audio_extra_level(int id);
+    int  hr_audio_extra_status(int id);
+    void hr_audio_extra_begin(const char *stem);
+    int  hr_audio_extra_collect(char *out, int cap);
+    void hr_audio_extra_shutdown();
 }
 
 #include <cstdio> // remove()/rename() for temp WAV cleanup in Stop()
@@ -224,6 +244,7 @@ RecordingController::~RecordingController() {
     if (ctl_) hr_ctl_destroy(ctl_);
     if (ffproc_) hr_ff_destroy(ffproc_);
     if (pipeline_) hr_pl_destroy(pipeline_);
+    hr_audio_extra_shutdown();   // 2.4: extra mixer channels (their threads must stop before the streams go)
     hr_audio_stop(nullptr, nullptr);
 }
 
@@ -300,7 +321,8 @@ std::string RecordingController::ResolveCaptureAppName() const {
 
     HWND hwnd = nullptr;
     RECT r{};
-    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd) || !hwnd) {
+    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd,
+                                 state_.window_capture_area == "client") || !hwnd) {
         return "Desktop"; // window's gone (closed, title changed) - fall back rather than emit "{app}" literally
     }
 
@@ -342,15 +364,28 @@ std::wstring RecordingController::BuildOutputPath() {
     // got silently cut off, taking the ".mp4" extension with it.
     char buf[1024] = {};
     std::string app_name = ResolveCaptureAppName();
-    hr_filename_from_template(state_.filename_template.c_str(), state_.output_folder.c_str(),
-                               app_name.c_str(), buf, (int)sizeof(buf), state_.active_preset_name.c_str());
+    // 2.4: the container comes from Settings > Video > Container (mp4 / mkv /
+    // both). "both" records to .mkv and remuxes an .mp4 copy at the end.
+    hr_filename_from_template_ex(state_.filename_template.c_str(), state_.output_folder.c_str(),
+                                  app_name.c_str(), buf, (int)sizeof(buf), state_.active_preset_name.c_str(),
+                                  HrVideoFormatExt(state_.video_format));
     std::wstring path = WideFromNarrow(buf);
 
     // Ffmpeg is always run with -y, so a template that isn't
     // unique per recording (e.g. "{app}_{date}", or two clips in the same
     // minute with "{hh}-{min}") silently overwrote the earlier file.
     // Append _2, _3, ... instead.
-    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    // 2.4: in "both" mode the .mp4 copy that will be written next to the .mkv
+    // must not clobber an older one either.
+    const bool both_fmt = state_.video_format == VideoFormat::Both;
+    auto taken = [both_fmt](const std::wstring &p) {
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
+        if (!both_fmt) return false;
+        const size_t d = p.find_last_of(L'.');
+        if (d == std::wstring::npos) return false;
+        return GetFileAttributesW((p.substr(0, d) + L".mp4").c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+    if (taken(path)) {
         const size_t dot = path.find_last_of(L'.');
         const size_t sep = path.find_last_of(L"\\/");
         const bool has_ext = dot != std::wstring::npos && (sep == std::wstring::npos || dot > sep);
@@ -358,7 +393,7 @@ std::wstring RecordingController::BuildOutputPath() {
         const std::wstring ext = has_ext ? path.substr(dot) : std::wstring();
         for (int n = 2; n < 10000; ++n) {
             std::wstring cand = stem + L"_" + std::to_wstring(n) + ext;
-            if (GetFileAttributesW(cand.c_str()) == INVALID_FILE_ATTRIBUTES) { path = cand; break; }
+            if (!taken(cand)) { path = cand; break; }
         }
     }
     return path;
@@ -407,7 +442,8 @@ bool RecordingController::CheckCaptureTarget(std::wstring &error_out) const {
     if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
         HWND hwnd = nullptr;
         RECT r{};
-        if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd)) {
+        if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd,
+                                 state_.window_capture_area == "client")) {
             error_out = L"The window you selected (\"" + WideFromNarrow(state_.capture_window_title) +
                         L"\") is closed, hidden or minimized, so it can't be recorded.\n\n"
                         L"Restore it, or choose File > Select Window... again "
@@ -464,13 +500,42 @@ void RecordingController::ResolveCaptureSize() {
     HWND capture_hwnd = nullptr;
     if (is_window) {
         have_target = HR_ResolveCaptureWindow(state_.capture_window_title, capture_hwnd, target_rect,
-                                              state_.capture_window_hwnd);
+                                              state_.capture_window_hwnd, state_.window_capture_area == "client");
     } else if (is_region) {
         target_rect.left = state_.region_x;
         target_rect.top = state_.region_y;
         target_rect.right = state_.region_x + state_.region_w;
         target_rect.bottom = state_.region_y + state_.region_h;
         have_target = true;
+    }
+
+    // ====== 2.4: PROPER WINDOW CAPTURE ======
+    // Record the window ITSELF (Windows.Graphics.Capture) rather than the part of a monitor it
+    // happens to cover: other windows on top of it don't show up, it can be partly off-screen or
+    // on another monitor, and it is always captured whole. The pre-2.4 screen crop is still used
+    // for Region mode, when "Window capture" is set to "Screen crop", and as the fallback when
+    // Windows refuses to hand out a capture item for this particular window.
+    use_wgc_ = false;
+    wgc_hwnd_ = nullptr;
+    if (is_window && have_target && capture_hwnd && state_.window_capture_method != "crop") {
+        int ww = 0, wh = 0;
+        if (HrWgcSupported() && HrWgcProbeWindow(capture_hwnd) &&
+            HrWgcQueryWindowSize(capture_hwnd, state_.window_capture_area == "client", &ww, &wh) &&
+            ww >= 16 && wh >= 16) {
+            hr_di_destroy(di);
+            use_wgc_ = true;
+            wgc_hwnd_ = capture_hwnd;
+            capture_output_idx_ = 0;
+            capture_w_ = std::min(ww, 16384) & ~1;
+            capture_h_ = std::min(wh, 16384) & ~1;
+            crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
+            ComputeOutputDims(capture_w_, capture_h_, output_w_, output_h_);
+            HrLog::Info("Capture target (window): recording the window itself (Windows.Graphics.Capture) at " +
+                        std::to_string(capture_w_) + "x" + std::to_string(capture_h_) + ", output " +
+                        std::to_string(output_w_) + "x" + std::to_string(output_h_));
+            return;
+        }
+        HrLog::Info("Window capture: Windows.Graphics.Capture isn't usable for this window - using the screen crop.");
     }
 
     if (have_target) {
@@ -615,18 +680,42 @@ void RecordingController::ResolveCaptureSize() {
     }
 }
 
+// Creates the capture pipeline for whatever ResolveCaptureSize() decided: the window source
+// (Windows.Graphics.Capture) or the monitor duplication. Records which one it made so a later
+// Start() only reuses a pipeline that matches the CURRENT target.
+void *RecordingController::CreatePipelineForTarget(intptr_t pipe_fd, int pvw, int pvh) {
+    void *pl = nullptr;
+    if (use_wgc_ && wgc_hwnd_) {
+        pl = hr_pl_create_window(capture_w_, capture_h_, state_.target_fps, pipe_fd, pvw, pvh,
+                                 wgc_hwnd_, state_.window_capture_area == "client" ? 1 : 0,
+                                 state_.cursor_enabled ? 1 : 0);
+        if (!pl) {
+            HrLog::Error("Window capture: couldn't start Windows.Graphics.Capture for this window. Set Settings > "
+                         "General > Window capture > \"Screen crop\" to use the older method.");
+        }
+    } else {
+        pl = hr_pl_create(capture_w_, capture_h_, state_.target_fps, pipe_fd, pvw, pvh, capture_output_idx_);
+    }
+    pipeline_wgc_ = (pl != nullptr) && use_wgc_;
+    pipeline_wgc_hwnd_ = pipeline_wgc_ ? wgc_hwnd_ : nullptr;
+    return pl;
+}
+
 void RecordingController::RetargetWindowCapture() {
     if (!pipeline_) return;
     // Region's whole point is a fixed area of the screen - it must NOT
     // track anything, so this only ever applies to Window mode.
     if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) return;
+    // 2.4: the WGC source follows the window by itself (it IS the window) - nothing to retarget.
+    if (use_wgc_) return;
     // OPTIMIZATION (2.3): while the tracked window is gone, every ~20 Hz overlay
     // tick used to run a full EnumWindows()+title scan. Retry twice a second.
     if (window_track_lost_warned_ && std::chrono::steady_clock::now() < next_window_retarget_) return;
 
     HWND hwnd = nullptr;
     RECT r{};
-    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd)) {
+    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd,
+                                 state_.window_capture_area == "client")) {
         if (!window_track_lost_warned_) {
             window_track_lost_warned_ = true;
             HrLog::Warn("Window capture: '" + state_.capture_window_title +
@@ -928,7 +1017,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         // ffmpeg expects.
         bool reused_preview_pipeline = false;
         if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h &&
-            pipeline_output_idx_ == capture_output_idx_) {
+            pipeline_output_idx_ == capture_output_idx_ && PipelineMatchesTarget()) {
             hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
             hr_pl_set_output_size(pipeline_, output_w_, output_h_);
             // The pixel format used to be set only AFTER recording had
@@ -962,8 +1051,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             JoinPendingPreviewTeardown();
             int pvw = 0, pvh = 0;
             ScaledPreviewSize(pvw, pvh);
-            pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, ff_stdin,
-                                     pvw, pvh, capture_output_idx_);
+            pipeline_ = CreatePipelineForTarget(ff_stdin, pvw, pvh);
             pipeline_output_idx_ = capture_output_idx_;
             last_overlays_sent_valid_ = false;
         }
@@ -1028,6 +1116,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         std::string sys_wav_path = audio_stem + "_sys.wav";
         hr_audio_reset_buffers(mic_wav_path.c_str(), sys_wav_path.c_str());
         hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
+        hr_audio_extra_begin(audio_stem.c_str());   // 2.4: extra mixer channels start collecting too
         const auto t_audio_go = std::chrono::steady_clock::now();
         av_start_skew_sec_ = std::chrono::duration<double>(t_audio_go - t_video_go).count();
         HrLog::Info("Recording: measured video/audio start skew = " +
@@ -1237,6 +1326,35 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         have_audio_file = true;
     }
 
+    // 2.4 - extra Audio Mixer channels (another mic, a browser / window, audio files):
+    // finish their WAVs and fold them into the audio track with the streaming mixer.
+    if (state_.audio_out_channels > 0) {
+        std::vector<char> xbuf(32768, '\0');
+        const int xn = hr_audio_extra_collect(xbuf.data(), (int)xbuf.size());
+        if (xn > 0) {
+            const std::string extras(xbuf.data());
+            std::string inputs = have_audio_file ? (audio_wav + "|" + extras) : extras;
+            const std::string mixed = stem + "_audiomix.wav";
+            if (hr_audio_mix_wav_list(inputs.c_str(), mixed.c_str()) == 0) {
+                if (have_audio_file) RemoveFileUtf8(audio_wav);
+                RenameFileUtf8(mixed, audio_wav);
+                have_audio_file = true;
+            } else {
+                HrLog::Warn("Recording: couldn't mix the extra audio sources into the recording.");
+                RemoveFileUtf8(mixed);
+            }
+            // The per-channel temp files are no longer needed either way.
+            size_t from = 0;
+            while (from <= extras.size()) {
+                size_t bar = extras.find('|', from);
+                std::string one = extras.substr(from, bar == std::string::npos ? std::string::npos : bar - from);
+                if (!one.empty()) RemoveFileUtf8(one);
+                if (bar == std::string::npos) break;
+                from = bar + 1;
+            }
+        }
+    }
+
     // This used to fire-and-forget hr_merge_av() and never look at
     // its result, and on a *successful* native merge deliberately left the
     // leftover audio_wav file sitting right next to the finished video
@@ -1289,6 +1407,18 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
             }
         } else {
             RemoveFileUtf8(audio_wav);
+        }
+    }
+
+    // 2.4 - Container "mp4 + mkv": the recording itself was written as .mkv;
+    // stream-copy an .mp4 next to it now that audio is merged (no re-encode).
+    if (state_.video_format == VideoFormat::Both && ffmpeg_found_ && hr_path_exists(base.c_str())) {
+        const std::string mp4_path = stem + ".mp4";
+        if (hr_remux_copy(ffmpeg_path_.c_str(), WideFromNarrow(base).c_str(),
+                           WideFromNarrow(mp4_path).c_str())) {
+            HrLog::Info("Recording: also saved an .mp4 copy -> " + mp4_path);
+        } else {
+            HrLog::Warn("Recording: couldn't create the .mp4 copy - the .mkv is intact.");
         }
     }
 
@@ -1781,14 +1911,13 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
     ResolveCaptureSize();
 
     if (!pipeline_ || capture_w_ != prev_w || capture_h_ != prev_h ||
-        pipeline_output_idx_ != capture_output_idx_) {
+        pipeline_output_idx_ != capture_output_idx_ || !PipelineMatchesTarget()) {
         JoinPendingInstantReplayStop();
         if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
         JoinPendingPreviewTeardown();
         int pvw = 0, pvh = 0;
         ScaledPreviewSize(pvw, pvh);
-        pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
-                                 pvw, pvh, capture_output_idx_);
+        pipeline_ = CreatePipelineForTarget(/*pipe_fd=*/0, pvw, pvh);
         pipeline_output_idx_ = capture_output_idx_;
         last_overlays_sent_valid_ = false;
         if (pipeline_) {
@@ -1984,6 +2113,15 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
         }
     }
 
+    if (ok && state_.video_format == VideoFormat::Both) {
+        const size_t rd = current_output_path_.find_last_of(L'.');
+        if (rd != std::wstring::npos) {
+            const std::wstring mp4_copy = current_output_path_.substr(0, rd) + L".mp4";
+            if (!hr_remux_copy(ffmpeg_path_.c_str(), current_output_path_.c_str(), mp4_copy.c_str()))
+                HrLog::Warn("Instant Replay: couldn't create the .mp4 copy - the .mkv is intact.");
+        }
+    }
+
     instant_replay_active_ = restarted;
     if (!restarted) {
         HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering after Save Replay - " + restart_err));
@@ -2059,8 +2197,7 @@ void RecordingController::EnsurePreview() {
     // hr_pl_set_recording() instead of replacing it, when the size matches.
     int pvw = 0, pvh = 0;
     ScaledPreviewSize(pvw, pvh);
-    pipeline_ = hr_pl_create(capture_w_, capture_h_, state_.target_fps, /*pipe_fd=*/0,
-                             pvw, pvh, capture_output_idx_);
+    pipeline_ = CreatePipelineForTarget(/*pipe_fd=*/0, pvw, pvh);
     pipeline_output_idx_ = capture_output_idx_;
     last_overlays_sent_valid_ = false;
     if (pipeline_ && !hr_pl_start(pipeline_)) {
