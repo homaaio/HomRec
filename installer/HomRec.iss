@@ -122,6 +122,9 @@ Source: "SUPPORT.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesnte
 Source: "commands.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "icons\files_icons\hrc.ico"; DestDir: "{app}\icons\files_icons"; Flags: ignoreversion skipifsourcedoesntexist
+; 2.4: overlay-type and Audio Mixer icons (optional PNGs - the UI draws a glyph when they are missing)
+Source: "icons\overlays\*.png"; DestDir: "{app}\icons\overlays"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "icons\audio\*.png"; DestDir: "{app}\icons\audio"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "icons\files_icons\hrp.ico"; DestDir: "{app}\icons\files_icons"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
