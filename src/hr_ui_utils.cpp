@@ -777,16 +777,25 @@ static bool _is_safe_strftime_fmt(const std::string &fmt) {
     return true;
 }
 
-HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
-                                         const char *app_name, char *out, int out_len,
-                                         const char *preset_name) {
+HR_EXPORT void hr_filename_from_template_ex(const char *tmpl, const char *folder,
+                                            const char *app_name, char *out, int out_len,
+                                            const char *preset_name, const char *ext) {
     if (!out || out_len < 8) return;
     out[0] = '\0';
+    // 2.4: the container extension is now chosen by the caller (Settings > Video >
+    // Container: mp4 / mkv / both). Only a plain alphanumeric extension is accepted.
+    std::string ext_s = "mp4";
+    if (ext && ext[0]) {
+        std::string e = ext;
+        bool okx = e.size() <= 5;
+        for (char c : e) if (!isalnum((unsigned char)c)) okx = false;
+        if (okx) ext_s = e;
+    }
 
     /* Get current time */
     time_t now = time(nullptr);
     struct tm *lt = localtime(&now);
-    if (!lt) { snprintf(out, (size_t)out_len, "%s/HomRec.mp4", folder ? folder : "."); return; }
+    if (!lt) { snprintf(out, (size_t)out_len, "%s/HomRec.%s", folder ? folder : ".", ext_s.c_str()); return; }
 
     char date_str[16], time_str[16], hh_str[8], min_str[8], sec_str[8];
     strftime(date_str, sizeof(date_str), "%Y%m%d", lt);
@@ -846,8 +855,15 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
         result = _str(folder);
         if (result.back() != '/' && result.back() != '\\') result += '/';
     }
-    result += expanded + ".mp4";
+    result += expanded + "." + ext_s;
     snprintf(out, (size_t)out_len, "%s", result.c_str());
+}
+
+/* Pre-2.4 entry point (always ".mp4") - kept so existing callers/plugins still link. */
+HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
+                                         const char *app_name, char *out, int out_len,
+                                         const char *preset_name) {
+    hr_filename_from_template_ex(tmpl, folder, app_name, out, out_len, preset_name, "mp4");
 }
 
 /* -------------------------------------------------------------------------

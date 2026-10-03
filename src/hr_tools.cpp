@@ -501,6 +501,59 @@ HR_EXPORT int hr_export_mp3(const wchar_t* ffpath, const wchar_t* wav_path, cons
     return fexists(mp3_path) ? 1 : 0;
 }
 
+// -------------------------------------------------------------
+// hr_remux_copy  (2.4)
+// Stream-copies every stream of in_path into out_path (no re-encode, so it
+// costs almost nothing). Used for Settings > Video > Container "mp4 + mkv":
+// the recording is written to .mkv (survives a crash / power loss) and an
+// .mp4 copy is produced from it once the recording is finalized.
+// -------------------------------------------------------------
+HR_EXPORT int hr_remux_copy(const wchar_t* ffpath, const wchar_t* in_path, const wchar_t* out_path)
+{
+    if (!ffpath || !in_path || !out_path) return 0;
+
+    std::wstring out(out_path);
+    // Write to a temp name first so a half-written .mp4 is never left behind.
+    std::wstring tmp = out;
+    size_t dot = tmp.rfind(L'.');
+    tmp = (dot == std::wstring::npos) ? tmp + L"_rmxtmp.mp4" : tmp.substr(0, dot) + L"_rmxtmp" + tmp.substr(dot);
+
+    std::wstring cmd =
+        L"\"" + std::wstring(ffpath) + L"\""
+        L" -i \"" + std::wstring(in_path) + L"\""
+        L" -map 0 -c copy -movflags +faststart -y"
+        L" \"" + tmp + L"\"";
+
+    RunResult rr;
+    run_cmd_ex(cmd, 10 * 60 * 1000, &rr);
+    if (!rr.ok() || !fexists(tmp)) { DeleteFileW(tmp.c_str()); return 0; }
+    if (!MoveFileExW(tmp.c_str(), out_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+        DeleteFileW(tmp.c_str());
+        return 0;
+    }
+    return fexists(out) ? 1 : 0;
+}
+
+// -------------------------------------------------------------
+// hr_decode_audio_to_wav  (2.4)
+// Decodes any audio (or video) file ffmpeg understands into a 16-bit stereo
+// 44.1 kHz WAV - the format the Audio Mixer's "Audio file" source is mixed
+// in as. Returns 1 on success.
+// -------------------------------------------------------------
+HR_EXPORT int hr_decode_audio_to_wav(const wchar_t* ffpath, const wchar_t* in_path, const wchar_t* wav_path)
+{
+    if (!ffpath || !in_path || !wav_path) return 0;
+    std::wstring cmd =
+        L"\"" + std::wstring(ffpath) + L"\""
+        L" -i \"" + std::wstring(in_path) + L"\""
+        L" -vn -ac 2 -ar 44100 -c:a pcm_s16le -y"
+        L" \"" + std::wstring(wav_path) + L"\"";
+    RunResult rr;
+    run_cmd_ex(cmd, 5 * 60 * 1000, &rr);
+    if (!rr.ok()) { DeleteFileW(wav_path); return 0; }
+    return fexists(wav_path) ? 1 : 0;
+}
+
 HR_EXPORT int hr_concat_segments(const wchar_t* ffpath, const wchar_t* list_path, const wchar_t* out_path)
 {
     if (!ffpath || !list_path || !out_path) return 0;
