@@ -19,6 +19,8 @@
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
+#include <wx/display.h>
+#include <wx/wrapsizer.h>
 #include <thread> 
 #include <atomic>
 #include <sstream>
@@ -875,12 +877,14 @@ HomRecMainFrame::HomRecMainFrame()
 
     auto *root = new wxPanel(this);
     auto *rootSizer = new wxBoxSizer(wxVERTICAL);
-    auto *contentSizer = new wxBoxSizer(wxHORIZONTAL);
 
-    BuildLeftPanel(root, contentSizer);
-    BuildPreviewPanel(root, contentSizer);
+    // 2.4: the Controls, Preview, Audio Mixer and Overlays blocks are wxAUI panes inside
+    // dock_host_ instead of cells of a fixed sizer (SetupDocking() below places them).
+    dock_host_ = new wxPanel(root);
+    BuildLeftPanel(dock_host_, nullptr);
+    BuildPreviewPanel(dock_host_, nullptr);
 
-    rootSizer->Add(contentSizer, 1, wxEXPAND | wxALL, kOuterPad);
+    rootSizer->Add(dock_host_, 1, wxEXPAND | wxALL, kOuterPad);
     BuildBottomBar(root, rootSizer);
     root->SetSizer(rootSizer);
 
@@ -889,6 +893,7 @@ HomRecMainFrame::HomRecMainFrame()
     SetSizer(frameSizer);
 
     ApplyThemeColours();
+    SetupDocking();
     ApplyLanguageText();
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
     HrLog::Info("HomRec " HR_APP_VERSION " started");
@@ -946,6 +951,9 @@ HomRecMainFrame::HomRecMainFrame()
     RestartLevelMeterTimer();
 
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_SELECT_REGION);
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_VIEW_LOCK_UI, ID_VIEW_DOCK_LAST);
+    // wxAuiManagerEvents are not command events: they do not bubble up to the frame, so bind on the manager.
+    aui_.Bind(wxEVT_AUI_PANE_CLOSE, &HomRecMainFrame::OnAuiPaneClose, this);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
     Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
@@ -962,6 +970,8 @@ HomRecMainFrame::HomRecMainFrame()
 }
 
 HomRecMainFrame::~HomRecMainFrame() {
+    dock_ready_ = false;   // nothing may touch the (about to be uninitialised) AUI manager after this
+    aui_.UnInit();   // 2.4: must happen before dock_host_ and the panes are destroyed
     if (preview_panel_) preview_panel_->FlushOverlaySave(); // children + state_ still alive here
     if (state_.recording && rec_) rec_->Stop();
     // MUST run on every exit path, not just a clean menu-driven Exit -
@@ -987,6 +997,7 @@ HomRecMainFrame::~HomRecMainFrame() {
 }
 
 void HomRecMainFrame::PersistSettings() {
+    SaveDockLayoutToState();   // 2.4: panel positions travel with every settings write
     std::wstring target = HrcConfig::ResolveSettingsPath(state_);
     HrcConfig::Save(state_, target);
     if (target != HrcConfig::kDefaultSettingsPath) HrcConfig::Save(state_, HrcConfig::kDefaultSettingsPath);
@@ -1036,6 +1047,24 @@ void HomRecMainFrame::BuildMenuBar() {
     viewMenu->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
     viewMenu->AppendCheckItem(ID_VIEW_AUDIO_PANEL, wxString::FromUTF8(lang_.Get("audio_mixer")));
     viewMenu->Check(ID_VIEW_AUDIO_PANEL, state_.show_audio_panel);
+    {
+        // 2.4: send a panel straight to a side or tear it out into its own window. (You can
+        // also just drag a panel's title bar - wxAUI shows where it will dock.)
+        auto *moveMenu = new wxMenu();
+        const wxString paneNames[3] = { "Controls (Start / Pause)",
+                                        wxString::FromUTF8(lang_.Get("audio_mixer")),
+                                        wxString::FromUTF8(lang_.Get("overlays_panel")) };
+        const wxString slotNames[5] = { "Left", "Right", "Top", "Bottom", "Floating window" };
+        for (int p = 0; p < 3; ++p) {
+            auto *sub = new wxMenu();
+            for (int sl = 0; sl < 5; ++sl) sub->Append(ID_VIEW_DOCK_FIRST + p * 8 + sl, slotNames[sl]);
+            moveMenu->AppendSubMenu(sub, paneNames[p]);
+        }
+        viewMenu->AppendSubMenu(moveMenu, "Move panel to");
+        viewMenu->AppendCheckItem(ID_VIEW_LOCK_UI, "Lock layout");
+        viewMenu->Check(ID_VIEW_LOCK_UI, state_.ui_locked);
+        viewMenu->Append(ID_VIEW_RESET_LAYOUT, "Reset layout");
+    }
     viewMenu->AppendSeparator();
     viewMenu->Append(ID_VIEW_PC_ANALYTICS, wxString::FromUTF8(lang_.Get("pc_analytics")));
     viewMenu->Append(ID_VIEW_LOG, wxString::FromUTF8(lang_.Get("show_log")));
@@ -1097,71 +1126,150 @@ wxFont MonoFont()     { return wxFont(wxFontInfo(11).FaceName("Consolas")); }
 } // namespace
 
 void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
-    left_panel_ = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(kLeftPanelW, -1));
-    auto *sizer = new wxBoxSizer(wxVERTICAL);
+    (void)parentSizer;   // 2.4: placed by wxAuiManager (SetupDocking), arranged by LayoutControlsPanel
+    left_panel_ = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(kLeftPanelW + 30, 520));
 
     title_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "HomRec", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
     title_lbl_->SetFont(wxFont(wxFontInfo(22).FaceName("Segoe UI").Bold()));
-    sizer->Add(title_lbl_, 0, wxEXPAND | wxTOP, 20);
 
     version_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "v" HR_APP_VERSION, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
     version_lbl_->SetFont(BodyFont());
-    sizer->Add(version_lbl_, 0, wxEXPAND | wxTOP, 4);
 
     start_color_btn_ = new ColorButton(left_panel_, ID_START_BTN, wxString::FromUTF8(lang_.Get("start")));
     start_color_btn_->SetFont(wxFont(wxFontInfo(11).FaceName("Segoe UI").Bold()));
     start_color_btn_->SetMinSize(wxSize(-1, 48));
-    sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 25);
     Bind(wxEVT_BUTTON, &HomRecMainFrame::OnStartClicked, this, ID_START_BTN);
 
     pause_color_btn_ = new ColorButton(left_panel_, ID_PAUSE_BTN, wxString::FromUTF8(lang_.Get("pause")));
     pause_color_btn_->SetFont(wxFont(wxFontInfo(10).FaceName("Segoe UI").Bold()));
     pause_color_btn_->SetMinSize(wxSize(-1, 32));
     pause_color_btn_->Enable2(false);
-    sizer->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
     Bind(wxEVT_BUTTON, &HomRecMainFrame::OnPauseClicked, this, ID_PAUSE_BTN);
 
-    auto addSection = [&](const wxString &labelText) {
+    auto makeSection = [&](const wxString &labelText) {
         auto *lbl = new wxStaticText(left_panel_, wxID_ANY, labelText);
         lbl->SetFont(SectionFont());
-        sizer->Add(lbl, 0, wxEXPAND | wxTOP, 15);
         return lbl;
     };
-
-    section_status_lbl_ = addSection(wxString::FromUTF8(lang_.Get("status")));
-    auto *statusRow = new wxBoxSizer(wxHORIZONTAL);
+    section_status_lbl_ = makeSection(wxString::FromUTF8(lang_.Get("status")));
     status_dot_ = new StatusDot(left_panel_, FromColorref(theme_.text_secondary), 14);
-    statusRow->Add(status_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
     status_lbl_ = new wxStaticText(left_panel_, wxID_ANY, wxString::FromUTF8(lang_.Get("ready")));
     status_lbl_->SetFont(BodyFont());
-    statusRow->Add(status_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
-    sizer->Add(statusRow, 0, wxEXPAND | wxTOP, 8);
 
-    section_time_lbl_ = addSection(wxString::FromUTF8(lang_.Get("time")));
+    section_time_lbl_ = makeSection(wxString::FromUTF8(lang_.Get("time")));
     time_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "00:00:00", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
     time_lbl_->SetFont(wxFont(wxFontInfo(24).FaceName("Consolas").Bold()));
-    sizer->Add(time_lbl_, 0, wxEXPAND | wxTOP, 8);
 
-    section_stats_lbl_ = addSection(wxString::FromUTF8(lang_.Get("stats")));
+    section_stats_lbl_ = makeSection(wxString::FromUTF8(lang_.Get("stats")));
     fps_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "");
     fps_lbl_->SetFont(MonoFont());
-    sizer->Add(fps_lbl_, 0, wxEXPAND | wxTOP, 4);
     res_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "");
     res_lbl_->SetFont(MonoFont());
-    sizer->Add(res_lbl_, 0, wxEXPAND | wxTOP, 2);
 
-    sizer->AddStretchSpacer(1);
+    // The panel re-flows by its own shape (see UpdateControlsOrientation()): stacked when it
+    // sits in a left/right dock, in a row when it is docked along the top/bottom.
+    left_panel_->Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) {
+        evt.Skip();
+        UpdateControlsOrientation();
+    });
+    LayoutControlsPanel(false);
+}
 
-    // Left sidebar's inner 15px padx, matching ui_mixin.py's frame padx=15.
-    auto *padded = new wxBoxSizer(wxVERTICAL);
-    padded->Add(sizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 15);
-    left_panel_->SetSizer(padded);
+// Arranges the Controls pane's widgets for a tall (vertical) or wide (horizontal) pane.
+// Widgets are created once in BuildLeftPanel(); only the sizers are rebuilt here, so a
+// re-flow costs one Layout() and no allocations of widgets.
+void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
+    if (!left_panel_ || !title_lbl_) return;
+    controls_horizontal_ = horizontal;
+    left_panel_->Freeze();
+    left_panel_->SetSizer(nullptr);   // deletes the previous sizer tree; the widgets survive
 
-    parentSizer->Add(left_panel_, 0, wxEXPAND | wxRIGHT, 15);
+    title_lbl_->SetFont(wxFont(wxFontInfo(horizontal ? 16 : 22).FaceName("Segoe UI").Bold()));
+    time_lbl_->SetFont(wxFont(wxFontInfo(horizontal ? 18 : 24).FaceName("Consolas").Bold()));
+
+    auto *statusRow = new wxBoxSizer(wxHORIZONTAL);
+    statusRow->Add(status_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+    statusRow->Add(status_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
+
+    if (!horizontal) {
+        auto *sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(title_lbl_, 0, wxEXPAND | wxTOP, 20);
+        sizer->Add(version_lbl_, 0, wxEXPAND | wxTOP, 4);
+        sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 25);
+        sizer->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
+        sizer->Add(section_status_lbl_, 0, wxEXPAND | wxTOP, 15);
+        sizer->Add(statusRow, 0, wxEXPAND | wxTOP, 8);
+        sizer->Add(section_time_lbl_, 0, wxEXPAND | wxTOP, 15);
+        sizer->Add(time_lbl_, 0, wxEXPAND | wxTOP, 8);
+        sizer->Add(section_stats_lbl_, 0, wxEXPAND | wxTOP, 15);
+        sizer->Add(fps_lbl_, 0, wxEXPAND | wxTOP, 4);
+        sizer->Add(res_lbl_, 0, wxEXPAND | wxTOP, 2);
+        sizer->AddStretchSpacer(1);
+        // Left sidebar's inner 15px padx, matching ui_mixin.py's frame padx=15.
+        auto *padded = new wxBoxSizer(wxVERTICAL);
+        padded->Add(sizer, 1, wxEXPAND | wxLEFT | wxRIGHT, 15);
+        left_panel_->SetSizer(padded);
+    } else {
+        auto *wrap = new wxWrapSizer(wxHORIZONTAL);
+        auto *c1 = new wxBoxSizer(wxVERTICAL);
+        c1->Add(title_lbl_, 0, wxEXPAND);
+        c1->Add(version_lbl_, 0, wxEXPAND | wxTOP, 2);
+        c1->SetMinSize(wxSize(110, -1));
+        auto *c2 = new wxBoxSizer(wxVERTICAL);
+        c2->Add(start_color_btn_, 0, wxEXPAND);
+        c2->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
+        c2->SetMinSize(wxSize(170, -1));
+        auto *c3 = new wxBoxSizer(wxVERTICAL);
+        c3->Add(section_status_lbl_, 0, wxEXPAND);
+        c3->Add(statusRow, 0, wxEXPAND | wxTOP, 6);
+        c3->SetMinSize(wxSize(120, -1));
+        auto *c4 = new wxBoxSizer(wxVERTICAL);
+        c4->Add(section_time_lbl_, 0, wxEXPAND);
+        c4->Add(time_lbl_, 0, wxEXPAND | wxTOP, 4);
+        c4->SetMinSize(wxSize(130, -1));
+        auto *c5 = new wxBoxSizer(wxVERTICAL);
+        c5->Add(section_stats_lbl_, 0, wxEXPAND);
+        c5->Add(fps_lbl_, 0, wxEXPAND | wxTOP, 3);
+        c5->Add(res_lbl_, 0, wxEXPAND | wxTOP, 2);
+        c5->SetMinSize(wxSize(150, -1));
+        wrap->Add(c1, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
+        wrap->Add(c2, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
+        wrap->Add(c3, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
+        wrap->Add(c4, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
+        wrap->Add(c5, 0, wxALIGN_CENTRE_VERTICAL);
+        auto *padded = new wxBoxSizer(wxVERTICAL);
+        padded->Add(wrap, 1, wxEXPAND | wxALL, 10);
+        left_panel_->SetSizer(padded);
+    }
+    left_panel_->Layout();
+    left_panel_->Thaw();
+}
+
+void HomRecMainFrame::UpdateControlsOrientation() {
+    if (!left_panel_ || !dock_ready_ || controls_reflow_pending_) return;
+    const wxSize sz = left_panel_->GetClientSize();
+    if (sz.x < 40 || sz.y < 40) return;
+    // Hysteresis: a pane has to be clearly wide (or clearly tall) to flip, so the re-flow
+    // itself can never make the pane oscillate between the two arrangements.
+    const bool want = controls_horizontal_ ? !(sz.x < 400 || sz.x <= sz.y * 1.05)
+                                           : (sz.x >= 460 && sz.x > sz.y * 1.35);
+    if (want == controls_horizontal_) return;
+    controls_reflow_pending_ = true;
+    CallAfter([this, want]() {
+        controls_reflow_pending_ = false;
+        if (!left_panel_ || !dock_ready_) return;
+        LayoutControlsPanel(want);
+        wxAuiPaneInfo &p = aui_.GetPane("controls");
+        if (p.IsOk()) {
+            if (want) p.BestSize(wxSize(left_panel_->GetClientSize().x, 118)).MinSize(wxSize(200, 96));
+            else      p.BestSize(wxSize(kLeftPanelW + 30, 520)).MinSize(wxSize(kLeftPanelW, 340));
+            aui_.Update();
+        }
+    });
 }
 
 void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) {
-    auto *rightColumn = new wxBoxSizer(wxVERTICAL);
+    (void)parentSizer;   // 2.4: all four blocks are wxAUI panes (see SetupDocking())
 
     preview_container_ = new wxPanel(parent);
     auto *pcSizer = new wxBoxSizer(wxVERTICAL);
@@ -1181,61 +1289,43 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     preview_panel_ = new PreviewPanel(preview_container_, rec_raw_, state_);
     pcSizer->Add(preview_panel_, 1, wxEXPAND | wxALL, 8);
     preview_container_->SetSizer(pcSizer);
-    rightColumn->Add(preview_container_, 1, wxEXPAND);
 
-    // Audio mixer strip lives below the preview - real wx widgets now
-    // (ColorSlider/ColorButton/LevelMeterPanel from audio_panel.h), no
-    // native-HWND hosting needed the way OverlaysDockPanel below still does.
+    // Audio Mixer (2.4 rebuild - audio_panel.h). It has no title row / close button of its own
+    // any more: the dock pane's caption provides both (OnAuiPaneClose keeps state_ in sync).
     audio_panel_ = std::make_unique<AudioPanel>(parent, state_, *rec_);
-    rightColumn->Add(audio_panel_.get(), 0, wxEXPAND | wxTOP, 15);
-    audio_panel_->on_close = [this]() {
-        state_.show_audio_panel = false;
-        if (audio_panel_) audio_panel_->Show(false);
-        if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_AUDIO_PANEL, false);
-        Layout();
-        // Same immediate persist as the ID_VIEW_AUDIO_PANEL menu toggle -
-        // this is the panel's own [x] close button, i.e. exactly the path
-        // that previously left show_audio_panel unsaved.
-        PersistSettings();
-    };
-    audio_panel_->Show(state_.show_audio_panel);
+    audio_panel_->on_changed = [this]() { PersistSettings(); };
 
-    parentSizer->Add(rightColumn, 1, wxEXPAND);
-
-    // Overlays dock - also raw-Win32, same reasoning as AudioPanel.
+    // Overlays dock - still raw Win32 inside a host panel; the host forwards its size to
+    // OverlaysDockPanel::Resize() so the list/buttons follow the pane when it is resized.
     overlays_host_ = new NativeHostPanel(parent);
-    overlays_host_->SetMinSize(wxSize(220, -1));
+    overlays_host_->SetMinSize(wxSize(170, 120));
     overlays_panel_ = std::make_unique<OverlaysDockPanel>(state_);
     overlays_panel_->Create((HWND)overlays_host_->GetHandle(), wxGetInstance(), 0, 0, 220, 500);
+    overlays_host_->Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) {
+        evt.Skip();
+        if (overlays_panel_ && overlays_host_) {
+            const wxSize cs = overlays_host_->GetClientSize();
+            overlays_panel_->Resize(cs.x, cs.y);
+        }
+    });
     overlays_host_->on_drawitem = [this](DRAWITEMSTRUCT *dis) {
-        // OverlaysDockPanel doesn't currently expose a HandleDrawItem the
-        // way AudioPanel does (its list items aren't owner-drawn) - no-op
-        // here, left as a documented hook if that changes.
-        (void)dis;
+        if (overlays_panel_) overlays_panel_->HandleDrawItem(dis, state_.current_theme != "light");
     };
     overlays_host_->on_command = [this](int id) {
         if (!overlays_panel_) return;
         overlays_panel_->OnCommand(id);
         if (id == ID_OVDOCK_CLOSE) {
-            // OverlaysDockPanel::OnCommand() only hides its own native
-            // child controls; also collapse the wx-level host panel and
-            // keep the View menu checkbox in sync, same as toggling it
-            // from the View menu does.
-            if (overlays_host_) overlays_host_->Show(state_.show_overlays_panel);
-            if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
-            Layout();
+            // OverlaysDockPanel::OnCommand() already cleared the flag and hid its own children;
+            // collapse the dock pane too and keep the View menu check in sync.
+            SetPaneShown("overlays", false, false);
         }
     };
     // "Edit Overlay..." (row context menu, see overlays_dock_panel.h) -
     // opens the merged position + settings + preview window for that one
-    // overlay (overlay_editor_dialog.h), replacing the old separate
-    // "Edit Parameters..."/"Position Overlays..." pair (and the standalone,
-    // every-overlay-at-once ShowOverlayPlacementDialog() that backed the
-    // latter - now unused and removed, see overlay_editor_dialog.h).
-    // OverlaysDockPanel has no access to RecordingController/theme_ itself,
-    // so it just asks main_frame.cpp to open the window; re-Refresh()es the
-    // panel afterward so a renamed/re-typed overlay's row label picks up
-    // the change right away.
+    // overlay (overlay_editor_dialog.h). OverlaysDockPanel has no access to
+    // RecordingController/theme_ itself, so it just asks main_frame.cpp to
+    // open the window; re-Refresh()es the panel afterward so a renamed/re-typed
+    // overlay's row label picks up the change right away.
     overlays_panel_->on_edit_overlay = [this](size_t idx) {
         if (!rec_raw_ || !overlays_panel_) return;
         if (ShowOverlayEditorDialog(this, state_, idx, rec_raw_, theme_)) {
@@ -1244,9 +1334,7 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     };
     overlays_panel_->on_overlay_added = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_added"); };
     overlays_panel_->on_overlay_removed = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_removed"); };
-    parentSizer->Add(overlays_host_, 0, wxEXPAND | wxLEFT, 15);
     overlays_panel_->SetVisible(state_.show_overlays_panel);
-    overlays_host_->Show(state_.show_overlays_panel);
 }
 
 void HomRecMainFrame::BuildBottomBar(wxWindow *parent, wxSizer *parentSizer) {
@@ -1331,8 +1419,245 @@ void HomRecMainFrame::ApplyThemeColours() {
     if (start_color_btn_) start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
     if (pause_color_btn_) pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
     if (audio_panel_) audio_panel_->ApplyTheme(theme_);
+    if (dock_host_) dock_host_->SetBackgroundColour(bg);
+    if (dock_ready_) ApplyDockArtColours();
 
     Refresh(true);
+}
+
+// ===========================================================================
+// 2.4 - dockable panels (wxAUI)
+// ===========================================================================
+namespace {
+// The AUI perspective string contains '|', ';', '=' and user-language captions. The .hrc
+// format is one "key=value" per line, so it is stored hex-encoded.
+std::string HexEncodeUtf8(const wxString &w) {
+    const wxScopedCharBuffer u = w.utf8_str();
+    static const char *d = "0123456789abcdef";
+    std::string out;
+    out.reserve(u.length() * 2);
+    for (size_t i = 0; i < u.length(); ++i) {
+        unsigned char c = (unsigned char)u.data()[i];
+        out += d[c >> 4];
+        out += d[c & 15];
+    }
+    return out;
+}
+wxString HexDecodeUtf8(const std::string &h) {
+    if (h.empty() || (h.size() & 1)) return wxString();
+    std::string raw;
+    raw.reserve(h.size() / 2);
+    auto val = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < h.size(); i += 2) {
+        int a = val(h[i]), b = val(h[i + 1]);
+        if (a < 0 || b < 0) return wxString();
+        raw += (char)((a << 4) | b);
+    }
+    return wxString::FromUTF8(raw.data(), raw.size());
+}
+} // namespace
+
+void HomRecMainFrame::ApplyDockArtColours() {
+    wxAuiDockArt *art = aui_.GetArtProvider();
+    if (!art) return;
+    const wxColour bg = FromColorref(theme_.bg);
+    const wxColour surface = FromColorref(theme_.surface);
+    const wxColour surfaceLight = FromColorref(theme_.surface_light);
+    const wxColour accent = FromColorref(theme_.accent);
+    const wxColour text = FromColorref(theme_.text);
+    art->SetColour(wxAUI_DOCKART_BACKGROUND_COLOUR, bg);
+    art->SetColour(wxAUI_DOCKART_SASH_COLOUR, bg);
+    art->SetColour(wxAUI_DOCKART_BORDER_COLOUR, surfaceLight);
+    art->SetColour(wxAUI_DOCKART_GRIPPER_COLOUR, surfaceLight);
+    art->SetColour(wxAUI_DOCKART_ACTIVE_CAPTION_COLOUR, surfaceLight);
+    art->SetColour(wxAUI_DOCKART_ACTIVE_CAPTION_GRADIENT_COLOUR, surfaceLight);
+    art->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_COLOUR, surface);
+    art->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_GRADIENT_COLOUR, surface);
+    art->SetColour(wxAUI_DOCKART_ACTIVE_CAPTION_TEXT_COLOUR, accent);
+    art->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_TEXT_COLOUR, text);
+    art->SetMetric(wxAUI_DOCKART_GRADIENT_TYPE, wxAUI_GRADIENT_NONE);
+    art->SetMetric(wxAUI_DOCKART_SASH_SIZE, 6);
+    art->SetMetric(wxAUI_DOCKART_CAPTION_SIZE, 22);
+    art->SetMetric(wxAUI_DOCKART_PANE_BORDER_SIZE, 1);
+    aui_.Update();
+}
+
+void HomRecMainFrame::SetupDocking() {
+    aui_.SetManagedWindow(dock_host_);
+    // Rectangle hint + no live-resize: dragging a panel or a sash only draws an outline
+    // and relayouts ONCE on release, so the 20 fps preview isn't re-scaled every mouse move.
+    aui_.SetFlags(wxAUI_MGR_ALLOW_FLOATING | wxAUI_MGR_RECTANGLE_HINT | wxAUI_MGR_NO_VENETIAN_BLINDS_FADE);
+
+    aui_.AddPane(preview_container_, wxAuiPaneInfo().Name("preview").CenterPane().PaneBorder(false)
+                                         .MinSize(wxSize(240, 160)));
+
+    aui_.AddPane(left_panel_, wxAuiPaneInfo().Name("controls").Caption("HomRec")
+                     .Left().Layer(1).Position(0)
+                     .BestSize(wxSize(kLeftPanelW + 30, 520)).MinSize(wxSize(kLeftPanelW, 340))
+                     .FloatingSize(wxSize(kLeftPanelW + 50, 580))
+                     .Fixed().CloseButton(false).MaximizeButton(false).PinButton(false));
+
+    aui_.AddPane(audio_panel_.get(), wxAuiPaneInfo().Name("audio")
+                     .Caption(wxString::FromUTF8(lang_.Get("audio_mixer")))
+                     .Bottom().Layer(0).Position(0)
+                     .BestSize(wxSize(520, 220)).MinSize(wxSize(190, 120))
+                     .FloatingSize(wxSize(400, 360))
+                     .CloseButton(true).MaximizeButton(false).PinButton(false));
+
+    aui_.AddPane(overlays_host_, wxAuiPaneInfo().Name("overlays")
+                     .Caption(wxString::FromUTF8(lang_.Get("overlays_panel")))
+                     .Right().Layer(1).Position(0)
+                     .BestSize(wxSize(250, 500)).MinSize(wxSize(170, 120))
+                     .FloatingSize(wxSize(280, 460))
+                     .CloseButton(true).MaximizeButton(false).PinButton(false));
+
+    ApplyDockArtColours();
+    default_perspective_ = aui_.SavePerspective();   // the factory layout, "Reset layout" returns here
+
+    if (!state_.ui_layout.empty()) {
+        const wxString persp = HexDecodeUtf8(state_.ui_layout);
+        if (persp.empty() || !aui_.LoadPerspective(persp, false)) {
+            HrLog::Warn("Saved panel layout couldn't be restored - using the default layout.");
+            aui_.LoadPerspective(default_perspective_, false);
+        }
+    }
+
+    // The flags in state_ (View menu / the panes' own close buttons) are authoritative for
+    // visibility; the preview is always there.
+    aui_.GetPane("preview").Show(true);
+    aui_.GetPane("controls").Show(true);
+    aui_.GetPane("audio").Show(state_.show_audio_panel);
+    aui_.GetPane("overlays").Show(state_.show_overlays_panel);
+
+    // A layout saved on another monitor setup could leave a floating panel off-screen.
+    const int n_displays = (int)wxDisplay::GetCount();
+    for (size_t i = 0; i < aui_.GetAllPanes().GetCount(); ++i) {
+        wxAuiPaneInfo &p = aui_.GetAllPanes().Item(i);
+        if (!p.IsFloating()) continue;
+        bool visible = false;
+        for (int d = 0; d < n_displays && !visible; ++d)
+            visible = wxDisplay(d).GetClientArea().Contains(p.floating_pos + wxPoint(40, 12));
+        if (!visible) p.FloatingPosition(GetScreenPosition() + wxPoint(70 + (int)i * 30, 130));
+    }
+
+    ui_lock_applied_ = !state_.ui_locked;   // force ApplyUiLock() to apply (it also calls Update())
+    dock_ready_ = true;
+    ApplyUiLock();
+    controls_horizontal_ = false;           // re-evaluated on the first real size event
+    if (left_panel_) UpdateControlsOrientation();
+}
+
+void HomRecMainFrame::ApplyUiLock() {
+    if (!dock_ready_) return;
+    const bool lock = state_.ui_locked;
+    ui_lock_applied_ = lock;
+    wxAuiPaneInfoArray &panes = aui_.GetAllPanes();
+    for (size_t i = 0; i < panes.GetCount(); ++i) {
+        wxAuiPaneInfo &p = panes.Item(i);
+        if (p.name == "preview") continue;
+        const bool is_controls = (p.name == "controls");
+        p.Movable(!lock).Floatable(!lock).Dockable(!lock);
+        p.CloseButton(!lock && !is_controls);
+        // Controls is a fixed-size pane by design (its size follows its contents); the others
+        // are resizable unless the layout is locked.
+        p.Resizable(!lock && !is_controls);
+        p.Gripper(false);
+    }
+    aui_.Update();
+}
+
+void HomRecMainFrame::SaveDockLayoutToState() {
+    if (!dock_ready_) return;
+    state_.ui_layout = HexEncodeUtf8(aui_.SavePerspective());
+}
+
+void HomRecMainFrame::SetPaneShown(const char *name, bool show, bool persist) {
+    if (!dock_ready_) return;
+    wxAuiPaneInfo &p = aui_.GetPane(name);
+    if (!p.IsOk()) return;
+    const std::string n = name;
+    if (n == "overlays") {
+        state_.show_overlays_panel = show;
+        if (overlays_panel_) overlays_panel_->SetVisible(show);
+    } else if (n == "audio") {
+        state_.show_audio_panel = show;
+    }
+    p.Show(show);
+    aui_.Update();
+    if (auto *mb = GetMenuBar()) {
+        if (n == "overlays") mb->Check(ID_VIEW_OVERLAYS_PANEL, show);
+        else if (n == "audio") mb->Check(ID_VIEW_AUDIO_PANEL, show);
+    }
+    if (persist) PersistSettings();
+}
+
+void HomRecMainFrame::OnAuiPaneClose(wxAuiManagerEvent &evt) {
+    wxAuiPaneInfo *p = evt.GetPane();
+    if (!p) return;
+    if (state_.ui_locked || p->name == "controls" || p->name == "preview") {
+        evt.Veto();
+        return;
+    }
+    if (p->name == "overlays") {
+        state_.show_overlays_panel = false;
+        if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_OVERLAYS_PANEL, false);
+    } else if (p->name == "audio") {
+        state_.show_audio_panel = false;
+        if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_AUDIO_PANEL, false);
+    }
+    // The pane itself is hidden by the manager right after this handler returns; defer the
+    // write so SavePerspective() sees the final (hidden) state.
+    CallAfter([this]() { PersistSettings(); });
+}
+
+void HomRecMainFrame::DockPaneTo(const char *name, DockSlot slot) {
+    if (!dock_ready_) return;
+    if (state_.ui_locked) {
+        wxMessageBox("The panel layout is locked. Unlock it first (View > Lock layout).", "HomRec",
+                     wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+    wxAuiPaneInfo &p = aui_.GetPane(name);
+    if (!p.IsOk()) return;
+    const std::string n = name;
+    if (n == "audio" && !state_.show_audio_panel) SetPaneShown("audio", true, false);
+    if (n == "overlays" && !state_.show_overlays_panel) SetPaneShown("overlays", true, false);
+
+    p.Show(true);
+    switch (slot) {
+        case kDockLeft:   p.Dock().Left().Layer(1).Row(0).Position(n == "controls" ? 0 : 1); break;
+        case kDockRight:  p.Dock().Right().Layer(1).Row(0).Position(n == "overlays" ? 0 : 1); break;
+        case kDockTop:    p.Dock().Top().Layer(1).Row(0).Position(0); break;
+        case kDockBottom: p.Dock().Bottom().Layer(0).Row(0).Position(n == "audio" ? 0 : 1); break;
+        case kDockFloat:
+            p.Float();
+            p.FloatingPosition(GetScreenPosition() + wxPoint(90, 140));
+            break;
+    }
+    aui_.Update();
+    controls_reflow_pending_ = false;
+    PersistSettings();
+}
+
+void HomRecMainFrame::ResetDockLayout() {
+    if (!dock_ready_) return;
+    if (state_.ui_locked) {
+        wxMessageBox("The panel layout is locked. Unlock it first (View > Lock layout).", "HomRec",
+                     wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+    aui_.LoadPerspective(default_perspective_, false);
+    aui_.GetPane("preview").Show(true);
+    aui_.GetPane("controls").Show(true);
+    aui_.GetPane("audio").Show(state_.show_audio_panel);
+    aui_.GetPane("overlays").Show(state_.show_overlays_panel);
+    ApplyUiLock();   // re-applies pane flags + Update()
+    PersistSettings();
 }
 
 void HomRecMainFrame::ApplyLanguageText() {
@@ -1355,6 +1680,14 @@ void HomRecMainFrame::ApplyLanguageText() {
     // actually retranslates the menu bar (see that function's own comment
     // for why the old menu bar is deleted rather than just replaced).
     BuildMenuBar();
+
+    if (dock_ready_) {
+        // Pane captions (the perspective restored at startup carries the old language's text).
+        aui_.GetPane("controls").Caption("HomRec");
+        aui_.GetPane("audio").Caption(wxString::FromUTF8(lang_.Get("audio_mixer")));
+        aui_.GetPane("overlays").Caption(wxString::FromUTF8(lang_.Get("overlays_panel")));
+        aui_.Update();
+    }
 
     if (section_status_lbl_) section_status_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("status")));
     if (section_time_lbl_) section_time_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("time")));
@@ -2018,7 +2351,21 @@ void HomRecMainFrame::OnCaptureTargetChanged() {
 }
 
 void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
-    switch (evt.GetId()) {
+    const int menu_id = evt.GetId();
+    if (menu_id >= ID_VIEW_DOCK_FIRST && menu_id <= ID_VIEW_DOCK_LAST) {
+        static const char *const kPaneNames[3] = { "controls", "audio", "overlays" };
+        const int p = (menu_id - ID_VIEW_DOCK_FIRST) / 8, sl = (menu_id - ID_VIEW_DOCK_FIRST) % 8;
+        if (p >= 0 && p < 3 && sl >= 0 && sl <= kDockFloat) DockPaneTo(kPaneNames[p], (DockSlot)sl);
+        return;
+    }
+    switch (menu_id) {
+        case ID_VIEW_LOCK_UI:
+            state_.ui_locked = !state_.ui_locked;
+            ApplyUiLock();
+            if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_LOCK_UI, state_.ui_locked);
+            PersistSettings();
+            break;
+        case ID_VIEW_RESET_LAYOUT: ResetDockLayout(); break;
         case ID_FILE_EXIT: Close(true); break;
         case ID_FILE_OPEN_RECORDINGS:
             OpenRecordingsFolder();
@@ -2093,24 +2440,14 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         }
         case ID_VIEW_FULLSCREEN: ToggleFullscreenNative(); break;
         case ID_VIEW_OVERLAYS_PANEL:
-            state_.show_overlays_panel = !state_.show_overlays_panel;
-            if (overlays_panel_) overlays_panel_->SetVisible(state_.show_overlays_panel);
-            if (overlays_host_) overlays_host_->Show(state_.show_overlays_panel);
-            if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
-            Layout();
-            // Persisted immediately (matching the ID_THEME_DARK/LIGHT
-            // handlers below) rather than waiting for OnClose(), since
-            // minimize-to-tray vetoes the close event entirely - that was
-            // exactly why toggling a panel closed never stuck across a
+            // Persisted immediately (matching the ID_THEME_DARK/LIGHT handlers below) rather
+            // than waiting for OnClose(), since minimize-to-tray vetoes the close event
+            // entirely - that was exactly why toggling a panel closed never stuck across a
             // restart before.
-            PersistSettings();
+            SetPaneShown("overlays", !state_.show_overlays_panel, true);
             break;
         case ID_VIEW_AUDIO_PANEL:
-            state_.show_audio_panel = !state_.show_audio_panel;
-            if (audio_panel_) audio_panel_->Show(state_.show_audio_panel);
-            if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_AUDIO_PANEL, state_.show_audio_panel);
-            Layout();
-            PersistSettings();
+            SetPaneShown("audio", !state_.show_audio_panel, true);
             break;
         case ID_VIEW_PC_ANALYTICS: ShowPcAnalyticsDialog(GetHWND(), wxGetInstance(), state_.output_folder); break;
         case ID_VIEW_LOG: ShowLogViewerDialog(GetHWND(), wxGetInstance()); break;
@@ -2181,6 +2518,10 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             // no-op restart if the dialog was cancelled or the rate
             // wasn't touched, same reasoning as SetupHotkeys() above.
             RestartLevelMeterTimer();
+            // 2.4: mixer layout and "lock panel layout" are on that dialog too.
+            if (audio_panel_) audio_panel_->ApplyMeterStyle();
+            ApplyUiLock();
+            if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_LOCK_UI, state_.ui_locked);
             // Instant Replay's on/off checkbox and buffer-size spinner also
             // live on this dialog - apply whichever way it changed. Calling
             // both Enable/Disable unconditionally is harmless either way:
@@ -2376,6 +2717,7 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
     // later StopInstantReplayEncoder() had no pipeline to close the pipe on,
     // ffmpeg never saw EOF, and both 3s waits ran out before it got killed.
     // Stop Instant Replay properly first, while pipeline_ still exists.
+    PersistSettings();   // 2.4: also stores the dock layout
     if (rec_ && rec_->instant_replay_enabled()) rec_->DisableInstantReplay();
     if (rec_) rec_->TeardownPreview();
     if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
