@@ -1039,3 +1039,21 @@ Run `bter` in the console for this same list read live from the plugin (includes
 | `revtext <text>`, `wordcount <text>` | Text utilities |
 
 27 commands total. Not the "60+" originally asked for - see the chat for why (kept to what's genuinely functional rather than padding the count with commands that don't do anything real). The `reg(name, description, fn)` pattern at the top of `plugins/bter/entry.lua` makes adding more straightforward if there's a specific list wanted next.
+
+---
+
+## 2.4 additions
+
+Set from the console, a `.cfg` script or the `.hrc` file like any other key
+(`<key> = <value>`):
+
+| key | values | meaning |
+|---|---|---|
+| `video_format` | `mp4` / `mkv` / `both` | container; `both` records `.mkv` and also saves an `.mp4` copy |
+| `window_capture_method` | `auto` / `crop` | `auto` = record the window itself (Windows.Graphics.Capture), `crop` = old screen-crop |
+| `window_capture_area` | `window` / `client` | whole window (title bar + borders) or content area only |
+| `audio_meter_style` | `horizontal` / `vertical` | Audio Mixer layout |
+| `ui_locked` (`lock_ui`) | `0` / `1` | freeze the panel layout |
+| `ui_layout` | hex text | saved panel layout - written by the app, not meant to be edited; clear it to reset |
+
+Extra Audio Mixer sources live in the `[audio_sources]` section of the `.hrc`.
