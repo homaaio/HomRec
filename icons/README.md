@@ -25,3 +25,17 @@ short label), the same way `tray.ico` started out - see the note in
 `resource.rc`. Swap them for real art whenever it's ready; nothing else
 needs to change on the code/installer side, since everything references
 these by their fixed filename.
+
+## 2.4 - UI icons (optional PNGs)
+
+Drop these in and they are picked up on the next start (no rebuild). A missing
+file is fine - the UI draws a text glyph instead. Any size works (square is best,
+64x64 or 128x128 with transparency); they are scaled once and cached.
+
+    icons/overlays/text.png      icons/overlays/gif.png
+    icons/overlays/image.png     icons/overlays/webcam.png
+    icons/audio/microphone.png   icons/audio/desktop_audio.png
+    (optional) icons/audio/browser.png  window.png  file.png
+
+Alternative file names (mic.png, speaker.png, camera.png, ...) are listed in
+`src/ui/hr_icons.cpp`.
