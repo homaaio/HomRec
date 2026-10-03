@@ -55,5 +55,8 @@ void ShowRegionPickerOverlay(HWND parent, HINSTANCE hInst, AppState &state);
 // be found or is minimized/degenerate - e.g. it was closed since being
 // picked - so the caller can refuse to start (or fall back for a preview)
 // instead of capturing the wrong thing.
+//
+// 2.4: client_only = true returns the window's content area (no title bar / borders) instead
+// of its whole visible frame (AppState::window_capture_area == "client").
 bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out_rect,
-                             HWND preferred_hwnd = nullptr);
+                             HWND preferred_hwnd = nullptr, bool client_only = false);

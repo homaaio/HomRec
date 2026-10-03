@@ -230,6 +230,11 @@ void ColorSlider::OnPaint(wxPaintEvent &) {
 
 LabeledSlider::LabeledSlider(wxWindow *parent, wxWindowID id, int value, int minVal, int maxVal)
     : wxPanel(parent, wxID_ANY), value_(value), cmd_id_(id) {
+    // 2.4 FIX ("white frames around every slider"): this wrapper panel was never
+    // given a colour, so it painted the system's default WHITE, and ColorSlider
+    // (which clears itself with its *parent's* colour) inherited that white
+    // rectangle. Start from the real parent's colour; SetTheme() keeps it in sync.
+    if (parent) SetBackgroundColour(parent->GetBackgroundColour());
     auto *sizer = new wxBoxSizer(wxHORIZONTAL);
 
     slider_ = new ColorSlider(this, wxID_ANY, value, minVal, maxVal);
@@ -271,6 +276,7 @@ LabeledSlider::LabeledSlider(wxWindow *parent, wxWindowID id, int value, int min
 }
 
 void LabeledSlider::SetTheme(wxColour track, wxColour fill, wxColour thumb, wxColour fieldBg, wxColour text) {
+    if (GetParent()) SetBackgroundColour(GetParent()->GetBackgroundColour());  // see ctor: no white frame
     slider_->SetTheme(track, fill, thumb);
     spin_->SetBackgroundColour(fieldBg);
     spin_->SetForegroundColour(text);
@@ -317,6 +323,141 @@ void LabeledSlider::Notify() {
     evt.SetEventObject(this);
     evt.SetInt(value_);
     ProcessWindowEvent(evt);
+}
+
+// ---------------------------------------------------------------------------
+// FlatFader
+// ---------------------------------------------------------------------------
+FlatFader::FlatFader(wxWindow *parent, wxWindowID id, int value, int minVal, int maxVal, bool vertical)
+    : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE),
+      value_(std::max(minVal, std::min(maxVal, value))), min_(minVal), max_(maxVal), vertical_(vertical),
+      bg_(30, 30, 40), track_(60, 60, 75), fill_(100, 200, 150), thumb_(235, 235, 240), cmd_id_(id) {
+    SetBackgroundStyle(wxBG_STYLE_PAINT);
+    SetCursor(wxCursor(wxCURSOR_HAND));
+    Bind(wxEVT_PAINT, &FlatFader::OnPaint, this);
+    Bind(wxEVT_LEFT_DOWN, &FlatFader::OnMouseDown, this);
+    Bind(wxEVT_LEFT_UP, &FlatFader::OnMouseUp, this);
+    Bind(wxEVT_LEFT_DCLICK, &FlatFader::OnDClick, this);
+    Bind(wxEVT_MOTION, &FlatFader::OnMouseMove, this);
+    Bind(wxEVT_MOUSEWHEEL, &FlatFader::OnWheel, this);
+    Bind(wxEVT_MOUSE_CAPTURE_LOST, &FlatFader::OnCaptureLost, this);
+    Bind(wxEVT_ENTER_WINDOW, &FlatFader::OnEnter, this);
+    Bind(wxEVT_LEAVE_WINDOW, &FlatFader::OnLeave, this);
+    Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) { Refresh(false); evt.Skip(); });
+}
+
+wxSize FlatFader::DoGetBestSize() const {
+    return vertical_ ? wxSize(24, 90) : wxSize(90, 24);
+}
+
+void FlatFader::SetColours(wxColour bg, wxColour track, wxColour fill, wxColour thumb) {
+    bg_ = bg; track_ = track; fill_ = fill; thumb_ = thumb;
+    Refresh(false);
+}
+
+void FlatFader::SetVertical(bool v) {
+    if (vertical_ == v) return;
+    vertical_ = v;
+    InvalidateBestSize();
+    Refresh(false);
+}
+
+void FlatFader::SetValue(int v) {
+    v = std::max(min_, std::min(max_, v));
+    if (v == value_) return;
+    value_ = v;
+    Refresh(false);
+}
+
+void FlatFader::SetAndNotify(int v) {
+    v = std::max(min_, std::min(max_, v));
+    if (v == value_) return;
+    value_ = v;
+    Refresh(false);
+    wxCommandEvent evt(wxEVT_SLIDER, cmd_id_);
+    evt.SetEventObject(this);
+    evt.SetInt(value_);
+    ProcessWindowEvent(evt);
+}
+
+void FlatFader::UpdateFromPos(const wxPoint &p) {
+    const wxSize cs = GetClientSize();
+    const int pad = 9;
+    const int len = std::max(1, (vertical_ ? cs.GetHeight() : cs.GetWidth()) - pad * 2);
+    double t = vertical_ ? 1.0 - (double)(p.y - pad) / len : (double)(p.x - pad) / len;
+    t = std::clamp(t, 0.0, 1.0);
+    SetAndNotify(min_ + (int)std::lround(t * (max_ - min_)));
+}
+
+void FlatFader::OnMouseDown(wxMouseEvent &evt) {
+    dragging_ = true;
+    if (!HasCapture()) CaptureMouse();
+    UpdateFromPos(evt.GetPosition());
+}
+void FlatFader::OnMouseUp(wxMouseEvent &) {
+    if (HasCapture()) ReleaseMouse();
+    dragging_ = false;
+    Refresh(false);
+}
+void FlatFader::OnMouseMove(wxMouseEvent &evt) {
+    if (dragging_ && evt.LeftIsDown()) UpdateFromPos(evt.GetPosition());
+}
+void FlatFader::OnWheel(wxMouseEvent &evt) {
+    const int steps = evt.GetWheelRotation() / std::max(1, evt.GetWheelDelta());
+    if (steps != 0) SetAndNotify(value_ + steps * 5);
+}
+void FlatFader::OnDClick(wxMouseEvent &) { SetAndNotify(unity_); }
+
+void FlatFader::OnPaint(wxPaintEvent &) {
+    wxAutoBufferedPaintDC dc(this);
+    dc.SetBackground(wxBrush(bg_));
+    dc.Clear();
+
+    const wxSize cs = GetClientSize();
+    const int pad = 9, grooveT = 6;
+    const double t = (max_ > min_) ? (double)(value_ - min_) / (max_ - min_) : 0.0;
+    const wxColour fill = dimmed_ ? wxColour(110, 110, 120) : fill_;
+
+    dc.SetPen(*wxTRANSPARENT_PEN);
+    if (!vertical_) {
+        const int len = std::max(1, cs.GetWidth() - pad * 2);
+        const int cy = cs.GetHeight() / 2;
+        const int tx = pad + (int)std::lround(t * len);
+        dc.SetBrush(wxBrush(track_));
+        dc.DrawRoundedRectangle(pad, cy - grooveT / 2, len, grooveT, grooveT / 2.0);
+        if (tx > pad) {
+            dc.SetBrush(wxBrush(fill));
+            dc.DrawRoundedRectangle(pad, cy - grooveT / 2, tx - pad, grooveT, grooveT / 2.0);
+        }
+        if (max_ > min_ && min_ < unity_ && unity_ < max_) {
+            const int ux = pad + (int)std::lround((double)(unity_ - min_) / (max_ - min_) * len);
+            dc.SetPen(wxPen(bg_, 2));
+            dc.DrawLine(ux, cy - grooveT, ux, cy + grooveT);
+            dc.SetPen(*wxTRANSPARENT_PEN);
+        }
+        dc.SetBrush(wxBrush(thumb_));
+        dc.SetPen(wxPen(fill, 2));
+        dc.DrawCircle(tx, cy, (dragging_ || hot_) ? 8 : 7);
+    } else {
+        const int len = std::max(1, cs.GetHeight() - pad * 2);
+        const int cx = cs.GetWidth() / 2;
+        const int ty = pad + (int)std::lround((1.0 - t) * len);
+        dc.SetBrush(wxBrush(track_));
+        dc.DrawRoundedRectangle(cx - grooveT / 2, pad, grooveT, len, grooveT / 2.0);
+        if (ty < pad + len) {
+            dc.SetBrush(wxBrush(fill));
+            dc.DrawRoundedRectangle(cx - grooveT / 2, ty, grooveT, pad + len - ty, grooveT / 2.0);
+        }
+        if (max_ > min_ && min_ < unity_ && unity_ < max_) {
+            const int uy = pad + (int)std::lround((1.0 - (double)(unity_ - min_) / (max_ - min_)) * len);
+            dc.SetPen(wxPen(bg_, 2));
+            dc.DrawLine(cx - grooveT, uy, cx + grooveT, uy);
+            dc.SetPen(*wxTRANSPARENT_PEN);
+        }
+        dc.SetBrush(wxBrush(thumb_));
+        dc.SetPen(wxPen(fill, 2));
+        dc.DrawCircle(cx, ty, (dragging_ || hot_) ? 8 : 7);
+    }
 }
 
 // ---------------------------------------------------------------------------

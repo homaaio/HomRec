@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cassert>
 #include <exception>
+#include <memory>
 
 #include "hr_log.h"
 
@@ -228,6 +229,9 @@ struct WasapiStream {
     LARGE_INTEGER         clock_t0{};
     LARGE_INTEGER         clock_freq{};
     int64_t               frames_total = 0;   // stereo frames delivered (incl. padding) since clock_t0
+
+    // 2.4: per-process loopback (a browser / one window's sound) - defined in hr_audio_extra.inc
+    bool open_process(unsigned long pid);
 
     bool open(bool is_loopback, IMMDevice* dev)
     {
@@ -789,9 +793,12 @@ HR_EXPORT void hr_audio_get_levels(int* out_mic, int* out_sys)
     if (out_sys) *out_sys = g_state->sys_level.load();
 }
 
+static void extra_on_pause(bool paused);   // hr_audio_extra.inc
+
 HR_EXPORT void hr_audio_pause(int paused)
 {
     if (g_state) g_state->paused.store(paused != 0);
+    extra_on_pause(paused != 0);
 }
 
 HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
@@ -893,8 +900,11 @@ HR_EXPORT void hr_audio_reset_buffers(const char* mic_wav_path, const char* sys_
     the whole duration of a recording) while state_.recording is true; also
     called once more from hr_audio_capture_to_wav() to catch whatever
     accumulated since the last periodic call before the stream closes. */
+static void extra_flush();                 // hr_audio_extra.inc
+
 HR_EXPORT void hr_audio_flush_buffered()
 {
+    extra_flush();   // 2.4: extra mixer channels stream to disk on the same tick
     if (!g_state) return;
     std::lock_guard<std::mutex> slk(g_state->stream_mutex);
     if (g_state->mic_stream_file) {
@@ -1110,8 +1120,129 @@ HR_EXPORT int hr_audio_mix_wav(const char* mic_path,
     return wav_write(out_path, out, 2, out_rate) ? 0 : -3;
 }
 
-/*  hr_audio_rms(buf, n_bytes)  - быстрый RMS для уже захваченного буфера */
+/*  hr_audio_mix_wav_list(inputs, out_path)   (2.4)
+    Mixes any number of 16-bit stereo WAVs (this file's own writers: 44-byte header)
+    into one, '|'-separated UTF-8 paths in `inputs`. STREAMING: a few KB of RAM no
+    matter how long the recording is - the older hr_audio_mix_wav() above reads both
+    inputs whole. Inputs at different sample rates are linearly resampled to the first
+    input's rate. Returns 0 on success. */
+namespace {
+struct MixIn {
+    FILE*    f = nullptr;
+    uint32_t rate = 44100;
+    uint64_t total = 0;          // frames in the file
+    int64_t  cur = -1;           // index of frame `a`
+    int16_t  a[2] = {0, 0}, b[2] = {0, 0};
+    int16_t  blk[4096 * 2];
+    size_t   blk_n = 0, blk_i = 0;
+    uint64_t consumed = 0;       // frames pulled from the file so far
+    bool open(const std::string& path)
+    {
+        f = fopen(path.c_str(), "rb");
+        if (!f) return false;
+        WavHeader h;
+        if (fread(&h, sizeof(h), 1, f) != 1 || h.num_channels != 2 || h.bits_per_smp != 16) { fclose(f); f = nullptr; return false; }
+        rate = h.sample_rate ? h.sample_rate : 44100;
+        // The header's size field is patched when a stream closes; if a crash left it 0,
+        // fall back to the real file length.
+        uint64_t bytes = h.data_size;
+        long here = ftell(f);
+        fseek(f, 0, SEEK_END);
+        long endp = ftell(f);
+        fseek(f, here, SEEK_SET);
+        if (endp > here && (bytes == 0 || bytes > (uint64_t)(endp - here))) bytes = (uint64_t)(endp - here);
+        total = bytes / 4;
+        return total > 0;
+    }
+    bool pull(int16_t o[2])
+    {
+        if (consumed >= total) return false;
+        if (blk_i >= blk_n) {
+            blk_n = fread(blk, 4, 4096, f);
+            blk_i = 0;
+            if (blk_n == 0) return false;
+        }
+        o[0] = blk[blk_i * 2]; o[1] = blk[blk_i * 2 + 1];
+        ++blk_i; ++consumed;
+        return true;
+    }
+    // Sample at a (monotonically increasing) source position. False past the end.
+    bool sample(double pos, int16_t out[2])
+    {
+        int64_t idx = (int64_t)pos;
+        if (idx >= (int64_t)total) return false;
+        if (cur < 0) {
+            if (!pull(a)) return false;
+            if (!pull(b)) { b[0] = a[0]; b[1] = a[1]; }
+            cur = 0;
+        }
+        while (cur < idx) {
+            a[0] = b[0]; a[1] = b[1];
+            if (!pull(b)) { b[0] = a[0]; b[1] = a[1]; }
+            ++cur;
+        }
+        const double fr = pos - (double)idx;
+        for (int c = 0; c < 2; ++c) out[c] = (int16_t)(a[c] + (b[c] - a[c]) * fr);
+        return true;
+    }
+    ~MixIn() { if (f) fclose(f); }
+};
+} // namespace
+
+HR_EXPORT int hr_audio_mix_wav_list(const char* inputs, const char* out_path)
+{
+    if (!inputs || !out_path) return -1;
+    std::vector<std::string> paths;
+    {
+        std::string cur;
+        for (const char* p = inputs; ; ++p) {
+            if (*p == '|' || *p == '\0') { if (!cur.empty()) paths.push_back(cur); cur.clear(); if (!*p) break; }
+            else cur += *p;
+        }
+    }
+    if (paths.empty()) return -1;
+
+    std::vector<std::unique_ptr<MixIn>> ins;
+    for (const auto& p : paths) {
+        auto m = std::make_unique<MixIn>();
+        if (m->open(p)) ins.push_back(std::move(m));
+    }
+    if (ins.empty()) return -2;
+
+    const uint32_t out_rate = ins[0]->rate;
+    uint64_t out_frames = 0;
+    for (auto& m : ins)
+        out_frames = std::max<uint64_t>(out_frames, (uint64_t)((double)m->total * out_rate / m->rate));
+
+    FILE* o = wav_stream_open(out_path);
+    if (!o) return -3;
+
+    std::vector<int16_t> chunk(8192 * 2);
+    std::vector<double> step(ins.size());
+    for (size_t k = 0; k < ins.size(); ++k) step[k] = (double)ins[k]->rate / (double)out_rate;
+
+    uint64_t done = 0;
+    while (done < out_frames) {
+        const size_t n = (size_t)std::min<uint64_t>(8192, out_frames - done);
+        for (size_t i = 0; i < n; ++i) {
+            int32_t l = 0, r = 0;
+            for (size_t k = 0; k < ins.size(); ++k) {
+                int16_t s[2];
+                if (ins[k]->sample((double)(done + i) * step[k], s)) { l += s[0]; r += s[1]; }
+            }
+            chunk[i * 2]     = (int16_t)std::max(-32768, std::min(32767, l));
+            chunk[i * 2 + 1] = (int16_t)std::max(-32768, std::min(32767, r));
+        }
+        wav_stream_append(o, chunk.data(), n * 2);
+        done += n;
+    }
+    wav_stream_close(o, 2, out_rate, done * 4);
+    return 0;
+}
+
 HR_EXPORT int hr_audio_rms(const void* buf, int n_bytes)
 {
     return calc_rms((const int16_t*)buf, n_bytes / 2);
 }
+
+#include "hr_audio_extra.inc"

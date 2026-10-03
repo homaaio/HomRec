@@ -13,6 +13,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <cctype>
+#include <algorithm>
 #include <cstdlib>
 
 namespace {
@@ -141,6 +142,50 @@ void ReadHotkeysSection(const std::unordered_map<std::string, std::string> &kv,
     }
 }
 
+// 2.4: Audio Mixer extra channels (AppState::audio_sources) - another microphone,
+// a browser / window, an audio file. Same flat "audio_source_N_field" scheme as
+// the overlays above.
+void WriteAudioSourcesSection(std::ofstream &f, const std::vector<AudioSourceDef> &srcs) {
+    f << "[audio_sources]\n"
+      << "audio_source_count=" << srcs.size() << "\n\n";
+    for (size_t i = 0; i < srcs.size(); ++i) {
+        const AudioSourceDef &a = srcs[i];
+        std::string p = "audio_source_" + std::to_string(i) + "_";
+        f << p << "id=" << a.id << "\n"
+          << p << "kind=" << a.kind << "\n"
+          << p << "name=" << OneLine(a.name) << "\n"
+          << p << "target=" << OneLine(a.target) << "\n"
+          << p << "window_title=" << OneLine(a.window_title) << "\n"
+          << p << "volume=" << a.volume << "\n"
+          << p << "muted=" << FromBool(a.muted) << "\n\n";
+    }
+}
+
+void ReadAudioSourcesSection(const std::unordered_map<std::string, std::string> &kv,
+                              std::vector<AudioSourceDef> &srcs) {
+    auto has = [&](const std::string &k) { return kv.find(k) != kv.end(); };
+    auto get = [&](const std::string &k) -> std::string { auto it = kv.find(k); return it == kv.end() ? std::string() : it->second; };
+    if (!has("audio_source_count")) return;   // older file: keep whatever the session already has
+    srcs.clear();
+    int n = atoi(get("audio_source_count").c_str());
+    if (n < 0) n = 0;
+    if (n > 64) n = 64;
+    for (int i = 0; i < n; ++i) {
+        std::string p = "audio_source_" + std::to_string(i) + "_";
+        if (!has(p + "kind")) continue;
+        AudioSourceDef a;
+        a.id = has(p + "id") ? get(p + "id") : ("as_" + std::to_string(i + 1));
+        a.kind = get(p + "kind");
+        if (a.kind != "mic" && a.kind != "app" && a.kind != "file") continue;
+        a.name = get(p + "name");
+        a.target = get(p + "target");
+        a.window_title = get(p + "window_title");
+        if (has(p + "volume")) a.volume = std::max(0, std::min(150, atoi(get(p + "volume").c_str())));
+        a.muted = ToBool(get(p + "muted"));
+        srcs.push_back(a);
+    }
+}
+
 } // namespace
 
 namespace HrcConfig {
@@ -210,6 +255,7 @@ static bool SaveDirect(const AppState &state, const std::wstring &path) {
     // field - see hr_settings_registry.h's "deliberately excludes" note.
     WriteOverlaysSection(f, state.overlays);
     WriteHotkeysSection(f, state.custom_hotkeys);
+    WriteAudioSourcesSection(f, state.audio_sources);
 
     return true;
 }
@@ -248,6 +294,7 @@ bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields
     // persisted at all before.
     ReadOverlaysSection(kv, state.overlays);
     ReadHotkeysSection(kv, state.custom_hotkeys);
+    ReadAudioSourcesSection(kv, state.audio_sources);
 
     return true;
 }

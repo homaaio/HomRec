@@ -37,8 +37,11 @@
 // merged position+settings+preview window (see overlay_editor_dialog.h)
 // via on_edit_overlay instead of doing either of the two old flows itself.
 //
-// Like AudioPanel (see audio_panel.h), this panel is created once at a
-// fixed rect and doesn't reflow on WM_SIZE.
+// 2.4: the panel now reflows - Resize(w, h) re-positions the raw child controls, which
+// is what lets it live in a resizable / floating dock pane - and the list is owner-drawn
+// (HandleDrawItem) so each row can show the PNG icon for its overlay type
+// (icons/overlays/text.png, gif.png, image.png, webcam.png; see hr_icons.h). Rows fall
+// back to the old emoji glyph when a PNG is missing.
 #pragma once
 
 #include <windows.h>
@@ -55,6 +58,12 @@ public:
     void Refresh();
 
     void OnCommand(int id);
+
+    // 2.4: lays the native children out for a w x h host (called on every host WM_SIZE).
+    void Resize(int w, int h);
+
+    // 2.4: WM_DRAWITEM for the owner-drawn list. `dark` selects the palette.
+    void HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark);
 
     // Shows/hides the panel's HWNDs to match AppState.show_overlays_panel
     // without destroying/recreating them.

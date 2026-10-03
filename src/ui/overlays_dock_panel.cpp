@@ -5,9 +5,11 @@
 #include "../hr_input_overlay.h"
 #include "../hr_input_overlay_registry.h"
 #include "../hr_webcam_enum.h"
+#include "hr_icons.h"
 #include <commdlg.h>
 #include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
 #include <string>
+#include <algorithm>
 
 // Phase 1 (see commands.md): show_overlays_panel is now persisted via
 // HrcConfig::Save() below, same as everything else in AppState - the old
@@ -63,9 +65,20 @@ std::string PickOpenFile(HWND parent, const wchar_t *filter, const wchar_t *titl
 // overlays_dock_panel.py (dot + kind icon + truncated name), adapted to
 // this port's OverlayDef field names (type/visible/image_path/
 // webcam_index instead of kind/enabled/path/cam_index).
+const wchar_t *GlyphFor(const OverlayDef &ov) {
+    if (ov.type == "text")  return L"\U0001F4DD";   // 📝
+    if (ov.type == "image") return L"\U0001F5BC";   // 🖼
+    if (ov.type == "gif")   return L"\U0001F3AC";   // 🎬
+    if (ov.type == "input_overlay") return L"\u2328"; // ⌨
+    return L"\U0001F4F7";                           // 📷 webcam
+}
+
+// 2.4: the row text no longer carries the type icon (HandleDrawItem draws the PNG, or the
+// glyph above when the PNG is missing) and is no longer cut to 14 characters - the list
+// can be as wide as the user makes the panel, and long names are ellipsised when painted.
 std::wstring RowLabel(const OverlayDef &ov) {
     const wchar_t *dot = ov.visible ? L"\u25CF" : L"\u25CB"; // ● / ○
-    const wchar_t *icon = L"?";
+    const wchar_t *icon = L"";
     std::wstring name;
 
     // A user-assigned name (right-click > Rename...) always wins over the
@@ -107,11 +120,8 @@ std::wstring RowLabel(const OverlayDef &ov) {
                                            : WideFromNarrow(ov.webcam_name);
         }
     }
-    if (name.size() > 14) name = name.substr(0, 14);
-
+    (void)icon;
     std::wstring row = dot;
-    row += L" ";
-    row += icon;
     row += L" ";
     row += name;
     return row;
@@ -159,8 +169,12 @@ HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w
     // Parameters (see ShowRowContextMenu()), so the list gets that
     // reclaimed vertical space instead.
     list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                             WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL,
+                             WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL |
+                             LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                              x + 6, cy + 30, w - 12, h - 42, parent, (HMENU)ID_OVDOCK_LIST, hInst, nullptr);
+    // Owner-drawn rows (icon + text). Fixed row height is set explicitly because the
+    // WM_MEASUREITEM that would normally supply it is sent before this panel can answer.
+    SendMessageW(list_, LB_SETITEMHEIGHT, 0, 28);
 
     // Subclass the list so right-click (or Shift+F10/the Menu key, which
     // Windows turns into the same WM_CONTEXTMENU) can be handled without
@@ -474,6 +488,87 @@ void OverlaysDockPanel::ClosePanel() {
     state_.show_overlays_panel = false;
     PersistState(state_);
     SetVisible(false);
+}
+
+void OverlaysDockPanel::Resize(int w, int h) {
+    if (!hwnd_ || w < 40 || h < 60) return;
+    HWND parent = GetParent(hwnd_);
+    HWND add = GetDlgItem(parent, ID_OVDOCK_ADD);
+    HWND close = GetDlgItem(parent, ID_OVDOCK_CLOSE);
+    // Batched so a sash drag repositions all four children with one repaint pass.
+    HDWP dwp = BeginDeferWindowPos(4);
+    auto place = [&](HWND win, int px, int py, int pw, int ph) {
+        if (!win) return;
+        if (dwp) dwp = DeferWindowPos(dwp, win, nullptr, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
+        else     SetWindowPos(win, nullptr, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+    place(hwnd_, 0, 0, w, h);
+    place(add, 6, 6, 28, 24);
+    place(close, w - 34, 6, 28, 24);
+    place(list_, 6, 36, std::max(20, w - 12), std::max(20, h - 42));
+    if (dwp) EndDeferWindowPos(dwp);
+    // The sunken STATIC is the lowest sibling; raise the controls above it.
+    if (add)   SetWindowPos(add,   HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (close) SetWindowPos(close, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (list_) SetWindowPos(list_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
+    if (!dis || dis->CtlType != ODT_LISTBOX || dis->itemID == (UINT)-1) return;
+    const COLORREF bg   = dark ? RGB(0x31, 0x32, 0x44) : RGB(0xff, 0xff, 0xff);
+    const COLORREF bgSel= dark ? RGB(0x45, 0x47, 0x5a) : RGB(0xcc, 0xdd, 0xff);
+    const COLORREF fg   = dark ? RGB(0xcd, 0xd6, 0xf4) : RGB(0x20, 0x20, 0x30);
+    const COLORREF fgDim= dark ? RGB(0x7f, 0x84, 0x9c) : RGB(0x90, 0x90, 0xa0);
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+
+    HDC dc = dis->hDC;
+    RECT rc = dis->rcItem;
+    HBRUSH br = CreateSolidBrush(selected ? bgSel : bg);
+    FillRect(dc, &rc, br);
+    DeleteObject(br);
+
+    // The "no overlays yet" hint row (list disabled) is plain centred text.
+    wchar_t buf[512] = {};
+    SendMessageW(list_, LB_GETTEXT, dis->itemID, (LPARAM)buf);
+    SetBkMode(dc, TRANSPARENT);
+
+    if (state_.overlays.empty() || dis->itemID >= state_.overlays.size()) {
+        SetTextColor(dc, fgDim);
+        RECT tr = rc; tr.left += 8; tr.right -= 8;
+        DrawTextW(dc, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+    const OverlayDef &ov = state_.overlays[dis->itemID];
+    const int rowH = rc.bottom - rc.top;
+    const int iconPx = 20;
+    int x = rc.left + 8;
+
+    // visibility dot (kept as text so hidden overlays read as hollow, like before)
+    SetTextColor(dc, ov.visible ? fg : fgDim);
+    RECT dr = { x, rc.top, x + 14, rc.bottom };
+    DrawTextW(dc, ov.visible ? L"\u25CF" : L"\u25CB", -1, &dr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    x += 18;
+
+    HrIcons::Id iid;
+    HICON hi = nullptr;
+    if (HrIcons::IdForOverlayType(ov.type, iid)) hi = HrIcons::GetHIcon(iid, iconPx);
+    if (hi) {
+        DrawIconEx(dc, x, rc.top + (rowH - iconPx) / 2, hi, iconPx, iconPx, 0, nullptr, DI_NORMAL);
+    } else {
+        SetTextColor(dc, ov.visible ? fg : fgDim);
+        RECT gr = { x, rc.top, x + iconPx, rc.bottom };
+        DrawTextW(dc, GlyphFor(ov), -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    x += iconPx + 8;
+
+    // label = everything after the "● " prefix RowLabel() puts in the string
+    const wchar_t *label = buf;
+    if (buf[0] && buf[1] == L' ') label = buf + 2;
+    SetTextColor(dc, ov.visible ? fg : fgDim);
+    RECT tr = { x, rc.top, rc.right - 6, rc.bottom };
+    DrawTextW(dc, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    if (dis->itemState & ODS_FOCUS) { /* no dotted focus rectangle - the highlight is enough */ }
 }
 
 void OverlaysDockPanel::SetVisible(bool visible) {

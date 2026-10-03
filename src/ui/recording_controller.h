@@ -604,6 +604,14 @@ private:
     // see the .cpp for the full explanation and hr_pl_set_capture_rect()
     // in hr_pipeline.cpp for how it's actually applied to captured frames.
     int crop_x_ = 0, crop_y_ = 0, crop_w_ = 0, crop_h_ = 0;
+    // 2.4: Window mode records the window itself via Windows.Graphics.Capture instead of
+    // cropping a monitor duplication. Set by ResolveCaptureSize(); crop_*_ stay 0 then.
+    bool use_wgc_ = false;
+    HWND wgc_hwnd_ = nullptr;
+    bool pipeline_wgc_ = false;           // what the CURRENT pipeline_ was created as
+    HWND pipeline_wgc_hwnd_ = nullptr;
+    bool PipelineMatchesTarget() const { return pipeline_wgc_ == use_wgc_ && (!use_wgc_ || pipeline_wgc_hwnd_ == wgc_hwnd_); }
+    void *CreatePipelineForTarget(intptr_t pipe_fd, int pvw, int pvh);
     bool window_track_lost_warned_ = false;
     std::chrono::steady_clock::time_point next_window_retarget_{}; // throttles re-resolving a lost window
     float mic_vol_ = 1.0f, sys_vol_ = 1.0f;

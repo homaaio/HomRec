@@ -17,7 +17,9 @@
 
 enum class CaptureMode { Desktop, Window, Region };
 enum class RecordingMode { Ultra, Turbo, Balanced, Eco };
-enum class VideoFormat { Mp4, Mkv };
+// Both = record to .mkv (crash-safe container) and remux a stream-copied .mp4
+// next to it when the recording is finalized (2.4).
+enum class VideoFormat { Mp4, Mkv, Both };
 // "Resolution:" setting in Settings > General - Percent keeps the old
 // scale_factor-of-native behavior (25/50/75/100%), Absolute lets the user
 // type an exact target width/height (e.g. 1280x720) instead. See
@@ -65,6 +67,22 @@ struct OverlayDef {
     // extracted files under plugins/input_overlays/<name>/.
     std::string input_json_path;
     std::string input_png_path;
+};
+
+// One extra audio source in the Audio Mixer (2.4). The built-in "Microphone"
+// and "Desktop Audio" strips are NOT in this list - they always exist.
+struct AudioSourceDef {
+    std::string id;            // "as_1", "as_2", ... (unique within the list)
+    std::string kind;          // "mic" | "app" | "file"
+                               //   mic  = another input device (target = WASAPI endpoint id)
+                               //   app  = one program's sound (browser / a specific window);
+                               //          target = exe name, window_title = title it was picked by
+                               //   file = an audio file mixed into the recording (target = path)
+    std::string name;          // label shown in the mixer
+    std::string target;
+    std::string window_title;
+    int         volume = 100;  // 0-150 (%)
+    bool        muted  = false;
 };
 
 struct AppState {
@@ -154,6 +172,33 @@ struct AppState {
     VideoFormat video_format       = VideoFormat::Mp4;
     bool        separate_audio_mp3 = false;
     int         level_meter_fps    = 30;
+    // 2.4: Audio Mixer look. "horizontal" (bars next to the slider, the
+    // pre-2.4 look) or "vertical" (OBS-style channel strips, meter beside a
+    // vertical fader).
+    std::string audio_meter_style  = "horizontal";
+    // 2.4: extra mixer channels (another mic, a browser, a window, an audio
+    // file). Persisted by HrcConfig in its own [audio_sources] section.
+    std::vector<AudioSourceDef> audio_sources;
+
+    // -- 2.4 window capture ----------------------------------------------
+    // How a selected window is captured:
+    //   "auto" - Windows.Graphics.Capture (the real window, even when covered by
+    //            other windows / partly off-screen) when the OS supports it,
+    //            otherwise cropping the screen to the window's rectangle
+    //   "wgc"  - same as auto (kept for explicitness); falls back to "crop" if WGC fails
+    //   "crop" - the pre-2.4 behaviour: duplicate the monitor and cut the window's
+    //            rectangle out of it (other windows on top of it show up)
+    std::string window_capture_method = "auto";
+    // What part of the window is recorded: "window" (title bar + borders +
+    // content - the WHOLE window) or "client" (only the content area).
+    std::string window_capture_area   = "window";
+
+    // -- 2.4 dockable UI ---------------------------------------------------
+    // Freezes the panel layout (no dragging, floating or resizing of panels).
+    bool        ui_locked = false;
+    // wxAuiManager perspective, hex-encoded so it survives the .hrc format.
+    // Empty = default layout.
+    std::string ui_layout;
 
     // -- UI toggles -------------------------------------------------------
     bool always_on_top      = false;

@@ -129,6 +129,9 @@ const std::vector<SettingDef> &All() {
             v.push_back(d);
         }
         v.push_back(StrField("capture_window_title", "capture", &AppState::capture_window_title));
+        // 2.4: how a selected window is captured / which part of it (see app_state.h)
+        v.push_back(StrField("window_capture_method", "capture", &AppState::window_capture_method));
+        v.push_back(StrField("window_capture_area", "capture", &AppState::window_capture_area));
         v.push_back(IntField("region_x", "capture", &AppState::region_x));
         v.push_back(IntField("region_y", "capture", &AppState::region_y));
         v.push_back(IntField("region_w", "capture", &AppState::region_w));
@@ -168,6 +171,8 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("separate_audio_mp3", "audio", &AppState::separate_audio_mp3));
         v.push_back(IntField("level_meter_fps", "audio", &AppState::level_meter_fps));
         v.push_back(StrField("mic_device_id", "audio", &AppState::mic_device_id));
+        // 2.4: "horizontal" | "vertical" level-meter / fader layout of the Audio Mixer
+        v.push_back(StrField("audio_meter_style", "audio", &AppState::audio_meter_style));
 
         // -- [hotkeys] -------------------------------------------------------
         v.push_back(StrField("hotkey_start_stop", "hotkeys", &AppState::hotkey_start_stop));
@@ -217,6 +222,10 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("notify_sound", "ui_toggles", &AppState::notify_sound));
         v.push_back(BoolField("notify_flash", "ui_toggles", &AppState::notify_flash));
         v.push_back(BoolField("hint_no_overlay", "ui_toggles", &AppState::hint_no_overlay));
+        // 2.4: dockable panels. ui_locked freezes the layout; ui_layout is the
+        // hex-encoded wxAuiManager perspective (written by the app, not meant to be hand-edited).
+        v.push_back(BoolField("ui_locked", "ui_toggles", &AppState::ui_locked, {"lock_ui", "ui_lock"}));
+        v.push_back(StrField("ui_layout", "ui_toggles", &AppState::ui_layout));
 
         // -- [security] --------------------------------------------------------
         v.push_back(BoolField("system_logging_enabled", "security", &AppState::system_logging_enabled));

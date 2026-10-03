@@ -82,6 +82,46 @@ private:
     wxWindowID cmd_id_;
 };
 
+// Slim fader used by the 2.4 Audio Mixer: horizontal OR vertical, rounded groove,
+// filled part, round thumb, mouse-wheel (+-5) and double-click (reset to unity).
+// Paints with its OWN background colour (SetColours) instead of reading the
+// parent's - reading the parent's was what produced the white rectangles
+// around every slider when the parent panel itself was never given a colour.
+// Fires wxEVT_SLIDER (GetInt() = value) like ColorSlider does.
+class FlatFader : public wxPanel {
+public:
+    FlatFader(wxWindow *parent, wxWindowID id, int value, int minVal, int maxVal, bool vertical = false);
+    void SetColours(wxColour bg, wxColour track, wxColour fill, wxColour thumb);
+    void SetVertical(bool v);
+    bool IsVertical() const { return vertical_; }
+    void SetUnity(int v) { unity_ = v; Refresh(false); }   // tick mark / double-click target
+    void SetDimmed(bool d) { if (dimmed_ != d) { dimmed_ = d; Refresh(false); } }
+    int  GetValue() const { return value_; }
+    void SetValue(int v);
+
+protected:
+    wxSize DoGetBestSize() const override;
+
+private:
+    void OnPaint(wxPaintEvent &evt);
+    void OnMouseDown(wxMouseEvent &evt);
+    void OnMouseUp(wxMouseEvent &evt);
+    void OnMouseMove(wxMouseEvent &evt);
+    void OnWheel(wxMouseEvent &evt);
+    void OnDClick(wxMouseEvent &evt);
+    void OnEnter(wxMouseEvent &) { if (!hot_) { hot_ = true; Refresh(false); } }
+    void OnLeave(wxMouseEvent &) { if (hot_) { hot_ = false; Refresh(false); } }
+    void OnCaptureLost(wxMouseCaptureLostEvent &) { dragging_ = false; Refresh(false); }
+    void UpdateFromPos(const wxPoint &p);
+    void SetAndNotify(int v);
+
+    int value_, min_, max_, unity_ = 100;
+    bool vertical_;
+    wxColour bg_, track_, fill_, thumb_;
+    bool dragging_ = false, hot_ = false, dimmed_ = false;
+    wxWindowID cmd_id_;
+};
+
 // Every slider in the app used to be a bare ColorSlider with no numeric
 // readout - fine for a rough adjustment, useless for "set this to exactly
 // 62". LabeledSlider pairs a ColorSlider with a spin box showing the same

@@ -375,6 +375,30 @@ private:
         timestamp_chk_ = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("timestamp")), state_.timestamp_enabled);
         cursor_chk_    = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("cursor")), state_.cursor_enabled);
         notify_chk_    = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("notification")), state_.show_summary);
+
+        // -- 2.4: "Select Window" capture ---------------------------------------
+        AddSectionHeading(page, pageRoot, accent, bg, "Window capture");
+        auto *wgrid = new wxFlexGridSizer(2, 10, 10);
+        wgrid->AddGrowableCol(1, 1);
+
+        AddLabel(page, wgrid, text, bg, "Capture method:");
+        wc_method_choice_ = new wxChoice(page, wxID_ANY);
+        wc_method_choice_->Append("Automatic - the real window (Windows.Graphics.Capture)");
+        wc_method_choice_->Append("Screen crop - cut the window's rectangle out of the screen");
+        wc_method_choice_->SetSelection(state_.window_capture_method == "crop" ? 1 : 0);
+        wc_method_choice_->SetToolTip(
+            "Automatic records the selected window itself: the whole window, even when other windows\n"
+            "cover it or part of it is off-screen (Windows 10 1903+; older systems use the crop).\n"
+            "Screen crop is the pre-2.4 behaviour - whatever is on screen in that rectangle is recorded.");
+        wgrid->Add(wc_method_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+
+        AddLabel(page, wgrid, text, bg, "Record:");
+        wc_area_choice_ = new wxChoice(page, wxID_ANY);
+        wc_area_choice_->Append("The whole window (title bar and borders included)");
+        wc_area_choice_->Append("Only the window's content area");
+        wc_area_choice_->SetSelection(state_.window_capture_area == "client" ? 1 : 0);
+        wgrid->Add(wc_area_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+        pageRoot->Add(wgrid, 0, wxEXPAND | wxALL, 16);
     }
 
     // Repopulates lang_choice_/lang_codes_ from the built-in "English"
@@ -500,6 +524,21 @@ private:
         custom_args_edit_ = new wxTextCtrl(page, wxID_ANY, wxString::FromUTF8(state_.custom_ffmpeg_args));
         pageRoot->Add(custom_args_edit_, 0, wxEXPAND | wxALL, 16);
 
+        AddSectionHeading(page, pageRoot, accent, bg, "Container");
+        {
+            auto *cgrid = new wxFlexGridSizer(2, 10, 10);
+            cgrid->AddGrowableCol(1, 1);
+            AddLabel(page, cgrid, text, bg, "Output format:");
+            container_choice_ = new wxChoice(page, wxID_ANY);
+            container_choice_->Append("MP4 (.mp4)");
+            container_choice_->Append("MKV (.mkv) - survives a crash or power loss");
+            container_choice_->Append("Both - record .mkv, then also save an .mp4 copy");
+            container_choice_->SetSelection(state_.video_format == VideoFormat::Mkv ? 1
+                                            : state_.video_format == VideoFormat::Both ? 2 : 0);
+            cgrid->Add(container_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
+            pageRoot->Add(cgrid, 0, wxEXPAND | wxALL, 16);
+        }
+
         AddSectionHeading(page, pageRoot, accent, bg, "GPU acceleration");
         gpu_convert_chk_ = AddCheck(page, pageRoot, text, bg,
             "GPU colour conversion (hardware encoders: crop/scale/convert on the GPU, less CPU)",
@@ -622,6 +661,12 @@ private:
         meter_fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
                                           wxSP_ARROW_KEYS, 10, 60, meter_fps);
         meterGrid->Add(meter_fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+        AddLabel(page, meterGrid, text, bg, "Mixer layout:");
+        meter_style_choice_ = new wxChoice(page, wxID_ANY);
+        meter_style_choice_->Append("Horizontal - level bars next to the faders");
+        meter_style_choice_->Append("Vertical - channel strips (like OBS)");
+        meter_style_choice_->SetSelection(state_.audio_meter_style == "vertical" ? 1 : 0);
+        meterGrid->Add(meter_style_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
         pageRoot->Add(meterGrid, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
         auto *meterNote = new wxStaticText(page, wxID_ANY,
             "How often the Microphone/Desktop Audio level bars redraw. Higher =\n"
@@ -922,6 +967,13 @@ private:
         updateShortcutEnabled();
         shortcut_chk_->Bind(wxEVT_CHECKBOX, [updateShortcutEnabled](wxCommandEvent &) { updateShortcutEnabled(); });
 
+        AddSectionHeading(page, pageRoot, accent, bg, "Interface");
+        ui_lock_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Lock the panel layout (panels can't be moved, floated or resized by accident)", state_.ui_locked);
+        ui_lock_chk_->SetToolTip(
+            "Freezes the Controls, Audio Mixer and Overlays panels where they are.\n"
+            "Also available as View > Lock layout, or: ui_locked = 1 in the console / a cfg script.");
+
         AddSectionHeading(page, pageRoot, accent, bg, "Startup");
         autostart_chk_ = AddCheck(page, pageRoot, text, bg,
             "Launch HomRec when Windows starts", state_.autostart_enabled);
@@ -1091,6 +1143,12 @@ private:
         state_.enc_crf = crf_spin_->GetValue();
         state_.pix_fmt = pixfmt_combo_->GetValue().ToUTF8().data();
         state_.custom_ffmpeg_args = custom_args_edit_->GetValue().ToUTF8().data();
+        {
+            int csel = container_choice_->GetSelection();
+            state_.video_format = csel == 1 ? VideoFormat::Mkv : csel == 2 ? VideoFormat::Both : VideoFormat::Mp4;
+            state_.window_capture_method = wc_method_choice_->GetSelection() == 1 ? "crop" : "auto";
+            state_.window_capture_area   = wc_area_choice_->GetSelection() == 1 ? "client" : "window";
+        }
         state_.gpu_convert = gpu_convert_chk_->GetValue();
         state_.gpu_capture_ddagrab = gpu_ddagrab_chk_->GetValue();
 
@@ -1104,6 +1162,7 @@ private:
         state_.audio_out_channels = channels_spin_->GetValue();
         state_.separate_audio_mp3 = separate_mp3_chk_->GetValue();
         state_.level_meter_fps = meter_fps_spin_->GetValue();
+        state_.audio_meter_style = meter_style_choice_->GetSelection() == 1 ? "vertical" : "horizontal";
 
         // -- Hotkeys -------------------------------------------------------
         state_.hotkey_start_stop = hk_startstop_btn_->GetValue().ToUTF8().data();
@@ -1167,6 +1226,7 @@ private:
             state_.autostart_enabled = wantAutostart;
 
             state_.minimize_to_tray = tray_chk_->GetValue();
+            state_.ui_locked = ui_lock_chk_->GetValue();
         }
 
         // -- Settings file path (Advanced tab) -------------------------
@@ -1217,6 +1277,10 @@ private:
     wxTextCtrl *folder_edit_ = nullptr;
     wxCheckBox *countdown_chk_ = nullptr, *timestamp_chk_ = nullptr, *cursor_chk_ = nullptr, *notify_chk_ = nullptr;
     wxChoice *lang_choice_ = nullptr;
+    wxChoice *wc_method_choice_ = nullptr, *wc_area_choice_ = nullptr;   // 2.4 window capture
+    wxChoice *container_choice_ = nullptr;                                // 2.4 mp4 / mkv / both
+    wxChoice *meter_style_choice_ = nullptr;                              // 2.4 mixer layout
+    wxCheckBox *ui_lock_chk_ = nullptr;                                   // 2.4 lock panel layout
     std::vector<std::string> lang_codes_; // parallel to lang_choice_'s items
 
     // Video & Codec

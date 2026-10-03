@@ -24,6 +24,7 @@
 
 #include <wx/wx.h>
 #include <wx/taskbar.h>
+#include <wx/aui/aui.h>      // 2.4: dockable / floating panels
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -69,6 +70,10 @@ enum MenuCommandId {
     ID_FILE_OPEN_PROGRAM_FILES = 1027,
     ID_FILE_IMPORT_HRP      = 1028,
     ID_FILE_SELECT_REGION   = 1029,
+    ID_VIEW_LOCK_UI         = 1034,
+    ID_VIEW_RESET_LAYOUT    = 1036,
+    ID_VIEW_DOCK_FIRST      = 1040,
+    ID_VIEW_DOCK_LAST       = 1069,
     // ID_PERF_ULTRA            = 1030,
     // ID_PERF_TURBO            = 1031,
     // ID_PERF_BALANCED         = 1032,
@@ -232,6 +237,27 @@ private:
     // no-longer-authoritative homrec_settings.json.
     void PersistSettings();
     void OnCaptureTargetChanged(); // after File > Select Window/Region - see main_frame.cpp
+    enum DockSlot { kDockLeft = 0, kDockRight, kDockTop, kDockBottom, kDockFloat };
+    void SetupDocking();
+    void ApplyDockArtColours();
+    void ApplyUiLock();
+    void SetPaneShown(const char *name, bool show, bool persist);
+    void DockPaneTo(const char *name, DockSlot slot);
+    void ResetDockLayout();
+    void SaveDockLayoutToState();
+    void OnAuiPaneClose(wxAuiManagerEvent &evt);
+    // The Controls pane re-flows: stacked vertically when docked left/right (or floating
+    // tall), laid out in a row when docked top/bottom.
+    void LayoutControlsPanel(bool horizontal);
+    void UpdateControlsOrientation();
+
+    wxAuiManager aui_;
+    wxPanel *dock_host_ = nullptr;
+    bool dock_ready_ = false;
+    bool ui_lock_applied_ = false;
+    bool controls_horizontal_ = false;
+    bool controls_reflow_pending_ = false;
+    wxString default_perspective_;
 
     void SetupHotkeys();
     void ConfigureHotkeysFromState();

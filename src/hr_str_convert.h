@@ -49,8 +49,18 @@ inline CaptureMode HrCaptureModeFromStr(const std::string &s) {
     return CaptureMode::Desktop;
 }
 
-inline std::string HrVideoFormatToStr(VideoFormat f) { return f == VideoFormat::Mkv ? "mkv" : "mp4"; }
-inline VideoFormat HrVideoFormatFromStr(const std::string &s) { return s == "mkv" ? VideoFormat::Mkv : VideoFormat::Mp4; }
+inline std::string HrVideoFormatToStr(VideoFormat f) {
+    if (f == VideoFormat::Mkv)  return "mkv";
+    if (f == VideoFormat::Both) return "both";
+    return "mp4";
+}
+inline VideoFormat HrVideoFormatFromStr(const std::string &s) {
+    if (s == "mkv")  return VideoFormat::Mkv;
+    if (s == "both" || s == "mp4+mkv" || s == "mkv+mp4") return VideoFormat::Both;
+    return VideoFormat::Mp4;
+}
+// File extension the encoder writes to (Both records to .mkv and remuxes an .mp4 copy).
+inline const char *HrVideoFormatExt(VideoFormat f) { return f == VideoFormat::Mp4 ? "mp4" : "mkv"; }
 
 inline std::string HrPostRecordHookTypeToStr(AppState::PostRecordHookType t) {
     switch (t) {
