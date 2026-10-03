@@ -71,10 +71,13 @@ set(HR_SOURCES
     src/hr_ui_utils.cpp
     src/hr_audio.cpp
     src/hr_dxgi_capture.cpp
+    src/hr_wgc_capture.cpp
     src/hr_stopwatch.cpp
     src/hr_settings.cpp
     src/hr_hotkey.cpp
     src/hr_mic_enum.cpp
+    src/hr_app_audio_enum.cpp
+    src/ui/hr_icons.cpp
     src/hr_settings_registry.cpp
     src/hr_update.cpp
     resource.rc
@@ -116,7 +119,7 @@ target_link_libraries(hr PRIVATE
     d3d11 dxgi pdh winmm ole32 uuid lua dwmapi uxtheme
     windowscodecs strmiids oleaut32
     mfplat mfreadwrite mf mfuuid
-    wx_mswu_xrc-3.2 wx_mswu_html-3.2 wx_mswu_qa-3.2
+    wx_mswu_aui-3.2 wx_mswu_xrc-3.2 wx_mswu_html-3.2 wx_mswu_qa-3.2
     wx_mswu_core-3.2 wx_baseu_xml-3.2 wx_baseu_net-3.2 wx_baseu-3.2
 )
 

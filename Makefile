@@ -27,7 +27,7 @@ LDFLAGS := -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bd
            -lcomctl32 -lcomdlg32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet -lwinhttp -ld3d11 -ldxgi -lpdh \
            -lwinmm -lole32 -luuid -llua -ldwmapi -luxtheme -lwindowscodecs -lstrmiids -loleaut32 \
            -lmfplat -lmfreadwrite -lmf -lmfuuid \
-           -LC:/msys64/mingw64/lib -lwx_mswu_xrc-3.2 -lwx_mswu_html-3.2 -lwx_mswu_qa-3.2 \
+           -LC:/msys64/mingw64/lib -lwx_mswu_aui-3.2 -lwx_mswu_xrc-3.2 -lwx_mswu_html-3.2 -lwx_mswu_qa-3.2 \
            -lwx_mswu_core-3.2 -lwx_baseu_xml-3.2 -lwx_baseu_net-3.2 -lwx_baseu-3.2
 
 OBJS := \
@@ -76,10 +76,13 @@ OBJS := \
 	src/hr_ui_utils.o \
 	src/hr_audio.o \
 	src/hr_dxgi_capture.o \
+	src/hr_wgc_capture.o \
 	src/hr_stopwatch.o \
 	src/hr_settings.o \
 	src/hr_hotkey.o \
 	src/hr_mic_enum.o \
+	src/hr_app_audio_enum.o \
+	src/ui/hr_icons.o \
 	src/hr_encoder_helpers.o \
 	src/hr_settings_registry.o \
 	src/hr_update.o
