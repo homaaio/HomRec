@@ -1,5 +1,97 @@
 welcome to changelog :D
 
+[Version 2.4.0] - 2026-10-03
+
+Window capture, MKV, dockable panels, a new Audio Mixer. (Written without a
+compiler at hand - if the build reports an error, send it back and it gets fixed.)
+
+Commit-style report, one line per file:
+
+Window capture ("Select Window" records the WHOLE window)
+- Added (src/hr_wgc_capture.h/.cpp): Windows.Graphics.Capture window source
+  (Windows 10 1903+). The selected window is recorded itself - other windows on
+  top of it, being partly off-screen or on another monitor no longer matter.
+  Window resized while recording -> the picture is fitted into the recording's
+  fixed size (aspect kept, black bars) so the whole window is always visible.
+  Raw COM/WinRT vtables, loaded late: the app still starts on older Windows.
+- Changed (src/hr_pipeline.cpp): new hr_pl_create_window(); dx_* call sites go
+  through small dispatch wrappers (PlDx*) so DXGI and the window source share one
+  pipeline. In window mode the GPU-NV12 path, dirty-rect conversion and the
+  pipeline's own cursor compositor are off (WGC draws the cursor itself).
+- Changed (src/ui/recording_controller.cpp/.h): ResolveCaptureSize() picks WGC or
+  the old screen crop; CreatePipelineForTarget(); a preview pipeline is only
+  reused if it matches the current target. RetargetWindowCapture() is skipped in
+  WGC mode (nothing to retarget).
+- Changed (src/ui/window_picker_dialog.cpp/.h): HR_ResolveCaptureWindow(...,
+  client_only) can return the content area instead of the whole frame.
+- Added settings (src/ui/app_state.h, src/hr_settings_registry.cpp -> .hrc, console,
+  cfg, Lua all get them automatically): window_capture_method = auto | crop,
+  window_capture_area = window | client. UI: Settings > General > Window capture.
+
+MKV output
+- Changed (src/ui/app_state.h, src/hr_str_convert.h): VideoFormat is now
+  Mp4 | Mkv | Both; HrVideoFormatExt().
+- Changed (src/hr_ui_utils.cpp): hr_filename_from_template_ex() takes the extension
+  (old hr_filename_from_template() kept, still ".mp4").
+- Changed (src/ui/recording_controller.cpp): BuildOutputPath() uses the chosen
+  container and avoids clobbering an existing .mp4 in "both" mode.
+- Added (src/hr_tools.cpp): hr_remux_copy() - stream-copy .mkv -> .mp4 (+faststart),
+  no re-encode; used for "Both" after the audio merge and after Save Replay.
+- Added: Settings > Video > Container (MP4 / MKV / Both); key: video_format.
+
+Dockable panels (like OBS)
+- Changed (src/ui/main_frame.cpp/.h, Makefile, CMakeLists.txt): Controls
+  (Start/Pause/status/time), Audio Mixer and Overlays are wxAUI panes around the
+  preview. Drag a title bar to dock on any side, drop outside the window to make
+  it a floating window, drag the sashes to resize. View > Move panel to > Left |
+  Right | Top | Bottom | Floating window, View > Reset layout. The layout is saved
+  (ui_layout, hex-encoded) and restored; off-screen floating panels are pulled back.
+- Added: View > Lock layout and Settings > System > Interface (key ui_locked,
+  alias lock_ui) freeze every panel (no move / float / dock / resize / close).
+- Changed: the Controls pane re-flows - stacked when tall (left/right dock), in
+  one row when wide (top/bottom dock). Hysteresis so it can't flicker.
+- Changed (src/ui/overlays_dock_panel.cpp/.h): Resize() so the list follows the
+  pane; owner-drawn rows with the overlay type icon.
+- Optimisation: rectangle drag hints, no live-resize (the preview is not re-scaled
+  on every mouse-move), no new timers.
+
+Audio Mixer
+- Fixed (src/ui/themed_widgets.cpp): the white frames around every slider -
+  LabeledSlider's wrapper panel was never given a colour (default white) and the
+  slider cleared itself with its parent's colour. It now takes the parent's colour
+  on creation and on every theme change.
+- Added (src/ui/themed_widgets.h/.cpp): FlatFader - own-background horizontal /
+  vertical fader (wheel +-5, double-click = 100%).
+- Changed (src/ui/audio_panel.h/.cpp): rebuilt as channel cards, scrollable,
+  no title row (the pane caption has it). Meter repaints only when it changed;
+  nothing is polled while the pane is hidden.
+- Added: Settings > Audio > Mixer layout: horizontal (bar above the fader) or
+  vertical (OBS-style strips); key audio_meter_style.
+- Added: "+ Add source": another microphone, a browser, a program's / window's sound
+  (WASAPI per-process loopback, Windows 10 2004+), an audio file (decoded by ffmpeg).
+  Each has mute / volume / rename / reconnect / remove. Offline sources reconnect
+  by themselves (checked every 3 s, never while recording).
+- Added (src/hr_audio_extra.inc, included by src/hr_audio.cpp): the backend.
+  Streams to disk like the built-in tracks, so RAM stays flat.
+- Added (src/hr_audio.cpp): hr_audio_mix_wav_list() - streaming N-way mixer, a few
+  KB of RAM at any length (the old mixer reads both files whole).
+- Added (src/hr_app_audio_enum.h/.cpp): lists browsers / windows for the above.
+- Added (src/ui/hrc_config.cpp): [audio_sources] section in .hrc.
+
+Icons (src/ui/hr_icons.h/.cpp)
+- Added: PNG loader (cached, scaled once per size). Missing file = text glyph, never
+  an error. Overlays: icons/overlays/text.png, gif.png, image.png, webcam.png.
+  Mixer: icons/audio/microphone.png, desktop_audio.png (optional browser.png,
+  window.png, file.png). Several alternative names are accepted - see hr_icons.cpp.
+  installer/HomRec.iss ships them.
+
+Build: new sources hr_wgc_capture, hr_app_audio_enum, ui/hr_icons; new link flag
+-lwx_mswu_aui-3.2 (Makefile + CMakeLists.txt).
+
+Known limits: extra mixer sources are not in Instant Replay (the replay buffer
+has no audio mixer); an elevated (admin) window can't be captured by a non-elevated
+HomRec - the screen crop is used then; a minimised window produces no new frames.
+
 [Version 2.3.3] - 2026-10-01
 
 Game FPS while recording. 2.3.3 cut HomRec's CPU use, but the in-game FPS did
