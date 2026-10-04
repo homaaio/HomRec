@@ -1080,6 +1080,7 @@ struct Pipeline {
     // OPT: устранён bgra_to_rgb_inplace() и буфер rgb_pv
     // -------------------------------------------------------------------------
     void update_preview() {
+        std::lock_guard<std::mutex> lock(pv_mtx);   // also guards pv_w/pv_h (hr_pl_set_preview_size)
         int tw = pv_w, th = pv_h;
         if (eff_w > 0 && eff_h > 0) {
             float ar = (float)eff_w / (float)eff_h;
@@ -1090,7 +1091,6 @@ struct Pipeline {
         th = std::max(th & ~1, 2);
 
         size_t pv_sz = (size_t)tw * th * 3;
-        std::lock_guard<std::mutex> lock(pv_mtx);
         if (pv_buf.size() != pv_sz) pv_buf.resize(pv_sz);
 
         if (frame_nv12 && nv12_w > 0 && nv12_h > 0)
@@ -2824,7 +2824,10 @@ HR_EXPORT void hr_pl_set_preview_size(void* handle, int pw, int ph) {
     std::lock_guard<std::mutex> lock(pl->pv_mtx);
     pl->pv_w    = pw;
     pl->pv_h    = ph;
-    pl->pv_ready = false;
+    // pv_ready is deliberately left alone (it used to be cleared here): the previous thumbnail
+    // stays valid - pv_buf/pv_actual_w/h always describe each other - until the capture thread
+    // publishes one at the new size, so the UI never flashes its "loading" placeholder when the
+    // preview panel is resized.
 #endif
 }
 
