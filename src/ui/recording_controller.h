@@ -229,6 +229,10 @@ public:
     // recording owns the pipeline until Stop()" rule as TeardownPreview().
     void SetPreviewVisible(bool visible);
 
+    // Tells the pipeline how big the on-screen preview pane is, so it can produce the thumbnail at
+    // that size (no UI-side rescale). Cheap; callers throttle it themselves.
+    void SetPreviewViewSize(int w, int h);
+
     // "Apply with preview off" (overlays_dock_panel.cpp's row context
     // menu): grabs one frame for the overlay editor even when the user
     // has Settings > Disable live preview on, by starting the preview
@@ -608,6 +612,7 @@ private:
     // cropping a monitor duplication. Set by ResolveCaptureSize(); crop_*_ stay 0 then.
     bool use_wgc_ = false;
     HWND wgc_hwnd_ = nullptr;
+    int pv_view_w_ = 0, pv_view_h_ = 0;   // preview pane size last reported by the UI (SetPreviewViewSize)
     bool pipeline_wgc_ = false;           // what the CURRENT pipeline_ was created as
     HWND pipeline_wgc_hwnd_ = nullptr;
     bool PipelineMatchesTarget() const { return pipeline_wgc_ == use_wgc_ && (!use_wgc_ || pipeline_wgc_hwnd_ == wgc_hwnd_); }
