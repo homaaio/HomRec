@@ -70,6 +70,7 @@ enum MenuCommandId {
     ID_FILE_OPEN_PROGRAM_FILES = 1027,
     ID_FILE_IMPORT_HRP      = 1028,
     ID_FILE_SELECT_REGION   = 1029,
+    // 2.4 - panel docking (View menu). ID_VIEW_DOCK_FIRST + pane * 8 + slot.
     ID_VIEW_LOCK_UI         = 1034,
     ID_VIEW_RESET_LAYOUT    = 1036,
     ID_VIEW_DOCK_FIRST      = 1040,
@@ -209,6 +210,7 @@ private:
     bool snapshot_dirty_ = false;    // snapshot_buf_ changed since last scale
     bool cache_dirty_ = true;        // cached_bmp_ no longer matches the source
     int idle_ticks_ = 0;
+    int req_pv_w_ = 0, req_pv_h_ = 0;  // last thumbnail size requested from the pipeline
     bool drag_moved_ = false;        // a drag actually changed the overlay
     bool overlay_save_pending_ = false;
     wxTimer overlay_save_timer_;
@@ -237,6 +239,13 @@ private:
     // no-longer-authoritative homrec_settings.json.
     void PersistSettings();
     void OnCaptureTargetChanged(); // after File > Select Window/Region - see main_frame.cpp
+
+    // -- 2.4: dockable panels (wxAUI) -------------------------------------------------
+    // Controls (Start/Pause/status/time), Audio Mixer and Overlays are AUI panes around
+    // the live preview: drag a pane's title to dock it to any side or to tear it out
+    // into its own window (and back), drag the sashes to resize. View > Panels can also
+    // send a pane straight to Left / Right / Top / Bottom / Floating. "Lock layout"
+    // freezes everything (AppState::ui_locked).
     enum DockSlot { kDockLeft = 0, kDockRight, kDockTop, kDockBottom, kDockFloat };
     void SetupDocking();
     void ApplyDockArtColours();

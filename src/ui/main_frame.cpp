@@ -378,13 +378,27 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
             double scale = std::min((double)cs.GetWidth() / w, (double)cs.GetHeight() / h);
             int dw = std::max(1, (int)(w * scale));
             int dh = std::max(1, (int)(h * scale));
-            wxImage scaled = img.Scale(dw, dh, wxIMAGE_QUALITY_BILINEAR);
-            cached_bmp_ = wxBitmap(scaled);
+            if (std::abs(dw - w) <= 3 && std::abs(dh - h) <= 3) {
+                cached_bmp_ = wxBitmap(img);
+                dw = w; dh = h;
+            } else {
+                // Thumbnail size differs (capped by the preview-quality setting, or the pane just
+                // changed size and the next thumbnail isn't here yet).
+                wxImage scaled = img.Scale(dw, dh, wxIMAGE_QUALITY_NORMAL);
+                cached_bmp_ = wxBitmap(scaled);
+            }
             cached_src_w_ = w; cached_src_h_ = h;
             cached_dst_w_ = dw; cached_dst_h_ = dh;
             cached_panel_w_ = cs.GetWidth(); cached_panel_h_ = cs.GetHeight();
             last_frame_buf_.assign(src, src + need);
             cache_dirty_ = false;
+        }
+        // Ask for a thumbnail at the pane's size (hysteresis: ignore jitter < 8 px).
+        if (rec_ && !snapshot_mode_ &&
+            (std::abs(cs.GetWidth() - req_pv_w_) >= 8 || std::abs(cs.GetHeight() - req_pv_h_) >= 8)) {
+            req_pv_w_ = cs.GetWidth();
+            req_pv_h_ = cs.GetHeight();
+            rec_->SetPreviewViewSize(req_pv_w_, req_pv_h_);
         }
         if (snapshot_mode_) snapshot_dirty_ = false;
         dc.DrawBitmap(cached_bmp_, (cs.GetWidth() - cached_dst_w_) / 2, (cs.GetHeight() - cached_dst_h_) / 2);
@@ -1301,12 +1315,26 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     overlays_host_->SetMinSize(wxSize(170, 120));
     overlays_panel_ = std::make_unique<OverlaysDockPanel>(state_);
     overlays_panel_->Create((HWND)overlays_host_->GetHandle(), wxGetInstance(), 0, 0, 220, 500);
-    overlays_host_->Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) {
+    auto repaint_pending = std::make_shared<bool>(false);
+    auto request_repaint = [this, repaint_pending]() {
+        if (*repaint_pending) return;
+        *repaint_pending = true;
+        overlays_host_->CallAfter([this, repaint_pending]() {
+            *repaint_pending = false;
+            if (overlays_panel_) overlays_panel_->ForceRepaint();
+        });
+    };
+    overlays_host_->Bind(wxEVT_SIZE, [this, request_repaint](wxSizeEvent &evt) {
         evt.Skip();
         if (overlays_panel_ && overlays_host_) {
             const wxSize cs = overlays_host_->GetClientSize();
             overlays_panel_->Resize(cs.x, cs.y);
+            request_repaint();
         }
+    });
+    overlays_host_->Bind(wxEVT_SHOW, [request_repaint](wxShowEvent &evt) {
+        evt.Skip();
+        if (evt.IsShown()) request_repaint();
     });
     overlays_host_->on_drawitem = [this](DRAWITEMSTRUCT *dis) {
         if (overlays_panel_) overlays_panel_->HandleDrawItem(dis, state_.current_theme != "light");
@@ -1792,10 +1820,12 @@ void HomRecMainFrame::ConfigureHotkeysFromState() {
 }
 
 void HomRecMainFrame::SetStatusState(const wxString &text, COLORREF dotColor) {
-    if (status_lbl_) status_lbl_->SetLabel(text);
-    if (status_dot_) status_dot_->SetColor(FromColorref(dotColor));
+    // Called every stats tick while the overload warning is up - skip all work when nothing changed.
+    bool changed = false;
+    if (status_lbl_ && status_lbl_->GetLabel() != text) { status_lbl_->SetLabel(text); changed = true; }
+    if (status_dot_) status_dot_->SetColor(FromColorref(dotColor));   // no-op for an unchanged colour
     if (bottom_dot_) bottom_dot_->SetColor(FromColorref(dotColor));
-    if (left_panel_) left_panel_->Layout();
+    if (changed && left_panel_) left_panel_->Layout();
 }
 
 void HomRecMainFrame::RequestStart() {
@@ -2649,25 +2679,25 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
                                state_.output_folder);
 
     if (state_.recording) {
+        // Only touch a label whose text really changed (every SetLabel invalidates + re-fits the
+        // control) and only re-layout the Controls pane when something did.
+        bool changed = false;
+        auto setLabel = [&changed](wxStaticText *w, const wxString &txt) {
+            if (w && w->GetLabel() != txt) { w->SetLabel(txt); changed = true; }
+        };
         std::wstring elapsed = rec_ ? rec_->elapsed_formatted() : std::wstring(L"00:00:00");
         wxString t(elapsed.c_str());
-        if (time_lbl_) time_lbl_->SetLabel(t);
-        if (fps_lbl_) {
-            wxString fps = wxString::FromUTF8(lang_.Get("fps")) +
-                           wxString::Format(" %.1f", rec_ ? rec_->current_fps() : 0.0);
-            fps_lbl_->SetLabel(fps);
-        }
-        if (res_lbl_) {
-            wxString res = wxString::FromUTF8(lang_.Get("resolution")) +
-                           wxString::Format(" %dx%d", rec_ ? rec_->output_width() : 0,
-                                            rec_ ? rec_->output_height() : 0);
-            res_lbl_->SetLabel(res);
-        }
-        if (preview_fps_lbl_) preview_fps_lbl_->SetLabel(fps_lbl_ ? fps_lbl_->GetLabel() : wxString());
-        if (file_lbl_) {
-            wxString state_word = wxString::FromUTF8(lang_.Get(state_.paused ? "paused" : "recording"));
-            file_lbl_->SetLabel(state_word + wxString::FromUTF8(" \u2014 ") + t);
-        }
+        setLabel(time_lbl_, t);
+        wxString fps = wxString::FromUTF8(lang_.Get("fps")) +
+                       wxString::Format(" %.1f", rec_ ? rec_->current_fps() : 0.0);
+        setLabel(fps_lbl_, fps);
+        wxString res = wxString::FromUTF8(lang_.Get("resolution")) +
+                       wxString::Format(" %dx%d", rec_ ? rec_->output_width() : 0,
+                                        rec_ ? rec_->output_height() : 0);
+        setLabel(res_lbl_, res);
+        setLabel(preview_fps_lbl_, fps);
+        wxString state_word = wxString::FromUTF8(lang_.Get(state_.paused ? "paused" : "recording"));
+        setLabel(file_lbl_, state_word + wxString::FromUTF8(" \u2014 ") + t);
         // Overload warning: rec_->overloaded() only turns on after a
         // sustained streak of real frame drops (see PollStats()), so this
         // isn't fighting the normal "recording"/"paused" status text for
@@ -2677,10 +2707,8 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
             SetStatusState(wxString::FromUTF8("\u26A0 System overloaded \u2014 dropping frames"),
                             theme_.warning);
         }
+        if (changed && left_panel_) left_panel_->Layout();
     }
-    // Labels only change while recording - relayouting the panel every
-    // 500ms while idle was wasted work.
-    if (state_.recording) left_panel_->Layout();
 }
 
 void HomRecMainFrame::OnLevelMeterTimer(wxTimerEvent &) {
