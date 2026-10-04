@@ -1,5 +1,36 @@
 welcome to changelog :D
 
+[Version 2.4.0] - fix pass after first test (2026-10-04)
+
+Optimisation (first priority)
+- Changed (src/hr_pipeline.cpp, src/ui/recording_controller.cpp/.h, src/ui/main_frame.cpp/.h):
+  the live-preview thumbnail is now produced by the pipeline at the size the preview PANE
+  actually has (capped by Settings > preview size/quality) via the new
+  RecordingController::SetPreviewViewSize(). PreviewPanel::OnPaint no longer runs a bilinear
+  wxImage::Scale() on the UI thread for every new frame (it was ~10-15 ms per frame at 15 fps
+  with the docked, smaller preview); it just wraps the thumbnail in a bitmap. Fallback scaling,
+  when sizes differ, uses the cheaper NORMAL quality. Re-applied when a pipeline is recreated.
+- Fixed (src/hr_pipeline.cpp): hr_pl_set_preview_size() cleared pv_ready, so every resize of the
+  preview pane flashed the "Preview loading..." placeholder; update_preview() also read pv_w/pv_h
+  without the lock. Both fixed.
+- Changed (src/ui/main_frame.cpp, src/ui/themed_widgets.cpp): OnStatsTimer only SetLabel()s texts
+  that really changed and only re-lays-out the Controls pane when one did; SetStatusState() and
+  StatusDot::SetColor() are no-ops for unchanged values (they ran every 500 ms while the overload
+  warning was on).
+
+Bug fixes
+- Fixed (src/ui/audio_panel.cpp): wxWidgets debug alert "wxEXPAND overrides alignment flags in box
+  sizers" at startup - two Add() calls combined wxEXPAND with wxALIGN_CENTRE_*. (All other
+  wxEXPAND|wxALIGN_* uses in the code base are in grid sizers, which is fine.)
+- Changed (src/ui/audio_panel.cpp): "Add source" is now a small 104x22 button under the cards instead
+  of a full-width bar that took a third of a short dock pane; mixer cards are compact (~70 px:
+  name / % / mute on one row, meter, fader) and the pane minimum height dropped, so both built-in
+  channels are visible in a small pane.
+- Fixed (src/ui/overlays_dock_panel.cpp/.h, src/ui/main_frame.cpp): the Overlays pane had two
+  close buttons (the dock caption's and its own "x") - its own is gone. The pane stayed blank
+  after being moved/floated/docked because the raw Win32 children were never invalidated after AUI
+  re-parented the host: OverlaysDockPanel::ForceRepaint(), requested (coalesced) on host size/show.
+
 [Version 2.4.0] - 2026-10-03
 
 Window capture, MKV, dockable panels, a new Audio Mixer. (Written without a
