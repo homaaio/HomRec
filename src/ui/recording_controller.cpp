@@ -102,6 +102,7 @@ extern "C" {
     void hr_pl_set_output_pixfmt(void *handle, int nv12);
     void hr_pl_set_gpu_convert(void *handle, int enabled);
     void hr_pl_set_preview_fps(void *handle, int fps);
+    void hr_pl_set_preview_size(void *handle, int pw, int ph);
     void hr_pl_set_fps(void *handle, int fps);
     void hr_pl_set_preview_needed(void *handle, int enabled);
     int hr_pl_end_recording_segment(void *handle, int timeout_ms);
@@ -698,6 +699,11 @@ void *RecordingController::CreatePipelineForTarget(intptr_t pipe_fd, int pvw, in
     }
     pipeline_wgc_ = (pl != nullptr) && use_wgc_;
     pipeline_wgc_hwnd_ = pipeline_wgc_ ? wgc_hwnd_ : nullptr;
+    if (pl && pv_view_w_ >= 64 && pv_view_h_ >= 64) {
+        int mw = 0, mh = 0;
+        ScaledPreviewSize(mw, mh);
+        hr_pl_set_preview_size(pl, std::min(pv_view_w_, mw) & ~1, std::min(pv_view_h_, mh) & ~1);
+    }
     return pl;
 }
 
@@ -2168,6 +2174,23 @@ int RecordingController::GetPreviewFrameIfNew(std::vector<uint8_t> &out, int &ou
     if (out.size() < cap) out.resize(cap);
     return hr_pl_get_preview_ex(pipeline_, out.data(), out.size(), &out_w, &out_h,
                                 &native_w, &native_h, &seq);
+}
+
+// The live thumbnail used to be produced at the (fixed) preview_width x preview_height and then
+// bilinear-rescaled on the UI thread for every single new frame; with the docked layout the preview
+// pane is rarely that size, so that rescale was pure CPU waste. The pipeline now makes the thumbnail
+// at the size the pane actually shows (capped by the user's preview quality setting), so the UI can
+// blit it as-is.
+void RecordingController::SetPreviewViewSize(int w, int h) {
+    if (w < 64 || h < 64) return;
+    pv_view_w_ = w;
+    pv_view_h_ = h;
+    if (!pipeline_) return;
+    int mw = 0, mh = 0;
+    ScaledPreviewSize(mw, mh);
+    w = std::min(w, mw);
+    h = std::min(h, mh);
+    hr_pl_set_preview_size(pipeline_, w & ~1, h & ~1);
 }
 
 uint64_t RecordingController::PreviewSeq() const {
