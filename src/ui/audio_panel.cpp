@@ -165,10 +165,13 @@ AudioPanel::AudioPanel(wxWindow *parent, AppState &state, RecordingController &r
     outer_ = new wxBoxSizer(wxVERTICAL);
     SetSizer(outer_);
 
-    add_btn_ = new ColorButton(this, ID_AUDIO_ADD, wxString::FromUTF8("\uFF0B  Add source"));
-    add_btn_->SetMinSize(wxSize(-1, 26));
+    // Compact, content-sized button pinned under the cards. It used to be a full-width
+    // 26 px bar with 6 px margins, which ate a third of a short dock pane.
+    add_btn_ = new ColorButton(this, ID_AUDIO_ADD, wxString::FromUTF8("\uFF0B Add source"));
+    add_btn_->SetMinSize(wxSize(104, 22));
+    add_btn_->SetMaxSize(wxSize(104, 22));
     add_btn_->SetToolTip("Add another microphone, a browser, a program's sound or an audio file");
-    outer_->Add(add_btn_, 0, wxEXPAND | wxALL, 6);
+    outer_->Add(add_btn_, 0, wxALIGN_LEFT | wxLEFT | wxRIGHT | wxBOTTOM, 4);
 
     Bind(wxEVT_SLIDER, &AudioPanel::OnFader, this, ID_AUDIO_FADER_BASE, ID_AUDIO_FADER_BASE + 99);
     Bind(wxEVT_BUTTON, &AudioPanel::OnMute, this, ID_AUDIO_MUTE_BASE, ID_AUDIO_MUTE_BASE + 99);
@@ -248,13 +251,13 @@ void AudioPanel::BuildLayout() {
     auto *sz = new wxBoxSizer(vertical ? wxHORIZONTAL : wxVERTICAL);
     for (int i = 0; i < ChannelCount(); ++i) {
         BuildCard(At(i), i, vertical);
-        if (vertical) sz->Add(At(i).card, 0, wxEXPAND | wxRIGHT, 8);
-        else          sz->Add(At(i).card, 0, wxEXPAND | wxBOTTOM, 8);
+        if (vertical) sz->Add(At(i).card, 0, wxEXPAND | wxRIGHT, 6);
+        else          sz->Add(At(i).card, 0, wxEXPAND | wxBOTTOM, 4);
     }
     scroller_->SetSizer(sz);
-    outer_->Insert(0, scroller_, 1, wxEXPAND | wxALL, 6);
+    outer_->Insert(0, scroller_, 1, wxEXPAND | wxALL, 4);
 
-    SetMinSize(wxSize(vertical ? 200 : 190, vertical ? 230 : 130));
+    SetMinSize(wxSize(vertical ? 190 : 170, vertical ? 200 : 90));
     for (int i = 0; i < ChannelCount(); ++i) UpdateCardState(At(i));
     ApplyTheme(theme_);          // also recolours the freshly built widgets
     scroller_->FitInside();
@@ -300,24 +303,26 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
     }
 
     if (!vertical) {
-        // [icon] Name ...................... [Mute] [...]
+        // Compact card (~70 px):
+        // [icon] Name ............ 100% [Mute] [...]
         // [================ meter ===============]
-        // [------------- fader --------------]  100%
+        // [---------------- fader ----------------]
+        ch.pct_lbl->SetMinSize(wxSize(40, -1));
         auto *top = new wxBoxSizer(wxHORIZONTAL);
-        top->Add(makeIcon(), 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
-        top->Add(ch.name_lbl, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
+        top->Add(makeIcon(), 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
+        top->Add(ch.name_lbl, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
+        top->Add(ch.pct_lbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
         top->Add(ch.mute_btn, 0, wxALIGN_CENTRE_VERTICAL);
         if (ch.menu_btn) top->Add(ch.menu_btn, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, 4);
-        root->Add(top, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
+        root->Add(top, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
-        ch.meter->SetMinSize(wxSize(60, 10));
-        root->Add(ch.meter, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
+        ch.meter->SetMinSize(wxSize(60, 8));
+        root->Add(ch.meter, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
-        auto *bottom = new wxBoxSizer(wxHORIZONTAL);
-        ch.fader->SetMinSize(wxSize(60, 24));
-        bottom->Add(ch.fader, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-        bottom->Add(ch.pct_lbl, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, 6);
-        root->Add(bottom, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+        ch.fader->SetMinSize(wxSize(60, 20));
+        // NB: wxEXPAND already overrides every alignment flag in a box sizer; combining it with
+        // wxALIGN_* trips a wxWidgets debug assertion ("wxEXPAND overrides alignment flags").
+        root->Add(ch.fader, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 6);
     } else {
         //   [icon]
         //   Name
@@ -332,9 +337,11 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
         auto *mid = new wxBoxSizer(wxHORIZONTAL);
         ch.meter->SetMinSize(wxSize(12, 70));
         ch.fader->SetMinSize(wxSize(26, 70));
+        mid->AddStretchSpacer(1);          // centres the meter+fader pair (no wxALIGN_* with wxEXPAND!)
         mid->Add(ch.meter, 0, wxEXPAND | wxRIGHT, 6);
         mid->Add(ch.fader, 0, wxEXPAND);
-        root->Add(mid, 1, wxALIGN_CENTRE_HORIZONTAL | wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 14);
+        mid->AddStretchSpacer(1);
+        root->Add(mid, 1, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
 
         root->Add(ch.pct_lbl, 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 4);
         root->Add(ch.mute_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
