@@ -81,6 +81,7 @@ StatusDot::StatusDot(wxWindow *parent, wxColour color, int diameter)
 }
 
 void StatusDot::SetColor(wxColour color) {
+    if (color_ == color) return;
     color_ = color;
     Refresh();
 }
