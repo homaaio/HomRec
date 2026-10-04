@@ -161,8 +161,8 @@ HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w
     int cy = y + 6;
     HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"\uFF0B", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                      x + 6, cy, 28, 24, parent, (HMENU)ID_OVDOCK_ADD, hInst, nullptr));
-    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"\u2715", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     x + w - 34, cy, 28, 24, parent, (HMENU)ID_OVDOCK_CLOSE, hInst, nullptr));
+    // 2.4: no "x" button of our own any more - the dock pane's caption (and the floating
+    // window's title bar) already has one, and having two was confusing.
 
     // Bottom buttons that used to live here (Show/Hide, Remove) are gone --
     // right-clicking a row now covers both of those plus Rename/Edit
@@ -494,9 +494,7 @@ void OverlaysDockPanel::Resize(int w, int h) {
     if (!hwnd_ || w < 40 || h < 60) return;
     HWND parent = GetParent(hwnd_);
     HWND add = GetDlgItem(parent, ID_OVDOCK_ADD);
-    HWND close = GetDlgItem(parent, ID_OVDOCK_CLOSE);
-    // Batched so a sash drag repositions all four children with one repaint pass.
-    HDWP dwp = BeginDeferWindowPos(4);
+    HDWP dwp = BeginDeferWindowPos(3);
     auto place = [&](HWND win, int px, int py, int pw, int ph) {
         if (!win) return;
         if (dwp) dwp = DeferWindowPos(dwp, win, nullptr, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -504,13 +502,17 @@ void OverlaysDockPanel::Resize(int w, int h) {
     };
     place(hwnd_, 0, 0, w, h);
     place(add, 6, 6, 28, 24);
-    place(close, w - 34, 6, 28, 24);
     place(list_, 6, 36, std::max(20, w - 12), std::max(20, h - 42));
     if (dwp) EndDeferWindowPos(dwp);
     // The sunken STATIC is the lowest sibling; raise the controls above it.
     if (add)   SetWindowPos(add,   HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (close) SetWindowPos(close, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if (list_) SetWindowPos(list_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void OverlaysDockPanel::ForceRepaint() {
+    if (!hwnd_) return;
+    HWND parent = GetParent(hwnd_);
+    if (parent) RedrawWindow(parent, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
@@ -578,7 +580,7 @@ void OverlaysDockPanel::SetVisible(bool visible) {
     // hwnd_ (a plain STATIC used only as a visual frame here), so they
     // have to be hidden individually too.
     HWND parent = GetParent(hwnd_);
-    for (int id : { ID_OVDOCK_ADD, ID_OVDOCK_CLOSE, ID_OVDOCK_LIST }) {
+    for (int id : { ID_OVDOCK_ADD, ID_OVDOCK_LIST }) {
         HWND ctrl = GetDlgItem(parent, id);
         if (ctrl) ShowWindow(ctrl, cmd);
     }

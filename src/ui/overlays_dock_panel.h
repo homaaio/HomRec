@@ -62,6 +62,9 @@ public:
     // 2.4: lays the native children out for a w x h host (called on every host WM_SIZE).
     void Resize(int w, int h);
 
+    // Invalidates + repaints the whole panel (after AUI floats/docks the host window).
+    void ForceRepaint();
+
     // 2.4: WM_DRAWITEM for the owner-drawn list. `dark` selects the palette.
     void HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark);
 
