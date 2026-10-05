@@ -32,6 +32,7 @@ LDFLAGS := -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bd
 
 OBJS := \
 	src/win_main.o \
+	src/commands/ls.o \
 	src/ui/main_frame.o \
 	src/ui/themed_widgets.o \
 	src/ui/theme.o \
@@ -52,40 +53,40 @@ OBJS := \
 	src/ui/hide_window_dialog.o \
 	src/ui/overlays_dock_panel.o \
 	src/ui/overlay_editor_dialog.o \
-	src/hr_log.o \
-	src/hr_log_paths.o \
-	src/hr_plugin_log.o \
-	src/hr_pc_log.o \
-	src/hr_system_integration.o \
-	src/hr_crash_handler.o \
-	src/hr_archive.o \
-	src/hr_input_overlay.o \
-	src/hr_input_overlay_registry.o \
+	src/utils/log.o \
+	src/utils/log_paths.o \
+	src/utils/plugin_log.o \
+	src/utils/pc_log.o \
+	src/utils/system_integration.o \
+	src/utils/crash_handler.o \
+	src/utils/archive.o \
+	src/core/input_overlay.o \
+	src/core/input_overlay_registry.o \
 	src/plugins/lua_engine.o \
 	src/plugins/lua_api.o \
-	src/hr_display_info.o \
-	src/hr_profile_io.o \
-	src/hr_app_logic.o \
-	src/hr_capture_ctl.o \
-	src/hr_pipeline.o \
-	src/hr_overlay_render.o \
-	src/hr_webcam_enum.o \
-	src/hr_webcam_capture.o \
-	ffmpeg/hr_ffmpeg_runner.o \
-	src/hr_tools.o \
-	src/hr_ui_utils.o \
-	src/hr_audio.o \
-	src/hr_dxgi_capture.o \
-	src/hr_wgc_capture.o \
-	src/hr_stopwatch.o \
-	src/hr_settings.o \
-	src/hr_hotkey.o \
-	src/hr_mic_enum.o \
-	src/hr_app_audio_enum.o \
-	src/ui/hr_icons.o \
-	src/hr_encoder_helpers.o \
-	src/hr_settings_registry.o \
-	src/hr_update.o
+	src/core/display_info.o \
+	src/core/profile_io.o \
+	src/core/app_logic.o \
+	src/core/capture_ctl.o \
+	src/core/pipeline.o \
+	src/core/overlay_render.o \
+	src/core/webcam_enum.o \
+	src/core/webcam_capture.o \
+	ffmpeg/ffmpeg_runner.o \
+	src/core/tools.o \
+	src/utils/ui_utils.o \
+	src/core/audio.o \
+	src/core/dxgi_capture.o \
+	src/core/wgc_capture.o \
+	src/utils/stopwatch.o \
+	src/core/settings.o \
+	src/core/hotkey.o \
+	src/core/mic_enum.o \
+	src/core/app_audio_enum.o \
+	src/ui/icons.o \
+	src/core/encoder_helpers.o \
+	src/core/settings_registry.o \
+	src/utils/update.o
 
 all: hr.exe
 

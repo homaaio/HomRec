@@ -26,6 +26,7 @@ enable_language(RC)
 # ---------------------------------------------------------------------------
 set(HR_SOURCES
     src/win_main.cpp
+    src/commands/ls.cpp
     src/ui/main_frame.cpp
     src/ui/themed_widgets.cpp
     src/ui/theme.cpp
@@ -46,40 +47,40 @@ set(HR_SOURCES
     src/ui/hide_window_dialog.cpp
     src/ui/overlays_dock_panel.cpp
     src/ui/overlay_editor_dialog.cpp
-    src/hr_log.cpp
-    src/hr_log_paths.cpp
-    src/hr_plugin_log.cpp
-    src/hr_pc_log.cpp
-    src/hr_system_integration.cpp
-    src/hr_crash_handler.cpp
-    src/hr_archive.cpp
-    src/hr_input_overlay.cpp
-    src/hr_input_overlay_registry.cpp
+    src/utils/log.cpp
+    src/utils/log_paths.cpp
+    src/utils/plugin_log.cpp
+    src/utils/pc_log.cpp
+    src/utils/system_integration.cpp
+    src/utils/crash_handler.cpp
+    src/utils/archive.cpp
+    src/core/input_overlay.cpp
+    src/core/input_overlay_registry.cpp
     src/plugins/lua_engine.cpp
     src/plugins/lua_api.cpp
-    src/hr_display_info.cpp
-    src/hr_profile_io.cpp
-    src/hr_app_logic.cpp
-    src/hr_capture_ctl.cpp
-    src/hr_pipeline.cpp
-    src/hr_overlay_render.cpp
-    src/hr_webcam_enum.cpp
-    src/hr_webcam_capture.cpp
-    src/hr_encoder_helpers.c
-    ffmpeg/hr_ffmpeg_runner.cpp
-    src/hr_tools.cpp
-    src/hr_ui_utils.cpp
-    src/hr_audio.cpp
-    src/hr_dxgi_capture.cpp
-    src/hr_wgc_capture.cpp
-    src/hr_stopwatch.cpp
-    src/hr_settings.cpp
-    src/hr_hotkey.cpp
-    src/hr_mic_enum.cpp
-    src/hr_app_audio_enum.cpp
-    src/ui/hr_icons.cpp
-    src/hr_settings_registry.cpp
-    src/hr_update.cpp
+    src/core/display_info.cpp
+    src/core/profile_io.cpp
+    src/core/app_logic.cpp
+    src/core/capture_ctl.cpp
+    src/core/pipeline.cpp
+    src/core/overlay_render.cpp
+    src/core/webcam_enum.cpp
+    src/core/webcam_capture.cpp
+    src/core/encoder_helpers.c
+    ffmpeg/ffmpeg_runner.cpp
+    src/core/tools.cpp
+    src/utils/ui_utils.cpp
+    src/core/audio.cpp
+    src/core/dxgi_capture.cpp
+    src/core/wgc_capture.cpp
+    src/utils/stopwatch.cpp
+    src/core/settings.cpp
+    src/core/hotkey.cpp
+    src/core/mic_enum.cpp
+    src/core/app_audio_enum.cpp
+    src/ui/icons.cpp
+    src/core/settings_registry.cpp
+    src/utils/update.cpp
     resource.rc
 )
 
