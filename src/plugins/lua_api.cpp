@@ -186,21 +186,6 @@ int L_store_get(lua_State *L) {
     return 1;
 }
 
-// homrec.get_setting(name)/set_setting(name, value) used to only support a
-// fixed dozen boolean flags, hand-listed here with their own separate
-// spellings from .hrc's (minimize_tray vs. minimize_to_tray, countdown vs.
-// countdown_enabled, etc.) - a second, independently-drifting copy of the
-// same field list hrc_config.cpp already had. Both now walk
-// HrSettingsRegistry::All() (see settings_registry.h), so every scalar
-// .hrc setting - not just bools - is reachable from a plugin, and a field
-// added to the registry shows up here for free. The old short key
-// spellings above still work: they're registered as aliases on the
-// canonical entry (see settings_registry.cpp), so existing plugin
-// scripts that call homrec.get_setting("minimize_tray") don't break.
-
-// Converts a Lua value on the stack (bool/number/string) to the plain-text
-// form HrSettingsRegistry::SettingDef::set() expects. `idx` is a stack
-// index (as usual for the Lua C API).
 std::string LuaValueToSettingString(lua_State *L, int idx) {
     if (lua_isboolean(L, idx)) return lua_toboolean(L, idx) ? "true" : "false";
     if (lua_isnumber(L, idx)) {
@@ -259,15 +244,6 @@ int L_settings_set(lua_State *L) {
     bool ok = false;
     if (rec) {
         if (const auto *def = HrSettingsRegistry::Find(key)) {
-            // custom_ffmpeg_args is the one sensitive field (see
-            // settings_registry.cpp) - plugins run with full trust
-            // already (register_command/http_get etc. have no sandboxing
-            // of their own), so this isn't gated behind "sec" the way the
-            // console's generic assignment is; a plugin that can call
-            // homrec.set_setting at all could already reach ffmpeg
-            // directly. Kept as a single explicit branch here (rather
-            // than silently falling through) so that's a deliberate
-            // choice, not an oversight.
             if (def->set(rec->state(), val)) {
                 std::wstring target = HrcConfig::ResolveSettingsPath(rec->state());
                 HrcConfig::Save(rec->state(), target);
@@ -418,13 +394,6 @@ int L_http_post(lua_State *L) {
     return 1;
 }
 
-// --- homrec.register_input_overlay(category, label, json_path, png_path) --
-// Called from a plugin's on_load() to advertise a bundled input-overlay
-// preset (see plugins/input_overlay_presets/entry.lua) - collected into
-// input_overlay_registry.h's global list, which
-// overlays_dock_panel.cpp's "+" menu reads to build its "Select
-// Input-Overlay…" picker. json_path/png_path are resolved relative to this
-// plugin's own directory (so the Lua script can just say "assets/x.json").
 std::string JoinPluginPath(const std::string &plugin_dir, const std::string &rel) {
     if (!rel.empty() && (rel[0] == '\\' || rel[0] == '/' || (rel.size() > 1 && rel[1] == ':'))) {
         return rel; // already absolute
@@ -448,20 +417,6 @@ int L_register_input_overlay(lua_State *L) {
     return 0;
 }
 
-// --- homrec.register_command(name, description, fn) -----------------------
-// Adds a new console command (<name> in the in-app console window).
-// fn is called as fn(raw_line) whenever the command runs, where raw_line
-// is the full text the user typed (including the command word itself, so
-// the plugin can parse its own subcommands/arguments - same convention
-// the built-in Cmd* handlers in console_window.cpp use). Anything the
-// handler wants printed to the console goes through homrec.print()
-// instead of a return value, since a command conceptually prints
-// multiple lines (progress, then a result), not just one.
-//
-// Only takes effect for the lifetime of this plugin - if a later-loaded
-// plugin registers the same name, that one wins for as long as both are
-// loaded (see LuaPluginEngine::RegisterCommand's comment for why this
-// isn't treated as an error).
 int L_register_command(lua_State *L) {
     auto *uv = GetUpvalues(L);
     const char *name = luaL_checkstring(L, 1);
@@ -473,22 +428,6 @@ int L_register_command(lua_State *L) {
     return 0;
 }
 
-// --- homrec.register_setting(name, description, get_fn, set_fn) -----------
-// Gives a plugin-defined value the exact same "<name> = <value>" treatment
-// a built-in .hrc setting gets, in the console AND in any .cfg file
-// (autoexec/config/startrec - same RunCommand parser either way, see
-// console_window.cpp). get_fn() -> value is called to print the current
-// value when the name is typed with no value after it; set_fn(raw_value)
-// is called with the raw text after the name when one IS given. Neither
-// function's return value (other than get_fn's) is otherwise interpreted -
-// call homrec.print() from either one if you want to show something
-// besides the default "<name> = <value>" confirmation.
-//
-// This is what "a plugin's own settings should be toggleable the same way
-// built-in ones are" means in practice: a plugin author backs get_fn/
-// set_fn with homrec.store_get/store_set (or their own in-memory state),
-// and from then on `myplugin_option = true` works in autoexec.cfg exactly
-// like `disable_preview = true` does.
 int L_register_setting(lua_State *L) {
     auto *uv = GetUpvalues(L);
     const char *name = luaL_checkstring(L, 1);
@@ -503,13 +442,6 @@ int L_register_setting(lua_State *L) {
     return 0;
 }
 
-// --- homrec.print(text) -----------------------------------------------
-// Appends a line to the current command's console output (no-op outside
-// of a command handler - see print_sink's comment in lua_engine.h for
-// why) *and* records it in logs\plugins.log tagged with this plugin's id,
-// so a plugin author gets a persisted trail of everything it printed even
-// from runs where nobody was watching the console live (on_load()/hooks
-// firing at startup, a scheduled/background task, etc).
 int L_print(lua_State *L) {
     auto *uv = GetUpvalues(L);
     const char *text = luaL_checkstring(L, 1);
@@ -518,14 +450,6 @@ int L_print(lua_State *L) {
     return 0;
 }
 
-// --- homrec.log(message, level?) ---------------------------------------
-// Explicit logging call for plugins that want an entry in logs\plugins.log
-// without it also echoing to the console the way print() does - e.g.
-// on_tick()-style hooks that run constantly and would flood the console.
-// level defaults to "INFO"; anything else the plugin passes is used
-// as-is (kept as a free string, same as HrLog's own C++-side level
-// parameter, rather than validated against a fixed set) so a plugin can
-// use its own conventions if it wants.
 int L_log(lua_State *L) {
     auto *uv = GetUpvalues(L);
     const char *text = luaL_checkstring(L, 1);
@@ -534,16 +458,6 @@ int L_log(lua_State *L) {
     return 0;
 }
 
-// --- homrec.log_to(filename, message) -----------------------------------
-// Writes into the plugin's own log file under logs\ instead of the
-// shared plugins.log - e.g. a plugin doing heavy per-frame debug logging
-// that would otherwise drown out every other plugin's entries. filename
-// is sanitized down to a single safe path component (see
-// HrLogPaths::SanitizeLogFilename()) so a plugin can't escape logs\ or
-// clobber homrec.log/pc.log/plugins.log themselves - two plugins asking
-// for the same filename share that file (each line is still tagged with
-// the writing plugin's id, same as the shared logs), which is expected
-// and fine, not an error.
 int L_log_to(lua_State *L) {
     auto *uv = GetUpvalues(L);
     if (!HasPermission(uv, Perm::Filesystem)) {
@@ -552,12 +466,6 @@ int L_log_to(lua_State *L) {
     }
     const char *filename = luaL_checkstring(L, 1);
     const char *text = luaL_checkstring(L, 2);
-
-    // filenames from plugin.json/Lua source are UTF-8, same convention as
-    // every other string this API takes (see homrec.show_toast() above) -
-    // naively widening bytes instead would mangle any non-ASCII filename
-    // a plugin passed and could even change what SanitizeLogFilename()
-    // strips out.
     std::wstring safe_name = HrLogPaths::SanitizeLogFilename(Utf8ToWide(filename));
 
     std::lock_guard<std::mutex> lock(CustomLogMutex());
