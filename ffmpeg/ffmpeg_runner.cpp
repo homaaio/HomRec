@@ -1,5 +1,5 @@
 /*
- * hr_ffmpeg_runner.cpp  -  HomRec FFmpeg process manager  (v1.6.1)
+ * ffmpeg_runner.cpp  -  HomRec FFmpeg process manager  (v1.6.1)
  *
  * Replaces the FFmpeg subprocess logic from homrec.py:
  *   _build_ffmpeg_cmd(), _start_ffmpeg_process(), _stop_ffmpeg_process(),
@@ -10,7 +10,7 @@
  *
  * Build (MinGW-w64):
  *   g++ -O2 -std=c++17 -shared -static-libgcc -static-libstdc++ ^
- *       -o hr_ffmpeg_runner.dll hr_ffmpeg_runner.cpp
+ *       -o hr_ffmpeg_runner.dll ffmpeg_runner.cpp
  */
 
 #ifdef _WIN32
@@ -112,7 +112,7 @@ static bool _wants_hw_pixfmt(const std::string &codec_args);
 // pipe that only supports blocking, synchronous I/O - the write end had no
 // way to time out a WriteFile() that ffmpeg wasn't draining, which is what
 // caused the writer thread to hang forever under load (see write_pipe()'s
-// comment in hr_pipeline.cpp for the full story, including the
+// comment in pipeline.cpp for the full story, including the
 // std::terminate() it led to). CreatePipe() itself can't be made overlapped
 // no matter what flags you pass it - this is the standard workaround:
 // a uniquely-named pipe with exactly one instance, server end
@@ -212,7 +212,7 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
  * When pipe_input is false, MSS captures to a file and ffmpeg re-encodes it.
  * When pipe_input is true, the pipeline converts each captured frame to
  * planar YUV420p or NV12 (hr_bgra_to_yuv420p / hr_bgra_to_nv12_band in
- * hr_pipeline.cpp/hr_encoder_helpers.c, chosen to match the encoder - see
+ * pipeline.cpp/encoder_helpers.c, chosen to match the encoder - see
  * _wants_hw_pixfmt() below) before writing it to ffmpeg's stdin, matching
  * the "-pixel_format"/"-pix_fmt" args below - ffmpeg never sees the
  * original BGRA capture buffer.
@@ -238,9 +238,9 @@ static std::wstring _utf8_to_wide(const std::string &s) {
 // of the one hr_bgra_to_yuv420p/hr_bgra_to_nv12 already did. codec_args
 // (e.g. "-c:v h264_qsv -preset veryfast ...") already names the encoder,
 // so that's the single source of truth here - same substring check
-// hr_build_codec_args() (hr_tools.cpp) uses to pick its own encoder-
+// hr_build_codec_args() (tools.cpp) uses to pick its own encoder-
 // specific flags, kept in sync with the raw pixel format the pipeline
-// actually writes (see Yuv420pWorkerPool::SetUseNv12() in hr_pipeline.cpp
+// actually writes (see Yuv420pWorkerPool::SetUseNv12() in pipeline.cpp
 // and hr_pl_set_output_pixfmt() - the caller must select the same format
 // on both sides or the rawvideo demuxer below will misinterpret the bytes
 // arriving on the pipe).
@@ -316,7 +316,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
        full-range flag request here was silently getting dropped and
        players fell back to the default limited-range decode on genuinely
        full-range samples - crushed shadows, dark/dull picture. The NV12
-       converter (hr_encoder_helpers.c) now emits real limited/"tv" range
+       converter (encoder_helpers.c) now emits real limited/"tv" range
        samples instead, so this just has to say what they actually are. */
     const wchar_t *out_color_range = _wants_hw_pixfmt(ctx->codec_args) ? L"tv" : L"pc";
     ss << L" -color_range " << out_color_range << L" -colorspace smpte170m"
@@ -366,7 +366,7 @@ HR_EXPORT void hr_ff_destroy(void *handle) {
         // in pipe_input mode, hStdin is the raw video pipe the capture
         // pipeline's writer thread may still be writing to (it's the sole
         // owner and closes it itself once, right after its loop ends - see
-        // writer_loop() in hr_pipeline.cpp). Destroy() can be reached with
+        // writer_loop() in pipeline.cpp). Destroy() can be reached with
         // ctx->running still true - StopFinalizeTail()'s last-resort
         // force-stop path calls this directly after a wait timeout - so
         // closing the handle here unconditionally would race that thread
@@ -469,7 +469,7 @@ HR_EXPORT void hr_ff_set_pipe_input(void *h, int enable) {
  * intptr_t-sized value so it round-trips through a 64-bit HANDLE on
  * Win64 without truncation. Returns 0 if there's no process, the
  * process hasn't been started yet, or pipe mode wasn't requested.
- * The capture pipeline (hr_pipeline.cpp) needs this raw value to know
+ * The capture pipeline (pipeline.cpp) needs this raw value to know
  * where to WriteFile() the raw BGRA/YUV frames it captures - it has no
  * other way to reach ffmpeg's stdin, since that HANDLE otherwise never
  * leaves this file.
@@ -550,7 +550,7 @@ HR_EXPORT int hr_ff_stop_graceful(void *handle) {
             // when every real frame has been written, so it - not this
             // function - now owns closing this handle exactly once, right
             // after its loop naturally ends (see writer_loop() in
-            // hr_pipeline.cpp). Here we just drop our own reference to it
+            // pipeline.cpp). Here we just drop our own reference to it
             // without touching the OS handle.
             ctx->hStdin = nullptr;
         } else {
@@ -662,7 +662,7 @@ HR_EXPORT void hr_ff_kill(void *handle) {
         // thread has as its raw video pipe (hr_pl_set_recording() was
         // handed this HANDLE via hr_ff_get_stdin_handle()), and that
         // thread closes it itself exactly once, right after its loop ends
-        // (writer_loop() in hr_pipeline.cpp) - it's the only thing that
+        // (writer_loop() in pipeline.cpp) - it's the only thing that
         // actually knows when it's done writing. Every hr_ff_kill() call
         // site that can run while a pipeline is still attached (e.g.
         // RecordingController::Start()'s "capture pipeline didn't start"
