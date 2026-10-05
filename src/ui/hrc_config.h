@@ -3,7 +3,7 @@
 // A small human-readable "key=value" text file for exporting/importing
 // HomRec's settings as one portable file, separate from the
 // auto-managed homrec_settings.json that already sits next to the exe
-// (hr_settings.cpp) - that file only ever covers a handful of fields
+// (settings.cpp) - that file only ever covers a handful of fields
 // (see its own header comment); .hrc covers the full configurable subset
 // of AppState, including everything the Settings dialog's Video/Codec,
 // Audio, Hotkeys, and Advanced tabs expose that homrec_settings.json
@@ -21,7 +21,7 @@ namespace HrcConfig {
 // Returns true on success. `path` is a wide (UTF-16) path, not narrow --
 // opening files through a narrow std::string path on Windows goes through
 // the current ANSI codepage, which mangles non-ASCII usernames/folders
-// (the same class of bug fixed in hr_log.cpp).
+// (the same class of bug fixed in log.cpp).
 bool Save(const AppState &state, const std::wstring &path);
 
 // Reads `path` and updates only the fields whose keys are present in the
@@ -35,7 +35,7 @@ bool Save(const AppState &state, const std::wstring &path);
 //
 // `allow_sensitive_fields` gates custom_ffmpeg_args specifically: that
 // field is written verbatim onto ffmpeg's command line (see
-// hr_ffmpeg_runner.cpp's _build_cmdline()), so importing an .hrc from
+// ffmpeg_runner.cpp's _build_cmdline()), so importing an .hrc from
 // somewhere other than a deliberate, interactive "Import Settings..." click
 // - e.g. the console's unattended "sethrc <path>" (console_window.cpp),
 // which can run from cfg/autoexec.cfg or cfg/config.cfg with no prompt at
@@ -50,7 +50,7 @@ bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields
 // Import Settings (.hrc)..." menu items - so anything set up in the
 // Overlays panel silently vanished the moment the app was closed and
 // reopened, with no warning. The auto-managed homrec_settings.json
-// (hr_settings.cpp) never touched state.overlays either - it only ever
+// (settings.cpp) never touched state.overlays either - it only ever
 // persisted the show_overlays_panel visibility flag, not the list itself.
 //
 // SaveOverlaysOnly()/LoadOverlaysOnly() give the overlay list its own
@@ -60,7 +60,7 @@ bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields
 // overlay_placement_dialog.cpp) and read back once at startup
 // (main_frame.cpp's HomRecMainFrame ctor). Deliberately a separate file/
 // function pair from Save()/Load() above rather than folding overlays
-// into homrec_settings.json directly: hr_settings.cpp is a plain-C JSON
+// into homrec_settings.json directly: settings.cpp is a plain-C JSON
 // engine with a fixed field whitelist (see its own header comment) that
 // doesn't know about AppState::OverlayDef, and routing overlay saves
 // through the full HrcConfig::Save() (which also writes every other
@@ -73,7 +73,7 @@ bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &pat
 
 // Default location for the app's own auto-managed settings file, now that
 // it uses this same .hrc format instead of homrec_settings.json
-// (hr_settings.cpp) - see the migration/startup-order comment in
+// (settings.cpp) - see the migration/startup-order comment in
 // main_frame.cpp's HomRecMainFrame ctor for the full picture. Overridable
 // via Settings > Advanced > "Settings file path" (AppState::settings_path;
 // empty means "use this default").

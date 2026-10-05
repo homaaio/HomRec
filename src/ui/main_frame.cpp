@@ -12,10 +12,10 @@
 #include "custom_messagebox.h"
 #include "hrc_config.h"
 #include "win32_theme.h"
-#include "../hr_log.h"
-#include "../hr_pc_log.h"
-#include "../hr_plugin_log.h"
-#include "../hr_update.h"
+#include "../utils/log.h"
+#include "../utils/pc_log.h"
+#include "../utils/plugin_log.h"
+#include "../utils/update.h"
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
@@ -40,7 +40,7 @@ extern "C" {
     void hr_hk_configure(void *handle, const char *start_stop_str, const char *pause_str, const char *fullscreen_str, const char *save_replay_str);
     int hr_hk_start(void *handle);
     void hr_hk_stop(void *handle);
-    // Custom action hotkeys - see hr_hotkey.cpp's own doc comment on these.
+    // Custom action hotkeys - see hotkey.cpp's own doc comment on these.
     void hr_hk_set_custom_callback(void *handle, void (*cb)(int id));
     void hr_hk_clear_custom(void *handle);
     int hr_hk_add_custom(void *handle, int id, const char *keystring);
@@ -67,7 +67,7 @@ extern "C" {
     // above (get_* + load) is still needed, for upgrading an install that
     // only ever had homrec_settings.json.
 
-    // hr_dxgi_capture.cpp - one-shot GPU vendor probe, used only on a
+    // dxgi_capture.cpp - one-shot GPU vendor probe, used only on a
     // genuine first launch (see the first_launch branch below) to pick a
     // sane default encoder instead of always defaulting to software libx264.
     int hr_dx_recommend_codec(char *out_buf, int buf_chars);
@@ -141,7 +141,7 @@ std::wstring WideFromNarrow(const std::string &s) {
 }
 
 // Only one main frame exists per process - the hotkey manager's callbacks
-// (hr_hotkey.cpp's HR_HK_CB is a plain no-arg function pointer, see its
+// (hotkey.cpp's HR_HK_CB is a plain no-arg function pointer, see its
 // header comment) fire on a background thread and need a way back to "the"
 // frame to wxQueueEvent() onto the UI thread; this is it.
 std::atomic<HomRecMainFrame *> g_frame{nullptr};
@@ -161,7 +161,7 @@ void HotkeyPauseThunk()     { if (auto *f = g_frame.load()) wxQueueEvent(f, new 
 void HotkeyFullscreenThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
 void HotkeySaveReplayThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_SAVE_REPLAY)); }
 
-// Custom (user-defined) hotkeys: hr_hotkey.cpp only ever hands us back the
+// Custom (user-defined) hotkeys: hotkey.cpp only ever hands us back the
 // numeric id we picked when registering the binding (see
 // ConfigureHotkeysFromState() below) - g_custom_hotkey_actions maps that id
 // (offset from HK_CUSTOM_BASE=100) back to the action string the user typed
@@ -354,7 +354,7 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         return;
     }
 
-    // hr_pipeline.cpp's bgra_to_thumb() writes true RGB order (o[0]=r,
+    // pipeline.cpp's bgra_to_thumb() writes true RGB order (o[0]=r,
     // o[1]=g, o[2]=b - see its BGR->RGB nearest-neighbour fallback branch),
     // so this can go straight into a wxImage with no channel swap.
     wxSize cs = GetClientSize();
@@ -379,6 +379,8 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
             int dw = std::max(1, (int)(w * scale));
             int dh = std::max(1, (int)(h * scale));
             if (std::abs(dw - w) <= 3 && std::abs(dh - h) <= 3) {
+                // The pipeline already produced the thumbnail at the pane's size (see
+                // RecordingController::SetPreviewViewSize): no CPU rescale at all.
                 cached_bmp_ = wxBitmap(img);
                 dw = w; dh = h;
             } else {
@@ -769,8 +771,8 @@ HomRecMainFrame::HomRecMainFrame()
 
     // ====== Settings load (Phase 1 storage migration - see commands.md) ======
     // homrec.hrc (HrcConfig, .hrc format) replaces homrec_settings.json
-    // (hr_settings.cpp) as the app's own auto-managed settings file - see
-    // hr_settings.cpp's header comment for the JSON-whitelist bug class
+    // (settings.cpp) as the app's own auto-managed settings file - see
+    // settings.cpp's header comment for the JSON-whitelist bug class
     // this sidesteps (a field missing from that whitelist silently
     // reverting to its compiled-in default every launch, which is exactly
     // what happened to show_summary/show_overlays_panel there). Bootstrap
@@ -848,7 +850,7 @@ HomRecMainFrame::HomRecMainFrame()
             // hotter than OBS at identical settings on such a machine (OBS
             // does this same GPU-first pick itself), separate from either
             // app's own capture/compositing efficiency. hr_dx_recommend_codec()
-            // (hr_dxgi_capture.cpp) walks the adapter list once here, only
+            // (dxgi_capture.cpp) walks the adapter list once here, only
             // on this one-time first-launch path, and only ever picks a
             // *hardware* codec when it actually found one - existing
             // installs that already saved "libx264" (by detection or by
@@ -1315,6 +1317,9 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     overlays_host_->SetMinSize(wxSize(170, 120));
     overlays_panel_ = std::make_unique<OverlaysDockPanel>(state_);
     overlays_panel_->Create((HWND)overlays_host_->GetHandle(), wxGetInstance(), 0, 0, 220, 500);
+    // One coalesced repaint request: AUI re-parents the host when the pane is floated/docked and
+    // its raw Win32 children then stay blank until invalidated - but a window-edge drag fires
+    // dozens of size events, and repainting for each of them would just burn CPU.
     auto repaint_pending = std::make_shared<bool>(false);
     auto request_repaint = [this, repaint_pending]() {
         if (*repaint_pending) return;
@@ -2590,7 +2595,7 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
 }
 
 // Help > Check for Updates. Hits GitHub on a background thread (see
-// hr_update.cpp) so the UI never blocks on the network call, then hops
+// update.cpp) so the UI never blocks on the network call, then hops
 // back to the UI thread via CallAfter before touching any widgets or
 // showing a message box.
 void HomRecMainFrame::OnCheckForUpdates() {

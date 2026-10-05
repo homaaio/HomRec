@@ -3,7 +3,7 @@
 // Shows CPU/RAM/Disk analytics (also reachable via show_cpu_info/
 // show_ram_info/show_disk_info, which all alias to show_analytics()). The
 // backend math this displays already existed - hr_get_sys_stats() in
-// hr_ui_utils.cpp computes
+// ui_utils.cpp computes
 // cpu_percent()/virtual_memory()/disk_usage() calls - but nothing in the
 // UI ever called it. This is the missing window.
 #pragma once

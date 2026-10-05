@@ -2,13 +2,13 @@
 //
 // Port of homrec_app/mixins/ui_mixin.py's open_window_picker() (plus the
 // one-liner set_capture_desktop()). The backend half of this already
-// existed - hr_enum_windows() in hr_app_logic.cpp enumerates the visible
+// existed - hr_enum_windows() in app_logic.cpp enumerates the visible
 // top-level windows - and AppState already has CaptureMode::Window +
 // capture_window_title fields ready to receive a selection. What was
 // missing was the picker UI and a menu entry to reach it;
 // RecordingController now resolves capture_window_title back to a live
 // HWND + rect via HR_ResolveCaptureWindow() below and crops the captured
-// monitor frame to it (see hr_pl_set_capture_rect() in hr_pipeline.cpp) -
+// monitor frame to it (see hr_pl_set_capture_rect() in pipeline.cpp) -
 // this used to be stored but never actually consumed anywhere, which is
 // why "record just this window" silently fell back to full-desktop
 // capture (and the preview never reflected it either, since preview and

@@ -5,7 +5,7 @@
 // overlay_manager.h/.cpp instead, since that's a substantial subsystem of
 // its own).
 //
-// IMPORTANT GAP, flagged rather than silently worked around: hr_settings.cpp
+// IMPORTANT GAP, flagged rather than silently worked around: settings.cpp
 // (the existing native settings store) only persists a fixed field set -
 // output_folder/quality/fps/monitor/codec/audio/countdown/timestamp/cursor/
 // notification/theme/language/minimize_tray/always_on_top/performance/dxgi.
@@ -14,7 +14,7 @@
 // auto_stop_min, replay_buffer_sec, video_format, separate_audio_mp3, or the
 // three hotkeys - all of which this dialog edits. Those edits update
 // AppState in memory (so they work for the current run), but won't survive
-// an app restart until hr_settings.cpp's struct + JSON reader/writer are
+// an app restart until settings.cpp's struct + JSON reader/writer are
 // extended with the extra fields. That's a small, mechanical change to an
 // existing core file, not something to do silently as a side effect of a UI
 // dialog - flagging it here as a named follow-up instead.

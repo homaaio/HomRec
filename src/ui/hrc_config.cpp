@@ -5,8 +5,8 @@
 #include <windows.h>
 #endif
 #include "hrc_config.h"
-#include "../hr_str_convert.h"
-#include "../hr_settings_registry.h"
+#include "../utils/str_convert.h"
+#include "../core/settings_registry.h"
 
 #include <windows.h>
 #include <fstream>
@@ -26,7 +26,7 @@ std::string Trim(const std::string &s) {
 }
 
 // ToBool()/FromBool() used to be duplicated here; they now live in
-// hr_str_convert.h so this file and hr_settings_registry.cpp can't drift
+// str_convert.h so this file and settings_registry.cpp can't drift
 // apart on what "1"/"true"/"yes" mean. Local aliases so the overlay code
 // below (which isn't part of the registry - see WriteOverlaysSection()'s
 // comment) doesn't need an `Hr` prefix sprinkled through it.
@@ -66,6 +66,8 @@ void WriteOverlaysSection(std::ofstream &f, const std::vector<OverlayDef> &overl
           << p << "h=" << ov.h << "\n"
           << p << "text=" << OneLine(ov.text) << "\n"
           << p << "text_color=" << ov.text_color << "\n"
+          << p << "font_family=" << OneLine(ov.font_family) << "\n"
+          << p << "opacity=" << ov.opacity << "\n"
           << p << "image_path=" << ov.image_path << "\n"
           << p << "webcam_index=" << ov.webcam_index << "\n"
           << p << "webcam_name=" << OneLine(ov.webcam_name) << "\n"
@@ -98,6 +100,19 @@ void ReadOverlaysSection(const std::unordered_map<std::string, std::string> &kv,
         if (has((p + "h").c_str())) ov.h = atoi(get((p + "h").c_str()).c_str());
         if (has((p + "text").c_str())) ov.text = get((p + "text").c_str());
         if (has((p + "text_color").c_str())) ov.text_color = get((p + "text_color").c_str());
+        // font_family / opacity were never written or read here, so every
+        // restart silently reset them to their defaults (Segoe UI / 100) -
+        // an overlay the user had faded to opacity 0 (invisible) came back
+        // fully visible. Files saved before this fix simply lack the keys
+        // and keep the defaults, same as before.
+        if (has((p + "font_family").c_str())) {
+            std::string ff = get((p + "font_family").c_str());
+            if (!ff.empty()) ov.font_family = ff;
+        }
+        if (has((p + "opacity").c_str())) {
+            int op = atoi(get((p + "opacity").c_str()).c_str());
+            ov.opacity = op < 0 ? 0 : (op > 100 ? 100 : op);
+        }
         if (has((p + "image_path").c_str())) ov.image_path = get((p + "image_path").c_str());
         if (has((p + "webcam_index").c_str())) ov.webcam_index = atoi(get((p + "webcam_index").c_str()).c_str());
         if (has((p + "webcam_name").c_str())) ov.webcam_name = get((p + "webcam_name").c_str());
@@ -227,7 +242,7 @@ static bool SaveDirect(const AppState &state, const std::wstring &path) {
     // and a THIRD one in lua_api.cpp's old plugin whitelist, were three
     // separate hand-maintained copies of "which fields exist and what
     // they're called" that had already drifted apart (see
-    // hr_settings_registry.h's header comment). All() is declared in the
+    // settings_registry.h's header comment). All() is declared in the
     // same section order the old hand-written blocks used, so this
     // reproduces the same [section] grouping - the only cosmetic
     // difference is a section header is now followed by its own blank
@@ -252,7 +267,7 @@ static bool SaveDirect(const AppState &state, const std::wstring &path) {
     // section headers entirely -- giving every overlay's "x" key the same
     // name would just have the last one clobber all the others. Not part
     // of the registry above since it's a vector of records, not a scalar
-    // field - see hr_settings_registry.h's "deliberately excludes" note.
+    // field - see settings_registry.h's "deliberately excludes" note.
     WriteOverlaysSection(f, state.overlays);
     WriteHotkeysSection(f, state.custom_hotkeys);
     WriteAudioSourcesSection(f, state.audio_sources);

@@ -1,9 +1,9 @@
 #include "recording_controller.h"
 #include "window_picker_dialog.h"  // HR_ResolveCaptureWindow()
-#include "../hr_wgc_capture.h"      // 2.4: HrWgcSupported()/HrWgcProbeWindow()
-#include "../hr_log.h"
-#include "../hr_overlay_render.h"
-#include "../hr_str_convert.h"   // HrVideoFormatExt() (2.4 container choice)
+#include "../core/wgc_capture.h"      // 2.4: HrWgcSupported()/HrWgcProbeWindow()
+#include "../utils/log.h"
+#include "../core/overlay_render.h"
+#include "../utils/str_convert.h"   // HrVideoFormatExt() (2.4 container choice)
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
                       // QueryFullProcessImageNameA (kernel32) - ResolveCaptureAppName()'s {app} lookup
 #include <shellapi.h> // ShellExecuteW - RunPostRecordHook()'s "open_folder" mode
@@ -19,7 +19,7 @@
 #include <functional>  // Start()'s Instant Replay resume-on-failure guard
 
 extern "C" {
-    // hr_tools.cpp (wide-string API)
+    // tools.cpp (wide-string API)
     int hr_check_ffmpeg(const wchar_t *hint, wchar_t *out, int out_len);
     int hr_probe_gpu(const wchar_t *ffpath, wchar_t *out_enc, int out_len);
     int hr_probe_ddagrab(const wchar_t *ffpath);
@@ -36,7 +36,7 @@ extern "C" {
     int hr_remux_copy(const wchar_t *ffpath, const wchar_t *in_path, const wchar_t *out_path);
     int hr_decode_audio_to_wav(const wchar_t *ffpath, const wchar_t *in_path, const wchar_t *wav_path);
 
-    // hr_ui_utils.cpp (narrow-string API - see README audit note: the core
+    // ui_utils.cpp (narrow-string API - see README audit note: the core
     // is split between wide- and narrow-string exports depending on which
     // file it landed in; this class just calls each the way it expects).
     void hr_filename_from_template(const char *tmpl, const char *folder, const char *app_name, char *out, int out_len,
@@ -48,7 +48,7 @@ extern "C" {
     float hr_file_size_mb(const char *path);
     int hr_get_free_disk_mb(const char *path, uint64_t *out_free_mb);
 
-    // hr_display_info.cpp
+    // display_info.cpp
     void *hr_di_create();
     void hr_di_destroy(void *handle);
     void hr_di_refresh(void *handle);
@@ -56,14 +56,14 @@ extern "C" {
     int hr_di_get(void *handle, int index, int *x, int *y, int *w, int *h, float *dpi);
     int hr_di_primary(void *handle, int *x, int *y, int *w, int *h, float *dpi);
 
-    // hr_dxgi_capture.cpp - ResolveCaptureSize() maps the chosen monitor
-    // (EnumDisplayMonitors order, see hr_display_info.cpp) onto the DXGI
+    // dxgi_capture.cpp - ResolveCaptureSize() maps the chosen monitor
+    // (EnumDisplayMonitors order, see display_info.cpp) onto the DXGI
     // output index that actually duplicates that same monitor.
     int hr_dx_output_count(int adapter_idx);
     int hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y,
                            int *out_w, int *out_h, char *name_buf, int name_buf_len);
 
-    // hr_capture_ctl.cpp
+    // capture_ctl.cpp
     void *hr_ctl_create();
     void hr_ctl_destroy(void *handle);
     void hr_ctl_set_callbacks(void *handle, void (*state_cb)(int), void (*stats_cb)(double, double, int));
@@ -77,7 +77,7 @@ extern "C" {
     void hr_ctl_update_stats(void *handle, long long file_bytes);
     int hr_ctl_format_elapsed(const void *handle, char *buf, int buf_len);
 
-    // hr_pipeline.cpp
+    // pipeline.cpp
     void *hr_pl_create(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h, int output_idx);
     // 2.4: one window via Windows.Graphics.Capture (nullptr if it can't be captured that way)
     void *hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h,
@@ -107,7 +107,7 @@ extern "C" {
     void hr_pl_set_preview_needed(void *handle, int enabled);
     int hr_pl_end_recording_segment(void *handle, int timeout_ms);
 
-    // hr_ffmpeg_runner.cpp
+    // ffmpeg_runner.cpp
     void *hr_ff_create();
     void hr_ff_destroy(void *handle);
     void hr_ff_set_ffmpeg_path(void *h, const char *path);
@@ -127,7 +127,7 @@ extern "C" {
     double hr_ff_output_size_mb(const void *handle);
     void hr_ff_kill(void *handle);
 
-    // hr_audio.cpp
+    // audio.cpp
     int hr_audio_init();
     int hr_audio_start(float mic_vol, float sys_vol, int mic_mute, int sys_mute, const wchar_t *mic_device_id);
     void hr_audio_set_max_buffer_sec(int seconds);
@@ -564,7 +564,7 @@ void RecordingController::ResolveCaptureSize() {
     state_.monitor_left = mx;
     state_.monitor_top = my;
 
-    // idx above indexes hr_display_info.cpp's list (EnumDisplayMonitors,
+    // idx above indexes display_info.cpp's list (EnumDisplayMonitors,
     // re-sorted primary-first), but hr_pl_create() hands it to DXGI's
     // IDXGIAdapter::EnumOutputs(), which has its OWN ordering - the two
     // only agree by luck (single monitor, or a lucky multi-monitor layout).
@@ -609,7 +609,7 @@ void RecordingController::ResolveCaptureSize() {
     // Settings > Resolution (scale_factor / resolution_w+h, depending on
     // resolution_mode) instead becomes the desired *output* size - applied
     // as a capture-side downscale before encoding (see
-    // hr_pl_set_output_size()/hr_pipeline.cpp), not by changing what DXGI
+    // hr_pl_set_output_size()/pipeline.cpp), not by changing what DXGI
     // itself captures.
     ComputeOutputDims(mw, mh, output_w_, output_h_);
 
@@ -699,6 +699,8 @@ void *RecordingController::CreatePipelineForTarget(intptr_t pipe_fd, int pvw, in
     }
     pipeline_wgc_ = (pl != nullptr) && use_wgc_;
     pipeline_wgc_hwnd_ = pipeline_wgc_ ? wgc_hwnd_ : nullptr;
+    // A brand-new pipeline starts with the generic thumbnail size; re-apply the pane size the
+    // UI last reported so the preview doesn't need a CPU rescale after a pipeline rebuild.
     if (pl && pv_view_w_ >= 64 && pv_view_h_ >= 64) {
         int mw = 0, mh = 0;
         ScaledPreviewSize(mw, mh);
@@ -922,7 +924,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         return false;
     }
 
-    // hr_get_free_disk_mb() (hr_ui_utils.cpp) existed already but nothing
+    // hr_get_free_disk_mb() (ui_utils.cpp) existed already but nothing
     // ever called it - a recording would happily start on an almost-full
     // drive and just die (ffmpeg write failure) partway through instead of
     // being refused up front. A 0 return (query failed, e.g. odd path) is
@@ -1077,7 +1079,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             // encoder path) regardless of the "Disable live preview" setting,
             // but there's no reason for it to keep generating an unread
             // thumbnail every preview_fps tick when that setting is on - see
-            // Pipeline::preview_needed's own comment (hr_pipeline.cpp).
+            // Pipeline::preview_needed's own comment (pipeline.cpp).
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
         if (!pipeline_ || !pipeline_started) {
@@ -1100,7 +1102,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         // A manual recording is genuinely happening now (as opposed to just
         // Instant Replay's background buffer, which also sets `recording` via
         // hr_pl_set_recording() above but should stay at ordinary priority -
-        // see boost_priority's comment in hr_pipeline.cpp / bug #5) - this is
+        // see boost_priority's comment in pipeline.cpp / bug #5) - this is
         // the one place that's actually true, so bump the capture thread.
         hr_pl_set_priority_boost(pipeline_, 1);
     }
@@ -1114,7 +1116,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         // exact paths right now, instead of only writing a WAV once
         // everything's been held in RAM until Stop(), is what keeps a long
         // recording's memory use flat (see hr_audio_flush_buffered()'s
-        // comment in hr_audio.cpp for the full story).
+        // comment in audio.cpp for the full story).
         std::string audio_base = NarrowFromWide(current_output_path_);
         size_t audio_dot = audio_base.find_last_of('.');
         std::string audio_stem = (audio_dot == std::string::npos) ? audio_base : audio_base.substr(0, audio_dot);
@@ -1178,7 +1180,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // hr_pl_stop() itself waits (with a timeout) for the capture thread
     // and then the writer thread to each signal that they've actually
     // stopped - up to ~1s per thread, by design (see its own comment in
-    // hr_pipeline.cpp). This function is StopAsync() - callers (the Stop
+    // pipeline.cpp). This function is StopAsync() - callers (the Stop
     // button's DoStop()) call it directly on the UI thread specifically
     // so they *don't* have to block - but this call used to run right
     // here, before finalize_thread_ below even existed, so every one of
@@ -1607,7 +1609,7 @@ void RecordingController::PollStats() {
     hr_audio_get_levels(&mic_level_, &sys_level_);
 
     // Drain buffered mic/system PCM to the incremental WAV streams so RAM
-    // use stays flat for the whole recording (see hr_audio.cpp
+    // use stays flat for the whole recording (see audio.cpp
     // hr_audio_flush_buffered()). Cheap no-op when no stream is open.
     if (!finalizing_) hr_audio_flush_buffered();
 
@@ -1809,7 +1811,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
         // nullptr, nullptr -- this is the rolling ring buffer, not a manual
         // recording, so it must stay fully in RAM (SaveReplay() needs
         // random access to "the last N seconds" on demand); see
-        // hr_audio_reset_buffers()'s comment (hr_audio.cpp) for why real
+        // hr_audio_reset_buffers()'s comment (audio.cpp) for why real
         // paths there mean something different (a streamed-to-disk manual
         // recording).
         hr_audio_reset_buffers(nullptr, nullptr);
@@ -1870,7 +1872,7 @@ void RecordingController::StopInstantReplayEncoderAsync() {
         // detached - see JoinPendingInstantReplayStop() - but that alone
         // doesn't catch anything thrown *inside* it) - every other bare
         // std::thread lambda in this codebase (capture_loop()/
-        // writer_loop() in hr_pipeline.cpp) got wrapped in a try/catch
+        // writer_loop() in pipeline.cpp) got wrapped in a try/catch
         // specifically because an uncaught throw in one of these calls
         // std::terminate() and takes the whole app down with it; this one
         // was missed. Whatever the actual trigger (hr_ff_wait()/
@@ -2215,7 +2217,7 @@ void RecordingController::EnsurePreview() {
     ResolveCaptureSize();
     // pipe_fd=0 -> hr_pl_create() leaves this in preview-only mode (frames
     // captured + thumbnailed for the UI, nothing written anywhere) - see
-    // its "false -> preview only" comment in hr_pipeline.cpp. Start()
+    // its "false -> preview only" comment in pipeline.cpp. Start()
     // later flips this same pipeline into recording mode via
     // hr_pl_set_recording() instead of replacing it, when the size matches.
     int pvw = 0, pvh = 0;
@@ -2281,7 +2283,7 @@ void RecordingController::TeardownPreview() {
     // (rare) remainder of the previous teardown, not a fresh one.
     if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
     // Wrapped in try/catch for the same reason as the thread
-    // entry points in hr_pipeline.cpp/hr_audio.cpp (see their matching
+    // entry points in pipeline.cpp/audio.cpp (see their matching
     // comments) - this lambda is a bare std::thread with nothing above it
     // to catch an uncaught exception out of hr_pl_destroy(), which would
     // otherwise be another std::terminate() path.

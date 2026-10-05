@@ -3,7 +3,7 @@
 // Port of homrec_app/mixins/recording_mixin.py. Talks directly to the
 // existing native pipeline (hr_pl_*, hr_capture_ctl's hr_ctl_*), the ffmpeg
 // process runner (hr_ff_*), and the ffmpeg discovery/codec-arg helpers in
-// hr_tools.cpp - all already implemented, so this class is glue around the
+// tools.cpp - all already implemented, so this class is glue around the
 // existing decision logic (codec fallback, GPU probe, filename templating),
 // not new engine code.
 #pragma once
@@ -17,7 +17,7 @@
 #include <atomic>
 #include <functional>
 #include "app_state.h"
-#include "../hr_overlay_render.h"
+#include "../core/overlay_render.h"
 
 class RecordingController {
 public:
@@ -136,7 +136,7 @@ public:
     //       grown, never shrunk, so don't use out.size() as the frame size)
     //   2 - unchanged since `seq`: nothing was copied and `out` is untouched
     // Also bounds-checked against `out`'s real size (see hr_pl_get_preview_ex
-    // in hr_pipeline.cpp for the heap-overflow this closes).
+    // in pipeline.cpp for the heap-overflow this closes).
     int GetPreviewFrameIfNew(std::vector<uint8_t> &out, int &out_w, int &out_h,
                              int &native_w, int &native_h, uint64_t &seq);
 
@@ -606,7 +606,7 @@ private:
     // EnsurePreview() time, then kept live for Window mode by
     // RetargetWindowCapture() on every SyncOverlays() tick thereafter -
     // see the .cpp for the full explanation and hr_pl_set_capture_rect()
-    // in hr_pipeline.cpp for how it's actually applied to captured frames.
+    // in pipeline.cpp for how it's actually applied to captured frames.
     int crop_x_ = 0, crop_y_ = 0, crop_w_ = 0, crop_h_ = 0;
     // 2.4: Window mode records the window itself via Windows.Graphics.Capture instead of
     // cropping a monitor duplication. Set by ResolveCaptureSize(); crop_*_ stay 0 then.

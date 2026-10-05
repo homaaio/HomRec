@@ -1,8 +1,8 @@
 #include "audio_panel.h"
 #include "recording_controller.h"
-#include "../hr_mic_enum.h"
-#include "../hr_app_audio_enum.h"
-#include "../hr_log.h"
+#include "../core/mic_enum.h"
+#include "../core/app_audio_enum.h"
+#include "../utils/log.h"
 #include <wx/dcbuffer.h>
 #include <wx/menu.h>
 #include <wx/filedlg.h>

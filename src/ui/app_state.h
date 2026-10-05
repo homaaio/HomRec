@@ -37,7 +37,7 @@ struct OverlayDef {
     int x = 0, y = 0, w = 0, h = 0;
     std::string text;
     std::string text_color = "#FFFFFF";  // "#RRGGBB", used for type == "text"
-    // Font family for type == "text" - see hr_overlay_render.cpp's
+    // Font family for type == "text" - see overlay_render.cpp's
     // RenderTextBgra(). If the named font isn't actually installed,
     // Windows' GDI silently substitutes its own default rather than
     // failing, so an unavailable choice here degrades gracefully instead
@@ -45,14 +45,14 @@ struct OverlayDef {
     std::string font_family = "Segoe UI";
     // 0-100, applies to every overlay type (text/image/gif/webcam/
     // input_overlay) on top of whatever per-pixel alpha the overlay
-    // content already has - see hr_overlay_render.cpp's CompositeBgra().
+    // content already has - see overlay_render.cpp's CompositeBgra().
     // 100 = fully opaque (the old, only, behavior before this existed).
     int opacity = 100;
     std::string image_path;              // for type == "image"; also reused for
                                           // type == "gif"'s .gif file path
     int webcam_index = -1;
     // Friendly device name captured when the webcam was picked from the
-    // enumerated device list (see hr_webcam_enum.h / overlays_dock_panel.cpp's
+    // enumerated device list (see webcam_enum.h / overlays_dock_panel.cpp's
     // AddWebcamOverlay) -- purely cosmetic (shown in the panel row and the
     // "Edit Parameters" dialog instead of a bare index), never fed back into
     // the actual capture; webcam_index above is still what's used to open
@@ -61,7 +61,7 @@ struct OverlayDef {
     bool visible = true;
 
     // For type == "input_overlay" (the "External Overlay" import, see
-    // overlays_dock_panel.cpp / hr_input_overlay.h): a keyboard/mouse
+    // overlays_dock_panel.cpp / input_overlay.h): a keyboard/mouse
     // overlay driven by a JSON layout + PNG spritesheet, installed from a
     // .hrp plugin package. input_json_path/input_png_path point at the
     // extracted files under plugins/input_overlays/<name>/.
@@ -219,8 +219,8 @@ struct AppState {
 
     // -- Settings > Security -----------------------------------------------
     // Independent on/off switches for the two always-on-by-default log
-    // files (see hr_pc_log.h / hr_plugin_log.h) - homrec.log itself
-    // (hr_log.h, events/errors) isn't covered by either of these, only
+    // files (see pc_log.h / plugin_log.h) - homrec.log itself
+    // (log.h, events/errors) isn't covered by either of these, only
     // the periodic hardware-sampling log and the plugin-system log.
     bool system_logging_enabled = true; // logs/pc.log
     bool plugin_logging_enabled = true; // logs/plugins.log
@@ -284,7 +284,7 @@ struct AppState {
     // -- misc -------------------------------------------------------------------
     std::string ffmpeg_path;      // resolved at startup via hr_find_ffmpeg
     // WASAPI endpoint ID of the microphone to record from (see
-    // hr_mic_enum.h's HrEnumerateMics() and settings_dialog.cpp's picker).
+    // mic_enum.h's HrEnumerateMics() and settings_dialog.cpp's picker).
     // Empty (the default) keeps the previous behavior of always using
     // whichever device Windows currently considers the default recording
     // device.

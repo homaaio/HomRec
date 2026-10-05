@@ -1,7 +1,7 @@
 #include "preset_dialog.h"
 #include "themed_widgets.h"
 #include "hrc_config.h"
-#include "../hr_log.h"
+#include "../utils/log.h"
 
 #include <wx/listctrl.h>
 #include <wx/filedlg.h>

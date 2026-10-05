@@ -1,6 +1,6 @@
 #include "log_viewer_dialog.h"
 #include "win32_theme.h"
-#include "../hr_log_paths.h"
+#include "../utils/log_paths.h"
 #include <windowsx.h>
 #include <string>
 #include <vector>

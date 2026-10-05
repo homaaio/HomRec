@@ -10,8 +10,8 @@
 //       "vertical"   - OBS-style channel strips side by side: vertical meter + vertical fader
 //   * "+ Add source": another microphone, a browser, one program's/window's sound, or an
 //     audio file. Those channels are stored in AppState::audio_sources and captured by the
-//     hr_audio_extra_* backend (hr_audio_extra.inc).
-//   * icons: icons/audio/microphone.png and desktop_audio.png (see hr_icons.h); a text
+//     hr_audio_extra_* backend (audio_extra.inc).
+//   * icons: icons/audio/microphone.png and desktop_audio.png (see icons.h); a text
 //     glyph is drawn when a file is missing.
 //   * lives in a dockable pane (main_frame.cpp), so it has no title row / close button of its
 //     own any more - the pane caption provides both.
@@ -30,7 +30,7 @@
 #include "app_state.h"
 #include "theme.h"
 #include "themed_widgets.h"
-#include "hr_icons.h"
+#include "icons.h"
 
 class RecordingController;
 

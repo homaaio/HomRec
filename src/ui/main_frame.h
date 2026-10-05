@@ -190,7 +190,7 @@ private:
     int drag_start_ov_x_ = 0, drag_start_ov_y_ = 0, drag_start_ov_w_ = 0, drag_start_ov_h_ = 0;
 
     // The underlying preview frame updates far less often than the 30fps
-    // paint timer used to assume (throttled in hr_pipeline.cpp, more so
+    // paint timer used to assume (throttled in pipeline.cpp, more so
     // when idle) - re-running the bilinear Scale() on an unchanged frame
     // every single paint was pure wasted CPU, most annoyingly right when
     // a recording is also competing for the same cores. Cache the last
@@ -356,7 +356,7 @@ private:
     void OnClose(wxCloseEvent &evt);
     void OnIconize(wxIconizeEvent &evt);
     void OnShowEvent(wxShowEvent &evt);
-    void OnHotkeyEvent(wxThreadEvent &evt); // posted from hr_hotkey.cpp's background thread
+    void OnHotkeyEvent(wxThreadEvent &evt); // posted from hotkey.cpp's background thread
 
     // hom plugin-update badge (bottom bar) - see CheckHomUpdatesAsync()'s
     // comment for why this is a plain background `hom list --upgradable`

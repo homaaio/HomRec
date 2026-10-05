@@ -7,15 +7,15 @@
 // full overlay editor window is gone: a plain text prompt (used for the
 // "Text" overlay's content and the row "Rename..." action), a picker for
 // choosing among the input-overlay presets a plugin has registered (see
-// hr_input_overlay_registry.h), and a picker for choosing a webcam from the
-// devices actually attached to the system (see hr_webcam_enum.h) instead of
+// input_overlay_registry.h), and a picker for choosing a webcam from the
+// devices actually attached to the system (see webcam_enum.h) instead of
 // asking the user to type a raw camera index.
 // -----------------------------------------------------------------------------
 #include <windows.h>
 #include <string>
 #include <vector>
-#include "../hr_input_overlay_registry.h"
-#include "../hr_webcam_enum.h"
+#include "../core/input_overlay_registry.h"
+#include "../core/webcam_enum.h"
 
 // Single-line text prompt. Returns false if the user cancelled (value is
 // left untouched in that case).

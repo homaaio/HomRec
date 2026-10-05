@@ -2,10 +2,10 @@
 #include "win32_theme.h"
 #include "overlay_add_dialogs.h"
 #include "hrc_config.h"
-#include "../hr_input_overlay.h"
-#include "../hr_input_overlay_registry.h"
-#include "../hr_webcam_enum.h"
-#include "hr_icons.h"
+#include "../core/input_overlay.h"
+#include "../core/input_overlay_registry.h"
+#include "../core/webcam_enum.h"
+#include "icons.h"
 #include <commdlg.h>
 #include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
 #include <string>
@@ -128,7 +128,7 @@ std::wstring RowLabel(const OverlayDef &ov) {
 }
 
 // Persists the *entire* current AppState (not just show_overlays_panel -
-// see the header comment above on hr_settings.cpp's old JSON whitelist
+// see the header comment above on settings.cpp's old JSON whitelist
 // bug class) to whichever .hrc path is configured, mirroring the same
 // path resolution / default-location mirroring settings_dialog.cpp's
 // OnSave uses, so this auto-save and an explicit Settings > Save can't
@@ -154,6 +154,9 @@ enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete };
 OverlaysDockPanel::OverlaysDockPanel(AppState &state) : state_(state) {}
 
 OverlaysDockPanel::~OverlaysDockPanel() {
+    // The list window is a child of the wx host panel and is destroyed AFTER this object
+    // (frame members go first, children later). Detach our subclass proc while the window
+    // is still alive so no message can ever reach a dangling `this`.
     if (list_ && IsWindow(list_)) {
         SetWindowLongPtrW(list_, GWLP_USERDATA, 0);
         if (orig_list_proc_ &&
@@ -167,6 +170,8 @@ OverlaysDockPanel::~OverlaysDockPanel() {
 }
 
 namespace {
+// The "+" button used to inherit the old bitmap system font, which renders a tiny, thin plus.
+// One shared, DPI-aware bold UI font for it (created once, lives for the process).
 HFONT AddButtonFont() {
     static HFONT f = nullptr;
     if (!f) {
@@ -184,9 +189,15 @@ HFONT AddButtonFont() {
 } // namespace
 
 HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w, int h) {
+    // WS_CLIPSIBLINGS on all three siblings is the fix for "the + button is invisible until
+    // the mouse touches its corner": the sunken STATIC below covers the whole host and is a
+    // SIBLING of the button and the list (not their parent). Without WS_CLIPSIBLINGS every
+    // repaint of the STATIC (size change, ForceRepaint(), theme change) painted straight over
+    // them, and the button only came back when it repainted itself on mouse-over.
     hwnd_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"",
                              WS_CHILD | WS_CLIPSIBLINGS | (state_.show_overlays_panel ? WS_VISIBLE : 0) | SS_SUNKEN,
                              x, y, w, h, parent, nullptr, hInst, nullptr);
+    // Explicitly the bottom-most sibling, whatever order AUI re-parenting leaves them in.
     SetWindowPos(hwnd_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     int cy = y + 6;
@@ -195,6 +206,13 @@ HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w
                      x + 6, cy, 28, 24, parent, (HMENU)ID_OVDOCK_ADD, hInst, nullptr);
     if (HFONT bf = AddButtonFont()) SendMessageW(add_btn, WM_SETFONT, (WPARAM)bf, FALSE);
     HrWin32Theme::ThemeButton(add_btn);
+    // 2.4: no "x" button of our own any more - the dock pane's caption (and the floating
+    // window's title bar) already has one, and having two was confusing.
+
+    // Bottom buttons that used to live here (Show/Hide, Remove) are gone --
+    // right-clicking a row now covers both of those plus Rename/Edit
+    // Parameters (see ShowRowContextMenu()), so the list gets that
+    // reclaimed vertical space instead.
     list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                              WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | LBS_NOTIFY | WS_VSCROLL |
                              LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
@@ -430,7 +448,7 @@ void OverlaysDockPanel::AddWebcamOverlay(HWND parent, HINSTANCE hInst) {
 void OverlaysDockPanel::AddExternalOverlay(HWND parent, HINSTANCE hInst) {
     (void)hInst;
     // Two plain files, picked directly -- NOT a .hrp plugin package. See
-    // hr_input_overlay.h for what the JSON layout needs to contain
+    // input_overlay.h for what the JSON layout needs to contain
     // ("elements": [...] with code/mapping/pos, same shape the bundled
     // input_overlay_presets plugin's assets use).
     std::string json_path = PickOpenFile(parent, L"Overlay layout (*.json)\0*.json\0", L"Choose the .json layout");

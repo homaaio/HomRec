@@ -4,8 +4,9 @@
 #include "win32_theme.h"
 #include "hrc_config.h"
 #include "../plugins/lua_engine.h"
-#include "../hr_log_paths.h"
-#include "../hr_settings_registry.h"
+#include "../commands/ls.h"
+#include "../utils/log_paths.h"
+#include "../core/settings_registry.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -28,6 +29,12 @@ extern "C" {
 }
 
 namespace {
+
+// Console output sizing: Print() trims scrollback once the text passes
+// kOutputKeepChars; kOutputHardLimitChars is the control's own cap (set once
+// in OnCreate) and is deliberately far above it.
+constexpr int kOutputKeepChars      = 1000000;
+constexpr int kOutputHardLimitChars = 4000000;
 
 std::wstring Trim(const std::wstring &s) {
     size_t a = s.find_first_not_of(L" \t\r\n");
@@ -151,7 +158,7 @@ bool FileExists(const std::wstring &p) {
 // in-process instead of requiring a separate PowerShell/cmd window.
 //
 // The reader thread (draining the pipe while we wait, not after) exists
-// for the same reason hr_tools.cpp's run_cmd() has one: CreatePipe()'s
+// for the same reason tools.cpp's run_cmd() has one: CreatePipe()'s
 // default buffer is small, and a child that writes more than that before
 // anyone reads it will block on WriteFile() forever if we only start
 // reading after WaitForSingleObject() returns - see that file's comment
@@ -505,6 +512,14 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
         SetWindowTheme(output_, L"DarkMode_Explorer", nullptr);
     }
 
+    // Raise the output control's text cap. A RichEdit/EDIT starts with a
+    // limit of only ~32K characters and silently refuses further text once
+    // it is reached - a few big listings (ls, log, hrc, ...) and the console
+    // simply stopped printing. Print() below trims the oldest lines long
+    // before this hard cap is reached, so it is never hit in practice.
+    if (rich_edit_) SendMessageW(output_, EM_EXLIMITTEXT, 0, (LPARAM)kOutputHardLimitChars);
+    else            SendMessageW(output_, EM_SETLIMITTEXT, (WPARAM)kOutputHardLimitChars, 0);
+
     HFONT monoFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Consolas");
@@ -603,6 +618,18 @@ void ConsoleWindow::OnCommand(int, int, HWND) {}
 
 void ConsoleWindow::Print(const std::wstring &line, COLORREF color) {
     int len = GetWindowTextLengthW(output_);
+    if (len > kOutputKeepChars) {
+        // Scrollback cap: drop the oldest quarter (cut on a line boundary) so
+        // the control's text - and every later GetWindowTextLength/EM_REPLACESEL
+        // on it - stays bounded no matter how long the console stays open.
+        LRESULT cutLine = SendMessageW(output_, EM_LINEFROMCHAR, (WPARAM)(len / 4), 0);
+        LRESULT cut = SendMessageW(output_, EM_LINEINDEX, (WPARAM)(cutLine + 1), 0);
+        if (cut > 0 && cut < len) {
+            SendMessageW(output_, EM_SETSEL, 0, (LPARAM)cut);
+            SendMessageW(output_, EM_REPLACESEL, FALSE, (LPARAM)L"");
+            len = GetWindowTextLengthW(output_);
+        }
+    }
     SendMessageW(output_, EM_SETSEL, (WPARAM)len, (LPARAM)len);
     std::wstring toAppend = (len > 0 ? L"\r\n" : L"") + line;
 
@@ -773,7 +800,7 @@ bool ConsoleWindow::TryRunSetting(const std::wstring &cmd, const std::wstring &r
 
     if (const auto *def = HrSettingsRegistry::Find(key)) {
         // custom_ffmpeg_args is the one sensitive field (see
-        // hr_settings_registry.cpp) - gated behind the same "sec" fuse
+        // settings_registry.cpp) - gated behind the same "sec" fuse
         // CmdSetHrc()'s import of it above already respects, so an
         // unattended cfg file (or a console line typed by someone who
         // isn't you) can't quietly rewrite ffmpeg's real command line.
@@ -1284,6 +1311,35 @@ void ConsoleWindow::CmdBatch(const std::wstring &raw) {
 }
 
 void ConsoleWindow::CmdLs(const std::wstring &raw) {
+    // `ls <path>` / `ls -a` list the FILESYSTEM (commands/ls.cpp): "ls ." is
+    // the HomRec folder, "ls plugins/bter.hrp" the contents of a .hrp plugin
+    // package. A bare `ls` and `ls --aliases` / `ls --env` keep their older
+    // meaning (the console's own "registry": aliases + session env vars).
+    const HrCmdLs::Args args = HrCmdLs::Parse(raw);
+    if (HrCmdLs::WantsFilesystem(args)) {
+        const std::vector<HrCmdLs::Line> lines = HrCmdLs::Run(args, GetBaseDir());
+        using HrCmdLs::Kind;
+        size_t i = 0;
+        while (i < lines.size()) {
+            const Kind k = lines[i].kind;
+            if (k == Kind::Header) { PrintInfo(lines[i].text); ++i; continue; }
+            if (k == Kind::Warn)   { PrintWarn(lines[i].text); ++i; continue; }
+            if (k == Kind::Err)    { PrintErr(lines[i].text);  ++i; continue; }
+            // Dir / File / Note rows: one control update per run of same-kind
+            // rows instead of one per row (a folder with hundreds of entries
+            // used to be hundreds of EM_REPLACESEL round trips).
+            std::wstring block;
+            size_t j = i;
+            for (; j < lines.size() && lines[j].kind == k; ++j) {
+                if (j > i) block += L"\r\n";
+                block += lines[j].text;
+            }
+            Print(block, k == Kind::Dir ? kColPrompt : (k == Kind::File ? kColText : kColInfo));
+            i = j;
+        }
+        return;
+    }
+
     // Windows/rules/AE objects aren't ported (they'd need the registry
     // subsystem described at the top of console_window.h) - this lists
     // the parts of "the registry" that DO exist natively in this port:
@@ -1302,6 +1358,7 @@ void ConsoleWindow::CmdLs(const std::wstring &raw) {
     }
     if (showAll) {
         PrintInfo(L"(windows/rules/ae objects aren't in this native port yet)");
+        PrintInfo(L"tip: \"ls .\" lists the HomRec folder, \"ls plugins/<name>.hrp\" a plugin package (ls --help)");
     }
 }
 

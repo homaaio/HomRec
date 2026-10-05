@@ -2,8 +2,8 @@
 #include "recording_controller.h"
 #include "themed_widgets.h"
 #include "hrc_config.h"
-#include "../hr_webcam_enum.h"
-#include "../hr_input_overlay.h"
+#include "../core/webcam_enum.h"
+#include "../core/input_overlay.h"
 #include <wx/dcbuffer.h>
 #include <wx/filedlg.h>
 #include <wx/choice.h>
@@ -95,7 +95,7 @@ private:
 
     // Draws an approximation of the overlay's actual content inside
     // `rect` - not the exact same code path the recording pipeline uses
-    // (hr_overlay_render.cpp), but enough to judge font/color/framing/
+    // (overlay_render.cpp), but enough to judge font/color/framing/
     // cropping before committing, which the old rectangle-only preview
     // (and the old raw-popup edit flow, which had no preview at all)
     // couldn't offer.

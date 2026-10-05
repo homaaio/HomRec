@@ -13,7 +13,7 @@
 // Since there's no other place left to add/edit overlays, this panel's "+"
 // button now opens a small dropdown itself (Text / Image / GIF / Webcam /
 // External Overlay / Select Input-Overlay - the last one only appears if a
-// plugin has registered any presets, see hr_input_overlay_registry.h) and
+// plugin has registered any presets, see input_overlay_registry.h) and
 // prompts for whatever it needs up front (see overlay_add_dialogs.h),
 // rather than adding a placeholder to edit later in a now-nonexistent
 // editor.
@@ -40,7 +40,7 @@
 // 2.4: the panel now reflows - Resize(w, h) re-positions the raw child controls, which
 // is what lets it live in a resizable / floating dock pane - and the list is owner-drawn
 // (HandleDrawItem) so each row can show the PNG icon for its overlay type
-// (icons/overlays/text.png, gif.png, image.png, webcam.png; see hr_icons.h). Rows fall
+// (icons/overlays/text.png, gif.png, image.png, webcam.png; see icons.h). Rows fall
 // back to the old emoji glyph when a PNG is missing.
 #pragma once
 
@@ -51,6 +51,9 @@
 class OverlaysDockPanel {
 public:
     explicit OverlaysDockPanel(AppState &state);
+    // 2.4 fix pass 2: un-subclasses the list. The list HWND is owned by the wx host panel and
+    // outlives this object during frame teardown; its subclass proc used to keep a dangling
+    // `this` in GWLP_USERDATA and call through freed memory -> crash on close.
     ~OverlaysDockPanel();
 
     HWND Create(HWND parent, HINSTANCE hInst, int x, int y, int w, int h);
@@ -98,11 +101,11 @@ private:
     void AddWebcamOverlay(HWND parent, HINSTANCE hInst);
     // "External Overlay" -- the user picks a .json layout file and a .png
     // spritesheet directly (two plain file pickers) -- NOT a .hrp plugin
-    // package; see hr_input_overlay.h's HrInputOverlayLayout for what the
+    // package; see input_overlay.h's HrInputOverlayLayout for what the
     // .json needs to look like.
     void AddExternalOverlay(HWND parent, HINSTANCE hInst);
     // "Select Input-Overlay" -- lists presets a plugin has registered via
-    // homrec.register_input_overlay() (hr_input_overlay_registry.h) and
+    // homrec.register_input_overlay() (input_overlay_registry.h) and
     // adds the chosen one. Only reachable from the menu when at least one
     // preset is registered.
     void AddFromInputOverlayRegistry(HWND parent, HINSTANCE hInst);

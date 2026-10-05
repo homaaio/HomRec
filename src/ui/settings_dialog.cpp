@@ -14,7 +14,7 @@
 // Advanced / Security / System.
 //
 // Persistence note (Phase 1 settings-storage migration, see commands.md):
-// this dialog used to save through hr_settings.cpp's on-disk
+// this dialog used to save through settings.cpp's on-disk
 // homrec_settings.json, whose fixed field whitelist didn't cover
 // hw_accel/enc_preset/enc_crf/pix_fmt/custom_ffmpeg_args/audio_*/
 // filename_template/auto_stop_min/replay_buffer_sec/hotkeys - those
@@ -27,10 +27,10 @@
 #include "themed_widgets.h"
 #include "language.h"
 #include "recording_controller.h"
-#include "../hr_mic_enum.h"
-#include "../hr_system_integration.h"
-#include "../hr_pc_log.h"
-#include "../hr_plugin_log.h"
+#include "../core/mic_enum.h"
+#include "../utils/system_integration.h"
+#include "../utils/pc_log.h"
+#include "../utils/plugin_log.h"
 #include "hrc_config.h"
 #include <wx/spinctrl.h>
 #include <wx/dirdlg.h>
@@ -60,7 +60,7 @@ extern "C" {
     int hr_settings_get_resolution_mode(const void *h);
     const char *hr_settings_get_codec(const void *h);
 
-    // hr_display_info.cpp - used to list real connected monitors (with
+    // display_info.cpp - used to list real connected monitors (with
     // their actual resolution) instead of making the user guess a plain
     // index number in a spin control.
     void *hr_di_create();
@@ -239,7 +239,7 @@ public:
     }
 
 private:
-    // Enumerates actually-connected monitors (via hr_display_info.cpp) so
+    // Enumerates actually-connected monitors (via display_info.cpp) so
     // the dropdown shows "Monitor 1 - 1920x1080 (Primary)" instead of
     // making the user guess an opaque index 0-15 in a spin control.
     // Falls back to a plain numbered list if enumeration fails for any
@@ -1008,9 +1008,9 @@ private:
     // Repopulates every control across every tab with hard-coded
     // defaults - doesn't touch state_/settings_/disk itself, so Cancel
     // (or just not clicking Save afterward) leaves everything exactly as
-    // it was before Reset was clicked. Values that hr_settings.cpp
+    // it was before Reset was clicked. Values that settings.cpp
     // tracks are read from a fresh (never-loaded) HrSettings blob so
-    // this can't drift out of sync with hr_settings.cpp's own
+    // this can't drift out of sync with settings.cpp's own
     // _defaults(); the handful of AppState-only fields hr_settings
     // doesn't cover yet (hw_accel/enc_preset/enc_crf/pix_fmt/
     // custom_ffmpeg_args/audio_*/filename_template/auto_stop_min/
@@ -1131,7 +1131,7 @@ private:
 
         // -- Video & Codec -------------------------------------------------
         // These used to be "in-memory only for now" per
-        // this comment's own former text - hr_settings.cpp's JSON whitelist
+        // this comment's own former text - settings.cpp's JSON whitelist
         // never had fields for hw_accel/enc_preset/enc_crf/pix_fmt/
         // custom_ffmpeg_args, so anything typed here reverted on restart.
         // Now that HrcConfig::Save() below persists the *entire* AppState
@@ -1189,7 +1189,7 @@ private:
         state_.system_logging_enabled = sys_log_chk_->GetValue();
         state_.plugin_logging_enabled = plugin_log_chk_->GetValue();
         // Applied immediately (not just at next launch) - see
-        // hr_pc_log.h/hr_plugin_log.h's SetEnabled().
+        // pc_log.h/plugin_log.h's SetEnabled().
         HrPcLog::SetEnabled(state_.system_logging_enabled);
         HrPluginLog::SetEnabled(state_.plugin_logging_enabled);
 
@@ -1242,7 +1242,7 @@ private:
 
         // Phase 1 settings-storage migration (see commands.md): one save
         // call persists the *entire* AppState, replacing the old JSON
-        // engine's fixed field whitelist (hr_settings.cpp) - see that
+        // engine's fixed field whitelist (settings.cpp) - see that
         // file's own header comment for the exact bug this whitelist
         // caused previously (show_summary/show_overlays_panel silently
         // not persisting because someone forgot to add them to it).

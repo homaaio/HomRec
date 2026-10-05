@@ -5,7 +5,7 @@
 #include <sstream>
 #include <iomanip>
 
-// Mirrors the HrSysStats layout in hr_ui_utils.cpp exactly. That file has
+// Mirrors the HrSysStats layout in ui_utils.cpp exactly. That file has
 // no public header of its own, so the struct is duplicated here the same
 // way AudioLevelMeterCtl duplicates hr_lerp_color's contract in
 // audio_panel.h.

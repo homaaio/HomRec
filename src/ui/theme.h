@@ -7,7 +7,7 @@
 //
 // Custom .hrt themes were removed - that support is discontinued (there
 // was never any UI to install one anyway; LoadCustomTheme() used to be
-// wired up to a gzip+JSON .hrt reader in hr_profile_io.cpp but nothing
+// wired up to a gzip+JSON .hrt reader in profile_io.cpp but nothing
 // called it). Only the two built-in themes below remain.
 #pragma once
 
