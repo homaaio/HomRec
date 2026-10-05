@@ -412,6 +412,9 @@ disconnect #name="start-rec"    # unbind by alias
 
 ### `ls` - list registry objects
 
+> **Current console:** `ls` now lists files and `.hrp` packages (`ls .`, `ls plugins/bter.hrp`) - see section 19. The registry flags below describe the older command language.
+
+
 ```
 ls [--windows] [--rules] [--ae] [--hotkeys] [--all]
     [-v] [--json] [--connected] [--disconnected] [--count]
@@ -998,6 +1001,22 @@ hom install update-hrp       # updates every already-installed .hrp plugin in .\
 hom remove <plugin-name>
 ```
 
+### `ls` - list the HomRec folder or the contents of a `.hrp` package
+
+`ls` is now a **filesystem** listing (`src/commands/ls.cpp`). A bare `ls`, `ls --aliases` and `ls --env` still print the console's own aliases / session env vars, exactly as before.
+
+```
+ls .                         # the HomRec folder (the one hr.exe lives in)
+ls plugins                   # any folder, relative to the HomRec folder
+ls plugins/bter.hrp          # the CONTENTS of a .hrp plugin package, shown like a folder
+ls plugins/bter.hrp/lua      # a folder inside the package
+ls -a plugins                # also show hidden entries (.installed, hidden/system files)
+ls "my folder" cfg           # quotes for spaces; several paths at once
+ls --help
+```
+
+Folders come first, then files; every row shows size, modified date and name, and the last line is a summary. A `.hrp` is a renamed zip - `ls` only reads its zip directory, nothing is extracted or changed. Read-only, so it is not gated by `inwid`. Absolute paths work too. (`.zip` files list the same way.)
+
 ### `log clear` / `log open` (core console addition)
 
 Added directly to the console's existing `$log` built-in rather than through a plugin, since `log` was already a taken command name a plugin can't shadow. See the updated Section 15 above.
@@ -1039,21 +1058,3 @@ Run `bter` in the console for this same list read live from the plugin (includes
 | `revtext <text>`, `wordcount <text>` | Text utilities |
 
 27 commands total. Not the "60+" originally asked for - see the chat for why (kept to what's genuinely functional rather than padding the count with commands that don't do anything real). The `reg(name, description, fn)` pattern at the top of `plugins/bter/entry.lua` makes adding more straightforward if there's a specific list wanted next.
-
----
-
-## 2.4 additions
-
-Set from the console, a `.cfg` script or the `.hrc` file like any other key
-(`<key> = <value>`):
-
-| key | values | meaning |
-|---|---|---|
-| `video_format` | `mp4` / `mkv` / `both` | container; `both` records `.mkv` and also saves an `.mp4` copy |
-| `window_capture_method` | `auto` / `crop` | `auto` = record the window itself (Windows.Graphics.Capture), `crop` = old screen-crop |
-| `window_capture_area` | `window` / `client` | whole window (title bar + borders) or content area only |
-| `audio_meter_style` | `horizontal` / `vertical` | Audio Mixer layout |
-| `ui_locked` (`lock_ui`) | `0` / `1` | freeze the panel layout |
-| `ui_layout` | hex text | saved panel layout - written by the app, not meant to be edited; clear it to reset |
-
-Extra Audio Mixer sources live in the `[audio_sources]` section of the `.hrc`.
