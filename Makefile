@@ -113,4 +113,6 @@ FORCE:
 clean:
 	rm -f $(OBJS) resource.o hr.exe hom.exe
 
+clwexe: # clear without exe
+	rm -f $(OBJS) resource.o
 .PHONY: all clean hom FORCE
