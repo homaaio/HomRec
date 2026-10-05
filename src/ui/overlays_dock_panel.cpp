@@ -153,23 +153,50 @@ enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete };
 
 OverlaysDockPanel::OverlaysDockPanel(AppState &state) : state_(state) {}
 
+OverlaysDockPanel::~OverlaysDockPanel() {
+    if (list_ && IsWindow(list_)) {
+        SetWindowLongPtrW(list_, GWLP_USERDATA, 0);
+        if (orig_list_proc_ &&
+            (WNDPROC)GetWindowLongPtrW(list_, GWLP_WNDPROC) == ListSubclassProc) {
+            SetWindowLongPtrW(list_, GWLP_WNDPROC, (LONG_PTR)orig_list_proc_);
+        }
+    }
+    orig_list_proc_ = nullptr;
+    list_ = nullptr;
+    hwnd_ = nullptr;
+}
+
+namespace {
+HFONT AddButtonFont() {
+    static HFONT f = nullptr;
+    if (!f) {
+        NONCLIENTMETRICSW ncm{};
+        ncm.cbSize = sizeof(ncm);
+        if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+            LOGFONTW lf = ncm.lfMessageFont;
+            lf.lfHeight = lf.lfHeight * 14 / 10;   // ~40% larger than the message font
+            lf.lfWeight = FW_BOLD;
+            f = CreateFontIndirectW(&lf);
+        }
+    }
+    return f;   // may stay null -> the button keeps the default font
+}
+} // namespace
+
 HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w, int h) {
     hwnd_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"",
-                             WS_CHILD | (state_.show_overlays_panel ? WS_VISIBLE : 0) | SS_SUNKEN,
+                             WS_CHILD | WS_CLIPSIBLINGS | (state_.show_overlays_panel ? WS_VISIBLE : 0) | SS_SUNKEN,
                              x, y, w, h, parent, nullptr, hInst, nullptr);
+    SetWindowPos(hwnd_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     int cy = y + 6;
-    HrWin32Theme::ThemeButton(CreateWindowExW(0, L"BUTTON", L"\uFF0B", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                     x + 6, cy, 28, 24, parent, (HMENU)ID_OVDOCK_ADD, hInst, nullptr));
-    // 2.4: no "x" button of our own any more - the dock pane's caption (and the floating
-    // window's title bar) already has one, and having two was confusing.
-
-    // Bottom buttons that used to live here (Show/Hide, Remove) are gone --
-    // right-clicking a row now covers both of those plus Rename/Edit
-    // Parameters (see ShowRowContextMenu()), so the list gets that
-    // reclaimed vertical space instead.
+    HWND add_btn = CreateWindowExW(0, L"BUTTON", L"+",
+                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+                     x + 6, cy, 28, 24, parent, (HMENU)ID_OVDOCK_ADD, hInst, nullptr);
+    if (HFONT bf = AddButtonFont()) SendMessageW(add_btn, WM_SETFONT, (WPARAM)bf, FALSE);
+    HrWin32Theme::ThemeButton(add_btn);
     list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                             WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL |
+                             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | LBS_NOTIFY | WS_VSCROLL |
                              LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                              x + 6, cy + 30, w - 12, h - 42, parent, (HMENU)ID_OVDOCK_LIST, hInst, nullptr);
     // Owner-drawn rows (icon + text). Fixed row height is set explicitly because the
@@ -189,11 +216,17 @@ HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w
 
 LRESULT CALLBACK OverlaysDockPanel::ListSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto *self = reinterpret_cast<OverlaysDockPanel *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (msg == WM_CONTEXTMENU && self) {
+    if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);   // detached (panel already gone)
+    if (msg == WM_CONTEXTMENU) {
         self->OnListContextMenu(lParam);
         return 0;
     }
-    WNDPROC orig = self ? self->orig_list_proc_ : nullptr;
+    WNDPROC orig = self->orig_list_proc_;
+    if (msg == WM_NCDESTROY) {
+        // The window is going away: unhook ourselves so nothing can reach `self` afterwards.
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        if (orig) SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)orig);
+    }
     return orig ? CallWindowProcW(orig, hwnd, msg, wParam, lParam)
                 : DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -274,7 +307,7 @@ void OverlaysDockPanel::Refresh() {
 
     SendMessageW(list_, LB_RESETCONTENT, 0, 0);
     if (state_.overlays.empty()) {
-        SendMessageW(list_, LB_ADDSTRING, 0, (LPARAM)L"No overlays yet. Click \uFF0B to add one.");
+        SendMessageW(list_, LB_ADDSTRING, 0, (LPARAM)L"No overlays yet. Click + to add one.");
         EnableWindow(list_, FALSE);
         return;
     }
@@ -494,6 +527,7 @@ void OverlaysDockPanel::Resize(int w, int h) {
     if (!hwnd_ || w < 40 || h < 60) return;
     HWND parent = GetParent(hwnd_);
     HWND add = GetDlgItem(parent, ID_OVDOCK_ADD);
+    // Batched so a sash drag repositions all three children with one repaint pass.
     HDWP dwp = BeginDeferWindowPos(3);
     auto place = [&](HWND win, int px, int py, int pw, int ph) {
         if (!win) return;
@@ -509,6 +543,8 @@ void OverlaysDockPanel::Resize(int w, int h) {
     if (list_) SetWindowPos(list_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
+// Raw child HWNDs are not repainted by wx when AUI re-parents the host into a floating
+// frame (or back into the dock): the pane stayed blank until something else invalidated it.
 void OverlaysDockPanel::ForceRepaint() {
     if (!hwnd_) return;
     HWND parent = GetParent(hwnd_);

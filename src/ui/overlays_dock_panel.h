@@ -51,6 +51,7 @@
 class OverlaysDockPanel {
 public:
     explicit OverlaysDockPanel(AppState &state);
+    ~OverlaysDockPanel();
 
     HWND Create(HWND parent, HINSTANCE hInst, int x, int y, int w, int h);
 
