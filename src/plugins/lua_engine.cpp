@@ -1,8 +1,8 @@
 #include "lua_engine.h"
 #include "lua_api.h"
-#include "../hr_archive.h"
-#include "../hr_input_overlay_registry.h"
-#include "../hr_plugin_log.h"
+#include "../utils/archive.h"
+#include "../core/input_overlay_registry.h"
+#include "../utils/plugin_log.h"
 #include <windows.h>
 #include <fstream>
 #include <sstream>

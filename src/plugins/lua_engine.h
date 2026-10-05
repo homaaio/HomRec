@@ -16,7 +16,7 @@
 // from plugins_dir:
 //   plugins/<id>/plugin.json + <entry>.lua      (directory, as before)
 //   plugins/<name>.hrp                            (archive)
-// .hrp archives are extracted (via hr_archive.h -- see that header for why
+// .hrp archives are extracted (via archive.h -- see that header for why
 // no zip library needed to be vendored to get this working) to
 // plugins/.installed/<name>/ once, then loaded the same way a directory
 // always was. Re-extraction on every LoadAll() would stomp any per-plugin

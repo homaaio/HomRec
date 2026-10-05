@@ -1,8 +1,8 @@
 #include "lua_api.h"
 #include "lua_engine.h"
-#include "../hr_input_overlay_registry.h"
-#include "../hr_plugin_log.h"
-#include "../hr_log_paths.h"
+#include "../core/input_overlay_registry.h"
+#include "../utils/plugin_log.h"
+#include "../utils/log_paths.h"
 #include "../ui/theme.h"
 #include "../ui/recording_controller.h"
 #include <windows.h>
@@ -24,11 +24,11 @@ extern "C" {
 
 // Phase 1 (see commands.md): homrec.get_setting()/set_setting() below now
 // read/write real AppState fields (via RecordingController::state()) and
-// persist through HrcConfig::Save() - the hr_settings.cpp JSON engine this
+// persist through HrcConfig::Save() - the settings.cpp JSON engine this
 // used to round-trip through is no longer touched from here at all.
 #include "../ui/hrc_config.h"
-#include "../hr_settings_registry.h"
-#include "../hr_str_convert.h"
+#include "../core/settings_registry.h"
+#include "../utils/str_convert.h"
 
 #pragma comment(lib, "wininet.lib")
 
@@ -191,11 +191,11 @@ int L_store_get(lua_State *L) {
 // spellings from .hrc's (minimize_tray vs. minimize_to_tray, countdown vs.
 // countdown_enabled, etc.) - a second, independently-drifting copy of the
 // same field list hrc_config.cpp already had. Both now walk
-// HrSettingsRegistry::All() (see hr_settings_registry.h), so every scalar
+// HrSettingsRegistry::All() (see settings_registry.h), so every scalar
 // .hrc setting - not just bools - is reachable from a plugin, and a field
 // added to the registry shows up here for free. The old short key
 // spellings above still work: they're registered as aliases on the
-// canonical entry (see hr_settings_registry.cpp), so existing plugin
+// canonical entry (see settings_registry.cpp), so existing plugin
 // scripts that call homrec.get_setting("minimize_tray") don't break.
 
 // Converts a Lua value on the stack (bool/number/string) to the plain-text
@@ -260,7 +260,7 @@ int L_settings_set(lua_State *L) {
     if (rec) {
         if (const auto *def = HrSettingsRegistry::Find(key)) {
             // custom_ffmpeg_args is the one sensitive field (see
-            // hr_settings_registry.cpp) - plugins run with full trust
+            // settings_registry.cpp) - plugins run with full trust
             // already (register_command/http_get etc. have no sandboxing
             // of their own), so this isn't gated behind "sec" the way the
             // console's generic assignment is; a plugin that can call
@@ -421,7 +421,7 @@ int L_http_post(lua_State *L) {
 // --- homrec.register_input_overlay(category, label, json_path, png_path) --
 // Called from a plugin's on_load() to advertise a bundled input-overlay
 // preset (see plugins/input_overlay_presets/entry.lua) - collected into
-// hr_input_overlay_registry.h's global list, which
+// input_overlay_registry.h's global list, which
 // overlays_dock_panel.cpp's "+" menu reads to build its "Select
 // Input-Overlay…" picker. json_path/png_path are resolved relative to this
 // plugin's own directory (so the Lua script can just say "assets/x.json").
