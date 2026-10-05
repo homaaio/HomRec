@@ -9,8 +9,8 @@
 #include <wx/wx.h>
 #include "ui/main_frame.h"
 #include "ui/version.h"
-#include "hr_crash_handler.h"
-#include "hr_log.h"
+#include "utils/crash_handler.h"
+#include "utils/log.h"
 
 // Both predate some SDK header snapshots this project's MinGW-w64
 // toolchain may ship with (window_picker_dialog.cpp hits the same thing
@@ -22,7 +22,7 @@ typedef HANDLE DPI_AWARENESS_CONTEXT;
 #endif
 
 extern "C" int hr_acquire_single_instance(const char *mutex_name);
-// Implemented in hr_pipeline.cpp - see g_handed_off_pipelines' comment
+// Implemented in pipeline.cpp - see g_handed_off_pipelines' comment
 // there for what this is waiting on and why OnExit() below calls it.
 extern "C" int hr_pl_wait_all_detached(int timeout_ms);
 
@@ -33,12 +33,12 @@ namespace {
 // 96-DPI space on any display running above 100% scaling (the Windows
 // default on most modern laptop panels, including higher-res ones like a
 // UHD-graphics 1920x1080 or higher screen). DXGI Desktop Duplication
-// (hr_dxgi_capture.cpp) is never virtualized - it always reports/captures
+// (dxgi_capture.cpp) is never virtualized - it always reports/captures
 // true physical pixels, regardless of the caller's DPI awareness. That
 // mismatch is exactly what made window-capture crop selection resolve to
 // the wrong rectangle (computed in one coordinate space, applied to a
 // buffer in another) - see RecordingController::ResolveCaptureSize()'s
-// crop math and Pipeline::src_w/h in hr_pipeline.cpp for where those two
+// crop math and Pipeline::src_w/h in pipeline.cpp for where those two
 // spaces actually collide. Declaring Per-Monitor-V2 awareness here (the
 // programmatic equivalent of an app manifest's <dpiAwareness> entry, and
 // preferred over one since it works without shipping a separate .manifest
@@ -46,8 +46,8 @@ namespace {
 //
 // Tried newest-to-oldest and loaded dynamically (GetProcAddress, not a
 // direct link) since not all three exist on every supported Windows
-// version - same reasoning/pattern as hr_crash_handler.cpp's dbghelp.dll
-// loading and hr_display_info.cpp's GetDpiForMonitor lookup.
+// version - same reasoning/pattern as crash_handler.cpp's dbghelp.dll
+// loading and display_info.cpp's GetDpiForMonitor lookup.
 void EnablePerMonitorDpiAwareness() {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     if (user32) {
