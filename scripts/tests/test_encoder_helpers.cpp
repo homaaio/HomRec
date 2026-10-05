@@ -1,7 +1,7 @@
 // scripts/tests/test_encoder_helpers.cpp
 //
 // Standalone unit tests for the pure pixel-conversion helpers in
-// src/hr_encoder_helpers.c (BGRA<->YUV420p/NV12, gamma LUT, thumbnail
+// src/core/encoder_helpers.c (BGRA<->YUV420p/NV12, gamma LUT, thumbnail
 // downscale). No wxWidgets, no DXGI, no AppState - just the math, so this
 // builds and runs in a couple seconds without the full MSYS2/wx toolchain.
 //
@@ -10,7 +10,7 @@
 //     https://raw.githubusercontent.com/doctest/doctest/master/doctest/doctest.h
 //
 // Build & run (any g++/MinGW works - this file doesn't touch Windows APIs):
-//   g++ -O2 -c src/hr_encoder_helpers.c -o /tmp/hr_encoder_helpers.o
+//   g++ -O2 -c src/core/encoder_helpers.c -o /tmp/hr_encoder_helpers.o
 //   g++ -std=c++17 -Iscripts/tests scripts/tests/test_encoder_helpers.cpp \
 //       /tmp/hr_encoder_helpers.o -o /tmp/hr_tests.exe
 //   /tmp/hr_tests.exe
@@ -64,11 +64,11 @@ TEST_CASE("hr_bgra_to_yuv420p: solid white -> Y=255 (full range, software x264/x
 }
 
 TEST_CASE("hr_bgra_to_nv12: solid black -> Y should be 16 in limited/tv range (NVENC/QSV/AMF)") {
-    // Per CHANGELOG.txt and ffmpeg/hr_ffmpeg_runner.cpp's "-color_range tv"
+    // Per CHANGELOG.txt and ffmpeg/ffmpeg_runner.cpp's "-color_range tv"
     // for the hardware-encoder path, hr_bgra_to_nv12 is supposed to emit
     // limited range (16-235), not full range (0-255) - that mismatch was
     // exactly the earlier "dark/dull, blackness effect" NVENC bug.
-    // If this CHECK fails: hr_bgra_to_nv12_band in hr_encoder_helpers.c is
+    // If this CHECK fails: hr_bgra_to_nv12_band in encoder_helpers.c is
     // currently using the same full-range coefficients as
     // hr_bgra_to_yuv420p (I checked - as of this archive it is), which
     // means either that fix never made it into this tree, or it got
@@ -151,7 +151,7 @@ std::vector<uint8_t> NoisyBgra(int w, int h, unsigned seed) {
     return buf;
 }
 
-// Same row-copy rule as copy_yuv_rows() in hr_pipeline.cpp.
+// Same row-copy rule as copy_yuv_rows() in pipeline.cpp.
 void CopyYuvRows(uint8_t *dst, const uint8_t *src, int w, int h, int y0, int y1, bool nv12) {
     std::memcpy(dst + (size_t)y0 * w, src + (size_t)y0 * w, (size_t)(y1 - y0) * w);
     const size_t base = (size_t)w * h;
