@@ -1,6 +1,115 @@
 welcome to changelog :D
 
-[Version 2.4.0] - fix pass after first test (2026-10-04)
+[Version 2.4.0] - (2026-10-05)
+Window capture, MKV, dockable panels, a new Audio Mixer.
+
+Source tree (files only, no behaviour change - code identifiers like hr_* C exports, HrLog, hr.exe are untouched)
+- src/hr_*.{cpp,h,c,inc} moved into folders and the "hr_" prefix dropped:
+    src/core/   app_audio_enum, app_logic, audio (+audio_extra.inc), capture_ctl, display_info, dxgi_capture,
+                encoder_helpers.c, hotkey, input_overlay, input_overlay_registry, mic_enum, overlay_render,
+                pipeline, profile_io, settings, settings_registry, tools, webcam_capture, webcam_enum, wgc_capture
+    src/utils/  archive, crash_handler, log, log_paths, pc_log, plugin_log, stopwatch, str_convert.h,
+                system_integration, ui_utils, update
+    src/ui/hr_icons.{cpp,h} -> src/ui/icons.{cpp,h}
+    ffmpeg/hr_ffmpeg_runner.cpp -> ffmpeg/ffmpeg_runner.cpp
+  src/plugins, src/platform and src/win_main.cpp stay where they were.
+- Every #include was rewritten to the new relative path; Makefile / CMakeLists.txt object lists updated;
+  file-name mentions in comments, installer/ and scripts/ follow the new names. (Older entries below keep
+  the old file names - they describe the tree as it was then.)
+
+New command: ls (src/commands/ls.h + ls.cpp)
+- ls .                      lists the HomRec folder (the one hr.exe lives in)
+- ls plugins                any folder, relative to it (absolute paths work too)
+- ls plugins/bter.hrp       lists the CONTENTS of a .hrp plugin package like a folder; ls plugins/bter.hrp/lua
+                            lists a folder inside it. Reads only the zip's central directory - nothing is extracted.
+- ls -a <path>              also shows hidden entries (.installed, hidden/system files)
+- A bare `ls`, `ls --aliases` and `ls --env` keep the old meaning (console aliases / session env vars).
+- Folders first, then files, size + modified date per row, summary line; capped at 2000 rows / 20000 scanned
+  entries so a huge folder can't freeze the console. Rows go to the control in one update per run, not per row.
+- Fixed (src/ui/console_window.cpp): the console output control kept the default ~32K-character limit and
+  silently stopped printing once it was reached (long listings made that easy to hit). The limit is raised and
+  Print() now trims the oldest quarter of the scrollback once it passes 1M characters.
+
+Bugs
+- Fixed (src/ui/hrc_config.cpp): overlay opacity and font were never saved or loaded. An overlay faded to
+  opacity 0 (invisible) came back at 100 after every restart, and a text overlay's font went back to Segoe UI.
+  overlay_N_opacity / overlay_N_font_family are now written and read (older files without the keys load with
+  the old defaults, as before).
+- Fixed (src/core/pipeline.cpp, overlay_render.*): an overlay at opacity 0 still counted as "something to
+  draw" - it kept the capture loop off the GPU colour-conversion path and was rendered every frame just to be
+  discarded (an input overlay rebuilt its whole layer 30x a second, a hidden-by-opacity webcam overlay kept the
+  camera open). HrOverlayDrawsAnything() (visible, size > 0, opacity > 0) is now the one definition used by
+  both the pipeline and the compositor.
+- Fixed (src/utils/stopwatch.cpp): timeEndPeriod() was always called with 1 while timeBeginPeriod() got the
+  device's minimum period; the two now use the same value.
+
+Optimization (1920x1080@30, QSV, GPU colour conversion - the config in homrec.hrc)
+- Overlays no longer push the whole recording onto the CPU path. Before: any visible overlay disabled the GPU
+  path, so EVERY tick did a full 8 MB BGRA readback, an 8 MB work-buffer copy, CPU compositing, a full-frame
+  CPU BGRA->NV12 conversion, and lost the static-desktop / dirty-rows shortcuts. Now (src/core/pipeline.cpp):
+  the GPU path stays on and OverlayCompositor::ApplyNv12() blends only the overlay rectangles straight into the
+  finished NV12 frame (same BT.601 matrix as hr_bgra_to_nv12_band and the NV12 cursor blend, so colours match
+  the CPU path; checked against the real converter: <= 2 luma / 1 chroma levels apart in all but one hard-edged
+  test case). The preview gets a copy with the overlays baked in, only while a preview is shown. A scaled
+  output (Resolution != native) with overlays still uses the classic CPU path, as before.
+- Input overlays (src/core/overlay_render.cpp): virtual-keys resolved once per load instead of one
+  MapVirtualKeyW per element per frame, and when no key changed (and the box wasn't resized) last frame's
+  finished layer is reused instead of clearing, re-blitting every element, re-scaling and copying it again.
+  Idle cost per frame went from (elements x blit + fill + scale + copy) to (elements x GetAsyncKeyState).
+
+- Analysis of the dump: 0xC0000005 on the GUI thread, access type 8 = EXECUTE (DEP), at a page-aligned
+  address that is not code -> the program CALLED through a dangling / garbage pointer; the log shows
+  the app was idle (no recording) and the previous pc.log line is 10 s older, i.e. a teardown path,
+  not a capture path. No symbols for his hr.exe, so the exact frame can't be named; the one
+  confirmed dangling-pointer-in-a-window-proc bug found in the code is fixed below.
+- Fixed (src/ui/overlays_dock_panel.cpp/.h): OverlaysDockPanel had no destructor, but its LISTBOX is
+  subclassed with GWLP_USERDATA = this and is destroyed LATER than the panel (the frame's members go
+  first, the wx host panel and its native children afterwards). Every message the list received during
+  teardown (WM_DESTROY/WM_NCDESTROY...) went through ListSubclassProc with a freed `this` and called
+  CallWindowProc() on whatever was left in that memory. Added ~OverlaysDockPanel() that restores the
+  original window proc and clears USERDATA; ListSubclassProc is null-safe and unhooks itself on
+  WM_NCDESTROY.
+
+Load / optimisation (QSV 1080p30 config from the friend's homrec.hrc, 8 GB machine at 85-89 % RAM)
+- Fixed (src/hr_audio.cpp): hr_audio_mix_wav() - used at every Stop with mic + system audio - read both
+  WAVs completely and built a third buffer: ~3x the track size in RAM (about 1 GB for 30 min, 2 GB for
+  1 h). On a machine with ~1 GB free that means paging and the 20-30 s of 30 % system CPU seen after
+  each stop in pc.log, then ffmpeg finalization timeouts. It now goes through the streaming mixer
+  (hr_audio_mix_wav_list, a few KB of RAM) when both files are 16-bit stereo; the old in-memory
+  version is kept as mix_wav_inmemory() for anything else.
+- Changed (src/hr_tools.cpp): when the encoded video comes out shorter than real time (dropped frames
+  on an overloaded PC), hr_merge_av() re-timed it by RE-ENCODING THE WHOLE VIDEO with libx264 - heaviest
+  possible work on the machine that was already overloaded. Now the video is stream-copied and its
+  timestamps are rescaled with the setts bitstream filter (no decode/encode, seconds instead of
+  minutes). If ffmpeg refuses that, it falls back to the old libx264 command automatically. Timeout
+  for the normal path is now video length x 0.5 (fallback keeps x 2).
+- Changed (src/hr_dxgi_capture.cpp): nv_deliver() copies the mapped NV12 readback with two memcpy()
+  calls when RowPitch == width (1920/1280 wide frames) instead of ~1620 row copies per frame.
+- Changed (src/hr_ui_utils.cpp): the cursor bitmap cache re-rasterized the pointer every 100 ms for
+  nothing (same HCURSOR => same bitmap, DrawIconEx always draws an animated cursor's first step); the
+  safety refresh is now 2 s.
+
+Bug fixes
+- Fixed (src/ui/overlays_dock_panel.cpp): the "+" button was invisible until the mouse touched its corner.
+  The full-size sunken STATIC frame, the "+" button and the list are SIBLINGS, and none had
+  WS_CLIPSIBLINGS: whenever the STATIC repainted (pane resize/move, ForceRepaint(), theme change) it
+  painted over the button and list; the button only came back when it repainted itself on hover. All
+  three now have WS_CLIPSIBLINGS and the STATIC is explicitly the bottom-most sibling. The button also
+  uses a plain "+" (the fullwidth U+FF0B is missing from the UI font) in a larger bold UI font
+  (it used to inherit the tiny system bitmap font).
+- Fixed (src/hr_ui_utils.cpp): small purple/pink pixels around the cursor in recordings. The pointer was
+  rasterized by DrawIconEx onto a MAGENTA chroma-key background and only exact-magenta pixels counted
+  as transparent; every anti-aliased / drop-shadow pixel of a modern (32-bit ARGB) cursor was blended
+  with the magenta by GDI, no longer matched the key and stayed in the video as an opaque purple fringe.
+  The cursor is now rendered twice (on black and on white), which gives the exact per-pixel alpha and
+  colour: black = c*a, white = c*a + 255*(1-a). Both compositors (BGRA and the NV12/GPU one) now do a real
+  straight-alpha blend. As a side effect, XOR "invert" cursors (I-beam of mask cursors, which used to be
+  drawn GREEN because of the magenta background) are detected and drawn as a real inversion.
+  NOTE for the "white elements all over the screen" part of the report: a 4:2:0 recording (NV12 / yuv420p)
+  stores colour at half resolution, so very small coloured artefacts on white UI can also come from the
+  codec itself; if purple pixels remain AFTER this fix on elements far from the pointer, send a PNG
+  crop of a single frame (not the player's screenshot) - that would point at the GPU video processor
+  colour-space setup in hr_dxgi_capture.cpp instead.
 
 Optimisation (first priority)
 - Changed (src/hr_pipeline.cpp, src/ui/recording_controller.cpp/.h, src/ui/main_frame.cpp/.h):
@@ -30,13 +139,6 @@ Bug fixes
   close buttons (the dock caption's and its own "x") - its own is gone. The pane stayed blank
   after being moved/floated/docked because the raw Win32 children were never invalidated after AUI
   re-parented the host: OverlaysDockPanel::ForceRepaint(), requested (coalesced) on host size/show.
-
-[Version 2.4.0] - 2026-10-03
-
-Window capture, MKV, dockable panels, a new Audio Mixer. (Written without a
-compiler at hand - if the build reports an error, send it back and it gets fixed.)
-
-Commit-style report, one line per file:
 
 Window capture ("Select Window" records the WHOLE window)
 - Added (src/hr_wgc_capture.h/.cpp): Windows.Graphics.Capture window source
