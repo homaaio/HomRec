@@ -38,4 +38,4 @@ file is fine - the UI draws a text glyph instead. Any size works (square is best
     (optional) icons/audio/browser.png  window.png  file.png
 
 Alternative file names (mic.png, speaker.png, camera.png, ...) are listed in
-`src/ui/hr_icons.cpp`.
+`src/ui/icons.cpp`.
