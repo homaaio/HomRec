@@ -25,7 +25,7 @@ Output: `dist\HomRec-Setup-<version>.exe`.
 
 - Installs per-user (`{userpf}`, i.e. `%LOCALAPPDATA%\Programs\HomRec`) with
   no admin/UAC prompt, since HomRec keeps its settings/logs next to its own
-  exe (see `hrc_config.h`/`hr_log_paths.cpp`) and needs to be able to write
+  exe (see `hrc_config.h`/`log_paths.cpp`) and needs to be able to write
   there without elevation.
 - Ships a real Windows uninstaller (Add/Remove Programs + Start Menu
   shortcut), which asks once whether to also delete `homrec.hrc`/`logs\`
@@ -43,7 +43,7 @@ Output: `dist\HomRec-Setup-<version>.exe`.
 
 There's no separate updater binary. The flow is:
 
-1. `hr.exe`'s **Help > Check for Updates** (`src/hr_update.cpp`) asks
+1. `hr.exe`'s **Help > Check for Updates** (`src/utils/update.cpp`) asks
    GitHub's API for `homaaio/HomREC`'s latest release and compares its tag
    against `HR_APP_VERSION`.
 2. If newer, it looks at that release's assets for one whose filename ends
@@ -63,7 +63,7 @@ There's no separate updater binary. The flow is:
 attached as an asset** - `tools/homrec_build.py` prints a reminder of this
 after building one. A release with only the source zip/tarball (GitHub
 auto-generates those, they don't count) won't trigger an update prompt for
-existing installs, since `FindInstallerAssetUrl()` in `hr_update.cpp` finds
+existing installs, since `FindInstallerAssetUrl()` in `update.cpp` finds
 nothing ending in `.exe` to offer.
 
 ## Changing the installer

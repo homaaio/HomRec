@@ -15,7 +15,7 @@
 ; Output: dist\HomRec-Setup-<version>.exe
 ;
 ; -- Auto-update -------------------------------------------------------------
-; hr.exe's Help > Check for Updates (src/hr_update.cpp) looks at the
+; hr.exe's Help > Check for Updates (src/utils/update.cpp) looks at the
 ; *latest GitHub release* on homaaio/HomREC and, if newer than the running
 ; version, downloads whichever release asset's filename ends in ".exe" and
 ; runs it with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS.
@@ -48,7 +48,7 @@ AppUpdatesURL={#MyAppURL}
 VersionInfoVersion={#MyAppVersion}
 
 ; HomRec keeps its settings (homrec.hrc), logs\, and recordings next to
-; hr.exe (see src/hr_log_paths.cpp / hrc_config.h's kDefaultSettingsPath) -
+; hr.exe (see src/utils/log_paths.cpp / hrc_config.h's kDefaultSettingsPath) -
 ; it was designed as a portable, unzip-anywhere app. Installing to the
 ; per-user Program Files equivalent keeps that working with zero UAC
 ; prompts (a machine-wide {autopf} install would need elevation just to
@@ -64,7 +64,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 ; Detect/close a running HomRec (matches HR_SINGLE_INSTANCE_MUTEX_NAME in
 ; src/ui/version.h) - needed both for a normal reinstall-over-a-running-app
-; and for the silent self-update flow in src/hr_update.cpp.
+; and for the silent self-update flow in src/utils/update.cpp.
 AppMutex=HomRec_SingleInstance_150
 CloseApplications=yes
 RestartApplications=no
@@ -134,7 +134,7 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Registry]
 ; Exactly the key/value HrSystemIntegration::SetAutostart(true) writes
-; (src/hr_system_integration.cpp) - HKCU so it needs no elevation and so
+; (src/utils/system_integration.cpp) - HKCU so it needs no elevation and so
 ; the app's own "Launch HomRec when Windows starts" checkbox in
 ; Settings > System agrees with what the installer did, either direction.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "HomRec"; ValueData: """{app}\{#MyAppExeName}"""; Tasks: autostart; Flags: uninsdeletevalue
@@ -142,7 +142,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; .hrc / .hrp file association (fileassoc task above) - HKCU, same reasoning
 ; as the autostart key: no elevation needed, and it only affects the
 ; installing user. ProgIDs/descriptions match hr_register_file_types()'s own
-; table in src/hr_app_logic.cpp exactly (HomRec.Profile / HomRec.Plugin) so
+; table in src/core/app_logic.cpp exactly (HomRec.Profile / HomRec.Plugin) so
 ; the two mechanisms can never register the same extension under two
 ; different, conflicting ProgIDs for the same user. Both extensions just
 ; launch hr.exe with the file as %1 (see win_main.cpp's command-line
@@ -183,7 +183,7 @@ begin
 end;
 
 // Notifies Explorer that file associations changed (same SHChangeNotify
-// call hr_register_file_types() in src/hr_app_logic.cpp makes after
+// call hr_register_file_types() in src/core/app_logic.cpp makes after
 // registering these itself), so a freshly-associated .hrc/.hrp shows its
 // new icon right away instead of only after the next Explorer restart.
 procedure SHChangeNotify(wEventId: Longint; uFlags: Longint; dwItem1: Longint; dwItem2: Longint);
