@@ -1522,9 +1522,7 @@ void HomRecMainFrame::ApplyDockArtColours() {
 
 void HomRecMainFrame::SetupDocking() {
     aui_.SetManagedWindow(dock_host_);
-    // Rectangle hint + no live-resize: dragging a panel or a sash only draws an outline
-    // and relayouts ONCE on release, so the 20 fps preview isn't re-scaled every mouse move.
-    aui_.SetFlags(wxAUI_MGR_ALLOW_FLOATING | wxAUI_MGR_RECTANGLE_HINT | wxAUI_MGR_NO_VENETIAN_BLINDS_FADE);
+    aui_.SetFlags(wxAUI_MGR_ALLOW_FLOATING | wxAUI_MGR_TRANSPARENT_HINT | wxAUI_MGR_NO_VENETIAN_BLINDS_FADE);
 
     aui_.AddPane(preview_container_, wxAuiPaneInfo().Name("preview").CenterPane().PaneBorder(false)
                                          .MinSize(wxSize(240, 160)));
