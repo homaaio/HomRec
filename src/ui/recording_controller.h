@@ -612,6 +612,10 @@ private:
     // cropping a monitor duplication. Set by ResolveCaptureSize(); crop_*_ stay 0 then.
     bool use_wgc_ = false;
     HWND wgc_hwnd_ = nullptr;
+    // Set when Windows.Graphics.Capture failed to start for a window: stay on the screen-crop path
+    // for the rest of this session (or until the user re-selects the method in Settings).
+    bool wgc_disabled_ = false;
+    std::string wgc_method_seen_;         // window_capture_method last seen - used to clear wgc_disabled_
     int pv_view_w_ = 0, pv_view_h_ = 0;   // preview pane size last reported by the UI (SetPreviewViewSize)
     bool pipeline_wgc_ = false;           // what the CURRENT pipeline_ was created as
     HWND pipeline_wgc_hwnd_ = nullptr;

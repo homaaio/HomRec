@@ -518,7 +518,11 @@ void RecordingController::ResolveCaptureSize() {
     // Windows refuses to hand out a capture item for this particular window.
     use_wgc_ = false;
     wgc_hwnd_ = nullptr;
-    if (is_window && have_target && capture_hwnd && state_.window_capture_method != "crop") {
+    if (wgc_method_seen_ != state_.window_capture_method) {
+        wgc_method_seen_ = state_.window_capture_method;
+        wgc_disabled_ = false;
+    }
+    if (is_window && have_target && capture_hwnd && state_.window_capture_method == "wgc" && !wgc_disabled_) {
         int ww = 0, wh = 0;
         if (HrWgcSupported() && HrWgcProbeWindow(capture_hwnd) &&
             HrWgcQueryWindowSize(capture_hwnd, state_.window_capture_area == "client", &ww, &wh) &&
@@ -612,34 +616,12 @@ void RecordingController::ResolveCaptureSize() {
     // hr_pl_set_output_size()/pipeline.cpp), not by changing what DXGI
     // itself captures.
     ComputeOutputDims(mw, mh, output_w_, output_h_);
-
-    // ====== WINDOW/REGION CAPTURE: crop the now-correctly-selected
-    // monitor's frame down to the target rect ======
-    // Reuses the resolve done above (have_target/target_rect) instead of
-    // re-resolving here - besides the redundant EnumWindows() pass for
-    // Window mode, re-resolving could in theory hit a narrow window
-    // between two calls where the window closed and its title got reused
-    // by something else, cropping to the wrong window's rect. One
-    // resolve, used consistently for both which monitor to capture and
-    // where to crop it.
     crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
     if (is_window || is_region) {
         if (have_target) {
             RECT r = target_rect;
-            // Target rect is in virtual-desktop coordinates; crop_x_/y_
-            // need to be relative to the captured monitor's own frame
-            // (monitor_left/top, set above), matching what bgra_buf
-            // actually holds.
             int wx = r.left - mx, wy = r.top - my;
             int ww = r.right - r.left, wh = r.bottom - r.top;
-            // Clamp to the monitor bounds - hr_pl_set_capture_rect() also
-            // clamps defensively, but doing it here too means output_w_/
-            // output_h_ (computed from ww/wh below) reflect the actual
-            // clamped crop size, not the pre-clamp one. For a region that
-            // spans two monitors, this means only the part that falls on
-            // the resolved (majority-overlap-by-center) monitor is kept -
-            // same letterboxing-by-clamp behavior Window capture already
-            // had for a window that's partly off-monitor.
             if (wx < 0) { ww += wx; wx = 0; }
             if (wy < 0) { wh += wy; wy = 0; }
             if (wx + ww > capture_w_) ww = capture_w_ - wx;
@@ -667,23 +649,12 @@ void RecordingController::ResolveCaptureSize() {
                             "monitor - falling back to full desktop.");
             }
         } else if (is_window) {
-            // Window was closed/renamed since being picked, or isn't on
-            // screen anymore. Fall back to full-desktop capture rather
-            // than starting a recording of nothing/garbage - crop_*_ are
-            // already 0 from the reset above, so capture_w_/h_/output_w_/
-            // h_ (monitor-sized, set earlier in this function) stand as-is.
             HrLog::Warn("Window capture: couldn't find a window titled '" +
                         state_.capture_window_title + "' - falling back to full desktop.");
         }
-        // is_region with !have_target can't happen (is_region already
-        // requires region_w/h > 0, and have_target is unconditionally set
-        // true for it above).
     }
 }
 
-// Creates the capture pipeline for whatever ResolveCaptureSize() decided: the window source
-// (Windows.Graphics.Capture) or the monitor duplication. Records which one it made so a later
-// Start() only reuses a pipeline that matches the CURRENT target.
 void *RecordingController::CreatePipelineForTarget(intptr_t pipe_fd, int pvw, int pvh) {
     void *pl = nullptr;
     if (use_wgc_ && wgc_hwnd_) {
@@ -691,16 +662,21 @@ void *RecordingController::CreatePipelineForTarget(intptr_t pipe_fd, int pvw, in
                                  wgc_hwnd_, state_.window_capture_area == "client" ? 1 : 0,
                                  state_.cursor_enabled ? 1 : 0);
         if (!pl) {
-            HrLog::Error("Window capture: couldn't start Windows.Graphics.Capture for this window. Set Settings > "
-                         "General > Window capture > \"Screen crop\" to use the older method.");
+            // Don't keep retrying a source that just failed: from now on this session uses the crop.
+            wgc_disabled_ = true;
+            HrLog::Error("Window capture: couldn't start Windows.Graphics.Capture for this window - "
+                         "falling back to the screen crop.");
+            if (pipe_fd == 0) {
+                ResolveCaptureSize();
+                if (!use_wgc_)
+                    pl = hr_pl_create(capture_w_, capture_h_, state_.target_fps, pipe_fd, pvw, pvh, capture_output_idx_);
+            }
         }
     } else {
         pl = hr_pl_create(capture_w_, capture_h_, state_.target_fps, pipe_fd, pvw, pvh, capture_output_idx_);
     }
     pipeline_wgc_ = (pl != nullptr) && use_wgc_;
     pipeline_wgc_hwnd_ = pipeline_wgc_ ? wgc_hwnd_ : nullptr;
-    // A brand-new pipeline starts with the generic thumbnail size; re-apply the pane size the
-    // UI last reported so the preview doesn't need a CPU rescale after a pipeline rebuild.
     if (pl && pv_view_w_ >= 64 && pv_view_h_ >= 64) {
         int mw = 0, mh = 0;
         ScaledPreviewSize(mw, mh);
@@ -711,13 +687,9 @@ void *RecordingController::CreatePipelineForTarget(intptr_t pipe_fd, int pvw, in
 
 void RecordingController::RetargetWindowCapture() {
     if (!pipeline_) return;
-    // Region's whole point is a fixed area of the screen - it must NOT
-    // track anything, so this only ever applies to Window mode.
     if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) return;
     // 2.4: the WGC source follows the window by itself (it IS the window) - nothing to retarget.
     if (use_wgc_) return;
-    // OPTIMIZATION (2.3): while the tracked window is gone, every ~20 Hz overlay
-    // tick used to run a full EnumWindows()+title scan. Retry twice a second.
     if (window_track_lost_warned_ && std::chrono::steady_clock::now() < next_window_retarget_) return;
 
     HWND hwnd = nullptr;
@@ -1083,7 +1055,10 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
         if (!pipeline_ || !pipeline_started) {
-            error_out = L"Failed to start the capture pipeline.";
+            error_out = (use_wgc_ && wgc_disabled_)
+                ? L"Window capture (Windows.Graphics.Capture) couldn't start for this window. HomRec switched to the "
+                  L"screen-crop method - press Start again."
+                : L"Failed to start the capture pipeline.";
             HrLog::Error("Start failed: capture pipeline didn't start");
             hr_ff_kill(ffproc_);
             hr_ff_destroy(ffproc_);
