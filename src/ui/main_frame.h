@@ -72,6 +72,7 @@ enum MenuCommandId {
     ID_FILE_SELECT_REGION   = 1029,
     // 2.4 - panel docking (View menu). ID_VIEW_DOCK_FIRST + pane * 8 + slot.
     ID_VIEW_LOCK_UI         = 1034,
+    ID_FILE_FULL_DESKTOP    = 1035,
     ID_VIEW_RESET_LAYOUT    = 1036,
     ID_VIEW_DOCK_FIRST      = 1040,
     ID_VIEW_DOCK_LAST       = 1069,

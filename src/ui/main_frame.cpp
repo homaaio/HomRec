@@ -1046,6 +1046,7 @@ void HomRecMainFrame::BuildMenuBar() {
     fileMenu->Append(ID_FILE_OPEN_PROGRAM_FILES, wxString::FromUTF8(lang_.Get("open_program_files")));
     fileMenu->Append(ID_FILE_SELECT_WINDOW, wxString::FromUTF8(lang_.Get("select_window")));
     fileMenu->Append(ID_FILE_SELECT_REGION, wxString::FromUTF8(lang_.Get("select_region")));
+    fileMenu->Append(ID_FILE_FULL_DESKTOP, wxString::FromUTF8(lang_.Get("full_desktop")));
     fileMenu->Append(ID_FILE_HIDE_WINDOW, wxString::FromUTF8(lang_.Get("hide_window")));
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXPORT_HRC, wxString::FromUTF8(lang_.Get("export_hrc")));
@@ -2412,6 +2413,13 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         case ID_FILE_SELECT_REGION:
             ShowRegionPickerOverlay(GetHWND(), wxGetInstance(), state_);
+            OnCaptureTargetChanged();
+            break;
+        case ID_FILE_FULL_DESKTOP:
+            state_.capture_mode = CaptureMode::Desktop;
+            state_.capture_window_title.clear();
+            state_.capture_window_hwnd = nullptr;
+            HrLog::Info("Capture target: full desktop (File > Full Desktop).");
             OnCaptureTargetChanged();
             break;
         case ID_FILE_HIDE_WINDOW:
