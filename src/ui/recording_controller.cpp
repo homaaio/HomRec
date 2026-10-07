@@ -518,11 +518,12 @@ void RecordingController::ResolveCaptureSize() {
     // Windows refuses to hand out a capture item for this particular window.
     use_wgc_ = false;
     wgc_hwnd_ = nullptr;
+    // Changing the method in Settings gives WGC a fresh chance after an earlier failure.
     if (wgc_method_seen_ != state_.window_capture_method) {
         wgc_method_seen_ = state_.window_capture_method;
         wgc_disabled_ = false;
     }
-    if (is_window && have_target && capture_hwnd && state_.window_capture_method == "wgc" && !wgc_disabled_) {
+    if (is_window && have_target && capture_hwnd && state_.WindowCaptureWantsWgc() && !wgc_disabled_) {
         int ww = 0, wh = 0;
         if (HrWgcSupported() && HrWgcProbeWindow(capture_hwnd) &&
             HrWgcQueryWindowSize(capture_hwnd, state_.window_capture_area == "client", &ww, &wh) &&
@@ -540,7 +541,12 @@ void RecordingController::ResolveCaptureSize() {
                         std::to_string(output_w_) + "x" + std::to_string(output_h_));
             return;
         }
-        HrLog::Info("Window capture: Windows.Graphics.Capture isn't usable for this window - using the screen crop.");
+        HrLog::Warn("Window capture: Windows.Graphics.Capture isn't usable for this window "
+                    "(unsupported Windows version, crash guard tripped, or Windows refused this window) - "
+                    "using the SCREEN CROP instead: anything on top of the window will be recorded too.");
+    } else if (is_window && have_target && !state_.WindowCaptureWantsWgc()) {
+        HrLog::Info("Window capture: screen-crop method selected in Settings - anything on top of the "
+                    "window will be recorded too.");
     }
 
     if (have_target) {
@@ -1055,15 +1061,19 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
         if (!pipeline_ || !pipeline_started) {
-            error_out = (use_wgc_ && wgc_disabled_)
-                ? L"Window capture (Windows.Graphics.Capture) couldn't start for this window. HomRec switched to the "
-                  L"screen-crop method - press Start again."
-                : L"Failed to start the capture pipeline.";
+            const bool retry_with_crop = !pipeline_ && use_wgc_ && wgc_disabled_;
             HrLog::Error("Start failed: capture pipeline didn't start");
             hr_ff_kill(ffproc_);
             hr_ff_destroy(ffproc_);
             ffproc_ = nullptr;
             if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+            if (retry_with_crop) {
+                HrLog::Warn("Window capture: Windows.Graphics.Capture couldn't start for this window - "
+                            "retrying the recording with the screen-crop method (anything on top of the "
+                            "window will be recorded too).");
+                return Start(error_out);
+            }
+            error_out = L"Failed to start the capture pipeline.";
             return false;
         }
 
