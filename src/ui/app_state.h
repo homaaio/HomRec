@@ -182,15 +182,14 @@ struct AppState {
 
     // -- 2.4 window capture ----------------------------------------------
     // How a selected window is captured:
-    //   "auto" - Windows.Graphics.Capture (the real window, even when covered by
-    //            other windows / partly off-screen) when the OS supports it,
-    //            otherwise cropping the screen to the window's rectangle
-    //   "wgc"  - same as auto (kept for explicitness); falls back to "crop" if WGC fails
-    //   "crop" - the pre-2.4 behaviour: duplicate the monitor and cut the window's
+    //   "crop" - the pre-2.4 behaviour and the DEFAULT: duplicate the monitor and cut the window's
     //            rectangle out of it (other windows on top of it show up)
-    std::string window_capture_method = "auto";
-    // What part of the window is recorded: "window" (title bar + borders +
-    // content - the WHOLE window) or "client" (only the content area).
+    //   "wgc"  - opt-in: Windows.Graphics.Capture records the real window, even when covered by
+    //            other windows / partly off-screen. Needs Windows 10 1903+, falls back to "crop"
+    //            if it fails, and is switched off automatically after a crash inside it
+    //            (see wgc_capture.cpp's crash sentinel).
+    //   "auto" - legacy value written by early 2.4 builds; treated exactly like "crop".
+    std::string window_capture_method = "crop";
     std::string window_capture_area   = "window";
 
     // -- 2.4 dockable UI ---------------------------------------------------
