@@ -46,6 +46,9 @@
 #include <cmath>
 #include <algorithm>
 
+// wgc_capture.cpp - clears the "WGC crashed last time" sentinel (see wgc_capture.h).
+void HrWgcResetCrashGuard();
+
 extern "C" {
     // Only the "read pure defaults" accessors remain in use here
     // (OnResetDefaults() below) - actual persistence now goes through
@@ -383,13 +386,14 @@ private:
 
         AddLabel(page, wgrid, text, bg, "Capture method:");
         wc_method_choice_ = new wxChoice(page, wxID_ANY);
-        wc_method_choice_->Append("Automatic - the real window (Windows.Graphics.Capture)");
-        wc_method_choice_->Append("Screen crop - cut the window's rectangle out of the screen");
-        wc_method_choice_->SetSelection(state_.window_capture_method == "crop" ? 1 : 0);
+        wc_method_choice_->Append("Screen crop - cut the window's rectangle out of the screen (stable)");
+        wc_method_choice_->Append("Windows.Graphics.Capture - the real window (experimental)");
+        wc_method_choice_->SetSelection(state_.window_capture_method == "wgc" ? 1 : 0);
         wc_method_choice_->SetToolTip(
-            "Automatic records the selected window itself: the whole window, even when other windows\n"
-            "cover it or part of it is off-screen (Windows 10 1903+; older systems use the crop).\n"
-            "Screen crop is the pre-2.4 behaviour - whatever is on screen in that rectangle is recorded.");
+            "Screen crop is the default: whatever is on screen inside the window's rectangle is recorded.\n"
+            "Windows.Graphics.Capture records the selected window itself - the whole window, even when other\n"
+            "windows cover it or part of it is off-screen (Windows 10 1903+). It is new and experimental: if\n"
+            "it ever crashes HomRec, it is switched off automatically until you select it here again.");
         wgrid->Add(wc_method_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
 
         AddLabel(page, wgrid, text, bg, "Record:");
@@ -1130,13 +1134,7 @@ private:
         }
 
         // -- Video & Codec -------------------------------------------------
-        // These used to be "in-memory only for now" per
-        // this comment's own former text - settings.cpp's JSON whitelist
-        // never had fields for hw_accel/enc_preset/enc_crf/pix_fmt/
-        // custom_ffmpeg_args, so anything typed here reverted on restart.
-        // Now that HrcConfig::Save() below persists the *entire* AppState
-        // in one shot (see hrc_config.cpp's Save()), every field set here
-        // actually round-trips - nothing further to do per-field.
+
         state_.video_codec = codec_combo_->GetValue().ToUTF8().data();
         state_.hw_accel = hwaccel_combo_->GetValue().ToUTF8().data();
         state_.enc_preset = preset_combo_->GetValue().ToUTF8().data();
@@ -1146,7 +1144,12 @@ private:
         {
             int csel = container_choice_->GetSelection();
             state_.video_format = csel == 1 ? VideoFormat::Mkv : csel == 2 ? VideoFormat::Both : VideoFormat::Mp4;
-            state_.window_capture_method = wc_method_choice_->GetSelection() == 1 ? "crop" : "auto";
+            {
+                const bool want_wgc = wc_method_choice_->GetSelection() == 1;
+                // Explicitly (re-)selecting WGC clears the crash sentinel so it gets another chance.
+                if (want_wgc && state_.window_capture_method != "wgc") HrWgcResetCrashGuard();
+                state_.window_capture_method = want_wgc ? "wgc" : "crop";
+            }
             state_.window_capture_area   = wc_area_choice_->GetSelection() == 1 ? "client" : "window";
         }
         state_.gpu_convert = gpu_convert_chk_->GetValue();
