@@ -46,8 +46,9 @@
 #include <cmath>
 #include <algorithm>
 
-// wgc_capture.cpp - clears the "WGC crashed last time" sentinel (see wgc_capture.h).
+// wgc_capture.cpp - the "WGC crashed last time" sentinel (see wgc_capture.h).
 void HrWgcResetCrashGuard();
+bool HrWgcCrashGuardTripped();
 
 extern "C" {
     // Only the "read pure defaults" accessors remain in use here
@@ -386,14 +387,19 @@ private:
 
         AddLabel(page, wgrid, text, bg, "Capture method:");
         wc_method_choice_ = new wxChoice(page, wxID_ANY);
-        wc_method_choice_->Append("Screen crop - cut the window's rectangle out of the screen (stable)");
-        wc_method_choice_->Append("Windows.Graphics.Capture - the real window (experimental)");
-        wc_method_choice_->SetSelection(state_.window_capture_method == "wgc" ? 1 : 0);
+        wc_method_choice_->Append("Windows.Graphics.Capture - only the selected window (recommended)");
+        wc_method_choice_->Append("Screen crop - cut the window's rectangle out of the screen");
+        // While the crash sentinel is tripped WGC is NOT in effect, so show what really happens
+        // (screen crop). Picking the first entry again is then a real change, which re-arms WGC.
+        wc_method_initial_sel_ = (state_.WindowCaptureWantsWgc() && !HrWgcCrashGuardTripped()) ? 0 : 1;
+        wc_method_choice_->SetSelection(wc_method_initial_sel_);
         wc_method_choice_->SetToolTip(
-            "Screen crop is the default: whatever is on screen inside the window's rectangle is recorded.\n"
-            "Windows.Graphics.Capture records the selected window itself - the whole window, even when other\n"
-            "windows cover it or part of it is off-screen (Windows 10 1903+). It is new and experimental: if\n"
-            "it ever crashes HomRec, it is switched off automatically until you select it here again.");
+            "Windows.Graphics.Capture records the selected window itself - nothing else: windows lying on top\n"
+            "of it (HomRec's own window included) and the taskbar do not appear, and it can even be partly\n"
+            "off-screen (Windows 10 1903+). If Windows refuses the window HomRec falls back to the screen crop\n"
+            "by itself; if it ever crashes HomRec, it is switched off automatically until you select it here again.\n\n"
+            "Screen crop copies whatever is on screen inside the window's rectangle. For a maximized window that\n"
+            "is practically the whole screen, and anything on top of the window is recorded as well.");
         wgrid->Add(wc_method_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
 
         AddLabel(page, wgrid, text, bg, "Record:");
@@ -1134,7 +1140,6 @@ private:
         }
 
         // -- Video & Codec -------------------------------------------------
-
         state_.video_codec = codec_combo_->GetValue().ToUTF8().data();
         state_.hw_accel = hwaccel_combo_->GetValue().ToUTF8().data();
         state_.enc_preset = preset_combo_->GetValue().ToUTF8().data();
@@ -1145,10 +1150,13 @@ private:
             int csel = container_choice_->GetSelection();
             state_.video_format = csel == 1 ? VideoFormat::Mkv : csel == 2 ? VideoFormat::Both : VideoFormat::Mp4;
             {
-                const bool want_wgc = wc_method_choice_->GetSelection() == 1;
-                // Explicitly (re-)selecting WGC clears the crash sentinel so it gets another chance.
-                if (want_wgc && state_.window_capture_method != "wgc") HrWgcResetCrashGuard();
-                state_.window_capture_method = want_wgc ? "wgc" : "crop";
+                const int msel = wc_method_choice_->GetSelection();
+                if (msel != wc_method_initial_sel_) {
+                    const bool want_wgc = (msel == 0);
+                    if (want_wgc) HrWgcResetCrashGuard();
+                    state_.window_capture_method = want_wgc ? "wgc" : "screen";
+                    wc_method_initial_sel_ = msel;
+                }
             }
             state_.window_capture_area   = wc_area_choice_->GetSelection() == 1 ? "client" : "window";
         }
@@ -1281,6 +1289,7 @@ private:
     wxCheckBox *countdown_chk_ = nullptr, *timestamp_chk_ = nullptr, *cursor_chk_ = nullptr, *notify_chk_ = nullptr;
     wxChoice *lang_choice_ = nullptr;
     wxChoice *wc_method_choice_ = nullptr, *wc_area_choice_ = nullptr;   // 2.4 window capture
+    int wc_method_initial_sel_ = 0;                                       // 0 = WGC, 1 = screen crop (as shown when the dialog opened)
     wxChoice *container_choice_ = nullptr;                                // 2.4 mp4 / mkv / both
     wxChoice *meter_style_choice_ = nullptr;                              // 2.4 mixer layout
     wxCheckBox *ui_lock_chk_ = nullptr;                                   // 2.4 lock panel layout
