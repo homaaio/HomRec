@@ -92,6 +92,7 @@ public:
         HrCrashHandler::Install();
 
         if (!wxApp::OnInit()) return false;
+        wxInitAllImageHandlers();
 
         if (!hr_acquire_single_instance(HR_SINGLE_INSTANCE_MUTEX_NAME)) {
             wxMessageBox("HomRec is already running.", "HomRec", wxOK | wxICON_INFORMATION);
