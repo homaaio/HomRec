@@ -281,6 +281,7 @@ compile_commands.json
 *.log
 *.bak
 *.swp
+*.flag
 
 # vcpkg
 vcpkg_installed/
