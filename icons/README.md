@@ -32,6 +32,13 @@ Drop these in and they are picked up on the next start (no rebuild). A missing
 file is fine - the UI draws a text glyph instead. Any size works (square is best,
 64x64 or 128x128 with transparency); they are scaled once and cached.
 
+**Only the `.png` files are loaded.** 
+The `icons/` folder is searched next to `hr.exe`, then in up to three parent
+folders of it (so `build/hr.exe` still finds `<repo>/icons`), then in the current
+directory. If an icon doesn't show, open Help > Log: HomRec writes one `Icons:`
+line per icon that was not found (listing every folder it looked in) or could not
+be decoded.
+
     icons/overlays/text.png      icons/overlays/gif.png
     icons/overlays/image.png     icons/overlays/webcam.png
     icons/audio/microphone.png   icons/audio/desktop_audio.png
