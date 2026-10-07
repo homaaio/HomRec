@@ -22,6 +22,12 @@
 
 bool  HrWgcSupported();
 
+// Crash sentinel (see wgc_capture.cpp): true when the PREVIOUS run died while inside native WGC
+// code. HrWgcSupported() then returns false so window recording falls back to the screen crop
+// instead of crashing again. HrWgcResetCrashGuard() lets the user give WGC another chance.
+bool  HrWgcCrashGuardTripped();
+void  HrWgcResetCrashGuard();
+
 // Size the window would be recorded at (client_only = content area only). False if hwnd is gone.
 bool  HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h);
 
