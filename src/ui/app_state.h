@@ -182,14 +182,21 @@ struct AppState {
 
     // -- 2.4 window capture ----------------------------------------------
     // How a selected window is captured:
-    //   "crop" - the pre-2.4 behaviour and the DEFAULT: duplicate the monitor and cut the window's
-    //            rectangle out of it (other windows on top of it show up)
-    //   "wgc"  - opt-in: Windows.Graphics.Capture records the real window, even when covered by
-    //            other windows / partly off-screen. Needs Windows 10 1903+, falls back to "crop"
-    //            if it fails, and is switched off automatically after a crash inside it
-    //            (see wgc_capture.cpp's crash sentinel).
-    //   "auto" - legacy value written by early 2.4 builds; treated exactly like "crop".
-    std::string window_capture_method = "crop";
+    //   "wgc"    - the DEFAULT: Windows.Graphics.Capture records the real window, even when it is
+    //              covered by other windows (HomRec's own window included) or partly off-screen.
+    //              Needs Windows 10 1903+. Falls back to the screen crop by itself if Windows
+    //              refuses the window / the capture can't start, and is switched off
+    //              automatically after a crash inside it (see wgc_capture.cpp's crash sentinel).
+    //   "screen" - the pre-2.4 method, only when the user explicitly picks it: duplicate the
+    //              monitor and cut the window's rectangle out of it (anything on top of the
+    //              window - and, for a maximized window, practically the whole screen - shows up).
+    //   "crop" / "auto" / anything else - LEGACY values. "crop" was the old DEFAULT, so it sits in
+    //              every settings file that was ever saved by 2.4.0 even though nobody chose it;
+    //              they now mean "wgc" (see WindowCaptureWantsWgc()). Only "screen" forces the crop.
+    std::string window_capture_method = "wgc";
+    bool WindowCaptureWantsWgc() const { return window_capture_method != "screen"; }
+    // What part of the window is recorded: "window" (title bar + borders +
+    // content - the WHOLE window) or "client" (only the content area).
     std::string window_capture_area   = "window";
 
     // -- 2.4 dockable UI ---------------------------------------------------
