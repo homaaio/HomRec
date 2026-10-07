@@ -1,5 +1,6 @@
 #include "wgc_capture.h"
 #include "../utils/log.h"
+#include "../utils/log_paths.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -185,6 +186,77 @@ bool WindowRects(HWND hwnd, RECT &frame, RECT &client_screen) {
     return true;
 }
 
+// ---- crash sentinel ("circuit breaker") -------------------------------------------------------
+// Windows.Graphics.Capture is driven through hand-written COM/WinRT calls. If native code in here
+// ever takes the whole process down (the 2.4.0 crash on "select a window, then click the preview /
+// press Start"), every later launch would walk straight into the same crash again.
+//
+// So: while ANY native WGC work is in flight a small flag file (logs\wgc_guard.flag) exists. It is
+// deleted again when that work finishes. If the process dies in the middle, the flag survives, and
+// the next launch sees it, logs it once and refuses WGC (HrWgcSupported() == false) - the caller
+// then uses the screen-crop path, which does not touch any of this code. The user can give WGC
+// another chance from Settings (HrWgcResetCrashGuard()).
+//
+// Deliberately built from plain Win32 primitives (SRWLOCK, interlocked ops, CreateFileW) so the
+// sentinel itself depends on nothing that could be involved in the fault it is watching for.
+std::wstring GuardPath() { return HrLogPaths::LogFilePath(L"wgc_guard.flag"); }
+
+volatile LONG g_guard_state = 0;      // 0 = not looked yet, 1 = clean, 2 = previous run crashed in WGC
+SRWLOCK       g_guard_lock  = SRWLOCK_INIT;
+int           g_guard_depth = 0;      // number of WGC operations currently in flight (any thread)
+
+bool GuardTripped() {
+    if (g_guard_state == 0) {
+        const bool present = GetFileAttributesW(GuardPath().c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (InterlockedCompareExchange(&g_guard_state, present ? 2 : 1, 0) == 0 && present) {
+            HrLog::Warn("Window capture: Windows.Graphics.Capture is switched OFF because the previous run "
+                        "crashed inside it (logs\\wgc_guard.flag). Window recording uses the screen-crop "
+                        "method. To try WGC again: Settings > General > Window capture > re-select it.");
+        }
+    }
+    return g_guard_state == 2;
+}
+
+void GuardEnter() {
+    (void)GuardTripped();   // latch the previous run's verdict BEFORE this process creates the flag itself
+    AcquireSRWLockExclusive(&g_guard_lock);
+    if (g_guard_depth++ == 0) {
+        HANDLE h = CreateFileW(GuardPath().c_str(), GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            static const char note[] = "HomRec: native Windows.Graphics.Capture code was running when this file "
+                                       "was written. If it still exists at the next start, that run crashed.\r\n";
+            DWORD n = 0;
+            WriteFile(h, note, (DWORD)(sizeof(note) - 1), &n, nullptr);
+            CloseHandle(h);
+        }
+    }
+    ReleaseSRWLockExclusive(&g_guard_lock);
+}
+
+void GuardLeave() {
+    AcquireSRWLockExclusive(&g_guard_lock);
+    if (g_guard_depth > 0 && --g_guard_depth == 0) DeleteFileW(GuardPath().c_str());
+    ReleaseSRWLockExclusive(&g_guard_lock);
+}
+
+struct GuardScope {
+    GuardScope()  { GuardEnter(); }
+    ~GuardScope() { GuardLeave(); }
+    GuardScope(const GuardScope &) = delete;
+    GuardScope &operator=(const GuardScope &) = delete;
+};
+
+// Same, but only armed when `on` - used for the first few frames of a capture session.
+struct OptionalGuard {
+    bool on;
+    explicit OptionalGuard(bool o) : on(o) { if (on) GuardEnter(); }
+    ~OptionalGuard() { if (on) GuardLeave(); }
+    OptionalGuard(const OptionalGuard &) = delete;
+    OptionalGuard &operator=(const OptionalGuard &) = delete;
+};
+
 std::mutex g_registry_mu;
 std::vector<void *> g_registry;
 
@@ -195,6 +267,8 @@ struct Ctx {
     bool  client_only = false;
     bool  cursor = false;
     bool  ok = false;
+    int   frames_ok = 0;     // frames delivered so far - the first few run under the crash sentinel
+    int   guard_calls = 0;   // HrWgcCapture() calls made under the sentinel (capped, so an idle window costs nothing)
 
     ComPtr<ID3D11Device>        dev;
     ComPtr<ID3D11DeviceContext> dc;
@@ -423,7 +497,25 @@ int ProcessFrame(Ctx *c, HrFrame *frame, uint8_t *out) {
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
+bool HrWgcCrashGuardTripped() { return GuardTripped(); }
+
+void HrWgcResetCrashGuard() {
+    AcquireSRWLockExclusive(&g_guard_lock);
+    if (g_guard_depth == 0) DeleteFileW(GuardPath().c_str());
+    ReleaseSRWLockExclusive(&g_guard_lock);
+    InterlockedExchange(&g_guard_state, 1);
+}
+
 bool HrWgcSupported() {
+    if (GuardTripped()) return false;           // the previous run crashed in here - stay on screen crop
+    // The very first call loads combase.dll / d3d11.dll and resolves the WinRT entry points.
+    static volatile LONG api_ready = 0;
+    if (!api_ready) {
+        GuardScope g;
+        const bool ok = OsBuildAtLeast(18362) && GetApi().ok;
+        InterlockedExchange(&api_ready, 1);
+        return ok;
+    }
     return OsBuildAtLeast(18362) && GetApi().ok;
 }
 
@@ -438,6 +530,7 @@ bool HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h) {
 
 bool HrWgcProbeWindow(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd) || !HrWgcSupported()) return false;
+    GuardScope guard;   // WinRT activation + capture-item creation: the part that crashed in 2.4.0
     GetApi().RoInitialize(1);
     HrCaptureItemInterop *interop = nullptr;
     if (FAILED(GetFactory(L"Windows.Graphics.Capture.GraphicsCaptureItem", kIidInterop,
@@ -453,6 +546,7 @@ bool HrWgcProbeWindow(HWND hwnd) {
 
 void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor) {
     if (!hwnd || canvas_w < 2 || canvas_h < 2 || !HrWgcSupported()) return nullptr;
+    GuardScope guard;
     auto *c = new Ctx();
     c->hwnd = hwnd;
     c->canvas_w = canvas_w & ~1;
@@ -487,6 +581,7 @@ void HrWgcDestroy(void *handle) {
         if (it == g_registry.end()) return;
         g_registry.erase(it);
     }
+    GuardScope guard;
     auto *c = static_cast<Ctx *>(handle);
     Teardown(c);
     delete c;
@@ -496,6 +591,8 @@ int HrWgcCapture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     auto *c = static_cast<Ctx *>(handle);
     if (!c || !out_bgra || !c->ok) return kError;
 
+    // Only the first frames are watched - once capture is proven to work there is no file churn.
+    OptionalGuard guard(c->frames_ok < 3 && c->guard_calls++ < 20);
     const DWORD t0 = GetTickCount();
     for (;;) {
         HrFrame *frame = nullptr;
@@ -510,6 +607,7 @@ int HrWgcCapture(void *handle, uint8_t *out_bgra, int timeout_ms) {
             }
             const int r = ProcessFrame(c, frame, out_bgra);
             CloseAndRelease(frame);
+            if (r == kOk && c->frames_ok < 3) ++c->frames_ok;
             return r;
         }
         if (FAILED(hr)) return kLost;
@@ -529,6 +627,7 @@ int HrWgcGetSize(void *handle, int *w, int *h) {
 int HrWgcReset(void *handle) {
     auto *c = static_cast<Ctx *>(handle);
     if (!c) return 0;
+    GuardScope guard;
     Teardown(c);
     return Init(c) ? 1 : 0;
 }
