@@ -598,7 +598,7 @@ LRESULT CALLBACK RegionPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             FillRect(dc, &client, bg);
             DeleteObject(bg);
 
-            std::wstring hint = L"Drag to select the region to record  \u2014  Esc to cancel";
+            std::wstring hint = L"Drag to select the region to record  \u2014  Esc to cancel  \u2014  (whole screen again: File \u2192 Full Desktop)";
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, RGB(235, 235, 235));
             HFONT font = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
