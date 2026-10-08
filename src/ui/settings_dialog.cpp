@@ -387,7 +387,7 @@ private:
 
         AddLabel(page, wgrid, text, bg, "Capture method:");
         wc_method_choice_ = new wxChoice(page, wxID_ANY);
-        wc_method_choice_->Append("Windows.Graphics.Capture - only the selected window (recommended)");
+        wc_method_choice_->Append("Windows.Graphics.Capture - only the selected window (experimental)");
         wc_method_choice_->Append("Screen crop - cut the window's rectangle out of the screen");
         // While the crash sentinel is tripped WGC is NOT in effect, so show what really happens
         // (screen crop). Picking the first entry again is then a real change, which re-arms WGC.
@@ -397,7 +397,8 @@ private:
             "Windows.Graphics.Capture records the selected window itself - nothing else: windows lying on top\n"
             "of it (HomRec's own window included) and the taskbar do not appear, and it can even be partly\n"
             "off-screen (Windows 10 1903+). If Windows refuses the window HomRec falls back to the screen crop\n"
-            "by itself; if it ever crashes HomRec, it is switched off automatically until you select it here again.\n\n"
+            "by itself; if it ever crashes HomRec, it is switched off automatically until you select it here again.\n"
+            "EXPERIMENTAL: it has crashed HomRec on some PCs, so screen crop is the default.\n\n"
             "Screen crop copies whatever is on screen inside the window's rectangle. For a maximized window that\n"
             "is practically the whole screen, and anything on top of the window is recorded as well.");
         wgrid->Add(wc_method_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
