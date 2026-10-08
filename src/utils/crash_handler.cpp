@@ -59,6 +59,71 @@ void AppendLogLine(const wchar_t *exe_dir, const char *line) {
     CloseHandle(h);
 }
 
+// "module.dll+0xOFFSET" for an address, or "?" when it's not inside any loaded module. With the
+// link map (hr.map, see Makefile) an hr.exe+0x... offset resolves to a function by hand, which the
+// minidump alone can't do (the dump doesn't carry hr.exe's code, and nobody ships its symbols).
+void DescribeAddress(const void *addr, char *out, size_t out_len) {
+    HMODULE mod = nullptr;
+    if (addr && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   static_cast<LPCWSTR>(addr), &mod) && mod) {
+        wchar_t path[MAX_PATH] = {};
+        GetModuleFileNameW(mod, path, MAX_PATH);
+        const wchar_t *base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        _snprintf_s(out, out_len, _TRUNCATE, "%ls+0x%llX", base,
+                    (unsigned long long)((const char *)addr - (const char *)mod));
+    } else {
+        _snprintf_s(out, out_len, _TRUNCATE, "?");
+    }
+}
+
+// Appends the facts a crash report needs to homrec.log: what faulted and how (read / write /
+// execute at which address), where (module+offset), on which thread, plus every stack word that
+// looks like a return address (module+offset) - a poor man's call stack that works without
+// symbols or dbghelp. Plain Win32 calls only; it runs inside the crash handler.
+void AppendCrashDetails(const wchar_t *exe_dir, EXCEPTION_POINTERS *info) {
+    if (!info || !info->ExceptionRecord) return;
+    const EXCEPTION_RECORD *er = info->ExceptionRecord;
+    char where[300], line[700];
+    DescribeAddress(er->ExceptionAddress, where, sizeof(where));
+
+    const char *kind = "";
+    unsigned long long target = 0;
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
+        kind = er->ExceptionInformation[0] == 0 ? "read" : er->ExceptionInformation[0] == 1 ? "write" : "execute (DEP)";
+        target = (unsigned long long)er->ExceptionInformation[1];
+    }
+    _snprintf_s(line, _TRUNCATE, "[CRASH]   fault: code 0x%08lX %s at 0x%llX, RIP in %s, thread %lu\r\n",
+                er->ExceptionCode, kind, target, where, GetCurrentThreadId());
+    AppendLogLine(exe_dir, line);
+
+    const CONTEXT *ctx = info->ContextRecord;
+    if (!ctx) return;
+#if defined(_M_X64) || defined(__x86_64__)
+    // The faulting RIP is garbage after a call through a bad pointer, so the first stack word is
+    // usually the caller's return address - exactly the lead needed.
+    const ULONG_PTR *sp = reinterpret_cast<const ULONG_PTR *>(ctx->Rsp);
+    NT_TIB *tib = reinterpret_cast<NT_TIB *>(NtCurrentTeb());
+    const ULONG_PTR *stack_top = tib ? reinterpret_cast<const ULONG_PTR *>(tib->StackBase) : nullptr;
+    int found = 0;
+    for (int i = 0; i < 4096 && found < 24; ++i) {
+        const ULONG_PTR *slot = sp + i;
+        if (stack_top && slot >= stack_top) break;
+        ULONG_PTR v = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), slot, &v, sizeof(v), nullptr)) break;
+        char d[300];
+        DescribeAddress(reinterpret_cast<const void *>(v), d, sizeof(d));
+        if (d[0] == '?') continue;
+        // Only code is interesting; skip words that point into a module's data (cheap filter:
+        // a return address is preceded by a call, but we can't decode here - keep all, it's a lead).
+        _snprintf_s(line, _TRUNCATE, "[CRASH]   stack[+0x%X] %s\r\n", (unsigned)(i * 8), d);
+        AppendLogLine(exe_dir, line);
+        ++found;
+    }
+#endif
+}
+
 // Shared by both the SEH filter (crashes) and the std::terminate handler
 // (uncaught C++ exceptions / abort()) below - dump_ctx is null for the
 // terminate path, since there's no EXCEPTION_POINTERS to hand dbghelp.
@@ -129,6 +194,7 @@ void WriteCrashArtifacts(EXCEPTION_POINTERS *dump_ctx, const wchar_t *reason) {
         _snprintf_s(logline, _TRUNCATE, "[CRASH] %ls -- (no dump written)\r\n", reason);
     }
     AppendLogLine(exe_dir, logline);
+    AppendCrashDetails(exe_dir, dump_ctx);
 
     wchar_t msg[512];
     if (dump_written) {
