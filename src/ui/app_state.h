@@ -182,19 +182,19 @@ struct AppState {
 
     // -- 2.4 window capture ----------------------------------------------
     // How a selected window is captured:
-    //   "wgc"    - the DEFAULT: Windows.Graphics.Capture records the real window, even when it is
-    //              covered by other windows (HomRec's own window included) or partly off-screen.
-    //              Needs Windows 10 1903+. Falls back to the screen crop by itself if Windows
-    //              refuses the window / the capture can't start, and is switched off
-    //              automatically after a crash inside it (see wgc_capture.cpp's crash sentinel).
-    //   "screen" - the pre-2.4 method, only when the user explicitly picks it: duplicate the
-    //              monitor and cut the window's rectangle out of it (anything on top of the
-    //              window - and, for a maximized window, practically the whole screen - shows up).
-    //   "crop" / "auto" / anything else - LEGACY values. "crop" was the old DEFAULT, so it sits in
-    //              every settings file that was ever saved by 2.4.0 even though nobody chose it;
-    //              they now mean "wgc" (see WindowCaptureWantsWgc()). Only "screen" forces the crop.
-    std::string window_capture_method = "wgc";
-    bool WindowCaptureWantsWgc() const { return window_capture_method != "screen"; }
+    //   "screen" - the DEFAULT (since 2.4.0 crash analysis, see CHANGELOG): duplicate the monitor and
+    //              cut the window's rectangle out of it. Anything on top of the window - and, for a
+    //              maximized window, practically the whole screen - shows up in the recording.
+    //   "wgc"    - OPT-IN, EXPERIMENTAL: Windows.Graphics.Capture records the real window, even when
+    //              it is covered by other windows or partly off-screen. Needs Windows 10 2004+.
+    //              Falls back to the screen crop by itself if Windows refuses the window / the capture
+    //              can't start, and is switched off automatically after a crash inside it (see
+    //              wgc_capture.cpp's crash sentinel). It made two native crashes in the field
+    //              (dumps of 2026-10-07: access violation in the WGC window probe on the GUI thread),
+    //              so it is not the default until that is fixed.
+    //   "crop" / "auto" / anything else - LEGACY values written by 2.4.0 builds; they mean "screen".
+    std::string window_capture_method = "screen";
+    bool WindowCaptureWantsWgc() const { return window_capture_method == "wgc"; }
     // What part of the window is recorded: "window" (title bar + borders +
     // content - the WHOLE window) or "client" (only the content area).
     std::string window_capture_area   = "window";
