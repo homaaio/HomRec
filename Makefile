@@ -91,7 +91,7 @@ OBJS := \
 all: hr.exe
 
 hr.exe: $(OBJS) resource.o
-	$(CXX) $(OBJS) resource.o -o hr.exe $(LDFLAGS)
+	$(CXX) $(OBJS) resource.o -o hr.exe $(LDFLAGS) -Wl,-Map=hr.map
 
 src/%.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@

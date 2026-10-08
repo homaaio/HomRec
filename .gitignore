@@ -318,3 +318,5 @@ tools/*.hrl
 tools/*.json
 crashes/*.dmp
 *.orig
+# linker map from `make` (hr.map) - keep next to each released hr.exe, it resolves crash offsets
+hr.map
