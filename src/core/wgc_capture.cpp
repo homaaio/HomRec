@@ -531,16 +531,21 @@ bool HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h) {
 bool HrWgcProbeWindow(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd) || !HrWgcSupported()) return false;
     GuardScope guard;   // WinRT activation + capture-item creation: the part that crashed in 2.4.0
+    HrLog::Info("WGC probe: RoInitialize");
     GetApi().RoInitialize(1);
     HrCaptureItemInterop *interop = nullptr;
+    HrLog::Info("WGC probe: activating GraphicsCaptureItem factory");
     if (FAILED(GetFactory(L"Windows.Graphics.Capture.GraphicsCaptureItem", kIidInterop,
                           reinterpret_cast<void **>(&interop))) || !interop)
         return false;
     HrCaptureItem *item = nullptr;
+    HrLog::Info("WGC probe: CreateForWindow");
     const HRESULT hr = interop->CreateForWindow(hwnd, kIidItem, reinterpret_cast<void **>(&item));
+    HrLog::Info("WGC probe: CreateForWindow returned 0x" + std::to_string((unsigned long)hr));
     interop->Release();
     if (FAILED(hr) || !item) return false;
     item->Release();
+    HrLog::Info("WGC probe: ok");
     return true;
 }
 
