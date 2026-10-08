@@ -1,271 +1,12 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HomRec</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            background: #ffffff;
-            color: #000000;
-            font-family: Arial, Helvetica, sans-serif;
-            font-size: 13px;
-            line-height: 1.5;
-            display: flex;
-            min-height: 100vh;
-        }
-
-        .sidebar {
-            width: 220px;
-            background: #f4f6fa;
-            border-right: 1px solid #d0d7e2;
-            padding: 30px 15px;
-            flex-shrink: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-            position: sticky;
-            top: 0;
-            height: 100vh;
-            overflow-y: auto;
-        }
-
-        .logo-container {
-            text-align: left;
-            margin-bottom: 20px;
-            padding-left: 8px;
-        }
-
-        .logo-container img {
-            width: 150px;
-            height: auto;
-            display: block;
-        }
-
-        .sidebar a {
-            display: block;
-            padding: 9px 12px;
-            border-radius: 6px;
-            color: #1a1f2b;
-            text-decoration: none;
-            font-weight: 500;
-            font-size: 14px;
-            transition: background 0.15s, color 0.15s;
-            border: 1px solid transparent;
-        }
-
-        .sidebar a:hover {
-            background: #e1e8f0;
-            color: #0047ab;
-            border-color: #cbd5e1;
-        }
-
-        .sidebar .spacer {
-            flex-grow: 1;
-        }
-
-        .sidebar .version-badge {
-            font-size: 12px;
-            color: #4b5563;
-            padding: 8px 12px;
-            border-top: 1px solid #d0d7e2;
-            margin-top: 10px;
-        }
-
-        .content {
-            flex: 1;
-            max-width: 850px;
-            margin: 0 auto;
-            padding: 35px 30px 50px 30px;
-        }
-
-        h1 {
-            font-size: 30px;
-            font-weight: bold;
-            margin: 10px 0 5px 0;
-            color: #0a0e17;
-            letter-spacing: -0.3px;
-        }
-
-        h2 {
-            font-size: 20px;
-            font-weight: bold;
-            margin: 30px 0 10px 0;
-            color: #0a0e17;
-            border-bottom: 2px solid #0047ab;
-            padding-bottom: 4px;
-        }
-
-        h3 {
-            font-size: 16px;
-            font-weight: bold;
-            margin: 20px 0 8px 0;
-            color: #111827;
-        }
-
-        p {
-            margin: 8px 0;
-        }
-
-        a {
-            color: #0047ab;
-            text-decoration: underline;
-        }
-
-        a:hover {
-            color: #003380;
-        }
-
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 12px 0;
-            font-size: 13px;
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        }
-
-        th {
-            background: #0a0e17;
-            color: #ffffff;
-            text-align: left;
-            padding: 9px 12px;
-            border: 1px solid #0a0e17;
-            font-weight: bold;
-        }
-
-        td {
-            padding: 8px 12px;
-            border: 1px solid #d9dee7;
-            vertical-align: top;
-            background: #ffffff;
-        }
-
-        tr:nth-child(even) td {
-            background: #f7f9fc;
-        }
-
-        .download-block {
-            border: 1px solid #ccc;
-            border-left: 5px solid #0047ab;
-            background: #f5f7fa;
-            padding: 22px 26px;
-            margin: 20px 0;
-            border-radius: 10px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.03);
-        }
-
-        .download-block p {
-            margin: 6px 0;
-        }
-
-        .download-title {
-            font-size: 22px;
-            font-weight: bold;
-            color: #0a0e17;
-            margin-bottom: 14px;
-        }
-
-        .download-link {
-            font-weight: bold;
-            font-size: 17px;
-            display: inline-block;
-            margin: 4px 0;
-        }
-
-        pre {
-            background: #f5f7fa;
-            border: 1px solid #ccc;
-            border-radius: 6px;
-            padding: 12px;
-            font-family: Consolas, "Courier New", monospace;
-            font-size: 12px;
-            overflow-x: auto;
-            margin: 12px 0;
-        }
-
-        code {
-            font-family: Consolas, "Courier New", monospace;
-            font-size: 12px;
-            background: #f0f2f5;
-            padding: 1px 5px;
-            border-radius: 4px;
-        }
-
-        .footer {
-            margin-top: 40px;
-            padding-top: 15px;
-            border-top: 1px solid #ccc;
-            font-size: 12px;
-            color: #555;
-            text-align: center;
-        }
-
-        .note {
-            background: #f0f4ff;
-            border: 1px solid #b8c8e8;
-            border-radius: 6px;
-            padding: 10px 14px;
-            margin: 15px 0;
-        }
-
-        .warn {
-            background: #fff7ed;
-            border: 1px solid #f0c88a;
-            border-radius: 6px;
-            padding: 10px 14px;
-            margin: 15px 0;
-        }
-
-        @media (max-width: 700px) {
-            body {
-                flex-direction: column;
-            }
-            .sidebar {
-                width: 100%;
-                height: auto;
-                position: static;
-                flex-direction: row;
-                flex-wrap: wrap;
-                align-items: center;
-                gap: 4px;
-                padding: 10px 15px;
-                border-right: none;
-                border-bottom: 1px solid #d0d7e2;
-            }
-            .logo-container {
-                margin-bottom: 0;
-                padding-left: 0;
-                margin-right: 15px;
-            }
-            .logo-container img {
-                width: 100px;
-            }
-            .sidebar a {
-                padding: 6px 10px;
-                font-size: 13px;
-            }
-            .sidebar .version-badge {
-                border-top: none;
-                margin-top: 0;
-                width: 100%;
-                text-align: right;
-                padding: 0;
-            }
-            .content {
-                padding: 20px 15px;
-            }
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="has-sidebar">
 
     <aside class="sidebar">
         <div class="logo-container">
@@ -278,7 +19,7 @@
         <a href="support.html">Support</a>
         <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
         <div class="spacer"></div>
-        <div class="version-badge">v2.0</div>
+        <div class="version-badge">v2.2</div>
     </aside>
 
     <div class="content">
@@ -290,12 +31,12 @@
         <div id="download" class="download-block">
             <div class="download-title">Download latest release</div>
             <p>
-                <img src="assets/Windows_logo.png" alt="" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;">
+                <img src="assets/Windows_logo.png" alt="">
                 <a href="down-win.html" class="download-link">Windows (64-bit)</a>
             </p>
             <p>
-                <img src="assets/linux_logo.png" alt="" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;opacity:0.5;">
-                <span class="download-link" style="color:#6b7280;">Linux — in development</span>
+                <img src="assets/linux_logo.png" alt="" style="opacity:0.5;">
+                <span class="download-link">Linux — in development</span>
             </p>
         </div>
         <div class="note">
@@ -407,7 +148,7 @@
         </table>
 
         <div class="warn">
-            <b>Note:</b>The program is new, so the system requirements may be very different from reality. If your computer can handle it, or can't handle it, please <a href="support.html">contact me.</a>
+            <b>Note:</b> The program is new, so the system requirements may be very different from reality. If your computer can handle it, or can't handle it, please <a href="support.html">contact me.</a>
         </div>
 
         <h2 id="install">Installation</h2>
@@ -427,7 +168,7 @@
 
         <h3>Option B — Build from source</h3>
         <pre>git clone https://github.com/homaaio/HomRec.git
-cd homrec
+cd HomRec
 make
 hr.exe</pre>
         <p>

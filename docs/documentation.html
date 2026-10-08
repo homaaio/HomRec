@@ -1,80 +1,12 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HomRec — Documentation</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: #ffffff; color: #000000;
-            font-family: Arial, Helvetica, sans-serif;
-            font-size: 13px; line-height: 1.5;
-            display: flex; min-height: 100vh;
-        }
-        .sidebar {
-            width: 220px; background: #f4f6fa; border-right: 1px solid #d0d7e2;
-            padding: 30px 15px; flex-shrink: 0; display: flex; flex-direction: column;
-            gap: 5px; position: sticky; top: 0; height: 100vh; overflow-y: auto;
-        }
-        .logo-container { text-align: left; margin-bottom: 20px; padding-left: 8px; }
-        .logo-container img { width: 150px; height: auto; display: block; }
-        .sidebar a {
-            display: block; padding: 9px 12px; border-radius: 6px; color: #1a1f2b;
-            text-decoration: none; font-weight: 500; font-size: 14px;
-            transition: background 0.15s, color 0.15s; border: 1px solid transparent;
-        }
-        .sidebar a:hover { background: #e1e8f0; color: #0047ab; border-color: #cbd5e1; }
-        .sidebar a.active { background: #e1e8f0; color: #0047ab; border-color: #cbd5e1; }
-        .sidebar .spacer { flex-grow: 1; }
-        .sidebar .version-badge {
-            font-size: 12px; color: #4b5563; padding: 8px 12px;
-            border-top: 1px solid #d0d7e2; margin-top: 10px;
-        }
-        .content { flex: 1; max-width: 850px; margin: 0 auto; padding: 35px 30px 60px 30px; }
-        h1 { font-size: 30px; font-weight: bold; margin: 10px 0 5px 0; color: #0a0e17; letter-spacing: -0.3px; }
-        h2 { font-size: 20px; font-weight: bold; margin: 34px 0 10px 0; color: #0a0e17; border-bottom: 2px solid #0047ab; padding-bottom: 4px; }
-        h3 { font-size: 16px; font-weight: bold; margin: 20px 0 8px 0; color: #111827; }
-        p, li { margin: 8px 0; }
-        ul, ol { margin-left: 22px; }
-        a { color: #0047ab; text-decoration: underline; }
-        a:hover { color: #003380; }
-        table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; border-radius: 8px; overflow: hidden; }
-        th { background: #0a0e17; color: #ffffff; text-align: left; padding: 9px 12px; border: 1px solid #0a0e17; font-weight: bold; }
-        td { padding: 8px 12px; border: 1px solid #d9dee7; vertical-align: top; background: #ffffff; }
-        tr:nth-child(even) td { background: #f7f9fc; }
-        pre {
-            background: #0a0e17; color: #e5e9f0; border-radius: 8px; padding: 14px 16px;
-            font-family: Consolas, "Courier New", monospace; font-size: 12.5px;
-            overflow-x: auto; margin: 12px 0; line-height: 1.6;
-        }
-        code {
-            font-family: Consolas, "Courier New", monospace; font-size: 12px;
-            background: #f0f2f5; padding: 1px 5px; border-radius: 4px;
-        }
-        pre code { background: none; padding: 0; color: inherit; }
-        .note {
-            background: #f0f4ff; border: 1px solid #b8c8e8; border-radius: 6px;
-            padding: 10px 14px; margin: 15px 0;
-        }
-        .warn {
-            background: #fff7ed; border: 1px solid #f0c88a; border-left: 4px solid #b8860b;
-            border-radius: 6px; padding: 10px 14px; margin: 15px 0;
-        }
-        .toc { background: #f7f9fc; border: 1px solid #d9dee7; border-radius: 8px; padding: 16px 20px; margin: 15px 0 25px 0; }
-        .toc a { display: block; padding: 3px 0; }
-        .footer { margin-top: 40px; padding-top: 15px; border-top: 1px solid #ccc; font-size: 12px; color: #555; text-align: center; }
-        @media (max-width: 700px) {
-            body { flex-direction: column; }
-            .sidebar { width: 100%; height: auto; position: static; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding: 10px 15px; border-right: none; border-bottom: 1px solid #d0d7e2; }
-            .logo-container { margin-bottom: 0; padding-left: 0; margin-right: 15px; }
-            .logo-container img { width: 100px; }
-            .sidebar a { padding: 6px 10px; font-size: 13px; }
-            .content { padding: 20px 15px; }
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="has-sidebar">
 
     <aside class="sidebar">
         <div class="logo-container">
@@ -87,7 +19,7 @@
         <a href="support.html">Support</a>
         <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
         <div class="spacer"></div>
-        <div class="version-badge">v2.0</div>
+        <div class="version-badge">v2.2</div>
     </aside>
 
     <div class="content">
@@ -125,7 +57,7 @@
         <p>A few conventions apply everywhere:</p>
         <ul>
             <li>Flags look like <code>--name</code> or <code>--name=value</code>.</li>
-            <li>Commands chain with <code>&&</code> via <a href="#batch"><code>batch</code></a>.</li>
+            <li>Commands chain with <code>&amp;&amp;</code> via <a href="#batch"><code>batch</code></a>.</li>
             <li>Anything not matching a built-in is handed to loaded plugins in case one of them
                 registered that command name (see <a href="#plugins">Plugins</a>) — otherwise you
                 get <code>Unknown command: ...</code>.</li>
@@ -170,7 +102,7 @@
         <table>
             <tr><th>Command</th><th>What it does</th></tr>
             <tr><td><code>repeat --count=N &lt;command&gt;</code></td><td>Runs a command N times in a row (capped at 1000).</td></tr>
-            <tr><td><code>batch cmd1 && cmd2 && ... [-x | --stop-on-error]</code></td><td>Runs several commands in sequence. <code>-x</code> is accepted but only loosely enforced right now — most commands print their own error without yet reporting pass/fail back to <code>batch</code>.</td></tr>
+            <tr><td><code>batch cmd1 &amp;&amp; cmd2 &amp;&amp; ... [-x | --stop-on-error]</code></td><td>Runs several commands in sequence. <code>-x</code> is accepted but only loosely enforced right now — most commands print their own error without yet reporting pass/fail back to <code>batch</code>.</td></tr>
         </table>
 
         <h3>Removal commands</h3>
@@ -405,7 +337,6 @@ hom: plugin removed. Its saved settings (if any) were kept -- use 'hom purge inp
         <p>Not yet — see the <a href="down-deb.html">Linux status page</a> for what's planned.</p>
         <h3>Something in the older docs doesn't match what I'm seeing</h3>
         <p>That's expected for anything about Windows/Rules/AE Objects, hotkeys, or timers — that syntax predates the C++ rewrite and isn't implemented. This page reflects the current console; if something here is wrong, please <a href="support.html">let us know</a>.</p>
-
 
         <div class="footer">
             HomRec © 2026 · <a href="https://github.com/homaaio/HomRec">GitHub</a> ·
