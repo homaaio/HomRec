@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -258,10 +259,18 @@ struct OptionalGuard {
 };
 
 std::mutex g_registry_mu;
-std::vector<void *> g_registry;
 
 struct Ctx {
     uint32_t magic = kMagic;
+    // Serialises everything that touches the COM objects below. The capture thread (HrWgcCapture /
+    // HrWgcReset), the UI thread (HrWgcSetCursor, HrWgcDestroy) and the preview-teardown thread
+    // (HrWgcDestroy) used to race on session/pool/dc: HrWgcSetCursor() called session2->put_...()
+    // while the capture thread's HrWgcReset() -> Teardown() had just released it (calls through a
+    // freed COM object - the kind of bug that ends as an "execute (DEP) violation at a non-code
+    // address" like the 2026-10-07 15:48:53 dump; that dump could not be pinned to this line, so
+    // treat this as hardening of a real race, not as a proven root cause).
+    std::mutex mu;
+    bool  dead = false;      // HrWgcDestroy() ran - every later call is a no-op / error
     HWND  hwnd = nullptr;
     int   canvas_w = 0, canvas_h = 0;
     bool  client_only = false;
@@ -286,6 +295,18 @@ struct Ctx {
     std::vector<int> xmap;              // scratch for nearest-neighbour scaling
 };
 
+// Registry of live contexts. shared_ptr: a caller that looked a handle up keeps the context alive
+// until it is done, even if HrWgcDestroy() removes it from the registry in the meantime.
+std::vector<std::shared_ptr<Ctx>> g_registry;
+
+std::shared_ptr<Ctx> FindCtx(void *handle) {
+    if (!handle) return nullptr;
+    std::lock_guard<std::mutex> lk(g_registry_mu);
+    for (const auto &p : g_registry)
+        if (p.get() == handle) return p;
+    return nullptr;
+}
+
 void Teardown(Ctx *c) {
     if (c->session) { CloseAndRelease(c->session); }
     SafeRelease(c->session2);
@@ -305,6 +326,7 @@ bool Init(Ctx *c) {
     const Api &api = GetApi();
     if (!api.ok) { HrLog::Warn("Window capture: Windows.Graphics.Capture is not available on this system."); return false; }
     if (!IsWindow(c->hwnd)) return false;
+    HrLog::Info("WGC init: RoInitialize");
     api.RoInitialize(1 /*RO_INIT_MULTITHREADED*/);   // harmless if the thread is already an STA (RPC_E_CHANGED_MODE)
 
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
@@ -325,6 +347,7 @@ bool Init(Ctx *c) {
             mt->Release();
         }
     }
+    HrLog::Info("WGC init: D3D11 device ready, creating the WinRT device");
     ComPtr<IDXGIDevice> dxgi;
     if (FAILED(c->dev.As(&dxgi))) return false;
     void *insp = nullptr;
@@ -342,8 +365,10 @@ bool Init(Ctx *c) {
     }
 
     HrCaptureItemInterop *interop = nullptr;
+    HrLog::Info("WGC init: activating GraphicsCaptureItem factory");
     hr = GetFactory(L"Windows.Graphics.Capture.GraphicsCaptureItem", kIidInterop, reinterpret_cast<void **>(&interop));
     if (FAILED(hr) || !interop) { HrLog::Warn("Window capture: GraphicsCaptureItem factory unavailable."); return false; }
+    HrLog::Info("WGC init: CreateForWindow");
     hr = interop->CreateForWindow(c->hwnd, kIidItem, reinterpret_cast<void **>(&c->item));
     interop->Release();
     if (FAILED(hr) || !c->item) {
@@ -360,6 +385,7 @@ bool Init(Ctx *c) {
     HrFramePoolStatics2 *stat2 = nullptr;
     hr = GetFactory(L"Windows.Graphics.Capture.Direct3D11CaptureFramePool", kIidPoolStat2, reinterpret_cast<void **>(&stat2));
     if (FAILED(hr) || !stat2) { HrLog::Warn("Window capture: frame pool factory unavailable."); return false; }
+    HrLog::Info("WGC init: CreateFreeThreaded frame pool");
     hr = stat2->CreateFreeThreaded(c->winrt_dev, kPixelFormatBgra8, 2, sz, reinterpret_cast<void **>(&c->pool));
     stat2->Release();
     if (FAILED(hr) || !c->pool) { HrLog::Warn("Window capture: CreateFreeThreaded failed."); return false; }
@@ -379,6 +405,7 @@ bool Init(Ctx *c) {
         }
     }
 
+    HrLog::Info("WGC init: StartCapture");
     hr = c->session->StartCapture();
     if (FAILED(hr)) { HrLog::Warn("Window capture: StartCapture failed (0x" + std::to_string((unsigned long)hr) + ")."); return false; }
 
@@ -529,30 +556,26 @@ bool HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h) {
 }
 
 bool HrWgcProbeWindow(HWND hwnd) {
+    // Used to activate the GraphicsCaptureItem factory and call CreateForWindow() right here - on the
+    // UI thread, in the middle of "select a window" (RefreshPreviewSettings -> ResolveCaptureSize).
+    // That is native WinRT code that can take the whole process down (2.4.0 crash; the
+    // 2026-10-07 dumps), and it only duplicated what HrWgcCreate() does a moment later anyway.
+    // HrWgcCreate() already reports a window Windows refuses (CreateForWindow failing) and the caller
+    // falls back to the screen crop, so the probe now only does the cheap Win32 checks and touches
+    // no WinRT object at all.
     if (!hwnd || !IsWindow(hwnd) || !HrWgcSupported()) return false;
-    GuardScope guard;   // WinRT activation + capture-item creation: the part that crashed in 2.4.0
-    HrLog::Info("WGC probe: RoInitialize");
-    GetApi().RoInitialize(1);
-    HrCaptureItemInterop *interop = nullptr;
-    HrLog::Info("WGC probe: activating GraphicsCaptureItem factory");
-    if (FAILED(GetFactory(L"Windows.Graphics.Capture.GraphicsCaptureItem", kIidInterop,
-                          reinterpret_cast<void **>(&interop))) || !interop)
-        return false;
-    HrCaptureItem *item = nullptr;
-    HrLog::Info("WGC probe: CreateForWindow");
-    const HRESULT hr = interop->CreateForWindow(hwnd, kIidItem, reinterpret_cast<void **>(&item));
-    HrLog::Info("WGC probe: CreateForWindow returned 0x" + std::to_string((unsigned long)hr));
-    interop->Release();
-    if (FAILED(hr) || !item) return false;
-    item->Release();
-    HrLog::Info("WGC probe: ok");
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId()) return false;   // never WGC-capture HomRec's own windows
     return true;
 }
 
 void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor) {
     if (!hwnd || canvas_w < 2 || canvas_h < 2 || !HrWgcSupported()) return nullptr;
     GuardScope guard;
-    auto *c = new Ctx();
+    auto sp = std::make_shared<Ctx>();
+    Ctx *c = sp.get();
     c->hwnd = hwnd;
     c->canvas_w = canvas_w & ~1;
     c->canvas_h = canvas_h & ~1;
@@ -560,12 +583,11 @@ void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool 
     c->cursor = draw_cursor;
     if (!Init(c)) {
         Teardown(c);
-        delete c;
-        return nullptr;
+        return nullptr;          // sp frees the context
     }
     {
         std::lock_guard<std::mutex> lk(g_registry_mu);
-        g_registry.push_back(c);
+        g_registry.push_back(sp);
     }
     HrLog::Info("Window capture: using Windows.Graphics.Capture (" + std::to_string(c->canvas_w) + "x" +
                 std::to_string(c->canvas_h) + (client_only ? ", content area only" : ", whole window") + ").");
@@ -573,73 +595,83 @@ void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool 
 }
 
 bool HrWgcIsHandle(void *handle) {
-    if (!handle) return false;
-    std::lock_guard<std::mutex> lk(g_registry_mu);
-    return std::find(g_registry.begin(), g_registry.end(), handle) != g_registry.end();
+    return FindCtx(handle) != nullptr;
 }
 
 void HrWgcDestroy(void *handle) {
     if (!handle) return;
+    std::shared_ptr<Ctx> sp;
     {
         std::lock_guard<std::mutex> lk(g_registry_mu);
-        auto it = std::find(g_registry.begin(), g_registry.end(), handle);
+        auto it = std::find_if(g_registry.begin(), g_registry.end(),
+                               [handle](const std::shared_ptr<Ctx> &p) { return p.get() == handle; });
         if (it == g_registry.end()) return;
+        sp = *it;
         g_registry.erase(it);
     }
     GuardScope guard;
-    auto *c = static_cast<Ctx *>(handle);
-    Teardown(c);
-    delete c;
-}
+    std::lock_guard<std::mutex> lk(sp->mu);     // waits for a capture / reset that is still running
+    sp->dead = true;
+    Teardown(sp.get());
+}                                               // the context itself is freed with the last shared_ptr
 
 int HrWgcCapture(void *handle, uint8_t *out_bgra, int timeout_ms) {
-    auto *c = static_cast<Ctx *>(handle);
-    if (!c || !out_bgra || !c->ok) return kError;
-
-    // Only the first frames are watched - once capture is proven to work there is no file churn.
-    OptionalGuard guard(c->frames_ok < 3 && c->guard_calls++ < 20);
+    std::shared_ptr<Ctx> sp = FindCtx(handle);
+    if (!sp || !out_bgra) return kError;
+    Ctx *c = sp.get();
     const DWORD t0 = GetTickCount();
     for (;;) {
-        HrFrame *frame = nullptr;
-        HRESULT hr = c->pool->TryGetNextFrame(reinterpret_cast<void **>(&frame));
-        if (SUCCEEDED(hr) && frame) {
-            // Always present the newest picture: drop anything older that queued up.
-            for (;;) {
-                HrFrame *newer = nullptr;
-                if (FAILED(c->pool->TryGetNextFrame(reinterpret_cast<void **>(&newer))) || !newer) break;
+        {
+            std::lock_guard<std::mutex> lk(c->mu);
+            if (c->dead || !c->ok || !c->pool) return kError;
+
+            // Only the first frames are watched - once capture is proven to work there is no file churn.
+            OptionalGuard guard(c->frames_ok < 3 && c->guard_calls++ < 20);
+            HrFrame *frame = nullptr;
+            HRESULT hr = c->pool->TryGetNextFrame(reinterpret_cast<void **>(&frame));
+            if (SUCCEEDED(hr) && frame) {
+                // Always present the newest picture: drop anything older that queued up.
+                for (;;) {
+                    HrFrame *newer = nullptr;
+                    if (FAILED(c->pool->TryGetNextFrame(reinterpret_cast<void **>(&newer))) || !newer) break;
+                    CloseAndRelease(frame);
+                    frame = newer;
+                }
+                const int r = ProcessFrame(c, frame, out_bgra);
                 CloseAndRelease(frame);
-                frame = newer;
+                if (r == kOk && c->frames_ok < 3) ++c->frames_ok;
+                return r;
             }
-            const int r = ProcessFrame(c, frame, out_bgra);
-            CloseAndRelease(frame);
-            if (r == kOk && c->frames_ok < 3) ++c->frames_ok;
-            return r;
-        }
-        if (FAILED(hr)) return kLost;
+            if (FAILED(hr)) return kLost;
+        }   // lock released while waiting, so Destroy / SetCursor / Reset never starve behind this loop
         if (timeout_ms <= 0 || (int)(GetTickCount() - t0) >= timeout_ms) return kTimeout;
         Sleep(2);   // frames arrive at most every ~8 ms; 2 ms keeps latency low without busy-spinning
     }
 }
 
 int HrWgcGetSize(void *handle, int *w, int *h) {
-    auto *c = static_cast<Ctx *>(handle);
-    if (!c) return 0;
-    if (w) *w = c->canvas_w;
-    if (h) *h = c->canvas_h;
+    std::shared_ptr<Ctx> sp = FindCtx(handle);
+    if (!sp) return 0;
+    if (w) *w = sp->canvas_w;
+    if (h) *h = sp->canvas_h;
     return 1;
 }
 
 int HrWgcReset(void *handle) {
-    auto *c = static_cast<Ctx *>(handle);
-    if (!c) return 0;
+    std::shared_ptr<Ctx> sp = FindCtx(handle);
+    if (!sp) return 0;
     GuardScope guard;
-    Teardown(c);
-    return Init(c) ? 1 : 0;
+    std::lock_guard<std::mutex> lk(sp->mu);
+    if (sp->dead) return 0;
+    Teardown(sp.get());
+    return Init(sp.get()) ? 1 : 0;
 }
 
 void HrWgcSetCursor(void *handle, bool on) {
-    auto *c = static_cast<Ctx *>(handle);
-    if (!c) return;
-    c->cursor = on;
-    if (c->session2) c->session2->put_IsCursorCaptureEnabled(on ? TRUE : FALSE);
+    std::shared_ptr<Ctx> sp = FindCtx(handle);
+    if (!sp) return;
+    std::lock_guard<std::mutex> lk(sp->mu);
+    if (sp->dead) return;
+    sp->cursor = on;
+    if (sp->session2) sp->session2->put_IsCursorCaptureEnabled(on ? TRUE : FALSE);
 }
