@@ -1,4 +1,5 @@
 #include "welcome_dialog.h"
+#include "modal_util.h"
 #include "version.h"
 #include "win32_theme.h"
 #include "hrc_config.h"
@@ -227,7 +228,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     break;
                 case IDC_NEXT:
                     if (ctx->page == Page::Settings) ApplyAndPersistSettings(ctx);
-                    if (ctx->page == Page::Finish) { DestroyWindow(hwnd); break; }
+                    if (ctx->page == Page::Finish) { HrCloseModalWindow(hwnd); break; }
                     ctx->page = (Page)((int)ctx->page + 1);
                     SetPageVisibility(ctx, hwnd);
                     break;
@@ -245,7 +246,7 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             KillTimer(hwnd, IDT_PULSE);

@@ -1,4 +1,5 @@
 #include "log_viewer_dialog.h"
+#include "modal_util.h"
 #include "win32_theme.h"
 #include "../utils/log_paths.h"
 #include <windowsx.h>
@@ -104,11 +105,11 @@ LRESULT CALLBACK LogViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 // homrec.log sat loose next to the .exe.
                 ShellExecuteW(hwnd, L"open", HrLogPaths::LogsDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             } else if (LOWORD(wParam) == IDC_LOG_CLOSE) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             delete logPath;

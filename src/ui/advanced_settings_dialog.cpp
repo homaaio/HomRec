@@ -1,4 +1,5 @@
 #include "advanced_settings_dialog.h"
+#include "modal_util.h"
 #include <commctrl.h>
 #include <string>
 
@@ -76,7 +77,7 @@ LRESULT CALLBACK DlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             // Deliberately NOT calling PostQuitMessage - see settings_dialog.cpp
@@ -116,9 +117,9 @@ LRESULT CALLBACK DlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     (SendMessageW(ctx->separate_mp3_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
                 ctx->saved = true;
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             } else if (id == IDC_CANCEL) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         }

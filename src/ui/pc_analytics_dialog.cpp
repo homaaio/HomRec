@@ -1,4 +1,5 @@
 #include "pc_analytics_dialog.h"
+#include "modal_util.h"
 #include "win32_theme.h"
 #include <cstdint>
 #include <cstring>
@@ -112,11 +113,11 @@ LRESULT CALLBACK AnalyticsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             if (LOWORD(wParam) == IDC_REFRESH) {
                 RefreshValues(hwnd, ctx);
             } else if (LOWORD(wParam) == IDC_CLOSE) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             return 0;

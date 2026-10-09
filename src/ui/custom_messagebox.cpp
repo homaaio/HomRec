@@ -1,4 +1,5 @@
 #include "custom_messagebox.h"
+#include "modal_util.h"
 #include "win32_theme.h"
 
 namespace {
@@ -83,12 +84,12 @@ LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // return 0/false instead of the user's actual choice.
                 ctx->result = (id == IDC_YES);
                 ctx->dontshow_result = (SendMessageW(ctx->dontshow_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             return 0; // nested modal loop - no PostQuitMessage, see settings_dialog.cpp

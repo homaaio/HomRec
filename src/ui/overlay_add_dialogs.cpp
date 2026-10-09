@@ -1,4 +1,5 @@
 #include "overlay_add_dialogs.h"
+#include "modal_util.h"
 #include "win32_theme.h"
 #include <string>
 #include <vector>
@@ -34,7 +35,7 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             return 0; // nested modal loop, see overlays_dock_panel.cpp's callers
@@ -49,9 +50,9 @@ LRESULT CALLBACK TextPromptProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 GetWindowTextW(ctx->edit, buf, 512);
                 ctx->result = buf;
                 ctx->confirmed = true;
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             } else if (id == IDC_TP_CANCEL) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         }
@@ -80,7 +81,7 @@ LRESULT CALLBACK SourcePickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             return 0;
@@ -93,15 +94,15 @@ LRESULT CALLBACK SourcePickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             int notify = HIWORD(wParam);
             if (id == IDC_IOP_LIST && notify == LBN_DBLCLK) {
                 ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
-                if (ctx->selected >= 0) { ctx->confirmed = true; DestroyWindow(hwnd); }
+                if (ctx->selected >= 0) { ctx->confirmed = true; HrCloseModalWindow(hwnd); }
                 return 0;
             }
             if (id == IDC_IOP_OK) {
                 ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
                 if (ctx->selected >= 0) ctx->confirmed = true;
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             } else if (id == IDC_IOP_CANCEL) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         }
@@ -130,7 +131,7 @@ LRESULT CALLBACK WebcamPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             return 0;
@@ -143,15 +144,15 @@ LRESULT CALLBACK WebcamPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             int notify = HIWORD(wParam);
             if (id == IDC_WCP_LIST && notify == LBN_DBLCLK) {
                 ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
-                if (ctx->selected >= 0) { ctx->confirmed = true; DestroyWindow(hwnd); }
+                if (ctx->selected >= 0) { ctx->confirmed = true; HrCloseModalWindow(hwnd); }
                 return 0;
             }
             if (id == IDC_WCP_OK) {
                 ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
                 if (ctx->selected >= 0) ctx->confirmed = true;
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             } else if (id == IDC_WCP_CANCEL) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         }
@@ -183,7 +184,7 @@ LRESULT CALLBACK ChoicePickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             return 0;
@@ -196,15 +197,15 @@ LRESULT CALLBACK ChoicePickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             int notify = HIWORD(wParam);
             if (id == IDC_CHP_LIST && notify == LBN_DBLCLK) {
                 ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
-                if (ctx->selected >= 0) { ctx->confirmed = true; DestroyWindow(hwnd); }
+                if (ctx->selected >= 0) { ctx->confirmed = true; HrCloseModalWindow(hwnd); }
                 return 0;
             }
             if (id == IDC_CHP_OK) {
                 ctx->selected = (int)SendMessageW(ctx->list, LB_GETCURSEL, 0, 0);
                 if (ctx->selected >= 0) ctx->confirmed = true;
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             } else if (id == IDC_CHP_CANCEL) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         }

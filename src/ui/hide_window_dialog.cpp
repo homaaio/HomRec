@@ -1,4 +1,5 @@
 #include "hide_window_dialog.h"
+#include "modal_util.h"
 #include "win32_theme.h"
 #include <dwmapi.h>
 #include <string>
@@ -141,7 +142,7 @@ LRESULT CALLBACK HideProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 ClearAllHiddenCaptureWindows(*ctx->state);
                 RefreshList(hwnd, ctx);
             } else if (id == IDC_HW_CLOSE) {
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             }
             return 0;
         }
@@ -182,7 +183,7 @@ LRESULT CALLBACK HideProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return TRUE;
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_CTLCOLORSTATIC:
             return (LRESULT)HrWin32Theme::ColorStatic((HDC)wParam);
