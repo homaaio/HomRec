@@ -114,6 +114,7 @@ private:
     Channel &At(int index) { return index < 2 ? slot_[index] : extras_[(size_t)(index - 2)]; }
     int  ChannelCount() const { return 2 + (int)extras_.size(); }
     int  IndexOfWindow(wxObject *o) const;
+    int  IndexOfId(const std::string &id) const;   // extra channel with this source id (>= 2) or -1
 
     void OnFader(wxCommandEvent &evt);
     void OnMute(wxCommandEvent &evt);
@@ -148,6 +149,7 @@ private:
     wxBoxSizer *outer_ = nullptr;
     ColorButton *add_btn_ = nullptr;
     std::string built_style_;               // style the current layout was built for
+    bool in_add_menu_ = false;              // ShowAddMenu() is running (nested message loops)
 
     // retry bookkeeping for offline "app"/"mic" sources
     unsigned long last_retry_tick_ = 0;
