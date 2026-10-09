@@ -1523,6 +1523,11 @@ void HomRecMainFrame::ApplyDockArtColours() {
 
 void HomRecMainFrame::SetupDocking() {
     aui_.SetManagedWindow(dock_host_);
+    // Transparent-window hint + no live-resize: dragging a panel or a sash only shows an outline
+    // and relayouts ONCE on release, so the 20 fps preview isn't re-scaled every mouse move.
+    // NOT wxAUI_MGR_RECTANGLE_HINT: that XOR-draws on the screen DC, and the preview (20 fps) and the
+    // raw-HWND overlays panel repaint over it, so the frame flickered, showed only in part, or
+    // not at all. The transparent hint is its own top-level window, so nothing paints over it.
     aui_.SetFlags(wxAUI_MGR_ALLOW_FLOATING | wxAUI_MGR_TRANSPARENT_HINT | wxAUI_MGR_NO_VENETIAN_BLINDS_FADE);
 
     aui_.AddPane(preview_container_, wxAuiPaneInfo().Name("preview").CenterPane().PaneBorder(false)
@@ -2053,6 +2058,7 @@ void HomRecMainFrame::OnRecordingFinalized() {
             L"Saved to: " + WideFromNarrow(state_.output_folder);
 
         bool dont_show = summary_dont_show_again_;
+        HrLog::Info("UI: recording summary box opened");
         bool open_folder = ShowCustomMessageBox(
             GetHWND(), wxGetInstance(), theme_,
             WideFromNarrow(lang_.Get("recording_saved")),
@@ -2408,7 +2414,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             OpenProgramFilesFolder();
             break;
         case ID_FILE_SELECT_WINDOW:
+            HrLog::Info("UI: window picker opened");
             ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
+            HrLog::Info("UI: window picker closed");
             OnCaptureTargetChanged();
             break;
         case ID_FILE_SELECT_REGION:
@@ -2416,6 +2424,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             OnCaptureTargetChanged();
             break;
         case ID_FILE_FULL_DESKTOP:
+            // Back to the whole screen after a window / region was picked. The stored region
+            // rectangle is kept (it is only ever used while the mode is Region), so picking
+            // "Select Region" again starts from a clean overlay as before.
             state_.capture_mode = CaptureMode::Desktop;
             state_.capture_window_title.clear();
             state_.capture_window_hwnd = nullptr;
