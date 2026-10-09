@@ -1,4 +1,5 @@
 #include "window_picker_dialog.h"
+#include "modal_util.h"
 #include "win32_theme.h"
 #include <string>
 #include <vector>
@@ -226,6 +227,14 @@ std::vector<WindowEntry> EnumCandidateWindows(HWND exclude) {
 // own icon in that case rather than showing a blank/black tile.
 HBITMAP CaptureWindowThumbnail(HWND hwnd, int tileW, int tileH) {
     if (!IsWindow(hwnd)) return nullptr;
+    {
+        // PrintWindow() on one of our own windows synchronously sends WM_PRINT into wx's window procs
+        // on this very thread, in the middle of a wx event handler - never worth it for a thumbnail
+        // (the tile falls back to the window's icon).
+        DWORD wpid = 0;
+        GetWindowThreadProcessId(hwnd, &wpid);
+        if (wpid == GetCurrentProcessId()) return nullptr;
+    }
 
     RECT rc{};
     // Extended frame bounds excludes the invisible resize-border/drop-
@@ -330,12 +339,17 @@ struct PickerCtx {
 
 LRESULT CALLBACK PickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto *ctx = reinterpret_cast<PickerCtx *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!ctx && msg != WM_NCCREATE) return DefWindowProcW(hwnd, msg, wParam, lParam);   // before NCCREATE / after teardown
     switch (msg) {
         case WM_NCCREATE: {
             auto *cs = reinterpret_cast<CREATESTRUCTW *>(lParam);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
+        case WM_NCDESTROY:
+            // ctx lives on ShowWindowPickerDialog()'s stack - never let a late message see it.
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             if (id == IDC_WP_RECORD) {
@@ -346,13 +360,13 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // Remember the exact window too - see AppState::capture_window_hwnd.
                     ctx->state->capture_window_hwnd = (*ctx->entries)[(size_t)sel].hwnd;
                     ctx->state->capture_mode = CaptureMode::Window;
-                    DestroyWindow(hwnd);
+                    HrCloseModalWindow(hwnd);
                 }
             } else if (id == IDC_WP_DESKTOP) {
                 ctx->state->capture_mode = CaptureMode::Desktop;
                 ctx->state->capture_window_title.clear();
                 ctx->state->capture_window_hwnd = nullptr;
-                DestroyWindow(hwnd);
+                HrCloseModalWindow(hwnd);
             } else if (id == IDC_WP_LIST && HIWORD(wParam) == LBN_DBLCLK) {
                 // Double-click a row = same as "Record this window", matching
                 // the natural double-click expectation for a list box.
@@ -411,7 +425,7 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return TRUE;
         }
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         case WM_DESTROY:
             if (ctx && ctx->entries) {
@@ -506,10 +520,13 @@ void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state) {
     ShowWindow(hwnd, SW_SHOW);
 
     MSG msg;
-    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    BOOL got = TRUE;
+    while (IsWindow(hwnd) && (got = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         if (!IsDialogMessageW(hwnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
         if (!IsWindow(hwnd)) break;
     }
+    if (got == 0) PostQuitMessage((int)msg.wParam);   // WM_QUIT arrived while we were modal: hand it on to wx's loop
+    if (IsWindow(hwnd)) HrCloseModalWindow(hwnd);      // loop left early (WM_QUIT / error): window must not outlive ctx
     EnableWindow(parent, TRUE);
     SetForegroundWindow(parent);
 }
@@ -577,11 +594,11 @@ LRESULT CALLBACK RegionPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             // Either way (a real drag or a stray click) the overlay's done
             // its job - close it. A stray click leaves have_result false,
             // so ShowRegionPickerOverlay() below just leaves state as-is.
-            DestroyWindow(hwnd);
+            HrCloseModalWindow(hwnd);
             return 0;
         }
         case WM_KEYDOWN:
-            if (wParam == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+            if (wParam == VK_ESCAPE) { HrCloseModalWindow(hwnd); return 0; }
             break;
         case WM_PAINT: {
             PAINTSTRUCT ps;
