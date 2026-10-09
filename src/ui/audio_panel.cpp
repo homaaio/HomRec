@@ -235,9 +235,26 @@ void AudioPanel::BuildLayout() {
 
     Freeze();
     if (scroller_) {
-        outer_->Detach(scroller_);
-        scroller_->Destroy();
+        // BuildLayout() is reached from inside button handlers whose button lives INSIDE the old
+        // scroller (card "..." button -> Remove source). wxWindow::Destroy() on a child window is
+        // an immediate `delete`, so the button (and its parents) were freed while wx was still
+        // unwinding that very event -> use-after-free inside wxEvtHandler::ProcessEvent, which is the
+        // signature of the 2026-10-07 15:48:08 / 2026-10-08 20:35:35 dumps (crash inside wxbase, no
+        // hr.exe frame on the stack). Not proven to be THE cause of those dumps, but a real bug.
+        // Hide it now and delete it from the event loop instead. CallAfter() is bound to this
+        // panel, so if the panel dies first the pending call is dropped together with the
+        // (then already deleted) child.
+        wxScrolledWindow *old = scroller_;
+        // If keyboard focus is inside the card list, move it out first: wx keeps "last focused child"
+        // pointers in the ancestors (wxControlContainer::m_winLastFocused) and re-focuses them on
+        // activation, so a focused button must not be the thing that disappears.
+        for (wxWindow *f = wxWindow::FindFocus(); f; f = f->GetParent()) {
+            if (f == old) { if (add_btn_) add_btn_->SetFocus(); else SetFocus(); break; }
+        }
+        outer_->Detach(old);
+        old->Hide();
         scroller_ = nullptr;
+        CallAfter([old]() { old->Destroy(); });
     }
     for (int i = 0; i < ChannelCount(); ++i) {
         Channel &c = At(i);
@@ -412,6 +429,14 @@ void AudioPanel::ApplyMeterStyle() {
 
 int AudioPanel::IndexOfWindow(wxObject *) const { return -1; }
 
+// Index of the extra channel with this source id (>= 2), or -1.
+int AudioPanel::IndexOfId(const std::string &id) const {
+    if (id.empty()) return -1;
+    for (size_t i = 0; i < extras_.size(); ++i)
+        if (extras_[i].id == id) return (int)i + 2;
+    return -1;
+}
+
 // ---------------------------------------------------------------------------
 // events
 // ---------------------------------------------------------------------------
@@ -468,6 +493,14 @@ std::string AudioPanel::NextSourceId() const {
 }
 
 void AudioPanel::ShowAddMenu() {
+    // The popup menu and the program-picker dialog below run nested message loops; the level-meter
+    // timer, hotkeys and a second click on the button keep being dispatched meanwhile.
+    if (in_add_menu_) return;
+    struct BusyGuard {
+        bool &flag;
+        explicit BusyGuard(bool &f) : flag(f) { flag = true; }
+        ~BusyGuard() { flag = false; }
+    } busy_guard(in_add_menu_);
     if (AddingBlocked("The list of audio sources")) return;
     if (state_.audio_sources.size() >= 32) {
         wxMessageBox("That's the maximum number of extra audio sources (32).", "Audio Mixer", wxOK | wxICON_INFORMATION, this);
@@ -506,7 +539,7 @@ void AudioPanel::ShowAddMenu() {
         def.name = mics[(size_t)(cmd - kMicBase)].name;
         def.target = mics[(size_t)(cmd - kMicBase)].id;
     } else if (cmd >= kBrowserBase && cmd < kBrowserBase + (int)browsers.size()) {
-        const HrAudioApp &a = browsers[(size_t)(cmd - kBrowserBase)];
+        const HrAudioApp a = browsers[(size_t)(cmd - kBrowserBase)];
         def.kind = "app";
         def.name = WithoutExe(a.exe);
         def.target = a.exe;
@@ -521,7 +554,9 @@ void AudioPanel::ShowAddMenu() {
         for (const auto &a : apps) labels.Add(wxString::FromUTF8(WithoutExe(a.exe) + "  -  " + Truncate(a.title, 60)));
         wxSingleChoiceDialog dlg(this, "Capture only the sound of this program:", "Window / program sound", labels);
         if (dlg.ShowModal() != wxID_OK) return;
-        const HrAudioApp &a = apps[(size_t)dlg.GetSelection()];
+        const int picked = dlg.GetSelection();
+        if (picked < 0 || (size_t)picked >= apps.size()) return;     // wxNOT_FOUND / stale index
+        const HrAudioApp a = apps[(size_t)picked];                    // copy: don't keep a reference into the list
         def.kind = "app";
         def.name = Truncate(a.title.empty() ? WithoutExe(a.exe) : a.title, 28);
         def.target = a.exe;
@@ -542,18 +577,28 @@ void AudioPanel::ShowAddMenu() {
 
 void AudioPanel::ShowChannelMenu(int index) {
     if (index < 2 || index >= ChannelCount()) return;
-    Channel &ch = At(index);
+    const std::string cid = At(index).id;
+    bool offline_non_file = false;
+    wxPoint pos = wxGetMousePosition();
+    {
+        Channel &c0 = At(index);
+        offline_non_file = !c0.online && c0.kind != "file";
+        if (c0.menu_btn) pos = c0.menu_btn->GetScreenPosition() + wxPoint(0, c0.menu_btn->GetSize().GetHeight());
+    }
     enum { kRename = 1, kReset, kReconnect, kRemove };
     wxMenu menu;
     menu.Append(kRename, wxString::FromUTF8("Rename\u2026"));
     menu.Append(kReset, "Reset volume to 100%");
-    if (!ch.online && ch.kind != "file") menu.Append(kReconnect, "Reconnect now");
+    if (offline_non_file) menu.Append(kReconnect, "Reconnect now");
     menu.AppendSeparator();
     menu.Append(kRemove, "Remove source");
 
-    const wxPoint pos = ch.menu_btn ? ch.menu_btn->GetScreenPosition() + wxPoint(0, ch.menu_btn->GetSize().GetHeight())
-                                    : wxGetMousePosition();
     const int cmd = GetPopupMenuSelectionFromUser(menu, ScreenToClient(pos));
+    // The popup (and the rename dialog below) pump messages: the list may have changed while they
+    // were up, so look the channel up again instead of trusting the index / a reference from before.
+    index = IndexOfId(cid);
+    if (index < 2) return;
+    Channel &ch = At(index);
     switch (cmd) {
         case kRename: {
             wxTextEntryDialog dlg(this, "Name shown in the mixer:", "Rename source", ch.name);
@@ -561,9 +606,12 @@ void AudioPanel::ShowChannelMenu(int index) {
             wxString n = dlg.GetValue();
             n.Trim(true).Trim(false);
             if (n.empty()) return;
-            ch.name = n;
-            for (auto &d : state_.audio_sources) if (d.id == ch.id) { d.name = n.ToUTF8().data(); break; }
-            UpdateCardState(ch);
+            const int ri = IndexOfId(cid);
+            if (ri < 2) return;
+            Channel &rc = At(ri);
+            rc.name = n;
+            for (auto &d : state_.audio_sources) if (d.id == rc.id) { d.name = n.ToUTF8().data(); break; }
+            UpdateCardState(rc);
             if (on_changed) on_changed();
             break;
         }
@@ -589,6 +637,7 @@ void AudioPanel::ShowChannelMenu(int index) {
 // sources
 // ---------------------------------------------------------------------------
 void AudioPanel::AddSource(const AudioSourceDef &def, bool persist) {
+    HrLog::Info("Audio Mixer: adding source '" + def.name + "' (" + def.kind + ")");
     Channel ch;
     ch.id = def.id; ch.kind = def.kind; ch.name = wxString::FromUTF8(def.name);
     ch.target = def.target; ch.window_title = def.window_title;
@@ -604,6 +653,7 @@ void AudioPanel::AddSource(const AudioSourceDef &def, bool persist) {
 }
 
 void AudioPanel::RemoveSource(int index) {
+    HrLog::Info("Audio Mixer: removing source #" + std::to_string(index - 1));
     if (index < 2 || index >= ChannelCount()) return;
     if (AddingBlocked("The list of audio sources")) return;
     Channel &ch = At(index);
