@@ -124,7 +124,15 @@ bool WasapiStream::open_process(unsigned long pid)
     if (FAILED(hr)) { h->Release(); return false; }
     if (op) static_cast<IUnknown *>(op)->Release();   // the handler already got the result
 
-    WaitForSingleObject(h->ev, 4000);
+    // The completion callback runs on a system thread. If it has not fired within the timeout, do
+    // NOT look at h->hr / h->client (the callback may be writing them right now) - just give up;
+    // the activation operation still owns a reference to the handler, so it stays valid and
+    // releases whatever client it receives later.
+    if (WaitForSingleObject(h->ev, 4000) != WAIT_OBJECT_0) {
+        HrLog::Warn("Audio Mixer: per-process audio capture didn't answer within 4 s (pid " + std::to_string(pid) + ").");
+        h->Release();
+        return false;
+    }
     if (FAILED(h->hr) || !h->client) { h->Release(); return false; }
     client = h->client;
     client->AddRef();
@@ -330,7 +338,25 @@ static void extra_stop_locked(Extra *s)
     Returns the channel handle (> 0) or a negative error:
       -1 unusable arguments, -2 device unavailable, -3 per-process capture unavailable
       (needs Windows 10 2004+ / the program has gone), -4 file unreadable. */
+static int hr_audio_extra_add_impl(int kind, const wchar_t *target, unsigned long pid, float vol, int mute);
+
 HR_EXPORT int hr_audio_extra_add(int kind, const wchar_t *target, unsigned long pid, float vol, int mute)
+{
+    // std::thread / make_unique / std::wstring can throw (std::system_error when the OS refuses a
+    // thread, bad_alloc...). This function is called straight from the wx UI thread through an
+    // extern "C" boundary, so an escaping exception ended in std::terminate = a crash right after
+    // "select a program as a new audio source". Report it as "device unavailable" instead.
+    try {
+        return hr_audio_extra_add_impl(kind, target, pid, vol, mute);
+    } catch (const std::exception &e) {
+        HrLog::Error(std::string("Audio Mixer: adding a source failed (") + e.what() + ")");
+    } catch (...) {
+        HrLog::Error("Audio Mixer: adding a source failed (unknown exception)");
+    }
+    return -2;
+}
+
+static int hr_audio_extra_add_impl(int kind, const wchar_t *target, unsigned long pid, float vol, int mute)
 {
     using namespace hrx;
     if (kind < 0 || kind > 2) return -1;
