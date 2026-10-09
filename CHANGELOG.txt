@@ -3,6 +3,25 @@ welcome to changelog :D
 [Version 2.4.0] - (2026-10-05)
 Window capture, MKV, dockable panels, a new Audio Mixer.
 
+Crash fix (2026-10-09, third pass) - WGC still crashed in D3D11CreateDevice (dump crash_20261009_141144.dmp)
+- The second-pass build still died at the log line "WGC init: D3D11CreateDevice": execute (DEP) fault at
+    "hr.exe base - 0x40000000", GUI thread, return address inside WGC Init(). The 10 call arguments are still on the
+    stack and match D3D11CreateDevice(nullptr, HARDWARE, ..., &c->dev, nullptr, &c->dc), so the call itself is the
+    culprit - and resolving it from d3d11.dll's export table (second pass) changed nothing, so the import table
+    was not the reason. apphelp/AcLayers/AcGenral shims are loaded in the process again.
+- The capture device in dxgi_capture.cpp is created on the same machine with the same d3d11.dll without any problem.
+    The only difference is the call shape: that one passes an explicit adapter + D3D_DRIVER_TYPE_UNKNOWN + a non-null
+    feature-level out-pointer; WGC passed a null adapter + D3D_DRIVER_TYPE_HARDWARE + null out-pointer.
+    (The exact mechanism inside d3d11/shim is NOT proven - no symbols - this is the one measurable difference.)
+- Fixed (src/core/wgc_capture.cpp): new CreateWgcDevice() creates the device like hr_dx_create() does: plain
+    D3D11CreateDevice import, adapter from CreateDXGIFactory1()/EnumAdapters1() (the adapter that drives the window's
+    monitor, adapter 0 as fallback), D3D_DRIVER_TYPE_UNKNOWN, feature level out-pointer given. The null-adapter form is
+    no longer used at all. Removed the late-bound CreateDevice pointer and RawExport() from the second pass.
+- wgc_guard.flag generation bumped to WGC-GUARD-GEN-3: the flag left by this crash is deleted at the next start
+    instead of keeping WGC switched off, so WGC is tried again without touching Settings.
+- If it STILL crashes at "WGC init: D3D11CreateDevice" the shim is the cause: check hr.exe > Properties > Compatibility
+    (no compatibility mode, no "Disable fullscreen optimizations") and send the new dump.
+
 Crash fix (2026-10-09, second pass) - "select a window, press Start" crashes / then records the whole screen
 - Cause found in the two crash dumps (crash_20261009_125455.dmp, crash_20261009_125637.dmp, both identical): the
     process died inside WGC's Init() on the call to D3D11CreateDevice() - the 10 arguments of that call are still
