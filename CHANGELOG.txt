@@ -3,6 +3,27 @@ welcome to changelog :D
 [Version 2.4.0] - (2026-10-05)
 Window capture, MKV, dockable panels, a new Audio Mixer.
 
+Crash fix (2026-10-09, second pass) - "select a window, press Start" crashes / then records the whole screen
+- Cause found in the two crash dumps (crash_20261009_125455.dmp, crash_20261009_125637.dmp, both identical): the
+    process died inside WGC's Init() on the call to D3D11CreateDevice() - the 10 arguments of that call are still
+    on the stack - with an execute (DEP) violation at "hr.exe base - 0x40000000". The WinRT function table next to
+    it was intact. apphelp.dll / AcLayers.dll / AcGenral.dll (Windows compatibility shims) were loaded in the
+    process and the registers show other code ran between the call and the bad jump (a hook in between).
+    Most likely: a shim hook for D3D11CreateDevice with a garbage way back. Not provable without symbols.
+- Why "sometimes it crashes, sometimes it records the whole screen": the first Start with WGC crashes and leaves
+    logs\wgc_guard.flag; from then on the crash guard keeps WGC off and the screen crop is used. The crop of a
+    maximized window (log: 1600x860 on a 1600x900 monitor) is practically the whole screen and includes whatever
+    lies on top of it (HomRec's own window too). Hidden overlays play no part in this.
+- Fixed (src/core/wgc_capture.cpp): D3D11CreateDevice is no longer called through hr.exe's import table; its address
+    is read from d3d11.dll's export table (RawExport(), falls back to GetProcAddress). The feature-level list is no
+    longer passed (WGC needs Windows 10 1903+, the default list already has 11_1); explicit list only as a retry.
+    New log breadcrumb "WGC init: D3D11CreateDevice".
+- Fixed (src/core/wgc_capture.cpp): wgc_guard.flag now carries a generation marker. A flag written by an older
+    build (the one with this bug) is deleted at start instead of switching WGC off for good, so WGC gets a fresh
+    chance without re-selecting it in Settings. A crash of THIS build still trips the guard as before.
+- Tip if "everything on top of the window" is still recorded in screen-crop mode: File > Hide Window... (excludes a
+    window, e.g. HomRec itself, from the recording), or use WGC (Settings > General > Window capture).
+
 Crash fixes (2026-10-09) - window selection and Audio Mixer "add program"
 - Third dump (2026-10-08 20:35:35, WGC already switched off by the guard, no GraphicsCapture.dll loaded): same
     wxbase event-chain access violation as dump 1 (identical RIP offset 0x143A38 and call chain), GUI thread in
