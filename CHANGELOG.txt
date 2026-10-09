@@ -3,6 +3,89 @@ welcome to changelog :D
 [Version 2.4.0] - (2026-10-05)
 Window capture, MKV, dockable panels, a new Audio Mixer.
 
+Crash fixes (2026-10-09) - window selection and Audio Mixer "add program"
+- Third dump (2026-10-08 20:35:35, WGC already switched off by the guard, no GraphicsCapture.dll loaded): same
+    wxbase event-chain access violation as dump 1 (identical RIP offset 0x143A38 and call chain), GUI thread in
+    the main loop, no hr.exe frame, 23 s after a recording was stopped. So there are two distinct crash families:
+    (A) WGC native crash (dump 2), (B) wx use-after-free (dumps 1 and 3). (B) is NOT proven to be one of the
+    fixes below - the heap isn't in the dumps - see "UI: ..." breadcrumbs in homrec.log to catch the trigger.
+- Fixed (src/core/wgc_capture.cpp): HrWgcProbeWindow() no longer activates WinRT / calls CreateForWindow on the
+    UI thread while a window is being picked; it only does Win32 checks (HrWgcCreate still reports a refused
+    window and the caller falls back to the screen crop).
+- Fixed (src/core/wgc_capture.cpp): contexts are now shared_ptr + per-context mutex; HrWgcSetCursor() (UI thread)
+    could call into session2 while HrWgcReset()'s Teardown() (capture thread) had just released it; Destroy
+    could race with a capture in flight. Added "WGC init: <step>" log breadcrumbs.
+- Fixed (src/ui/audio_panel.cpp, audio_panel.h): BuildLayout() deleted the card list synchronously from inside
+    the click handler of a button that lives in it (Remove source) -> use-after-free in wx's event dispatch.
+    The old list is now hidden and destroyed from the event loop; keyboard focus is moved out first.
+    ShowChannelMenu() re-looks the channel up after its nested message loops (new IndexOfId());
+    ShowAddMenu() is re-entrancy-guarded and validates the picked program index.
+- Fixed (src/core/audio_extra.inc): hr_audio_extra_add() could let a C++ exception (thread creation failure,
+    bad_alloc) cross the extern "C" boundary into the UI = instant crash; it is caught and reported as "device
+    unavailable". The per-process-capture activation no longer reads the handler's result after a timeout.
+- Fixed (src/ui/window_picker_dialog.cpp): null-ctx guards + ctx cleared at WM_NCDESTROY; a WM_QUIT received while
+    the picker is modal no longer leaves the window alive pointing at a dead stack frame; no PrintWindow()
+    thumbnails of HomRec's own windows.
+- Changed (new src/ui/modal_util.h; advanced_settings_dialog, custom_messagebox, hide_window_dialog,
+    log_viewer_dialog, overlay_add_dialogs, pc_analytics_dialog, welcome_dialog, window_picker_dialog):
+    hand-rolled Win32 modal dialogs now re-enable their owner BEFORE destroying themselves.
+- Added (src/ui/main_frame.cpp, audio_panel.cpp): "UI: ..." / "Audio Mixer: ..." log lines around the window
+    picker, the recording summary box and add/remove source.
+
+Crash analysis (2026-10-08) - two crash dumps from one test session (2026-10-07 15:48)
+- Dump 1 (no recording running, 18 s after launch): access violation (read at 0xFFFFFFFFFFFFFFFF) inside
+    wxbase while wxWidgets was searching an event handler for a window message; the call stack holds no
+    hr.exe frame at all and the heap register shows a freed block -> a wx object was used after it was
+    deleted. Windows.Graphics.Capture was not even loaded in that run. The exact object can't be named from
+    the dump (no symbols for hr.exe/wx). Not fixed yet - see "Diagnostics" below for how the next one is caught.
+- Dump 2 (pressing Start, window capture): execute (DEP) violation at a non-code address, called directly from
+    hr.exe on the GUI thread, wgc_guard.flag left behind. The WGC API table in hr.exe's data was filled with
+    valid pointers (combase / d3d11) and WGC's registry mutex was never touched, i.e. it died inside
+    HrWgcProbeWindow() (activation / CreateForWindow), before any capture object existed - and no log line
+    was written because nothing is logged inside it. Same area as the 2.4.0 crash the sentinel was added for.
+- Changed (src/ui/app_state.h, src/ui/recording_controller.cpp, src/ui/settings_dialog.cpp): Windows.Graphics.Capture
+    is OPT-IN again. window_capture_method defaults to "screen" (the screen crop); only the value "wgc" enables WGC;
+    legacy "crop"/"auto" mean "screen". Settings > General > Window capture labels WGC "(experimental)".
+    Reason: a native crash can't be caught, and the 2026-10-07 default-to-WGC change made the first Start crash.
+    The crash sentinel stays: after a crash, WGC stays off until it is re-selected in Settings.
+- Added (src/core/wgc_capture.cpp): HrWgcProbeWindow() writes a "WGC probe: <step>" line to homrec.log before every
+    native call (RoInitialize / factory activation / CreateForWindow / result). HrLog flushes every line, so if
+    it dies there again the last line names the step.
+Diagnostics
+- Changed (src/utils/crash_handler.cpp): after the "[CRASH] ..." line the log now gets "[CRASH]   fault:" (code,
+    read/write/execute, target address, module+offset of RIP, thread id) and up to 24 "[CRASH]   stack[+0x..]
+    module+0x..." lines (every stack word that points into a loaded module = a poor man's call stack, no symbols
+    needed). A call through a garbage pointer shows the caller's address first.
+- Changed (Makefile, .gitignore): hr.exe is linked with -Wl,-Map=hr.map (git-ignored). Keep the map next to every
+    released hr.exe: it turns "hr.exe+0x12a79b" from a crash log/dump into a function name.
+
+Fixed (2026-10-07 pass) - "recording one window records the whole screen" and "the icons never show up"
+- src/ui/app_state.h: window_capture_method now defaults to "wgc" (Windows.Graphics.Capture). New value "screen" =
+    the old screen crop, only when the user picks it. Legacy "crop"/"auto" (written into every 2.4.0 settings
+    file because "crop" used to be the default) now mean "wgc". New helper AppState::WindowCaptureWantsWgc().
+    Why: the crop cuts a rectangle out of a whole-MONITOR duplication, so a maximized window (e.g. Chrome,
+    1920x1040 on a 1920x1080 screen) was practically the whole screen, and everything on top of the window -
+    HomRec's own window included - was recorded too.
+- src/ui/recording_controller.cpp: ResolveCaptureSize() uses WGC by default; falls back to the crop (with a WARN
+    log line saying that overlapping windows will now be recorded) when Windows refuses the window, the crash
+    guard is tripped, or the user chose "screen". Start(): if WGC can't start for the window after ffmpeg was
+    already launched, HomRec now cleans up and retries the recording once with the crop instead of asking the
+    user to press Start again.
+- src/ui/settings_dialog.cpp: capture-method choice re-labelled/reordered (0 = WGC "recommended", 1 = screen crop).
+    While the crash guard is tripped the dialog shows "screen crop" (what really happens), so picking WGC again
+    is a real change that re-arms it. Saving with the entry untouched changes nothing (keeps a legacy "crop"
+    value = default WGC, and does not clear the crash guard).
+- src/win_main.cpp: wxInitAllImageHandlers() at startup. wxImage only knows BMP by default, so every PNG load
+    failed SILENTLY (icons.cpp wraps the load in wxLogNull) - the icons/overlays and icons/audio PNGs were valid
+    and in the right place but could never be decoded. Also fixes anything else that loads PNG/JPEG/GIF via wxImage.
+- src/ui/icons.cpp: registers the PNG handler itself as a safety net; searches next to the exe, up to 3 parent
+    folders of it and the current directory (so build/hr.exe finds <repo>/icons); writes "Icons:" lines to the
+    log (INFO = no PNG found + every folder searched, WARN = file found but not decodable), once per icon.
+- src/ui/icons.h, icons/README.md: documented the above. Only .png files are loaded; the .svg copies are source art.
+- Not changed: DXGI Desktop Duplication is still the capture method for full-screen / region recording and the
+    fallback for windows. WGC is used only for a selected window. WGC runs on the CPU conversion path (the GPU
+    NV12 / dirty-rect optimisations are DXGI-only).
+
 Source tree (files only, no behaviour change - code identifiers like hr_* C exports, HrLog, hr.exe are untouched)
 - src/hr_*.{cpp,h,c,inc} moved into folders and the "hr_" prefix dropped:
     src/core/   app_audio_enum, app_logic, audio (+audio_extra.inc), capture_ctl, display_info, dxgi_capture,
