@@ -106,41 +106,19 @@ using RoGetActivationFactoryFn  = HRESULT(WINAPI *)(void *hstring, REFIID iid, v
 using WindowsCreateStringFn     = HRESULT(WINAPI *)(PCWSTR src, UINT32 len, void **hstring);
 using WindowsDeleteStringFn     = HRESULT(WINAPI *)(void *hstring);
 using CreateD3DDeviceFromDxgiFn = HRESULT(WINAPI *)(IDXGIDevice *, void **inspectable);
-using CreateD3D11DeviceFn       = HRESULT(WINAPI *)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
-                                                    const D3D_FEATURE_LEVEL *, UINT, UINT,
-                                                    ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
 
+// NOTE: D3D11CreateDevice is deliberately NOT late-bound here. It is the plain import from
+// -ld3d11, called exactly the way dxgi_capture.cpp's hr_dx_create() calls it (explicit adapter,
+// D3D_DRIVER_TYPE_UNKNOWN, non-null feature-level out-pointer) - that call is proven to work in
+// this very process, see CreateWgcDevice().
 struct Api {
     RoInitializeFn            RoInitialize = nullptr;
     RoGetActivationFactoryFn  RoGetActivationFactory = nullptr;
     WindowsCreateStringFn     WindowsCreateString = nullptr;
     WindowsDeleteStringFn     WindowsDeleteString = nullptr;
     CreateD3DDeviceFromDxgiFn CreateD3D11DeviceFromDXGIDevice = nullptr;
-    CreateD3D11DeviceFn       CreateDevice = nullptr;   // d3d11.dll!D3D11CreateDevice, see RawExport()
     bool                      ok = false;
 };
-FARPROC RawExport(HMODULE mod, const char *name) {
-    if (!mod || !name) return nullptr;
-    const BYTE *base = reinterpret_cast<const BYTE *>(mod);
-    const auto *dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
-    const auto *nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
-    const IMAGE_DATA_DIRECTORY &dd = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    if (!dd.VirtualAddress || !dd.Size) return nullptr;
-    const auto *ex = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY *>(base + dd.VirtualAddress);
-    const DWORD *names = reinterpret_cast<const DWORD *>(base + ex->AddressOfNames);
-    const WORD  *ords  = reinterpret_cast<const WORD *>(base + ex->AddressOfNameOrdinals);
-    const DWORD *funcs = reinterpret_cast<const DWORD *>(base + ex->AddressOfFunctions);
-    for (DWORD i = 0; i < ex->NumberOfNames; ++i) {
-        if (std::strcmp(reinterpret_cast<const char *>(base + names[i]), name) != 0) continue;
-        if (ords[i] >= ex->NumberOfFunctions) return nullptr;
-        const DWORD rva = funcs[ords[i]];
-        if (rva >= dd.VirtualAddress && rva < dd.VirtualAddress + dd.Size) return nullptr;   // forwarder
-        return reinterpret_cast<FARPROC>(const_cast<BYTE *>(base + rva));
-    }
-    return nullptr;
-}
 
 const Api &GetApi() {
     static Api api = [] {
@@ -154,11 +132,8 @@ const Api &GetApi() {
         a.WindowsDeleteString = reinterpret_cast<WindowsDeleteStringFn>(GetProcAddress(combase, "WindowsDeleteString"));
         a.CreateD3D11DeviceFromDXGIDevice = reinterpret_cast<CreateD3DDeviceFromDxgiFn>(
             GetProcAddress(d3d11, "CreateDirect3D11DeviceFromDXGIDevice"));
-        FARPROC create_dev = RawExport(d3d11, "D3D11CreateDevice");
-        if (!create_dev) create_dev = GetProcAddress(d3d11, "D3D11CreateDevice");
-        a.CreateDevice = reinterpret_cast<CreateD3D11DeviceFn>(create_dev);
         a.ok = a.RoInitialize && a.RoGetActivationFactory && a.WindowsCreateString &&
-               a.WindowsDeleteString && a.CreateD3D11DeviceFromDXGIDevice && a.CreateDevice;
+               a.WindowsDeleteString && a.CreateD3D11DeviceFromDXGIDevice;
         return a;
     }();
     return api;
@@ -237,8 +212,10 @@ int           g_guard_depth = 0;      // number of WGC operations currently in f
 
 // Bump when a WGC crash cause has been fixed: a flag written by an OLDER build (no / smaller marker)
 // belongs to a bug that no longer exists, so it is deleted instead of switching WGC off for good.
-// (2 = D3D11CreateDevice call through a shim-patched import, see RawExport().)
-constexpr char kGuardGen[] = "WGC-GUARD-GEN-2";
+// (2 = first attempt: D3D11CreateDevice resolved from the export table - did not help.)
+// (3 = D3D11CreateDevice(nullptr adapter, DRIVER_TYPE_HARDWARE) crashed on some setups; now created on an
+//  explicit adapter exactly like dxgi_capture.cpp, see CreateWgcDevice().)
+constexpr char kGuardGen[] = "WGC-GUARD-GEN-3";
 
 bool GuardTripped() {
     if (g_guard_state == 0) {
@@ -276,7 +253,7 @@ void GuardEnter() {
                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
-            static const char note[] = "WGC-GUARD-GEN-2\r\n"
+            static const char note[] = "WGC-GUARD-GEN-3\r\n"
                                        "HomRec: native Windows.Graphics.Capture code was running when this file "
                                        "was written. If it still exists at the next start, that run crashed.\r\n";
             DWORD n = 0;
@@ -373,6 +350,51 @@ void Teardown(Ctx *c) {
     c->ok = false;
 }
 
+// Creates the D3D11 device WGC renders into.
+//
+// Crash history: both 2.4.0 crash dumps died with an execute (DEP) fault at "hr.exe base - 0x40000000"
+// straight out of D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, ...) - first through the import
+// table, then (2nd attempt) through the address read from d3d11.dll's export table, so the import
+// table was not the culprit. The same machine creates its capture device in dxgi_capture.cpp just
+// fine, and that call differs in exactly the way below: an explicit IDXGIAdapter1 from
+// CreateDXGIFactory1()/EnumAdapters1() with D3D_DRIVER_TYPE_UNKNOWN, and a non-null feature-level
+// out-pointer. (With a null adapter d3d11 enumerates adapters itself through a different internal
+// path.) Not proven to be the trigger, but it is the only difference, so do it the proven way: prefer the adapter
+// that drives the window's monitor, fall back to adapter 0, and as a last resort the old null-adapter
+// form is NOT tried (it is the crashing one) - failure just means "use the screen crop".
+HRESULT CreateWgcDevice(Ctx *c) {
+    ComPtr<IDXGIFactory1> factory;
+    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(factory.GetAddressOf()));
+    if (FAILED(hr) || !factory) return FAILED(hr) ? hr : E_FAIL;
+
+    // Adapter whose output shows the window (monitor of the window); adapter 0 otherwise.
+    ComPtr<IDXGIAdapter1> adapter;
+    const HMONITOR mon = MonitorFromWindow(c->hwnd, MONITOR_DEFAULTTOPRIMARY);
+    for (UINT ai = 0; mon; ++ai) {
+        ComPtr<IDXGIAdapter1> a;
+        if (factory->EnumAdapters1(ai, a.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
+        bool match = false;
+        for (UINT oi = 0; !match; ++oi) {
+            ComPtr<IDXGIOutput> out;
+            if (a->EnumOutputs(oi, out.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_OUTPUT_DESC od{};
+            if (SUCCEEDED(out->GetDesc(&od)) && od.Monitor == mon) match = true;
+        }
+        if (match) { adapter = a; break; }
+    }
+    if (!adapter) {
+        hr = factory->EnumAdapters1(0, adapter.GetAddressOf());
+        if (FAILED(hr) || !adapter) return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    D3D_FEATURE_LEVEL fl = (D3D_FEATURE_LEVEL)0;
+    hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                           nullptr, 0, D3D11_SDK_VERSION,
+                           c->dev.ReleaseAndGetAddressOf(), &fl, c->dc.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) { c->dev.Reset(); c->dc.Reset(); }
+    return hr;
+}
+
 bool Init(Ctx *c) {
     const Api &api = GetApi();
     if (!api.ok) { HrLog::Warn("Window capture: Windows.Graphics.Capture is not available on this system."); return false; }
@@ -380,19 +402,8 @@ bool Init(Ctx *c) {
     HrLog::Info("WGC init: RoInitialize");
     api.RoInitialize(1 /*RO_INIT_MULTITHREADED*/);   // harmless if the thread is already an STA (RPC_E_CHANGED_MODE)
 
-    // WGC needs Windows 10 1903+ (HrWgcSupported()), where the default feature-level list already
-    // contains 11_1, so none is passed.
     HrLog::Info("WGC init: D3D11CreateDevice");
-    HRESULT hr = api.CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                  nullptr, 0, D3D11_SDK_VERSION,
-                                  c->dev.GetAddressOf(), nullptr, c->dc.GetAddressOf());
-    if (FAILED(hr)) {
-        const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-        c->dev.Reset(); c->dc.Reset();
-        hr = api.CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                              levels, (UINT)(sizeof(levels) / sizeof(levels[0])), D3D11_SDK_VERSION,
-                              c->dev.GetAddressOf(), nullptr, c->dc.GetAddressOf());
-    }
+    HRESULT hr = CreateWgcDevice(c);
     if (FAILED(hr) || !c->dev || !c->dc) {
         HrLog::Warn("Window capture: D3D11CreateDevice failed (0x" + std::to_string((unsigned long)hr) + ").");
         return false;
