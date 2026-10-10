@@ -11,10 +11,12 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -78,13 +80,6 @@ struct HrSession3 : public HrInspectable {                 // IGraphicsCaptureSe
     virtual HRESULT STDMETHODCALLTYPE get_IsBorderRequired(BOOLEAN *) = 0;
     virtual HRESULT STDMETHODCALLTYPE put_IsBorderRequired(BOOLEAN) = 0;
 };
-struct HrMultithread : public IUnknown {                   // ID3D10Multithread / ID3D11Multithread
-    virtual void  STDMETHODCALLTYPE Enter() = 0;
-    virtual void  STDMETHODCALLTYPE Leave() = 0;
-    virtual BOOL  STDMETHODCALLTYPE SetMultithreadProtected(BOOL) = 0;
-    virtual BOOL  STDMETHODCALLTYPE GetMultithreadProtected() = 0;
-};
-const GUID kIidMultithread = {0x9B7E4E00, 0x342C, 0x4106, {0xA1, 0x9F, 0x4F, 0x27, 0x04, 0xF6, 0x89, 0xF0}};
 struct HrDxgiAccess : public IUnknown {                    // IDirect3DDxgiInterfaceAccess
     virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void **object) = 0;
 };
@@ -215,7 +210,10 @@ int           g_guard_depth = 0;      // number of WGC operations currently in f
 // (2 = first attempt: D3D11CreateDevice resolved from the export table - did not help.)
 // (3 = D3D11CreateDevice(nullptr adapter, DRIVER_TYPE_HARDWARE) crashed on some setups; now created on an
 //  explicit adapter exactly like dxgi_capture.cpp, see CreateWgcDevice().)
-constexpr char kGuardGen[] = "WGC-GUARD-GEN-3";
+// (4 = the crash was not in D3D11CreateDevice but right after it, in the ID3D11Multithread block, which is
+//  removed; device creation also runs contained on a helper thread now, see CreateWgcDevice().)
+#define HR_WGC_GUARD_GEN "WGC-GUARD-GEN-4"
+constexpr char kGuardGen[] = HR_WGC_GUARD_GEN;
 
 bool GuardTripped() {
     if (g_guard_state == 0) {
@@ -253,7 +251,7 @@ void GuardEnter() {
                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
-            static const char note[] = "WGC-GUARD-GEN-3\r\n"
+            static const char note[] = HR_WGC_GUARD_GEN "\r\n"
                                        "HomRec: native Windows.Graphics.Capture code was running when this file "
                                        "was written. If it still exists at the next start, that run crashed.\r\n";
             DWORD n = 0;
@@ -350,49 +348,215 @@ void Teardown(Ctx *c) {
     c->ok = false;
 }
 
-// Creates the D3D11 device WGC renders into.
+// ---------------------------------------------------------------------------------------------
+// D3D11 device WGC renders into - created on a helper thread, with a safety net.
 //
-// Crash history: both 2.4.0 crash dumps died with an execute (DEP) fault at "hr.exe base - 0x40000000"
-// straight out of D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, ...) - first through the import
-// table, then (2nd attempt) through the address read from d3d11.dll's export table, so the import
-// table was not the culprit. The same machine creates its capture device in dxgi_capture.cpp just
-// fine, and that call differs in exactly the way below: an explicit IDXGIAdapter1 from
-// CreateDXGIFactory1()/EnumAdapters1() with D3D_DRIVER_TYPE_UNKNOWN, and a non-null feature-level
-// out-pointer. (With a null adapter d3d11 enumerates adapters itself through a different internal
-// path.) Not proven to be the trigger, but it is the only difference, so do it the proven way: prefer the adapter
-// that drives the window's monitor, fall back to adapter 0, and as a last resort the old null-adapter
-// form is NOT tried (it is the crashing one) - failure just means "use the screen crop".
-HRESULT CreateWgcDevice(Ctx *c) {
-    ComPtr<IDXGIFactory1> factory;
-    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(factory.GetAddressOf()));
-    if (FAILED(hr) || !factory) return FAILED(hr) ? hr : E_FAIL;
+// Crash history (all four dumps, 2026-10-09 .. 10-10): execute (DEP) fault at "hr.exe base -
+// 0x40000000", GUI thread, return address inside Init(), last log line "WGC init: D3D11CreateDevice",
+// next breadcrumb ("D3D11 device ready") never written. Changing HOW D3D11CreateDevice is called (import
+// table, export table, null adapter, explicit adapter) changed nothing - because the call was not the
+// crash site: the 10 call arguments the earlier passes read off the stack are only the STALE outgoing
+// argument area of the D3D11CreateDevice call that had already returned (the Intel user-mode driver,
+// igd10iumd64 / igc64, is loaded in the dump, i.e. the device WAS created). What runs after it, still
+// inside the breadcrumb window, was the ID3D11Multithread QueryInterface + SetMultithreadProtected()
+// block - the only code in this window that the proven capture path in dxgi_capture.cpp never executes.
+// That block is gone (see Init()), and since the true cause cannot be proven from a dump without
+// symbols, device creation additionally runs here:
+//   * on its own short-lived thread - the GUI thread (wx, OLE STA, compat shims hooking it) is out of
+//     the picture;
+//   * under a vectored exception handler that recognises exactly one signature: an EXECUTE access
+//     violation on that thread (the CPU jumped to a non-executable address - never a legitimate,
+//     SEH-handled event). The handler parks the faulting thread forever (no DLL_THREAD_DETACH, no
+//     unwinding through driver frames), wakes the waiting caller, and the caller reports "WGC unusable"
+//     so the recording falls back to the screen crop instead of killing the process. Every other
+//     exception (including the first-chance AVs drivers handle internally) is left alone.
+// ---------------------------------------------------------------------------------------------
+constexpr DWORD kDeviceJobTimeoutMs = 30000;
 
-    // Adapter whose output shows the window (monitor of the window); adapter 0 otherwise.
-    ComPtr<IDXGIAdapter1> adapter;
-    const HMONITOR mon = MonitorFromWindow(c->hwnd, MONITOR_DEFAULTTOPRIMARY);
-    for (UINT ai = 0; mon; ++ai) {
-        ComPtr<IDXGIAdapter1> a;
-        if (factory->EnumAdapters1(ai, a.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
-        bool match = false;
-        for (UINT oi = 0; !match; ++oi) {
-            ComPtr<IDXGIOutput> out;
-            if (a->EnumOutputs(oi, out.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
-            DXGI_OUTPUT_DESC od{};
-            if (SUCCEEDED(out->GetDesc(&od)) && od.Monitor == mon) match = true;
-        }
-        if (match) { adapter = a; break; }
-    }
-    if (!adapter) {
-        hr = factory->EnumAdapters1(0, adapter.GetAddressOf());
-        if (FAILED(hr) || !adapter) return FAILED(hr) ? hr : E_FAIL;
-    }
+const char *const kDeviceStages[] = {
+    "not started", "CreateDXGIFactory1", "adapter selection", "D3D11CreateDevice",
+    "releasing adapter/factory", "done"};
 
+struct DeviceJob {
+    HWND          hwnd = nullptr;
+    HANDLE        done = nullptr;            // manual-reset event: job finished OR faulted
+    DWORD         tid = 0;                   // job thread (the VEH only reacts to this one)
+    volatile LONG stage = 0;                 // index into kDeviceStages: last step entered
+    volatile LONG finished = 0;
+    volatile LONG faulted = 0;
+    ULONG_PTR     fault_target = 0;          // address the CPU tried to execute
+    ULONG_PTR     fault_rsp = 0;
+    HRESULT       hr = E_FAIL;
     D3D_FEATURE_LEVEL fl = (D3D_FEATURE_LEVEL)0;
-    hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                           nullptr, 0, D3D11_SDK_VERSION,
-                           c->dev.ReleaseAndGetAddressOf(), &fl, c->dc.ReleaseAndGetAddressOf());
-    if (FAILED(hr)) { c->dev.Reset(); c->dc.Reset(); }
-    return hr;
+    std::string   adapter_name;
+    ComPtr<ID3D11Device>        dev;
+    ComPtr<ID3D11DeviceContext> dc;
+    ~DeviceJob() { if (done) CloseHandle(done); }
+};
+
+DeviceJob *volatile g_active_job = nullptr;   // the job the VEH watches (guarded by g_job_mu)
+std::mutex          g_job_mu;                 // one device job at a time
+
+std::string HexStr(unsigned long long v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "0x%llX", v);
+    return buf;
+}
+
+std::string NarrowForLog(const wchar_t *w) {
+    if (!w || !*w) return std::string();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return std::string();
+    std::string s((size_t)n - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+// Where a faulted job thread ends up: it sleeps forever. Deliberately NOT ExitThread/TerminateThread -
+// ExitThread would run DLL_THREAD_DETACH of d3d11 / the GPU driver on top of whatever state the fault
+// left behind, TerminateThread could leave a lock held. A parked thread costs a few KB.
+[[noreturn]] void ParkFaultedThread() {
+    for (;;) Sleep(INFINITE);
+}
+
+LONG CALLBACK DeviceJobVeh(PEXCEPTION_POINTERS ep) {
+    DeviceJob *j = g_active_job;
+    if (!j || GetCurrentThreadId() != j->tid) return EXCEPTION_CONTINUE_SEARCH;
+    const EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    // ExceptionInformation[0]: 0 = read, 1 = write, 8 = execute (DEP). Only "execute" is the bad-jump signature.
+    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 ||
+        er->ExceptionInformation[0] != 8)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    j->fault_target = er->ExceptionInformation[1];
+    j->fault_rsp = (ULONG_PTR)ep->ContextRecord->Rsp;
+    InterlockedExchange(&j->faulted, 1);
+
+    // Resume the thread in ParkFaultedThread() on a fresh, 16-byte-aligned spot below the fault
+    // (rsp % 16 == 8 as at any function entry), then wake the caller.
+    ep->ContextRecord->Rip = reinterpret_cast<DWORD64>(&ParkFaultedThread);
+    ep->ContextRecord->Rsp = ((ep->ContextRecord->Rsp - 0x400) & ~static_cast<DWORD64>(0xF)) - 8;
+    SetEvent(j->done);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// Called with g_job_mu held, so there is no race between "installed" and "usable".
+void EnsureDeviceJobVeh() {
+    static volatile LONG installed = 0;
+    if (InterlockedCompareExchange(&installed, 1, 0) == 0) AddVectoredExceptionHandler(1, DeviceJobVeh);
+}
+
+// The actual work - same call sequence as hr_dx_create() in dxgi_capture.cpp (explicit adapter,
+// D3D_DRIVER_TYPE_UNKNOWN, non-null feature-level out-pointer), which is proven on this machine.
+void RunDeviceJob(DeviceJob *j) {
+    j->stage = 1;
+    {
+        ComPtr<IDXGIFactory1> factory;
+        HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(factory.GetAddressOf()));
+        if (FAILED(hr) || !factory) { j->hr = FAILED(hr) ? hr : E_FAIL; return; }
+
+        // Adapter whose output shows the window (monitor of the window); adapter 0 otherwise.
+        j->stage = 2;
+        ComPtr<IDXGIAdapter1> adapter;
+        const HMONITOR mon = MonitorFromWindow(j->hwnd, MONITOR_DEFAULTTOPRIMARY);
+        for (UINT ai = 0; mon; ++ai) {
+            ComPtr<IDXGIAdapter1> a;
+            if (factory->EnumAdapters1(ai, a.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
+            bool match = false;
+            for (UINT oi = 0; !match; ++oi) {
+                ComPtr<IDXGIOutput> out;
+                if (a->EnumOutputs(oi, out.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
+                DXGI_OUTPUT_DESC od{};
+                if (SUCCEEDED(out->GetDesc(&od)) && od.Monitor == mon) match = true;
+            }
+            if (match) { adapter = a; break; }
+        }
+        if (!adapter) {
+            hr = factory->EnumAdapters1(0, adapter.GetAddressOf());
+            if (FAILED(hr) || !adapter) { j->hr = FAILED(hr) ? hr : E_FAIL; return; }
+        }
+        {
+            DXGI_ADAPTER_DESC1 ad{};
+            if (SUCCEEDED(adapter->GetDesc1(&ad))) j->adapter_name = NarrowForLog(ad.Description);
+        }
+
+        j->stage = 3;
+        ComPtr<ID3D11Device> dev;
+        ComPtr<ID3D11DeviceContext> dc;
+        D3D_FEATURE_LEVEL fl = (D3D_FEATURE_LEVEL)0;
+        hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                               nullptr, 0, D3D11_SDK_VERSION, dev.GetAddressOf(), &fl, dc.GetAddressOf());
+        j->fl = fl;
+        if (SUCCEEDED(hr) && dev && dc) {
+            j->dev = std::move(dev);
+            j->dc = std::move(dc);
+            j->hr = S_OK;
+        } else {
+            j->hr = FAILED(hr) ? hr : E_FAIL;
+        }
+        j->stage = 4;
+    }   // adapter + factory are released here
+    j->stage = 5;
+}
+
+DWORD WINAPI DeviceJobThread(LPVOID param) {
+    auto *holder = static_cast<std::shared_ptr<DeviceJob> *>(param);
+    std::shared_ptr<DeviceJob> j = *holder;       // keeps the job alive even if the caller gave up waiting
+    delete holder;
+    RunDeviceJob(j.get());
+    InterlockedExchange(&j->finished, 1);
+    SetEvent(j->done);
+    return 0;
+}
+
+// Creates c->dev / c->dc. Failure (including a contained fault or a timeout) just means "no WGC".
+HRESULT CreateWgcDevice(Ctx *c) {
+    std::lock_guard<std::mutex> lk(g_job_mu);
+    EnsureDeviceJobVeh();
+
+    auto job = std::make_shared<DeviceJob>();
+    job->hwnd = c->hwnd;
+    job->done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!job->done) return HRESULT_FROM_WIN32(GetLastError());
+
+    auto *holder = new std::shared_ptr<DeviceJob>(job);
+    DWORD tid = 0;
+    HANDLE th = CreateThread(nullptr, 0, DeviceJobThread, holder, CREATE_SUSPENDED, &tid);
+    if (!th) {
+        const DWORD err = GetLastError();
+        delete holder;
+        return HRESULT_FROM_WIN32(err);
+    }
+    job->tid = tid;                 // set while the thread is still suspended: the VEH can never miss it
+    g_active_job = job.get();
+    ResumeThread(th);
+    const DWORD w = WaitForSingleObject(job->done, kDeviceJobTimeoutMs);
+    g_active_job = nullptr;
+    CloseHandle(th);
+
+    const LONG st = job->stage;
+    const char *stage_name = (st >= 0 && st < (LONG)(sizeof(kDeviceStages) / sizeof(kDeviceStages[0])))
+                                 ? kDeviceStages[st] : "?";
+    if (job->faulted) {
+        HrLog::Warn("Window capture: the D3D11 device creation jumped to an invalid address (" +
+                    HexStr(job->fault_target) + ", stack " + HexStr(job->fault_rsp) + ") in step '" +
+                    stage_name + "'. The fault was contained (helper thread parked), "
+                    "Windows.Graphics.Capture is NOT used - falling back to the screen crop.");
+        return E_FAIL;
+    }
+    if (w != WAIT_OBJECT_0 || !job->finished) {
+        HrLog::Warn("Window capture: the D3D11 device creation did not finish within " +
+                    std::to_string(kDeviceJobTimeoutMs / 1000) + " s (stuck in step '" + stage_name +
+                    "') - falling back to the screen crop.");
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    }
+    if (FAILED(job->hr)) return job->hr;
+
+    c->dev = std::move(job->dev);
+    c->dc = std::move(job->dc);
+    HrLog::Info("WGC init: D3D11 device created on adapter '" + job->adapter_name + "', feature level " +
+                HexStr((unsigned long long)job->fl));
+    return S_OK;
 }
 
 bool Init(Ctx *c) {
@@ -409,13 +573,12 @@ bool Init(Ctx *c) {
         return false;
     }
 
-    {   // WGC uses the device from its own threads too - serialise access to the immediate context.
-        HrMultithread *mt = nullptr;
-        if (SUCCEEDED(c->dev->QueryInterface(kIidMultithread, reinterpret_cast<void **>(&mt))) && mt) {
-            mt->SetMultithreadProtected(TRUE);
-            mt->Release();
-        }
-    }
+    // No ID3D11Multithread::SetMultithreadProtected() here any more. It was the only code between the
+    // "D3D11CreateDevice" and "D3D11 device ready" breadcrumbs that the working capture path never runs,
+    // and the 2026-10-09/10 dumps die in exactly that window (see CreateWgcDevice()). It is also not
+    // needed: the immediate context is only touched by HrWgcCapture()/Teardown(), always under c->mu and
+    // on one thread at a time, and the frame pool is polled with TryGetNextFrame() (no FrameArrived
+    // handler is registered, so WGC never runs code on our context from a thread of its own).
     HrLog::Info("WGC init: D3D11 device ready, creating the WinRT device");
     ComPtr<IDXGIDevice> dxgi;
     if (FAILED(c->dev.As(&dxgi))) return false;
