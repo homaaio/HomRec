@@ -3,6 +3,33 @@ welcome to changelog :D
 [Version 2.4.0] - (2026-10-05)
 Window capture, MKV, dockable panels, a new Audio Mixer.
 
+Crash fix (2026-10-10, fourth pass) - recording a separate Chrome window crashed again (dump crash_20261010_114742.dmp)
+- The third-pass build still died at the log line "WGC init: D3D11CreateDevice" (execute (DEP) fault at "hr.exe base -
+    0x40000000", GUI thread, return address inside WGC Init()), so changing the shape of the D3D11CreateDevice call
+    (passes 2 and 3) was not the fix. Re-reading the dump: the 10 "call arguments" the earlier passes found on the stack
+    are only the STALE outgoing-argument area of a D3D11CreateDevice call that had already returned - the Intel
+    user-mode driver (igd10iumd64 / igdgmm64 / igc64 / DXCore) is loaded in the process, i.e. the device was created
+    - and the crash call sits at the same stack depth, after it. The next breadcrumb ("D3D11 device ready") was never
+    written, so the fault is in the code between the two breadcrumbs that runs AFTER the device exists. The only code
+    there that the working capture path (dxgi_capture.cpp / hr_dx_create) never executes is the ID3D11Multithread
+    QueryInterface + SetMultithreadProtected(TRUE) block.
+    NOT proven: there are no symbols and hr.exe is not in the dump, the exact instruction cannot be named.
+- Fixed (src/core/wgc_capture.cpp, Init()): removed the ID3D11Multithread block. It is not needed: the immediate context
+    is only used by HrWgcCapture()/Teardown() under the per-context mutex on one thread at a time, and the frame pool is
+    polled with TryGetNextFrame() (no FrameArrived handler, so WGC never runs code on our context from its own thread).
+- Fixed (src/core/wgc_capture.cpp, CreateWgcDevice()): device creation (CreateDXGIFactory1, adapter pick, D3D11CreateDevice,
+    release of adapter/factory) now runs on its own short-lived thread, same call sequence as hr_dx_create(). A vectored
+    exception handler watches that thread for exactly one signature - an EXECUTE access violation (jump to a
+    non-executable address) - parks the thread forever (no unwinding / DLL_THREAD_DETACH through driver frames) and wakes
+    the caller, which reports "WGC unusable" so the recording uses the screen crop instead of killing the process. Other
+    exceptions (e.g. first-chance AVs that drivers handle internally) are not touched. A hang is cut off after 30 s.
+- New log lines: "WGC init: D3D11 device created on adapter '<name>', feature level 0x..." on success; on a contained
+    fault "the D3D11 device creation jumped to an invalid address (0x..., stack 0x...) in step '<step>' ...".
+- wgc_guard.flag generation bumped to WGC-GUARD-GEN-4: the GEN-3 flag left by this crash is deleted at the next start
+    ("cleared a crash flag left by an older HomRec build"), so WGC is tried again without touching Settings.
+- If the log shows the "contained" line: send homrec.log - the step name says where it jumped; window recording then
+    keeps working through the screen crop.
+
 Crash fix (2026-10-09, third pass) - WGC still crashed in D3D11CreateDevice (dump crash_20261009_141144.dmp)
 - The second-pass build still died at the log line "WGC init: D3D11CreateDevice": execute (DEP) fault at
     "hr.exe base - 0x40000000", GUI thread, return address inside WGC Init(). The 10 call arguments are still on the
