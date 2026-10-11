@@ -3,6 +3,53 @@ welcome to changelog :D
 [Version 2.4.0] - (2026-10-05)
 Window capture, MKV, dockable panels, a new Audio Mixer.
 
+Window capture without WinRT, lower CPU (2026-10-11, sixth pass)
+- Log facts (homrec.log 2026-10-11): the contained fault is identical on every start - "jumped to an invalid address ... in step
+    'CreateForWindow'" (return address hr.exe+0x12C844). It happens with and without compatibility shims loaded, so the shims are not
+    the cause. Native WGC is simply unusable on this PC, and after the fault window recording used the SCREEN CROP: for a maximized
+    Chrome that is 1600x860 of a 1600x900 screen = "the whole screen is recorded". (The 10:47 recording at 1600x900 had no window
+    selected at all - capture_mode=desktop was saved by the picker.)
+- Added (src/core/wgc_capture.cpp): PrintWindow backend. Same API as the WGC source (HrWgcCreate/Capture/Reset/Destroy), so the pipeline,
+    encoder, overlays and pause logic need no change. It records ONE window through PrintWindow(PW_RENDERFULLCONTENT) - other windows on
+    top of it, the taskbar and HomRec itself are not in the picture. Plain Win32/GDI, no hand-written COM. Cursor is drawn by us.
+- Changed (src/core/wgc_capture.cpp): HrWgcCreate() tries native WGC first (contained); if it faults / times out / is refused it writes
+    logs\wgc_native_bad.flag and returns a PrintWindow source in the same call, so the recording does NOT fall back to the screen crop.
+    Next starts skip the native attempt. HrWgcSupported() is now true whenever PrintWindow is available (Windows 8.1+).
+- Changed (src/core/wgc_capture.cpp): HrWgcResetCrashGuard() (Settings > General > Window capture > re-select) also clears
+    wgc_native_bad.flag and the in-process "WGC disabled" state, so native WGC gets another chance.
+- Note: PrintWindow has no GPU zero-copy path, so a window recording costs more CPU than a desktop recording (desktop recording can use
+    the full-GPU ddagrab path, window recording cannot).
+- Config (homrec.hrc): gpu_capture_ddagrab=1 - desktop recordings are captured, converted and encoded by ffmpeg on the GPU (no readback,
+    no HomRec capture pipeline, no frame queue in RAM). Falls back automatically if this ffmpeg has no ddagrab (see homrec.log).
+
+Crash fix (2026-10-10, fifth pass) - recording a separate window still crashed (dump crash_20261010_174951.dmp)
+- Dump facts: execute (DEP) fault at "hr.exe base - 0x40000000" again (base 0x7FF72F4C0000, target 0x7FF6EF4C0000), GUI
+    thread, return address hr.exe+0x12EE4D inside WGC Init() (its caller hr.exe+0x12F2B7 is HrWgcCreate), last log line
+    "WGC init: CreateForWindow". The fourth-pass device thread worked ("D3D11 device created on adapter 'Intel(R) UHD
+    Graphics'"), so the crash did not go away - it moved on to the next native call made from the GUI thread. AcLayers.dll +
+    apphelp.dll (Windows compatibility shims) are loaded in the process, as in every earlier dump. hr.exe+0x34A740 in the dump
+    is the static WGC API table (all five pointers valid), so the late-bound entry points are fine.
+- NOT proven (still no symbols, hr.exe is not in the dump): which single call jumps to the bad address. What the five dumps
+    do prove is that fixing one call at a time does not work - the same bad jump follows the GUI thread to the next call.
+- Fixed (src/core/wgc_capture.cpp): the WHOLE of Init() (device, WinRT device, GraphicsCaptureItem, CreateForWindow, frame pool,
+    session, StartCapture) now runs on its own short-lived MTA thread (InitContained / InitImpl) instead of the GUI thread. The
+    GUI thread only waits (20 s timeout). The vectored exception handler from the fourth pass now guards that thread: an
+    EXECUTE access violation parks the thread, wakes the caller, WGC reports "unusable" and the recording uses the screen crop -
+    the process no longer dies. A contained fault or timeout switches WGC off until HomRec is restarted (HrWgcSupported()).
+- Fixed (src/core/wgc_capture.cpp): after a contained fault / timeout the half-built WinRT objects and the context are
+    abandoned on purpose (never Release()d / freed) - touching them again is what could crash a second time.
+- Added (src/core/wgc_capture.cpp): step breadcrumbs. A contained fault / hang is logged with the exact step ("CreateForWindow",
+    "CreateFreeThreaded", ...), the bad address and the return address as module+offset (resolve hr.exe+0x... with hr.map).
+- Added (src/core/wgc_capture.cpp): the log now says when compatibility shims are active (AcLayers/AcGenral DLLs loaded,
+    __COMPAT_LAYER, HKCU/HKLM AppCompatFlags\Layers entry for hr.exe) - check hr.exe > Properties > Compatibility and untick
+    everything ("Disable fullscreen optimizations", compatibility mode, DPI override) if that line appears.
+- Added (src/core/wgc_capture.cpp): CoIncrementMTAUsage() once, so the MTA the WGC objects live in outlives the init thread.
+- Changed (src/core/wgc_capture.cpp): CreateWgcDevice() is synchronous again (it already runs on the init thread); the separate
+    DeviceJob thread of the fourth pass is gone. wgc_guard.flag generation bumped to WGC-GUARD-GEN-5, so the GEN-4 flag left by
+    this crash is deleted at the next start and WGC is tried again.
+- If the log shows "jumped to an invalid address ... in step '<x>'": send homrec.log (and hr.map of that build) - the step and the
+    return address name the call.
+
 Crash fix (2026-10-10, fourth pass) - recording a separate Chrome window crashed again (dump crash_20261010_114742.dmp)
 - The third-pass build still died at the log line "WGC init: D3D11CreateDevice" (execute (DEP) fault at "hr.exe base -
     0x40000000", GUI thread, return address inside WGC Init()), so changing the shape of the D3D11CreateDevice call
