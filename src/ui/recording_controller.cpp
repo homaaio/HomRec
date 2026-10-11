@@ -497,6 +497,8 @@ void RecordingController::ResolveCaptureSize() {
     bool have_target = false;
     bool is_window = (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty());
     bool is_region = (state_.capture_mode == CaptureMode::Region && state_.region_w > 0 && state_.region_h > 0);
+    HrLog::Info("Capture target resolve: mode=" + HrCaptureModeToStr(state_.capture_mode) + ", window='" +
+                state_.capture_window_title + "', hwnd=" + std::to_string((unsigned long long)(uintptr_t)state_.capture_window_hwnd));
 
     HWND capture_hwnd = nullptr;
     if (is_window) {
