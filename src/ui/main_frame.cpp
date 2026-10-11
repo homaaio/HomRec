@@ -13,6 +13,7 @@
 #include "hrc_config.h"
 #include "win32_theme.h"
 #include "../utils/log.h"
+#include "../utils/str_convert.h"   // HrCaptureModeToStr() for the picker log line
 #include "../utils/pc_log.h"
 #include "../utils/plugin_log.h"
 #include "../utils/update.h"
@@ -2416,7 +2417,8 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         case ID_FILE_SELECT_WINDOW:
             HrLog::Info("UI: window picker opened");
             ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
-            HrLog::Info("UI: window picker closed");
+            HrLog::Info("UI: window picker closed -> capture_mode=" + HrCaptureModeToStr(state_.capture_mode) +
+                        ", window='" + state_.capture_window_title + "'");
             OnCaptureTargetChanged();
             break;
         case ID_FILE_SELECT_REGION:
