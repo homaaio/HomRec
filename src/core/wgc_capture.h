@@ -14,8 +14,10 @@
 //   * window got bigger    -> scaled down to fit, aspect ratio kept, black bars
 // so the recording's resolution never changes mid-file but the WHOLE window stays visible.
 //
-// Needs Windows 10 version 1903 (build 18362); HrWgcSupported() says whether it can work here. If
-// anything fails at HrWgcCreate() the caller falls back to the old screen-crop path.
+// Needs Windows 10 version 1903 (build 18362) for native WGC; where that is unusable (or has faulted on
+// this PC) HrWgcCreate() hands out a PrintWindow-based source instead (Windows 8.1+, same API, more CPU).
+// HrWgcSupported() says whether either can work here. If both fail the caller falls back to the old
+// screen-crop path.
 #pragma once
 #include <cstdint>
 #include <windows.h>

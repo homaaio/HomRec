@@ -321,6 +321,14 @@ struct Ctx {
 
     int  geom_w = -1, geom_h = -1;      // content size the canvas was last composed for
     std::vector<int> xmap;              // scratch for nearest-neighbour scaling
+
+    // ---- PrintWindow backend (no WinRT at all, see PwCapture()) ----
+    bool     pw = false;                // this context captures with PrintWindow, not Windows.Graphics.Capture
+    HDC      pw_dc = nullptr;
+    HBITMAP  pw_bmp = nullptr, pw_old = nullptr;
+    uint8_t *pw_bits = nullptr;         // top-down BGRA DIB section (pw_w x pw_h)
+    int      pw_w = 0, pw_h = 0;
+    bool     pw_fail_warned = false, pw_slow_warned = false;
 };
 
 // Registry of live contexts. shared_ptr: a caller that looked a handle up keeps the context alive
@@ -335,7 +343,16 @@ std::shared_ptr<Ctx> FindCtx(void *handle) {
     return nullptr;
 }
 
+void PwRelease(Ctx *c) {
+    if (c->pw_dc && c->pw_old) SelectObject(c->pw_dc, c->pw_old);
+    if (c->pw_bmp) DeleteObject(c->pw_bmp);
+    if (c->pw_dc) DeleteDC(c->pw_dc);
+    c->pw_dc = nullptr; c->pw_bmp = nullptr; c->pw_old = nullptr; c->pw_bits = nullptr;
+    c->pw_w = c->pw_h = 0;
+}
+
 void Teardown(Ctx *c) {
+    if (c->pw) PwRelease(c);
     if (c->session) { CloseAndRelease(c->session); }
     SafeRelease(c->session2);
     if (c->pool) { CloseAndRelease(c->pool); }
@@ -849,6 +866,221 @@ int ProcessFrame(Ctx *c, HrFrame *frame, uint8_t *out) {
     return kOk;
 }
 
+// ---------------------------------------------------------------------------------------------
+// PrintWindow backend (2.4.1) - "record ONE window" WITHOUT any hand-written WinRT call.
+//
+// Why it exists: on some PCs the native Windows.Graphics.Capture setup above jumps to an invalid
+// address inside CreateForWindow (six crash dumps / log lines, identical every time, see
+// CHANGELOG 2.4.0 crash passes 1-5). The fault is contained, but then window recording used to fall
+// back to the SCREEN CROP - which for a maximized window is practically the whole screen plus
+// everything that lies on top of it ("I select Chrome and the entire screen is recorded").
+//
+// PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT) (Windows 8.1+) asks DWM for the window's own
+// composited picture, so the result is that ONE window - not the desktop under its rectangle - even
+// when other windows cover it. It is plain Win32/GDI: nothing in here can take the process down the
+// way the WinRT path did. The price is CPU: the picture is read back and converted on the CPU (the
+// same path WGC frames already took), so it is the fallback, not the first choice.
+// ---------------------------------------------------------------------------------------------
+#ifndef PW_RENDERFULLCONTENT
+#define PW_RENDERFULLCONTENT 0x00000002
+#endif
+
+bool PwAvailable() {
+    using RtlGetVersionFn = LONG(WINAPI *)(OSVERSIONINFOW *);
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    if (!nt) return false;
+    auto fn = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(nt, "RtlGetVersion"));
+    if (!fn) return false;
+    OSVERSIONINFOW vi{};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    if (fn(&vi) != 0) return false;
+    return vi.dwMajorVersion > 6 || (vi.dwMajorVersion == 6 && vi.dwMinorVersion >= 3);   // 8.1+
+}
+
+// Draws the live mouse cursor into the DIB - PrintWindow never includes it. Only when the cursor is
+// really over THIS window (not over something that happens to lie on top of it).
+void PwDrawCursor(Ctx *c, const RECT &wr) {
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
+    if (!PtInRect(&wr, ci.ptScreenPos)) return;
+    HWND under = WindowFromPoint(ci.ptScreenPos);
+    if (!under || GetAncestor(under, GA_ROOT) != GetAncestor(c->hwnd, GA_ROOT)) return;
+    int hx = 0, hy = 0;
+    ICONINFO ii{};
+    if (GetIconInfo(ci.hCursor, &ii)) {
+        hx = (int)ii.xHotspot; hy = (int)ii.yHotspot;
+        if (ii.hbmMask)  DeleteObject(ii.hbmMask);
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    }
+    DrawIconEx(c->pw_dc, ci.ptScreenPos.x - wr.left - hx, ci.ptScreenPos.y - wr.top - hy,
+               ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
+}
+
+// One frame via PrintWindow. Called with c->mu held. Same return codes as HrWgcCapture().
+int PwCapture(Ctx *c, uint8_t *out) {
+    if (!IsWindow(c->hwnd)) return kError;
+    if (IsIconic(c->hwnd)) return kTimeout;                 // a minimised window has nothing to draw
+
+    RECT wr{};
+    if (!GetWindowRect(c->hwnd, &wr)) return kError;
+    const int ww = (int)(wr.right - wr.left), wh = (int)(wr.bottom - wr.top);
+    if (ww < 2 || wh < 2 || ww > 16384 || wh > 16384) return kTimeout;
+
+    if (!c->pw_dc) {
+        HDC screen = GetDC(nullptr);
+        c->pw_dc = CreateCompatibleDC(screen);
+        ReleaseDC(nullptr, screen);
+        if (!c->pw_dc) return kError;
+    }
+    if (!c->pw_bmp || c->pw_w != ww || c->pw_h != wh) {     // first frame, or the window was resized
+        if (c->pw_bmp) {
+            SelectObject(c->pw_dc, c->pw_old);
+            DeleteObject(c->pw_bmp);
+            c->pw_bmp = nullptr; c->pw_bits = nullptr; c->pw_old = nullptr;
+        }
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = ww;
+        bi.bmiHeader.biHeight = -wh;                        // negative = top-down rows
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void *bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(c->pw_dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!bmp || !bits) { if (bmp) DeleteObject(bmp); return kError; }
+        c->pw_bmp = bmp;
+        c->pw_old = static_cast<HBITMAP>(SelectObject(c->pw_dc, bmp));
+        c->pw_bits = static_cast<uint8_t *>(bits);
+        c->pw_w = ww; c->pw_h = wh;
+    }
+
+    // Win10/11 windows have an invisible resize border that DWM never paints: start from black so it
+    // can't show stale pixels (it is cropped away below anyway unless the frame bounds say otherwise).
+    std::memset(c->pw_bits, 0, (size_t)ww * wh * 4);
+
+    const DWORD t0 = GetTickCount();
+    const BOOL ok = PrintWindow(c->hwnd, c->pw_dc, PW_RENDERFULLCONTENT);
+    const DWORD took = GetTickCount() - t0;
+    if (!ok) {
+        if (!c->pw_fail_warned) {
+            c->pw_fail_warned = true;
+            HrLog::Warn("Window capture (PrintWindow): Windows refused to draw this window - the last picture is repeated until it works.");
+        }
+        return kTimeout;
+    }
+    if (took > 250 && !c->pw_slow_warned) {
+        c->pw_slow_warned = true;
+        HrLog::Warn("Window capture (PrintWindow): the window needs " + std::to_string(took) +
+                    " ms to draw itself - the recording will drop frames while it is that slow.");
+    }
+    if (c->cursor) PwDrawCursor(c, wr);
+
+    // The part of the window that gets recorded (whole window = DWM frame bounds, or just the client
+    // area), expressed relative to the GetWindowRect() bitmap above.
+    int rx = 0, ry = 0, rw = ww, rh = wh;
+    RECT frame{}, client{};
+    if (WindowRects(c->hwnd, frame, client)) {
+        const RECT &want = c->client_only ? client : frame;
+        rx = (int)(want.left - wr.left); ry = (int)(want.top - wr.top);
+        rw = (int)(want.right - want.left); rh = (int)(want.bottom - want.top);
+    }
+    if (rx < 0) { rw += rx; rx = 0; }
+    if (ry < 0) { rh += ry; ry = 0; }
+    if (rx + rw > ww) rw = ww - rx;
+    if (ry + rh > wh) rh = wh - ry;
+    rw &= ~1; rh &= ~1;
+    if (rw < 2 || rh < 2) return kTimeout;
+
+    // Always reported as a NEW frame, even when the picture is identical to the last one: the pipeline
+    // counts every "no new frame" (timeout) answer as a dropped frame in classic (non-GPU) mode, which
+    // would put a false "System overloaded - dropping frames" banner on any static page.
+    Compose(c, c->pw_bits + ((size_t)ry * ww + rx) * 4, ww * 4, rw, rh, out);
+    return kOk;
+}
+
+// ---- "native" (WinRT) Windows.Graphics.Capture: is it allowed to run in this process? ----------
+// Separate from PrintWindow: after a crash / contained fault the native path stays off, but window
+// recording itself stays available through PrintWindow.
+std::wstring NativeBadPath() { return HrLogPaths::LogFilePath(L"wgc_native_bad.flag"); }
+volatile LONG g_native_bad = -1;      // -1 = not looked yet, 0 = fine, 1 = a contained fault happened on this PC
+
+bool NativeMarkedBad() {
+    if (g_native_bad < 0) {
+        bool bad = false;
+        const std::wstring path = NativeBadPath();
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            char buf[256] = {};
+            DWORD n = 0;
+            ReadFile(h, buf, sizeof(buf) - 1, &n, nullptr);
+            CloseHandle(h);
+            buf[n < sizeof(buf) ? n : sizeof(buf) - 1] = '\0';
+            if (std::strstr(buf, kGuardGen)) bad = true;      // written by this generation of the code
+            else DeleteFileW(path.c_str());                   // an older build's verdict - give WGC another go
+        }
+        InterlockedCompareExchange(&g_native_bad, bad ? 1 : 0, -1);
+    }
+    return g_native_bad == 1;
+}
+
+void MarkNativeBad() {
+    InterlockedExchange(&g_native_bad, 1);
+    HANDLE h = CreateFileW(NativeBadPath().c_str(), GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        static const char note[] = HR_WGC_GUARD_GEN "\r\n"
+            "HomRec: native Windows.Graphics.Capture faulted on this PC (see homrec.log). Window recording uses the "
+            "PrintWindow backend instead. Delete this file (or re-select the window capture method in Settings) to retry.\r\n";
+        DWORD n = 0;
+        WriteFile(h, note, (DWORD)(sizeof(note) - 1), &n, nullptr);
+        CloseHandle(h);
+    }
+}
+
+bool NativeWgcAllowed() {
+    if (GuardTripped()) return false;           // the previous run died inside native WGC
+    if (g_session_disabled) return false;       // a fault/hang was contained earlier in THIS run
+    if (NativeMarkedBad()) return false;        // ... or in an earlier run: don't walk into it again
+    // The very first call loads combase.dll / d3d11.dll and resolves the WinRT entry points.
+    static volatile LONG api_ready = 0;
+    if (!api_ready) {
+        GuardScope g;
+        const bool ok = OsBuildAtLeast(18362) && GetApi().ok;
+        InterlockedExchange(&api_ready, 1);
+        return ok;
+    }
+    return OsBuildAtLeast(18362) && GetApi().ok;
+}
+
+std::shared_ptr<Ctx> MakeCtx(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor) {
+    auto sp = std::make_shared<Ctx>();
+    sp->hwnd = hwnd;
+    sp->canvas_w = canvas_w & ~1;
+    sp->canvas_h = canvas_h & ~1;
+    sp->client_only = client_only;
+    sp->cursor = draw_cursor;
+    return sp;
+}
+
+void *CreatePrintWindowCtx(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor) {
+    auto sp = MakeCtx(hwnd, canvas_w, canvas_h, client_only, draw_cursor);
+    Ctx *c = sp.get();
+    c->pw = true;
+    c->ok = true;
+    {
+        std::lock_guard<std::mutex> lk(g_registry_mu);
+        g_registry.push_back(sp);
+    }
+    HrLog::Info("Window capture: using the PrintWindow backend (" + std::to_string(c->canvas_w) + "x" +
+                std::to_string(c->canvas_h) + (client_only ? ", content area only" : ", whole window") +
+                ") - records this ONE window, even when other windows cover it. No GPU zero-copy, so it costs "
+                "more CPU than a desktop recording.");
+    return c;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -859,20 +1091,17 @@ void HrWgcResetCrashGuard() {
     if (g_guard_depth == 0) DeleteFileW(GuardPath().c_str());
     ReleaseSRWLockExclusive(&g_guard_lock);
     InterlockedExchange(&g_guard_state, 1);
+    // The user asked for another go at native WGC: forget the contained-fault verdicts as well.
+    DeleteFileW(NativeBadPath().c_str());
+    InterlockedExchange(&g_native_bad, 0);
+    InterlockedExchange(&g_session_disabled, 0);
 }
 
 bool HrWgcSupported() {
-    if (GuardTripped()) return false;           // the previous run crashed in here - stay on screen crop
-    if (g_session_disabled) return false;       // a fault/hang was contained earlier in THIS run
-    // The very first call loads combase.dll / d3d11.dll and resolves the WinRT entry points.
-    static volatile LONG api_ready = 0;
-    if (!api_ready) {
-        GuardScope g;
-        const bool ok = OsBuildAtLeast(18362) && GetApi().ok;
-        InterlockedExchange(&api_ready, 1);
-        return ok;
-    }
-    return OsBuildAtLeast(18362) && GetApi().ok;
+    // True when a window can be recorded as ITSELF: native Windows.Graphics.Capture if it is allowed to
+    // run, otherwise the PrintWindow backend (Windows 8.1+). Only when neither works does the caller
+    // fall back to the screen crop.
+    return NativeWgcAllowed() || PwAvailable();
 }
 
 bool HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h) {
@@ -902,32 +1131,35 @@ bool HrWgcProbeWindow(HWND hwnd) {
 
 void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor) {
     if (!hwnd || canvas_w < 2 || canvas_h < 2 || !HrWgcSupported()) return nullptr;
-    GuardScope guard;
-    auto sp = std::make_shared<Ctx>();
-    Ctx *c = sp.get();
-    c->hwnd = hwnd;
-    c->canvas_w = canvas_w & ~1;
-    c->canvas_h = canvas_h & ~1;
-    c->client_only = client_only;
-    c->cursor = draw_cursor;
-    const InitResult ir = InitContained(c);
-    if (ir != InitResult::kOk) {
+
+    if (NativeWgcAllowed()) {
+        GuardScope guard;
+        auto sp = MakeCtx(hwnd, canvas_w, canvas_h, client_only, draw_cursor);
+        Ctx *c = sp.get();
+        const InitResult ir = InitContained(c);
+        if (ir == InitResult::kOk) {
+            {
+                std::lock_guard<std::mutex> lk(g_registry_mu);
+                g_registry.push_back(sp);
+            }
+            HrLog::Info("Window capture: using Windows.Graphics.Capture (" + std::to_string(c->canvas_w) + "x" +
+                        std::to_string(c->canvas_h) + (client_only ? ", content area only" : ", whole window") + ").");
+            return c;
+        }
         if (ir == InitResult::kFaulted || ir == InitResult::kTimeout) {
             // The init thread is parked / still running and may still write into this context:
             // keep it alive for the rest of the process (deliberate leak) and never release its objects.
             new std::shared_ptr<Ctx>(sp);
-            return nullptr;
+            MarkNativeBad();
+            HrLog::Warn("Window capture: native Windows.Graphics.Capture is unusable on this PC (remembered in "
+                        "logs\\wgc_native_bad.flag) - recording the window with the PrintWindow backend instead of "
+                        "the screen crop.");
+        } else {
+            Teardown(c);         // a plain failure (e.g. Windows refused this window): sp frees the context
         }
-        Teardown(c);
-        return nullptr;          // sp frees the context
     }
-    {
-        std::lock_guard<std::mutex> lk(g_registry_mu);
-        g_registry.push_back(sp);
-    }
-    HrLog::Info("Window capture: using Windows.Graphics.Capture (" + std::to_string(c->canvas_w) + "x" +
-                std::to_string(c->canvas_h) + (client_only ? ", content area only" : ", whole window") + ").");
-    return c;
+    if (!PwAvailable()) return nullptr;
+    return CreatePrintWindowCtx(hwnd, canvas_w, canvas_h, client_only, draw_cursor);
 }
 
 bool HrWgcIsHandle(void *handle) {
@@ -959,7 +1191,9 @@ int HrWgcCapture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     for (;;) {
         {
             std::lock_guard<std::mutex> lk(c->mu);
-            if (c->dead || !c->ok || !c->pool) return kError;
+            if (c->dead || !c->ok) return kError;
+            if (c->pw) return PwCapture(c, out_bgra);   // PrintWindow: synchronous, the pipeline paces the calls
+            if (!c->pool) return kError;
 
             // Only the first frames are watched - once capture is proven to work there is no file churn.
             OptionalGuard guard(c->frames_ok < 3 && c->guard_calls++ < 20);
@@ -999,6 +1233,7 @@ int HrWgcReset(void *handle) {
     GuardScope guard;
     std::lock_guard<std::mutex> lk(sp->mu);
     if (sp->dead) return 0;
+    if (sp->pw) return 1;                 // PrintWindow has no device that can be lost
     Teardown(sp.get());
     const InitResult ir = InitContained(sp.get());
     if (ir == InitResult::kFaulted || ir == InitResult::kTimeout) {
