@@ -54,6 +54,34 @@ struct Src {
         o.rx = s.region_x; o.ry = s.region_y; o.rw = s.region_w; o.rh = s.region_h;
         return o;
     }
+    static Src From(const OverlayDef &ov, int monitor_id) {
+        Src o;
+        o.mode = ov.type == "region" ? CaptureMode::Region : CaptureMode::Window;
+        o.monitor_id = monitor_id;
+        o.title = ov.win_title; o.exe = ov.win_exe; o.cls = ov.win_class;
+        o.hwnd = ov.win_hwnd;
+        o.match_exe = ov.win_match_exe; o.match_class = ov.win_match_class; o.match_title = ov.win_match_title;
+        o.title_mode = ov.win_title_mode;
+        o.follow = ov.win_follow;
+        o.method = ov.win_method == "wgc" ? "wgc" : "screen";
+        o.area = ov.win_area == "client" ? "client" : "window";
+        o.smart = false;
+        o.fps_cap = ov.win_fps_cap;
+        o.rx = ov.rx; o.ry = ov.ry; o.rw = ov.rw; o.rh = ov.rh;
+        return o;
+    }
+
+    void ApplyTo(OverlayDef &ov) const {
+        ov.win_title = title; ov.win_exe = exe; ov.win_class = cls;
+        ov.win_hwnd = hwnd;
+        ov.win_match_exe = match_exe; ov.win_match_class = match_class; ov.win_match_title = match_title;
+        ov.win_title_mode = title_mode;
+        ov.win_follow = follow;
+        ov.win_method = method;
+        ov.win_area = area;
+        ov.win_fps_cap = fps_cap;
+        ov.rx = rx; ov.ry = ry; ov.rw = rw; ov.rh = rh;
+    }
 
     void ApplyTo(AppState &s) const {
         s.capture_mode = mode;
@@ -97,10 +125,17 @@ std::string Trim(const std::string &s) {
 
 class SourceDialog : public wxDialog {
 public:
-    SourceDialog(wxWindow *parent, const Src &src, const ThemeColors &theme, const LanguageTable &lang, int live_mode)
-        : wxDialog(parent, wxID_ANY, Tr("src_dialog_title", lang), wxDefaultPosition, wxDefaultSize,
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
-          lang_(lang), src_(src) {
+    // fixed: what this window edits - the Desktop layer (monitor), a window layer or a region layer. The
+    // radio buttons of the old one-source dialog are gone since the Desktop split (each kind has its own
+    // layer now), only the sections of the chosen kind are shown.
+    SourceDialog(wxWindow *parent, const Src &src, const ThemeColors &theme, const LanguageTable &lang, int live_mode,
+                 CaptureMode fixed)
+        : wxDialog(parent, wxID_ANY,
+                   Tr(fixed == CaptureMode::Window ? "src_layer_window_title"
+                      : fixed == CaptureMode::Region ? "src_layer_region_title" : "src_dialog_title", lang),
+                   wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
+          lang_(lang), src_(src), fixed_(fixed) {
+        src_.mode = fixed;
         bg_ = FromColorref(theme.bg);
         text_ = FromColorref(theme.text);
         dim_ = FromColorref(theme.text_secondary);
@@ -112,14 +147,20 @@ public:
         scroll_->SetBackgroundColour(bg_);
         scroll_->SetScrollRate(0, 12);
         auto *col = new wxBoxSizer(wxVERTICAL);
+        wxBoxSizer *root_col = col;
+        auto newSection = [&]() { auto *sec = new wxBoxSizer(wxVERTICAL); root_col->Add(sec, 0, wxEXPAND); return sec; };
 
-        // ---- what -----------------------------------------------------------------------------
+        // ---- what (hidden: kept only so the code below can stay as it was) ----------------------
+        wxBoxSizer *sec_what = newSection();
+        col = sec_what;
         Heading(col, T("src_what"));
         rb_desktop_ = Radio(col, T("src_desktop"), true);
         rb_window_ = Radio(col, T("src_window"), false);
         rb_region_ = Radio(col, T("src_region"), false);
 
         // ---- desktop: monitor -----------------------------------------------------------------
+        wxBoxSizer *sec_desktop = newSection();
+        col = sec_desktop;
         Heading(col, T("src_desktop_head"));
         {
             auto *row = new wxBoxSizer(wxHORIZONTAL);
@@ -142,7 +183,9 @@ public:
             col->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
         }
 
-        // ---- window ---------------------------------------------------------------------------
+        // ---- window (and how it is recorded) ----------------------------------------------------
+        wxBoxSizer *sec_window = newSection();
+        col = sec_window;
         Heading(col, T("src_window_head"));
         {
             auto *row = new wxBoxSizer(wxHORIZONTAL);
@@ -219,7 +262,8 @@ public:
         col->AddSpacer(6);
         chk_smart_ = Check(T("src_smart"), src_.smart);
         col->Add(chk_smart_, 0, wxLEFT | wxRIGHT, 16);
-        col->Add(Dim(T("src_smart_hint")), 0, wxLEFT | wxRIGHT, 36);
+        smart_hint_ = Dim(T("src_smart_hint"));
+        col->Add(smart_hint_, 0, wxLEFT | wxRIGHT, 36);
         col->AddSpacer(6);
         {
             auto *row = new wxBoxSizer(wxHORIZONTAL);
@@ -239,6 +283,8 @@ public:
         col->Add(retry_btn_, 0, wxLEFT | wxRIGHT, 16);
 
         // ---- region ---------------------------------------------------------------------------
+        wxBoxSizer *sec_region = newSection();
+        col = sec_region;
         Heading(col, T("src_region_head"));
         {
             auto *row = new wxBoxSizer(wxHORIZONTAL);
@@ -250,9 +296,20 @@ public:
             row->Add(pick_region_btn_, 0);
             col->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
         }
+        col = root_col;
         col->AddSpacer(12);
 
         scroll_->SetSizer(col);
+        root_col->Show(sec_what, false);
+        root_col->Show(sec_desktop, fixed_ == CaptureMode::Desktop);
+        root_col->Show(sec_window, fixed_ == CaptureMode::Window);
+        root_col->Show(sec_region, fixed_ == CaptureMode::Region);
+        if (fixed_ == CaptureMode::Window) {
+            // Smart mode would open a second screen duplication next to the recording's own one, so a
+            // window LAYER does not offer it: "the window itself" or "cut out of the screen picture".
+            chk_smart_->Hide();
+            smart_hint_->Hide();
+        }
         root->Add(scroll_, 1, wxEXPAND | wxALL, 4);
         root->Add(new wxStaticLine(this), 0, wxEXPAND);
         auto *btnRow = new wxBoxSizer(wxHORIZONTAL);
@@ -302,8 +359,7 @@ public:
     const Src &Collected() const { return src_; }
 
     void Collect() {
-        src_.mode = rb_window_->GetValue() ? CaptureMode::Window
-                  : rb_region_->GetValue() ? CaptureMode::Region : CaptureMode::Desktop;
+        src_.mode = fixed_;
         const int msel = monitor_choice_->GetSelection();
         src_.monitor_id = msel >= 0 ? msel + 1 : 1;
         src_.exe = LowerStr(Trim(edit_exe_->GetValue().ToUTF8().data()));
@@ -391,7 +447,8 @@ private:
     }
 
     void UpdateEnabled() {
-        const bool desk = rb_desktop_->GetValue(), win = rb_window_->GetValue(), reg = rb_region_->GetValue();
+        const bool desk = fixed_ == CaptureMode::Desktop, win = fixed_ == CaptureMode::Window,
+                   reg = fixed_ == CaptureMode::Region;
         monitor_choice_->Enable(desk);
         for (wxWindow *w : std::initializer_list<wxWindow *>{ pick_window_btn_, chk_exe_, chk_class_, chk_title_,
                                                                 chk_follow_, test_btn_, method_choice_, area_choice_,
@@ -465,6 +522,8 @@ private:
 
     const LanguageTable &lang_;
     Src src_;
+    CaptureMode fixed_ = CaptureMode::Desktop;
+    wxStaticText *smart_hint_ = nullptr;
     wxColour bg_, text_, dim_, accent_;
     wxScrolledWindow *scroll_ = nullptr;
     wxRadioButton *rb_desktop_ = nullptr, *rb_window_ = nullptr, *rb_region_ = nullptr;
@@ -480,14 +539,16 @@ private:
 
 bool ShowCaptureSourceDialog(wxWindow *parent, AppState &state, const ThemeColors &theme,
                              const LanguageTable &lang, int live_mode) {
+    const CaptureMode fixed_kind = CaptureMode::Desktop;
     const Src before = Src::From(state);
     Src work = before;
+    work.mode = fixed_kind;
     const HWND parent_hwnd = parent ? (HWND)parent->GetHandle() : nullptr;
 
     for (int guard = 0; guard < 64; ++guard) {
         int rc;
         {
-            SourceDialog dlg(parent, work, theme, lang, live_mode);
+            SourceDialog dlg(parent, work, theme, lang, live_mode, fixed_kind);
             rc = dlg.ShowModal();
             if (rc == wxID_OK || rc == kResultPickWindow || rc == kResultPickRegion) work = dlg.Collected();
         }
@@ -528,5 +589,44 @@ bool ShowCaptureSourceDialog(wxWindow *parent, AppState &state, const ThemeColor
                    (state.window_capture_smart ? "1" : "0") + ", fps cap=" + std::to_string(state.window_capture_fps_cap) +
                    ", region=" + std::to_string(state.region_x) + "," + std::to_string(state.region_y) + " " +
                    std::to_string(state.region_w) + "x" + std::to_string(state.region_h));
+    return true;
+}
+
+// 8th pass: settings of a window / region LAYER (same sections as the old one-source dialog, only those of
+// the layer's kind). The pickers run between two openings of the dialog exactly like above, on a scratch
+// AppState, so the real capture_mode (Desktop) is never touched.
+bool ShowLayerSourceDialog(wxWindow *parent, AppState &state, OverlayDef &ov, const ThemeColors &theme,
+                           const LanguageTable &lang) {
+    const CaptureMode kind = ov.type == "region" ? CaptureMode::Region : CaptureMode::Window;
+    const Src before = Src::From(ov, state.monitor_id);
+    Src work = before;
+    const HWND parent_hwnd = parent ? (HWND)parent->GetHandle() : nullptr;
+
+    for (int guard = 0; guard < 64; ++guard) {
+        int rc;
+        {
+            SourceDialog dlg(parent, work, theme, lang, /*live_mode=*/0, kind);
+            rc = dlg.ShowModal();
+            if (rc == wxID_OK || rc == kResultPickWindow || rc == kResultPickRegion) work = dlg.Collected();
+        }
+        if (rc == wxID_OK) break;
+        if (rc == kResultPickWindow || rc == kResultPickRegion) {
+            AppState scratch = state;
+            work.ApplyTo(scratch);
+            if (rc == kResultPickWindow) ShowWindowPickerDialog(parent_hwnd, wxGetInstance(), scratch);
+            else                         ShowRegionPickerOverlay(parent_hwnd, wxGetInstance(), scratch);
+            work = Src::From(scratch);
+            work.mode = kind;          // "full desktop" inside the window picker means nothing for a layer
+            continue;
+        }
+        return false;   // Cancel / [X]
+    }
+
+    if (work.SameAs(before)) return false;
+    work.ApplyTo(ov);
+    HrWgcLog::Note(std::string("Layer '") + ov.id + "' (" + ov.type + ") changed: window='" + ov.win_title + "' (" +
+                   ov.win_exe + " / " + ov.win_class + "), method=" + ov.win_method + ", area=" + ov.win_area +
+                   ", fps cap=" + std::to_string(ov.win_fps_cap) + ", region=" + std::to_string(ov.rx) + "," +
+                   std::to_string(ov.ry) + " " + std::to_string(ov.rw) + "x" + std::to_string(ov.rh));
     return true;
 }
