@@ -2,6 +2,7 @@
 #include "recording_controller.h"
 #include "themed_widgets.h"
 #include "hrc_config.h"
+#include "overlay_geometry.h"
 #include "../core/webcam_enum.h"
 #include "../core/input_overlay.h"
 #include <wx/dcbuffer.h>
@@ -173,6 +174,18 @@ private:
         dc.SetPen(*wxTRANSPARENT_PEN);
         dc.DrawRectangle(rx + rw - handle, ry + rh - handle, handle, handle);
         dc.DrawRectangle(rx, ry, handle, handle);
+
+        if (dragging_ && (snap_x_ || snap_y_)) {
+            dc.SetPen(wxPen(accent, 1, wxPENSTYLE_SHORT_DASH));
+            if (snap_x_) {
+                const int gx = imgRect.GetX() + imgRect.GetWidth() / 2;
+                dc.DrawLine(gx, imgRect.GetY(), gx, imgRect.GetBottom());
+            }
+            if (snap_y_) {
+                const int gy = imgRect.GetY() + imgRect.GetHeight() / 2;
+                dc.DrawLine(imgRect.GetX(), gy, imgRect.GetRight(), gy);
+            }
+        }
     }
 
     void OnLeftDown(wxMouseEvent &evt) {
@@ -217,21 +230,29 @@ private:
         int dy = (int)std::lround((evt.GetY() - drag_start_my_) / sy);
 
         int cw = NativeW(), ch = NativeH();
+        using namespace HrOverlayGeom;
+        const Rect start{drag_start_x_, drag_start_y_, drag_start_w_, drag_start_h_};
+        // Same rules as dragging on the live preview: Shift keeps the proportions (an overlay with
+        // "Keep proportions" ticked keeps them without Shift), dragging near the middle snaps to the
+        // exact centre (Alt = move freely), resizing never leaves the picture.
+        const bool keep = KeepAspect(ov_.lock_aspect, evt.ShiftDown());
+        snap_x_ = snap_y_ = false;
         if (drag_corner_ == Corner::kBottomRight) {
-            ov_.w = std::max(10, drag_start_w_ + dx);
-            ov_.h = std::max(10, drag_start_h_ + dy);
+            const Rect r = ResizeBottomRight(start, dx, dy, cw, ch, keep);
+            ov_.w = r.w; ov_.h = r.h;
         } else if (drag_corner_ == Corner::kTopLeft) {
-            int new_w = std::max(10, drag_start_w_ - dx);
-            int new_h = std::max(10, drag_start_h_ - dy);
-            int anchor_right  = drag_start_x_ + drag_start_w_;
-            int anchor_bottom = drag_start_y_ + drag_start_h_;
-            ov_.w = new_w;
-            ov_.h = new_h;
-            ov_.x = std::clamp(anchor_right - new_w, 0, std::max(0, cw - new_w));
-            ov_.y = std::clamp(anchor_bottom - new_h, 0, std::max(0, ch - new_h));
+            const Rect r = ResizeTopLeft(start, dx, dy, cw, ch, keep);
+            ov_.x = r.x; ov_.y = r.y; ov_.w = r.w; ov_.h = r.h;
         } else {
-            ov_.x = std::clamp(drag_start_x_ + dx, 0, std::max(0, cw - ov_.w));
-            ov_.y = std::clamp(drag_start_y_ + dy, 0, std::max(0, ch - ov_.h));
+            Rect r = start;
+            r.x += dx; r.y += dy;
+            ClampMove(r, cw, ch);
+            if (!evt.AltDown()) {
+                const int thr = std::max(2, (int)std::lround(8.0 / std::min(sx, sy)));
+                const Snap sn = SnapToCenter(r, cw, ch, thr);
+                snap_x_ = sn.x; snap_y_ = sn.y;
+            }
+            ov_.x = r.x; ov_.y = r.y;
         }
         if (on_moved) on_moved();
         Refresh();
@@ -242,6 +263,7 @@ private:
             if (HasCapture()) ReleaseMouse();
             dragging_ = false;
             drag_corner_ = Corner::kNone;
+            snap_x_ = snap_y_ = false;
             Refresh();
         }
         evt.Skip();
@@ -250,6 +272,7 @@ private:
     void OnCaptureLost(wxMouseCaptureLostEvent &) {
         dragging_ = false;
         drag_corner_ = Corner::kNone;
+        snap_x_ = snap_y_ = false;
         Refresh();
     }
 
@@ -268,6 +291,7 @@ private:
     int native_w_ = 0, native_h_ = 0;
     int cached_dst_w_ = -1, cached_dst_h_ = -1;
     bool dragging_ = false;
+    bool snap_x_ = false, snap_y_ = false;     // centre guides while the drag is snapped
     Corner drag_corner_ = Corner::kNone;
     int drag_start_mx_ = 0, drag_start_my_ = 0;
     int drag_start_x_ = 0, drag_start_y_ = 0, drag_start_w_ = 0, drag_start_h_ = 0;
@@ -330,8 +354,9 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
     AddSectionHeading(&dlg, root, accent, bg, "Position");
     root->AddSpacer(-2);
     auto *hint = new wxStaticText(&dlg, wxID_ANY,
-        "This is the overlay itself, shown over a screenshot \u2013 drag it to move, "
-        "drag a corner handle to resize. Refresh re-takes the screenshot.");
+        "This is the overlay itself, shown over a screenshot \u2013 drag it to move (it snaps to the exact "
+        "centre; hold Alt to move freely), drag a corner handle to resize (hold Shift to keep the "
+        "proportions). Refresh re-takes the screenshot.");
     hint->SetForegroundColour(text2);
     hint->SetBackgroundColour(bg);
     hint->Wrap(940);
@@ -376,6 +401,22 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
     opacitySlider->SetTheme(FromColorref(theme.surface_light), accent, FromColorref(theme.fg),
                              surface, text);
     grid->Add(opacitySlider, 1, wxEXPAND);
+
+    AddLabel(settingsScroll, grid, text, bg, "Resizing:");
+    auto *keepPropChk = new wxCheckBox(settingsScroll, wxID_ANY, "Keep proportions (Shift then resizes freely)");
+    keepPropChk->SetValue(working.lock_aspect);
+    keepPropChk->SetForegroundColour(text);
+    keepPropChk->SetBackgroundColour(bg);
+    keepPropChk->SetToolTip("Off: a corner drag stretches the overlay freely and Shift keeps the proportions.\n"
+                            "On: the proportions are always kept and Shift lets go of them.");
+    grid->Add(keepPropChk, 0);
+
+    AddLabel(settingsScroll, grid, text, bg, "Lock:");
+    auto *lockChk = new wxCheckBox(settingsScroll, wxID_ANY, "Lock position and size (no moving / resizing on the preview)");
+    lockChk->SetValue(working.locked);
+    lockChk->SetForegroundColour(text);
+    lockChk->SetBackgroundColour(bg);
+    grid->Add(lockChk, 0);
 
     // Type-specific fields.
     wxTextCtrl *textCtrl = nullptr;
@@ -549,6 +590,8 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
         working.visible = visibleChk->GetValue();
         canvas->Refresh();
     });
+    keepPropChk->Bind(wxEVT_CHECKBOX, [&](wxCommandEvent &) { working.lock_aspect = keepPropChk->GetValue(); });
+    lockChk->Bind(wxEVT_CHECKBOX, [&](wxCommandEvent &) { working.locked = lockChk->GetValue(); });
     opacitySlider->Bind(wxEVT_SLIDER, [&](wxCommandEvent &) {
         working.opacity = opacitySlider->GetValue();
         canvas->Refresh();
