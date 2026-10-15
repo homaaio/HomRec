@@ -37,8 +37,20 @@ bool  HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h);
 // elevated / odd windows refuse). No device or session is created.
 bool  HrWgcProbeWindow(HWND hwnd);
 
-// Returns nullptr on failure (details are logged).
-void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor);
+// 7th pass options of the PrintWindow backend (native WGC ignores them).
+//   smart   - while nothing covers the window its picture is cut out of a cheap screen duplication (the
+//             same cost as a desktop recording, and nothing is recomputed while nothing changes); the
+//             moment another window overlaps it, it switches to the exact capture (PrintWindow) and back.
+//   fps_cap - upper limit of exact captures per second (PrintWindow is expensive and makes the target
+//             window redraw itself); 0 = no limit beyond the recording's own frame rate.
+struct HrWgcOptions {
+    bool smart   = true;
+    int  fps_cap = 0;
+};
+
+// Returns nullptr on failure (details are logged to logs\wgc.log and homrec.log).
+void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor,
+                  const HrWgcOptions *opt = nullptr);
 void  HrWgcDestroy(void *handle);
 bool  HrWgcIsHandle(void *handle);
 
@@ -48,3 +60,12 @@ int   HrWgcCapture(void *handle, uint8_t *out_bgra, int timeout_ms);
 int   HrWgcGetSize(void *handle, int *w, int *h);      // the canvas size
 int   HrWgcReset(void *handle);                         // rebuilds device + session; 1 = ok
 void  HrWgcSetCursor(void *handle, bool on);
+
+// 7th pass: point a running window source at another window (the program opened a new main window, the
+// window was re-created...). Only the PrintWindow / smart backends can follow; native WGC is bound to
+// its window and returns false. The canvas keeps its size (the new window is fitted into it).
+bool  HrWgcSetTarget(void *handle, HWND hwnd);
+
+// What this source is doing right now: 0 = unknown handle, 1 = native Windows.Graphics.Capture,
+// 2 = exact window capture (PrintWindow), 3 = smart mode currently reading the screen duplication.
+int   HrWgcMode(void *handle);
