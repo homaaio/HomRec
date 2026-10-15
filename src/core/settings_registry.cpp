@@ -128,6 +128,7 @@ const std::vector<SettingDef> &All() {
             d.set = [](AppState &s, const std::string &v) { s.capture_mode = HrCaptureModeFromStr(v); return true; };
             v.push_back(d);
         }
+        v.push_back(BoolField("desktop_visible", "capture", &AppState::desktop_visible));
         v.push_back(StrField("capture_window_title", "capture", &AppState::capture_window_title));
         // 2.4: how a selected window is captured / which part of it (see app_state.h)
         v.push_back(StrField("window_capture_method", "capture", &AppState::window_capture_method));
