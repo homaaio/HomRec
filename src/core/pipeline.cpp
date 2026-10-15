@@ -1212,6 +1212,9 @@ struct Pipeline {
         // must not keep the cheap paths (GPU conversion, static-frame reuse,
         // partial re-conversion) switched off.
         bool overlays_active = false;
+        // 8th pass: some overlay reads / blanks the captured monitor picture (region / window / hidden
+        // Desktop layer) - that picture only exists as BGRA on the CPU, so no GPU colour conversion.
+        bool overlays_need_base = false;
         uint64_t last_overlays_gen = (uint64_t)-1; // sentinel: forces the first copy below
         bool warned_bad_crop = false;              // see the crop clamp below - log it once, not per frame
 
@@ -1453,8 +1456,11 @@ struct Pipeline {
                     overlays_snapshot = overlays;
                     last_overlays_gen = gen;
                     overlays_active = false;
-                    for (const auto &o : overlays_snapshot)
-                        if (HrOverlayDrawsAnything(o)) { overlays_active = true; break; }
+                    overlays_need_base = false;
+                    for (const auto &o : overlays_snapshot) {
+                        if (HrOverlayDrawsAnything(o)) overlays_active = true;
+                        if (HrOverlayNeedsBgraBase(o)) overlays_need_base = true;
+                    }
                 }
             }
 
@@ -1500,7 +1506,7 @@ struct Pipeline {
             bool gpu_tick = false;
             int  gpu_enc_w = 0, gpu_enc_h = 0;
 #ifdef _WIN32
-            if (!gpu_failed && !wgc_mode && gpu_convert.load(std::memory_order_relaxed) &&
+            if (!gpu_failed && !wgc_mode && !overlays_need_base && gpu_convert.load(std::memory_order_relaxed) &&
                 recording.load(std::memory_order_acquire) && yuv_pool.IsNv12() &&
                 g_libs.dx_get_size) {
                 int real_w = 0, real_h = 0;
@@ -1810,8 +1816,11 @@ struct Pipeline {
                     // even a future change to this call site can't silently
                     // reopen that hole.
                     try {
+                        // The pristine capture buffer is the source of region / window layers (it is
+                        // untouched while `frame` is the work copy of it and nothing was cropped).
+                        const uint8_t *pristine = (!do_crop && frame != bgra_buf.data()) ? bgra_buf.data() : nullptr;
                         overlay_compositor.Apply(frame, eff_w, eff_h, eff_w * 4, overlays_snapshot,
-                                                  fps_actual.load(std::memory_order_relaxed));
+                                                  fps_actual.load(std::memory_order_relaxed), pristine);
                     } catch (const std::exception &e) {
                         HrLog::Error(std::string("Overlay compositing threw (") + e.what() +
                                      ") -- this frame's overlays were skipped, recording continues.");
