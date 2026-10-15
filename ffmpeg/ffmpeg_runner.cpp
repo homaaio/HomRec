@@ -250,6 +250,36 @@ static bool _wants_hw_pixfmt(const std::string &codec_args) {
            codec_args.find("amf")   != std::string::npos;
 }
 
+// In that path the frames are D3D11/QSV BGRA surfaces and the HARDWARE
+// ENCODER does the RGB -> YUV conversion itself (Intel MFX / NVENC / AMF). All
+// three produce studio ("tv", 16..235) BT.601-style YUV, but ffmpeg is not
+// told so: the surfaces carry no colour tags (or an RGB-style "full range"
+// one that ffmpeg copies into the stream's VUI), so a player may decode
+// limited-range samples as full range -> lifted blacks (VS Code black ->
+// grey), dimmer whites, a washed-out picture.
+// Plain "-color_range/-colorspace" output options are NOT used here (see the
+// comment in _build_cmdline(): with hardware frames they can end up in the
+// filter graph). A bitstream filter only rewrites the VUI of the already
+// encoded stream (and the SPS in the mp4 header), never touches the frames,
+// so the GPU zero-copy path stays intact. Returns "" for codecs it does not
+// know (the stream is then left exactly as before).
+static std::wstring _ddagrab_vui_bsf(const std::string &codec_args) {
+    // 6 = smpte170m (BT.601), same tag the pipe path writes for its own data.
+    if (codec_args.find("h264") != std::string::npos) {
+        return L" -bsf:v h264_metadata=video_full_range_flag=0:colour_primaries=6"
+               L":transfer_characteristics=6:matrix_coefficients=6";
+    }
+    if (codec_args.find("hevc") != std::string::npos || codec_args.find("h265") != std::string::npos) {
+        return L" -bsf:v hevc_metadata=video_full_range_flag=0:colour_primaries=6"
+               L":transfer_characteristics=6:matrix_coefficients=6";
+    }
+    if (codec_args.find("av1") != std::string::npos) {
+        return L" -bsf:v av1_metadata=color_range=tv:color_primaries=6"
+               L":transfer_characteristics=6:matrix_coefficients=6";
+    }
+    return L"";
+}
+
 static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     std::wostringstream ss;
 
@@ -282,6 +312,8 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         if (is_qsv) ss << L",hwmap=derive_device=qsv,format=qsv";
         ss << L"\"";
         if (!ctx->codec_args.empty()) ss << L" " << _utf8_to_wide(ctx->codec_args);
+        // Fix the colour tags of the encoded stream (limited range, BT.601) - see _ddagrab_vui_bsf().
+        ss << _ddagrab_vui_bsf(ctx->codec_args);
         ss << L" -y " << Q(ctx->output_path);
         return ss.str();
     }
