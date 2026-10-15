@@ -114,6 +114,17 @@ std::wstring RowLabel(const OverlayDef &ov) {
             std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
             name = base.empty() ? L"(input overlay)" : WideFromNarrow(base);
         }
+    } else if (ov.type == "window") {
+        if (name.empty()) {
+            name = L"Window \u2014 ";
+            if (!ov.win_exe.empty()) name += WideFromNarrow(ov.win_exe) + L" \u00B7 ";
+            std::wstring title = WideFromNarrow(ov.win_title);
+            if (title.size() > 60) title = title.substr(0, 59) + L"\u2026";
+            if (title.empty()) title = WideFromNarrow(ov.win_class);
+            name += title;
+        }
+    } else if (ov.type == "region") {
+        if (name.empty()) name = L"Region \u2014 " + std::to_wstring(ov.rw) + L"\u00D7" + std::to_wstring(ov.rh);
     } else { // "webcam"
         icon = L"\U0001F4F7"; // 📷
         if (name.empty()) {
@@ -141,14 +152,15 @@ void PersistState(AppState &state) {
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the "+" menu -- local to
 // this file, never go through WM_COMMAND, so no risk of colliding with the
 // ID_OVDOCK_* control ids.
-enum { kMenuAddText = 1, kMenuAddImage, kMenuAddGif, kMenuAddWebcam, kMenuAddExternal, kMenuAddInputOverlay };
+enum { kMenuAddText = 1, kMenuAddImage, kMenuAddGif, kMenuAddWebcam, kMenuAddExternal, kMenuAddInputOverlay,
+       kMenuAddWindow, kMenuAddRegion };
 
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the per-row right-click
 // menu -- same reasoning as kMenuAdd* above, a separate numbering space
 // local to this file.
 enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete, kCtxDuplicate, kCtxUp, kCtxDown, kCtxCenter, kCtxLock, kCtxKeepProp };
 // ... and for the capture-source row's menu.
-enum { kSrcCtxSettings = 1, kSrcCtxDesktop, kSrcCtxWindow, kSrcCtxRegion };
+enum { kSrcCtxSettings = 1, kSrcCtxToggle };
 // Width of the clickable eye column on the right edge of an overlay row.
 constexpr int kEyeColW = 30;
 
@@ -242,6 +254,19 @@ LRESULT CALLBACK OverlaysDockPanel::ListSubclassProc(HWND hwnd, UINT msg, WPARAM
         self->OnListContextMenu(lParam);
         return 0;
     }
+    // Enter did nothing: the list lives inside a wx host panel, and wx runs every key through
+    // IsDialogMessage() first, which treats Enter as "press the default button" and never lets a plain
+    // LISTBOX see it. Telling the dialog manager that this control wants Enter itself fixes that (Tab etc.
+    // keep working because only Enter is claimed). F2 / Space reach the list normally.
+    if (msg == WM_GETDLGCODE) {
+        LRESULT code = self->orig_list_proc_ ? CallWindowProcW(self->orig_list_proc_, hwnd, msg, wParam, lParam)
+                                              : DefWindowProcW(hwnd, msg, wParam, lParam);
+        const MSG *m = reinterpret_cast<const MSG *>(lParam);
+        if (m && (m->message == WM_KEYDOWN || m->message == WM_CHAR) && (m->wParam == VK_RETURN || m->wParam == VK_F2))
+            code |= DLGC_WANTMESSAGE;
+        return code;
+    }
+    if (msg == WM_CHAR && (wParam == VK_RETURN)) return 0;   // no beep for the Enter we handled on key-down
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
         bool handled = false;
         self->OnListMouse(msg, lParam, handled);
@@ -315,45 +340,20 @@ const std::vector<HrMonitorInfo> &OverlaysDockPanel::Monitors() const {
 
 // What the source row says. `tag` (optional) receives the short dim text on its right edge.
 std::wstring OverlaysDockPanel::SourceText(std::wstring *tag) const {
-    std::wstring text;
+    // 8th pass: the first row is the DESKTOP layer only (window / region recording are layers of their own).
+    std::wstring text = WideFromNarrow(T("src_row_desktop", "Desktop"));
     std::wstring t;
     const std::string dash = " \xE2\x80\x94 ";   // " — "
-    switch (state_.capture_mode) {
-    case CaptureMode::Window: {
-        text = WideFromNarrow(T("src_row_window", "Window") + dash);
-        if (!state_.capture_window_exe.empty()) text += WideFromNarrow(state_.capture_window_exe) + L" · ";
-        std::wstring title = WideFromNarrow(state_.capture_window_title);
-        if (title.size() > 70) title = title.substr(0, 69) + L"…";
-        if (title.empty()) title = WideFromNarrow(state_.capture_window_class);
-        text += title;
-        if (state_.WindowCaptureWantsWgc()) {
-            const int mode = get_source_mode ? get_source_mode() : 0;
-            if (mode == 1) t = WideFromNarrow(T("src_tag_native", "native"));
-            else if (mode == 2) t = WideFromNarrow(T("src_tag_exact", "exact"));
-            else if (mode == 3) t = WideFromNarrow(T("src_tag_smart", "smart"));
-        } else {
-            t = WideFromNarrow(T("src_tag_screen", "screen crop"));
-        }
-        break;
+    const auto &mons = Monitors();
+    const int idx = state_.monitor_id > 0 ? state_.monitor_id - 1 : 0;
+    if (mons.size() > 1 || idx > 0) {
+        text += WideFromNarrow(dash + T("src_monitor_word", "Monitor")) + L" " + std::to_wstring(idx + 1);
+        if (idx < (int)mons.size())
+            t = std::to_wstring(mons[(size_t)idx].w) + L"\u00D7" + std::to_wstring(mons[(size_t)idx].h);
+    } else if (!mons.empty()) {
+        t = std::to_wstring(mons[0].w) + L"\u00D7" + std::to_wstring(mons[0].h);
     }
-    case CaptureMode::Region:
-        text = WideFromNarrow(T("src_row_region", "Region") + dash) + std::to_wstring(state_.region_w) +
-               L"×" + std::to_wstring(state_.region_h);
-        break;
-    default: {
-        text = WideFromNarrow(T("src_row_desktop", "Desktop"));
-        const auto &mons = Monitors();
-        const int idx = state_.monitor_id > 0 ? state_.monitor_id - 1 : 0;
-        if (mons.size() > 1 || idx > 0) {
-            text += WideFromNarrow(dash + T("src_monitor_word", "Monitor")) + L" " + std::to_wstring(idx + 1);
-            if (idx < (int)mons.size())
-                t = std::to_wstring(mons[(size_t)idx].w) + L"×" + std::to_wstring(mons[(size_t)idx].h);
-        } else if (!mons.empty()) {
-            t = std::to_wstring(mons[0].w) + L"×" + std::to_wstring(mons[0].h);
-        }
-        break;
-    }
-    }
+    if (!state_.desktop_visible) t = WideFromNarrow(T("src_tag_hidden", "hidden")) + (t.empty() ? L"" : L" \u00B7 " + t);
     if (tag) *tag = t;
     return text;
 }
@@ -378,6 +378,13 @@ void OverlaysDockPanel::OnListMouse(UINT msg, LPARAM lparam, bool &handled) {
     const int row = RowAtPoint(pt, &rc);
     if (row < 0) return;
     const int idx = OverlayOfRow(row);
+    // 8th pass: the Desktop row has an eye too (hides / shows the monitor picture)
+    if (row == 0 && pt.x >= rc.right - kEyeColW) {
+        SendMessageW(list_, LB_SETCURSEL, (WPARAM)row, 0);
+        if (on_source_action) on_source_action(kSrcToggleDesktop);
+        handled = true;
+        return;
+    }
     const bool on_eye = idx >= 0 && pt.x >= rc.right - kEyeColW;
     if (on_eye) {
         // One click on the eye hides / shows the overlay (a double-click counts as a second click).
@@ -407,7 +414,8 @@ void OverlaysDockPanel::OnListKey(WPARAM vk, bool &handled) {
         if (idx >= 0) { RenameAt((size_t)idx); handled = true; }
         break;
     case VK_SPACE:
-        if (idx >= 0) { ToggleVisibility((size_t)idx); handled = true; }
+        if (row == 0) { if (on_source_action) on_source_action(kSrcToggleDesktop); handled = true; }
+        else if (idx >= 0) { ToggleVisibility((size_t)idx); handled = true; }
         break;
     default: break;
     }
@@ -446,17 +454,12 @@ void OverlaysDockPanel::OnListContextMenu(LPARAM lparam) {
 }
 
 void OverlaysDockPanel::ShowSourceContextMenu(HWND owner, POINT screen_pt) {
-    const std::wstring s_settings = WideFromNarrow(T("ctx_src_settings", "Capture source…"));
-    const std::wstring s_desktop  = WideFromNarrow(T("ctx_src_desktop", "Record the whole desktop"));
-    const std::wstring s_window   = WideFromNarrow(T("ctx_src_window", "Pick a window…"));
-    const std::wstring s_region   = WideFromNarrow(T("ctx_src_region", "Select a region…"));
+    const std::wstring s_settings = WideFromNarrow(T("ctx_src_settings", "Capture source\u2026"));
+    const std::wstring s_toggle   = WideFromNarrow(state_.desktop_visible ? T("ctx_hide", "Hide") : T("ctx_show", "Show"));
 
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, kSrcCtxSettings, s_settings.c_str());
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (state_.capture_mode == CaptureMode::Desktop ? MF_CHECKED : 0), kSrcCtxDesktop, s_desktop.c_str());
-    AppendMenuW(menu, MF_STRING, kSrcCtxWindow, s_window.c_str());
-    AppendMenuW(menu, MF_STRING, kSrcCtxRegion, s_region.c_str());
+    AppendMenuW(menu, MF_STRING, kSrcCtxToggle, s_toggle.c_str());
 
     SetForegroundWindow(owner);
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
@@ -464,9 +467,7 @@ void OverlaysDockPanel::ShowSourceContextMenu(HWND owner, POINT screen_pt) {
     DestroyMenu(menu);
     switch (cmd) {
     case kSrcCtxSettings: if (on_edit_source) on_edit_source(); break;
-    case kSrcCtxDesktop:  if (on_source_action) on_source_action(kSrcDesktop); break;
-    case kSrcCtxWindow:   if (on_source_action) on_source_action(kSrcPickWindow); break;
-    case kSrcCtxRegion:   if (on_source_action) on_source_action(kSrcRegion); break;
+    case kSrcCtxToggle:   if (on_source_action) on_source_action(kSrcToggleDesktop); break;
     default: break;
     }
 }
@@ -579,6 +580,12 @@ void OverlaysDockPanel::RebuildList() {
 
 void OverlaysDockPanel::ShowAddMenu(HWND parent, HINSTANCE hInst) {
     HMENU menu = CreatePopupMenu();
+    // 8th pass: window / region recording are layers now - added here like any other layer.
+    const std::wstring s_win = WideFromNarrow(T("add_window_layer", "Window capture\u2026"));
+    const std::wstring s_reg = WideFromNarrow(T("add_region_layer", "Region capture\u2026"));
+    AppendMenuW(menu, MF_STRING, kMenuAddWindow, s_win.c_str());
+    AppendMenuW(menu, MF_STRING, kMenuAddRegion, s_reg.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuAddText, L"Text");
     AppendMenuW(menu, MF_STRING, kMenuAddImage, L"Image");
     AppendMenuW(menu, MF_STRING, kMenuAddGif, L"GIF");
@@ -598,6 +605,8 @@ void OverlaysDockPanel::ShowAddMenu(HWND parent, HINSTANCE hInst) {
     DestroyMenu(menu);
 
     switch (cmd) {
+        case kMenuAddWindow:       AddWindowLayer(parent, hInst); break;
+        case kMenuAddRegion:       AddRegionLayer(parent, hInst); break;
         case kMenuAddText:         AddTextOverlay(parent, hInst); break;
         case kMenuAddImage:        AddImageOverlay(parent, hInst); break;
         case kMenuAddGif:          AddGifOverlay(parent, hInst); break;
@@ -606,6 +615,48 @@ void OverlaysDockPanel::ShowAddMenu(HWND parent, HINSTANCE hInst) {
         case kMenuAddInputOverlay: AddFromInputOverlayRegistry(parent, hInst); break;
         default: break; // menu dismissed without a choice
     }
+}
+
+// The pickers write into an AppState, so they get a scratch copy: the real capture_mode stays Desktop.
+void OverlaysDockPanel::AddWindowLayer(HWND parent, HINSTANCE hInst) {
+    AppState scratch = state_;
+    scratch.capture_mode = CaptureMode::Desktop;
+    scratch.capture_window_title.clear();
+    scratch.capture_window_exe.clear();
+    scratch.capture_window_class.clear();
+    scratch.capture_window_hwnd = nullptr;
+    ShowWindowPickerDialog(parent, hInst, scratch);
+    if (scratch.capture_mode != CaptureMode::Window) return;      // cancelled / "full desktop" chosen
+    int cw = 0, ch = 0;
+    if ((!get_canvas_size || !get_canvas_size(cw, ch) || cw <= 0 || ch <= 0) && !HrCanvasSizeForState(state_, cw, ch)) {
+        cw = 1920; ch = 1080;
+    }
+    OverlayDef ov;
+    if (!HrBuildWindowLayer(scratch, cw, ch, /*allow_upscale=*/false, ov)) return;
+    ov.id = NewOverlayId();
+    state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
+    Refresh();
+    SelectOverlay(state_.overlays.size() - 1);
+}
+
+void OverlaysDockPanel::AddRegionLayer(HWND parent, HINSTANCE hInst) {
+    AppState scratch = state_;
+    scratch.capture_mode = CaptureMode::Desktop;
+    scratch.region_w = scratch.region_h = 0;
+    ShowRegionPickerOverlay(parent, hInst, scratch);
+    if (scratch.capture_mode != CaptureMode::Region) return;      // cancelled
+    int cw = 0, ch = 0;
+    if ((!get_canvas_size || !get_canvas_size(cw, ch) || cw <= 0 || ch <= 0) && !HrCanvasSizeForState(state_, cw, ch)) {
+        cw = 1920; ch = 1080;
+    }
+    OverlayDef ov;
+    if (!HrBuildRegionLayer(scratch, cw, ch, /*allow_upscale=*/false, ov)) return;
+    ov.id = NewOverlayId();
+    state_.overlays.push_back(ov);
+    if (on_overlay_added) on_overlay_added();
+    Refresh();
+    SelectOverlay(state_.overlays.size() - 1);
 }
 
 void OverlaysDockPanel::AddTextOverlay(HWND parent, HINSTANCE hInst) {
@@ -945,13 +996,17 @@ void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
     // ---- row 0: the capture source -------------------------------------------------------------
     if (is_source) {
         int x = rc.left + 8;
-        const int kind = state_.capture_mode == CaptureMode::Window ? 1 : state_.capture_mode == CaptureMode::Region ? 2 : 0;
-        DrawSourceIcon(dc, x, rc.top + (rowH - 18) / 2, kind, fg);
+        const COLORREF src_fg = state_.desktop_visible ? fg : fgDim;
+        DrawSourceIcon(dc, x, rc.top + (rowH - 18) / 2, 0, src_fg);
         x += 18 + 8;
+
+        // 8th pass: the Desktop layer has an eye like every other layer (same column as OnListMouse()'s hit test)
+        RECT eye = { rc.right - kEyeColW, rc.top, rc.right - 4, rc.bottom };
+        DrawEye(dc, eye, state_.desktop_visible, src_fg);
 
         std::wstring tag;
         SourceText(&tag);
-        int right = rc.right - 8;
+        int right = rc.right - kEyeColW - 2;
         if (!tag.empty()) {
             SetTextColor(dc, fgDim);
             RECT tr_ = { x, rc.top, right, rc.bottom };
@@ -960,7 +1015,7 @@ void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
             GetTextExtentPoint32W(dc, tag.c_str(), (int)tag.size(), &sz);
             right -= sz.cx + 10;
         }
-        SetTextColor(dc, fg);
+        SetTextColor(dc, src_fg);
         RECT tr_ = { x, rc.top, std::max(x + 10, (int)right), rc.bottom };
         DrawTextW(dc, buf, -1, &tr_, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
@@ -988,7 +1043,9 @@ void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
     HrIcons::Id iid;
     HICON hi = nullptr;
     if (HrIcons::IdForOverlayType(ov.type, iid)) hi = HrIcons::GetHIcon(iid, iconPx);
-    if (hi) {
+    if (!hi && (ov.type == "window" || ov.type == "region")) {
+        DrawSourceIcon(dc, x + 1, rc.top + (rowH - 18) / 2, ov.type == "window" ? 1 : 2, tc);
+    } else if (hi) {
         DrawIconEx(dc, x, rc.top + (rowH - iconPx) / 2, hi, iconPx, iconPx, 0, nullptr, DI_NORMAL);
     } else {
         SetTextColor(dc, tc);

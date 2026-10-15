@@ -105,7 +105,7 @@ public:
     //   get_source_mode  - RecordingController::WindowSourceMode() (tag on the source row)
     //   on_edit_source   - open the capture-source window
     //   on_source_action - quick actions of the source row's context menu
-    enum SourceAction { kSrcDesktop = 1, kSrcPickWindow, kSrcRegion };
+    enum SourceAction { kSrcToggleDesktop = 1 };   // the Desktop row's eye (also Space / context menu)
     std::function<std::string(const char *key)> tr;
     std::function<bool(int &w, int &h)> get_canvas_size;
     std::function<int()> get_source_mode;
@@ -120,6 +120,9 @@ private:
     // Add* methods below based on what was picked.
     void ShowAddMenu(HWND parent, HINSTANCE hInst);
 
+    // 8th pass: window / region recording as layers (picker -> new layer fitted into the picture).
+    void AddWindowLayer(HWND parent, HINSTANCE hInst);
+    void AddRegionLayer(HWND parent, HINSTANCE hInst);
     void AddTextOverlay(HWND parent, HINSTANCE hInst);
     void AddImageOverlay(HWND parent, HINSTANCE hInst);
     // "GIF" -- same idea as AddImageOverlay, but restricted to .gif and
