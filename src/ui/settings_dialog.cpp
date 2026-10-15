@@ -31,6 +31,7 @@
 #include "../utils/system_integration.h"
 #include "../utils/pc_log.h"
 #include "../utils/plugin_log.h"
+#include "../utils/wgc_log.h"
 #include "hrc_config.h"
 #include <wx/spinctrl.h>
 #include <wx/dirdlg.h>
@@ -243,42 +244,10 @@ public:
     }
 
 private:
-    // Enumerates actually-connected monitors (via display_info.cpp) so
-    // the dropdown shows "Monitor 1 - 1920x1080 (Primary)" instead of
-    // making the user guess an opaque index 0-15 in a spin control.
-    // Falls back to a plain numbered list if enumeration fails for any
-    // reason (e.g. running headless), so the control is never empty.
-    void PopulateMonitorChoice() {
-        monitor_choice_->Clear();
-        void *di = hr_di_create();
-        int count = 0;
-        if (di) {
-            hr_di_refresh(di);
-            count = hr_di_count(di);
-        }
-        if (count > 0) {
-            for (int i = 0; i < count; ++i) {
-                int x = 0, y = 0, w = 0, h = 0; float dpi = 96.0f;
-                hr_di_get(di, i, &x, &y, &w, &h, &dpi);
-                wxString label = wxString::Format("Monitor %d \u2014 %dx%d", i + 1, w, h);
-                if (i == 0) label += " (Primary)";
-                monitor_choice_->Append(label);
-            }
-        } else {
-            for (int i = 0; i < 4; ++i)
-                monitor_choice_->Append(wxString::Format("Monitor %d", i + 1));
-        }
-        if (di) hr_di_destroy(di);
-
-        int sel = state_.monitor_id > 0 ? state_.monitor_id - 1 : 0;
-        if (sel < 0 || sel >= (int)monitor_choice_->GetCount()) sel = 0;
-        monitor_choice_->SetSelection(sel);
-    }
-
     // -- General: output location, capture quality/resolution, on-screen
     // capture options ------------------------------------------------------
     void BuildGeneralTab(wxWindow *page, wxSizer *pageRoot, wxColour bg, wxColour surface,
-                          wxColour accent, wxColour text, wxColour /*textDim*/) {
+                          wxColour accent, wxColour text, wxColour textDim) {
         auto *grid = new wxFlexGridSizer(2, 10, 10);
         grid->AddGrowableCol(1, 1);
 
@@ -291,11 +260,6 @@ private:
         fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
                                     wxSP_ARROW_KEYS, 1, 240, state_.target_fps);
         grid->Add(fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
-
-        AddLabel(page, grid, text, bg, wxString::FromUTF8(lang_.Get("monitor")));
-        monitor_choice_ = new wxChoice(page, wxID_ANY);
-        PopulateMonitorChoice();
-        grid->Add(monitor_choice_, 0, wxALIGN_CENTRE_VERTICAL);
 
         AddLabel(page, grid, text, bg, wxString::FromUTF8(lang_.Get("resolution_mode_label")));
         resolution_mode_choice_ = new wxChoice(page, wxID_ANY);
@@ -380,36 +344,16 @@ private:
         cursor_chk_    = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("cursor")), state_.cursor_enabled);
         notify_chk_    = AddCheck(page, pageRoot, text, bg, wxString::FromUTF8(lang_.Get("notification")), state_.show_summary);
 
-        // -- 2.4: "Select Window" capture ---------------------------------------
-        AddSectionHeading(page, pageRoot, accent, bg, "Window capture");
-        auto *wgrid = new wxFlexGridSizer(2, 10, 10);
-        wgrid->AddGrowableCol(1, 1);
-
-        AddLabel(page, wgrid, text, bg, "Capture method:");
-        wc_method_choice_ = new wxChoice(page, wxID_ANY);
-        wc_method_choice_->Append("Windows.Graphics.Capture - only the selected window (experimental)");
-        wc_method_choice_->Append("Screen crop - cut the window's rectangle out of the screen");
-        // While the crash sentinel is tripped WGC is NOT in effect, so show what really happens
-        // (screen crop). Picking the first entry again is then a real change, which re-arms WGC.
-        wc_method_initial_sel_ = (state_.WindowCaptureWantsWgc() && !HrWgcCrashGuardTripped()) ? 0 : 1;
-        wc_method_choice_->SetSelection(wc_method_initial_sel_);
-        wc_method_choice_->SetToolTip(
-            "Windows.Graphics.Capture records the selected window itself - nothing else: windows lying on top\n"
-            "of it (HomRec's own window included) and the taskbar do not appear, and it can even be partly\n"
-            "off-screen (Windows 10 1903+). If Windows refuses the window HomRec falls back to the screen crop\n"
-            "by itself; if it ever crashes HomRec, it is switched off automatically until you select it here again.\n"
-            "EXPERIMENTAL: it has crashed HomRec on some PCs, so screen crop is the default.\n\n"
-            "Screen crop copies whatever is on screen inside the window's rectangle. For a maximized window that\n"
-            "is practically the whole screen, and anything on top of the window is recorded as well.");
-        wgrid->Add(wc_method_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-
-        AddLabel(page, wgrid, text, bg, "Record:");
-        wc_area_choice_ = new wxChoice(page, wxID_ANY);
-        wc_area_choice_->Append("The whole window (title bar and borders included)");
-        wc_area_choice_->Append("Only the window's content area");
-        wc_area_choice_->SetSelection(state_.window_capture_area == "client" ? 1 : 0);
-        wgrid->Add(wc_area_choice_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-        pageRoot->Add(wgrid, 0, wxEXPAND | wxALL, 16);
+        // 7th pass: what is recorded (monitor / window / region), how a window is found again and how it is
+        // captured moved out of here to the Layers panel > Capture source... (first row, double-click).
+        {
+            auto *srcNote = new wxStaticText(page, wxID_ANY,
+                wxString::FromUTF8(lang_.Get("settings_source_moved")));
+            srcNote->SetForegroundColour(textDim);
+            srcNote->SetBackgroundColour(bg);
+            srcNote->Wrap(520);
+            pageRoot->Add(srcNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+        }
     }
 
     // Repopulates lang_choice_/lang_codes_ from the built-in "English"
@@ -889,6 +833,8 @@ private:
             "System logging (logs/pc.log)", state_.system_logging_enabled);
         plugin_log_chk_ = AddCheck(page, pageRoot, text, bg,
             "Plugin logging (logs/plugins.log)", state_.plugin_logging_enabled);
+        wgc_log_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Window capture logging (logs/wgc.log)", state_.wgc_logging_enabled);
 
         AddSectionHeading(page, pageRoot, accent, bg, "Live Preview");
         disable_preview_chk_ = AddCheck(page, pageRoot, text, bg,
@@ -1038,7 +984,6 @@ private:
 
         quality_slider_->SetValue(hr_settings_get_quality(def));
         fps_spin_->SetValue(hr_settings_get_fps(def));
-        monitor_choice_->SetSelection(0);
         resolution_mode_choice_->SetSelection(hr_settings_get_resolution_mode(def));
         {
             int pct = hr_settings_get_resolution_pct(def);
@@ -1094,6 +1039,7 @@ private:
 
         sys_log_chk_->SetValue(hr_settings_get_flag(def, "system_logging_enabled") != 0);
         plugin_log_chk_->SetValue(hr_settings_get_flag(def, "plugin_logging_enabled") != 0);
+        wgc_log_chk_->SetValue(true);
         disable_preview_chk_->SetValue(hr_settings_get_flag(def, "disable_preview") != 0);
         preview_quality_choice_->SetSelection(2); // 100%
         preview_fps_spin_->SetValue(15);
@@ -1114,7 +1060,6 @@ private:
         state_.output_folder = folder_edit_->GetValue().ToUTF8().data();
         state_.quality = quality_slider_->GetValue();
         state_.target_fps = fps_spin_->GetValue();
-        state_.monitor_id = monitor_choice_->GetSelection() + 1;
 
         {
             static const int kPct[] = {100, 75, 50, 25};
@@ -1150,16 +1095,6 @@ private:
         {
             int csel = container_choice_->GetSelection();
             state_.video_format = csel == 1 ? VideoFormat::Mkv : csel == 2 ? VideoFormat::Both : VideoFormat::Mp4;
-            {
-                const int msel = wc_method_choice_->GetSelection();
-                if (msel != wc_method_initial_sel_) {
-                    const bool want_wgc = (msel == 0);
-                    if (want_wgc) HrWgcResetCrashGuard();
-                    state_.window_capture_method = want_wgc ? "wgc" : "screen";
-                    wc_method_initial_sel_ = msel;
-                }
-            }
-            state_.window_capture_area   = wc_area_choice_->GetSelection() == 1 ? "client" : "window";
         }
         state_.gpu_convert = gpu_convert_chk_->GetValue();
         state_.gpu_capture_ddagrab = gpu_ddagrab_chk_->GetValue();
@@ -1200,10 +1135,12 @@ private:
         // -- Security -------------------------------------------------------
         state_.system_logging_enabled = sys_log_chk_->GetValue();
         state_.plugin_logging_enabled = plugin_log_chk_->GetValue();
+        state_.wgc_logging_enabled = wgc_log_chk_->GetValue();
         // Applied immediately (not just at next launch) - see
         // pc_log.h/plugin_log.h's SetEnabled().
         HrPcLog::SetEnabled(state_.system_logging_enabled);
         HrPluginLog::SetEnabled(state_.plugin_logging_enabled);
+        HrWgcLog::SetEnabled(state_.wgc_logging_enabled);
 
         state_.disable_preview = disable_preview_chk_->GetValue();
         {
@@ -1282,15 +1219,12 @@ private:
     // General
     LabeledSlider *quality_slider_ = nullptr;
     wxSpinCtrl *fps_spin_ = nullptr;
-    wxChoice *monitor_choice_ = nullptr;
     wxChoice *resolution_choice_ = nullptr;
     wxChoice *resolution_mode_choice_ = nullptr;
     wxSpinCtrl *resolution_w_spin_ = nullptr, *resolution_h_spin_ = nullptr;
     wxTextCtrl *folder_edit_ = nullptr;
     wxCheckBox *countdown_chk_ = nullptr, *timestamp_chk_ = nullptr, *cursor_chk_ = nullptr, *notify_chk_ = nullptr;
     wxChoice *lang_choice_ = nullptr;
-    wxChoice *wc_method_choice_ = nullptr, *wc_area_choice_ = nullptr;   // 2.4 window capture
-    int wc_method_initial_sel_ = 0;                                       // 0 = WGC, 1 = screen crop (as shown when the dialog opened)
     wxChoice *container_choice_ = nullptr;                                // 2.4 mp4 / mkv / both
     wxChoice *meter_style_choice_ = nullptr;                              // 2.4 mixer layout
     wxCheckBox *ui_lock_chk_ = nullptr;                                   // 2.4 lock panel layout
@@ -1338,7 +1272,7 @@ private:
     wxCheckBox *instant_replay_check_ = nullptr;
 
     // Security
-    wxCheckBox *sys_log_chk_ = nullptr, *plugin_log_chk_ = nullptr;
+    wxCheckBox *sys_log_chk_ = nullptr, *plugin_log_chk_ = nullptr, *wgc_log_chk_ = nullptr;
     wxCheckBox *disable_preview_chk_ = nullptr;
     wxChoice *preview_quality_choice_ = nullptr;
     wxSpinCtrl *preview_fps_spin_ = nullptr;

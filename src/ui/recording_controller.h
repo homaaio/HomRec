@@ -162,6 +162,11 @@ public:
     // just copies a handful of small structs unless overlays are empty.
     void SyncOverlays();
 
+    // 7th pass: what the window source is doing right now (for the Layers panel's capture-source row):
+    // 0 = not recording a window itself, 1 = native Windows.Graphics.Capture, 2 = exact window capture
+    // (PrintWindow), 3 = smart mode, currently reading the cheap screen duplication.
+    int WindowSourceMode() const;
+
     // -- Instant Replay -----------------------------------------------
     //
     // A continuous background recording into a short rolling buffer,
@@ -345,6 +350,14 @@ private:
     // always expand to *something* filename-safe rather than leaving a
     // literal "{app}" in the output path.
     std::string ResolveCaptureAppName() const;
+    // 7th pass: a window target is "defined" when ANY of title / program / class is known (the title alone
+    // used to be required, which made a window that was picked once and later renamed unrecoverable).
+    bool WindowTargetDefined() const;
+    // Short human text for log lines / messages: the title, or the program name when there is no title.
+    std::string WindowTargetLabel() const;
+    // Resolves the window target through the matching rules (program / class / title, see
+    // window_picker_dialog.h); updates state_.capture_window_hwnd and writes what changed to wgc.log.
+    bool ResolveWindowTarget(HWND &hwnd, RECT &rect) const;
     // Side-effect-free check that the person's chosen Window/Region capture
     // target can actually be recorded right now. Returns false (with a
     // user-facing reason in error_out) if a picked window is gone/minimized
@@ -525,6 +538,12 @@ private:
         // comparison, leaving the live preview on the full desktop after
         // File > Select Window/Region until something unrelated changed.
         HWND capture_window_hwnd = nullptr;
+        // 7th pass (capture-source dialog): how the window is recorded and found again. A change of any of
+        // these rebuilds the preview pipeline so the new method / area / smart mode takes effect.
+        std::string window_capture_method, window_capture_area, window_title_mode;
+        bool window_match_exe = true, window_match_class = true, window_match_title = false;
+        bool window_follow_hwnd = true, window_capture_smart = true;
+        int window_capture_fps_cap = 0;
         int region_x = 0, region_y = 0, region_w = 0, region_h = 0;
         int target_fps = -1;
         int preview_width = -1, preview_height = -1;
@@ -537,6 +556,12 @@ private:
             return disable_preview == o.disable_preview && monitor_id == o.monitor_id &&
                    capture_mode == o.capture_mode && capture_window_title == o.capture_window_title &&
                    capture_window_hwnd == o.capture_window_hwnd &&
+                   window_capture_method == o.window_capture_method &&
+                   window_capture_area == o.window_capture_area && window_title_mode == o.window_title_mode &&
+                   window_match_exe == o.window_match_exe && window_match_class == o.window_match_class &&
+                   window_match_title == o.window_match_title && window_follow_hwnd == o.window_follow_hwnd &&
+                   window_capture_smart == o.window_capture_smart &&
+                   window_capture_fps_cap == o.window_capture_fps_cap &&
                    region_x == o.region_x && region_y == o.region_y &&
                    region_w == o.region_w && region_h == o.region_h &&
                    target_fps == o.target_fps && preview_width == o.preview_width &&
@@ -623,6 +648,8 @@ private:
     void *CreatePipelineForTarget(intptr_t pipe_fd, int pvw, int pvh);
     bool window_track_lost_warned_ = false;
     std::chrono::steady_clock::time_point next_window_retarget_{}; // throttles re-resolving a lost window
+    mutable std::string window_route_logged_;   // last "found by" text written to wgc.log (avoid log spam)
+    bool window_follow_failed_warned_ = false;  // native WGC cannot follow a new window handle: say so once
     float mic_vol_ = 1.0f, sys_vol_ = 1.0f;
     bool mic_muted_ = false, sys_muted_ = false;
     double current_fps_ = 0.0;
