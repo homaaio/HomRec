@@ -19,6 +19,7 @@
 // -----------------------------------------------------------------------------
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <chrono>
 #include <functional>
 #include <string>
@@ -55,6 +56,20 @@ struct HrOverlayDesc {
     // size like the rest of it.
     char input_json_path[260];
     char input_png_path[260];
+
+    // 8th pass (Desktop split) - layers that show a piece of the screen or a window:
+    //   "region"         src_x/src_y/src_w/src_h = the rectangle cut out of the monitor picture
+    //                    (monitor-relative pixels), drawn scaled into x/y/w/h.
+    //   "window"         win_method 0: src_* = the window's current rectangle (resolved by the UI thread),
+    //                    cut out of the monitor picture like a region. win_method 1: the window itself is
+    //                    captured (hwnd, wgc_capture.h) - other windows on top of it do not show up.
+    //   "desktop_hidden" present ONLY while the Desktop layer's eye is closed: blanks the monitor picture
+    //                    (the other layers still read it as their source).
+    int       src_x = 0, src_y = 0, src_w = 0, src_h = 0;
+    int       win_method = 0;       // 0 = cut out of the monitor picture, 1 = the window itself
+    int       win_client_only = 0;  // win_method 1: content area only
+    int       win_fps_cap = 0;      // win_method 1: limit of exact captures per second (0 = none)
+    long long hwnd = 0;             // win_method 1: the window to capture (0 = not found right now)
 };
 
 // True when compositing this overlay can change a single pixel of the frame.
@@ -67,6 +82,14 @@ inline bool HrOverlayDrawsAnything(const HrOverlayDesc &ov) {
     return ov.visible && ov.w > 0 && ov.h > 0 && ov.opacity > 0;
 }
 
+// True when this overlay reads (or blanks) the captured monitor picture itself, which only exists as BGRA
+// on the CPU path - the GPU colour-conversion path cannot be used while such an overlay is drawn.
+inline bool HrOverlayNeedsBgraBase(const HrOverlayDesc &ov) {
+    if (!HrOverlayDrawsAnything(ov)) return false;
+    return std::strcmp(ov.type, "region") == 0 || std::strcmp(ov.type, "window") == 0 ||
+           std::strcmp(ov.type, "desktop_hidden") == 0;
+}
+
 // Renders + caches overlay content and composites it onto captured frames.
 // Not thread-safe on its own -- the capture pipeline only ever touches it
 // from the single capture thread, which is all it needs.
@@ -75,8 +98,14 @@ public:
     // base_bgra: capture_w x capture_h, 4 bytes/pixel (B,G,R,A), row pitch
     // base_stride bytes (usually capture_w*4). Composites every visible
     // overlay in `overlays` directly onto it, clipped to its bounds.
+    //
+    // 8th pass: `source_bgra` (optional, same size and pitch as the base: base_w*4) is the UNTOUCHED
+    // monitor picture for the region / window layers. The capture loop passes its pristine capture buffer;
+    // without it the compositor takes a copy of the base itself when such a layer needs one (the Desktop
+    // layer's eye may blank the base before they read it).
     void Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
-                const std::vector<HrOverlayDesc> &overlays, double current_fps = 0.0);
+                const std::vector<HrOverlayDesc> &overlays, double current_fps = 0.0,
+                const uint8_t *source_bgra = nullptr);
 
     // Same overlays, same cached layers - but blended straight into an NV12
     // frame (w x h, tightly packed: w*h luma bytes then w*h/2 interleaved
@@ -243,6 +272,32 @@ private:
         ~WebcamSourceCache();
     };
     std::unordered_map<size_t, WebcamSourceCache> webcam_cache_;
+
+    // 8th pass: "window" layers that capture the window itself (win_method 1) keep one wgc_capture.h
+    // source each, plus the last scaled picture (kept while the window has no new frame).
+    struct WindowSourceCache {
+        void *handle = nullptr;
+        long long hwnd = 0;
+        int canvas_w = 0, canvas_h = 0;
+        CachedLayer layer;
+        bool have_layer = false;
+        std::vector<uint8_t> frame;
+        std::chrono::steady_clock::time_point retry_at{};
+        bool warned = false;
+        WindowSourceCache() = default;
+        WindowSourceCache(const WindowSourceCache &) = delete;
+        WindowSourceCache &operator=(const WindowSourceCache &) = delete;
+        ~WindowSourceCache();
+    };
+    std::unordered_map<size_t, WindowSourceCache> window_cache_;
+
+    // The monitor picture the region / window layers read (set at the start of Apply()).
+    const uint8_t *src_ptr_ = nullptr;
+    int src_w_ = 0, src_h_ = 0;
+    std::vector<uint8_t> src_copy_;   // used when the caller gave no pristine picture
+    const CachedLayer *GetOrRenderRegion(size_t idx, const HrOverlayDesc &ov);
+    const CachedLayer *GetOrRenderWindow(size_t idx, const HrOverlayDesc &ov);
+    const CachedLayer *CropFromSource(size_t idx, const HrOverlayDesc &ov);
 
     // Drops every entry in the six idx-keyed caches above whose idx is no
     // longer in range for `overlay_count` -- called at the top of Apply()

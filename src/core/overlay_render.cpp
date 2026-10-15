@@ -15,6 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include "wgc_capture.h"   // 8th pass: window layers that capture the window itself (after NOMINMAX above)
 
 namespace {
 // Bounded strcpy into a fixed-size char array (always NUL-terminates).
@@ -180,13 +181,34 @@ static void ScaleBgraNearest(const std::vector<uint8_t> &src, int sw, int sh,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Text: GDI can't draw anti-aliased text with a real alpha channel directly,
-// so use the standard trick -- draw white text on a black 32bpp DIB, then
-// treat the resulting (R==G==B) luminance as coverage/alpha and re-tint to
-// the actual desired colour. Produces properly anti-aliased text that blends
-// cleanly over whatever's under it.
-// ---------------------------------------------------------------------------
+static void ScaleRectBox(const uint8_t *src, size_t src_stride, int sx, int sy, int sw, int sh,
+                         uint8_t *dst, int dw, int dh)
+{
+    if (!src || !dst || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    const bool avg_x = sw >= dw * 3 / 2, avg_y = sh >= dh * 3 / 2;
+    for (int y = 0; y < dh; ++y) {
+        const int y0 = sy + (int)((int64_t)y * sh / dh);
+        int y1 = avg_y ? sy + (int)((int64_t)(y + 1) * sh / dh) - 1 : y0;
+        if (y1 < y0) y1 = y0;
+        const uint8_t *r0 = src + (size_t)y0 * src_stride;
+        const uint8_t *r1 = src + (size_t)std::min(y1, y0 + 1 + (y1 - y0) / 2) * src_stride;
+        uint8_t *drow = dst + (size_t)y * dw * 4;
+        for (int x = 0; x < dw; ++x) {
+            const int x0 = sx + (int)((int64_t)x * sw / dw);
+            int x1 = avg_x ? sx + (int)((int64_t)(x + 1) * sw / dw) - 1 : x0;
+            if (x1 < x0) x1 = x0;
+            const int xb = std::min(x1, x0 + 1 + (x1 - x0) / 2);
+            const uint8_t *p00 = r0 + (size_t)x0 * 4, *p01 = r0 + (size_t)xb * 4;
+            const uint8_t *p10 = r1 + (size_t)x0 * 4, *p11 = r1 + (size_t)xb * 4;
+            uint8_t *d = drow + (size_t)x * 4;
+            d[0] = (uint8_t)((p00[0] + p01[0] + p10[0] + p11[0] + 2) >> 2);
+            d[1] = (uint8_t)((p00[1] + p01[1] + p10[1] + p11[1] + 2) >> 2);
+            d[2] = (uint8_t)((p00[2] + p01[2] + p10[2] + p11[2] + 2) >> 2);
+            d[3] = 255;
+        }
+    }
+}
+
 static bool RenderTextBgra(const std::wstring &text, int w, int h, COLORREF color,
                             const std::wstring &font_name, std::vector<uint8_t> &out)
 {
@@ -767,6 +789,131 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderWebcam(size_
 #endif
 }
 
+const OverlayCompositor::CachedLayer *OverlayCompositor::CropFromSource(size_t idx, const HrOverlayDesc &ov) {
+#ifdef _WIN32
+    if (!src_ptr_ || src_w_ <= 0 || src_h_ <= 0 || ov.src_w <= 0 || ov.src_h <= 0 || ov.w <= 0 || ov.h <= 0)
+        return nullptr;
+    const int cx0 = std::max(ov.src_x, 0), cy0 = std::max(ov.src_y, 0);
+    const int cx1 = std::min(ov.src_x + ov.src_w, src_w_), cy1 = std::min(ov.src_y + ov.src_h, src_h_);
+    if (cx1 - cx0 <= 0 || cy1 - cy0 <= 0) return nullptr;      // completely off this monitor
+
+    CachedLayer &layer = cache_[idx];
+    const size_t need = (size_t)ov.w * ov.h * 4;
+    if (layer.w != ov.w || layer.h != ov.h || layer.bgra.size() != need) {
+        layer.w = ov.w; layer.h = ov.h;
+        layer.bgra.assign(need, 0);
+    } else if (cx0 != ov.src_x || cy0 != ov.src_y || cx1 != ov.src_x + ov.src_w || cy1 != ov.src_y + ov.src_h) {
+        std::fill(layer.bgra.begin(), layer.bgra.end(), (uint8_t)0);    // partly outside: keep the rest clear
+    }
+    layer.key = "src";    // never matches a text / image key, so those renderers rebuild if this index changes type
+
+    const double fx = (double)ov.w / ov.src_w, fy = (double)ov.h / ov.src_h;
+    int dx0 = (int)((cx0 - ov.src_x) * fx + 0.5), dy0 = (int)((cy0 - ov.src_y) * fy + 0.5);
+    int dx1 = (int)((cx1 - ov.src_x) * fx + 0.5), dy1 = (int)((cy1 - ov.src_y) * fy + 0.5);
+    dx1 = std::min(dx1, ov.w); dy1 = std::min(dy1, ov.h);
+    const int dw = dx1 - dx0, dh = dy1 - dy0;
+    if (dw <= 0 || dh <= 0) return nullptr;
+    // ScaleRectBox writes a tightly packed dw x dh block: build it in scratch, then place it.
+    static thread_local std::vector<uint8_t> blk;
+    if (dw == ov.w && dh == ov.h) {
+        ScaleRectBox(src_ptr_, (size_t)src_w_ * 4, cx0, cy0, cx1 - cx0, cy1 - cy0, layer.bgra.data(), dw, dh);
+    } else {
+        blk.resize((size_t)dw * dh * 4);
+        ScaleRectBox(src_ptr_, (size_t)src_w_ * 4, cx0, cy0, cx1 - cx0, cy1 - cy0, blk.data(), dw, dh);
+        for (int y = 0; y < dh; ++y)
+            std::memcpy(layer.bgra.data() + ((size_t)(dy0 + y) * ov.w + dx0) * 4, blk.data() + (size_t)y * dw * 4,
+                        (size_t)dw * 4);
+    }
+    return &layer;
+#else
+    (void)idx; (void)ov;
+    return nullptr;
+#endif
+}
+
+const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderRegion(size_t idx, const HrOverlayDesc &ov) {
+    return CropFromSource(idx, ov);
+}
+
+OverlayCompositor::WindowSourceCache::~WindowSourceCache() {
+#ifdef _WIN32
+    if (handle) HrWgcDestroy(handle);
+#endif
+}
+
+const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderWindow(size_t idx, const HrOverlayDesc &ov) {
+#ifdef _WIN32
+    if (ov.win_method == 1 && ov.hwnd != 0) {
+        WindowSourceCache &src = window_cache_[idx];
+        const auto now = std::chrono::steady_clock::now();
+        if (src.handle && src.hwnd != ov.hwnd) {
+            // The program opened a new window: re-aim the source (PrintWindow backend can), else rebuild.
+            if (HrWgcSetTarget(src.handle, (HWND)(intptr_t)ov.hwnd)) {
+                src.hwnd = ov.hwnd;
+            } else {
+                HrWgcDestroy(src.handle);
+                src.handle = nullptr;
+                src.have_layer = false;
+            }
+        }
+        if (!src.handle && now >= src.retry_at) {
+            int ww = 0, wh = 0;
+            if (HrWgcQueryWindowSize((HWND)(intptr_t)ov.hwnd, ov.win_client_only != 0, &ww, &wh) && ww > 1 && wh > 1) {
+                // Smart mode is off on purpose: it would open a second screen duplication next to the
+                // recording's own one. The cheap cut-out of the monitor picture is the "screen" method.
+                HrWgcOptions opt;
+                opt.smart = false;
+                opt.fps_cap = ov.win_fps_cap;
+                src.canvas_w = ww & ~1; src.canvas_h = wh & ~1;
+                src.handle = HrWgcCreate((HWND)(intptr_t)ov.hwnd, src.canvas_w, src.canvas_h,
+                                         ov.win_client_only != 0, /*draw_cursor=*/false, &opt);
+                if (src.handle) { src.hwnd = ov.hwnd; src.warned = false; }
+            }
+            if (!src.handle) {
+                src.retry_at = now + std::chrono::seconds(2);
+                if (!src.warned) {
+                    src.warned = true;
+                    HrLog::Warn("Window layer: the window itself can't be captured right now - cutting it out of "
+                                "the screen picture instead.");
+                }
+            }
+        }
+        if (src.handle) {
+            src.frame.resize((size_t)src.canvas_w * src.canvas_h * 4);
+            const int rc = HrWgcCapture(src.handle, src.frame.data(), 0);
+            if (rc == 0) {
+                src.layer.w = ov.w; src.layer.h = ov.h;
+                src.layer.key = "win";
+                src.layer.bgra.assign((size_t)ov.w * ov.h * 4, 0);
+                ScaleRectBox(src.frame.data(), (size_t)src.canvas_w * 4, 0, 0, src.canvas_w, src.canvas_h,
+                             src.layer.bgra.data(), ov.w, ov.h);
+                src.have_layer = true;
+            } else if (rc == 2) {
+                HrWgcReset(src.handle);
+            } else if (rc < 0) {
+                HrWgcDestroy(src.handle);
+                src.handle = nullptr;
+                src.retry_at = now + std::chrono::seconds(2);
+            }
+            if (src.have_layer && (src.layer.w != ov.w || src.layer.h != ov.h)) {
+                // the layer was resized without a new window frame: rescale what is held
+                src.layer.bgra.assign((size_t)ov.w * ov.h * 4, 0);
+                ScaleRectBox(src.frame.data(), (size_t)src.canvas_w * 4, 0, 0, src.canvas_w, src.canvas_h,
+                             src.layer.bgra.data(), ov.w, ov.h);
+                src.layer.w = ov.w; src.layer.h = ov.h;
+            }
+            if (src.have_layer) return &src.layer;
+        }
+    } else {
+        window_cache_.erase(idx);     // switched back to the screen method: free the window source
+    }
+    return CropFromSource(idx, ov);   // method "screen" (or the exact capture is unavailable)
+#else
+    (void)idx; (void)ov;
+    return nullptr;
+#endif
+}
+
 const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay(size_t idx, const HrOverlayDesc &ov) {
 #ifdef _WIN32
     InputOverlayCache &c = input_cache_[idx];
@@ -925,6 +1072,7 @@ void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {    auto prune =
     prune(image_source_cache_);
     prune(gif_cache_);
     prune(webcam_cache_);
+    prune(window_cache_);
 }
 
 void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays, double current_fps,
@@ -944,6 +1092,9 @@ void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays,
             if (std::strcmp(ov.type, "webcam") == 0) {
                 webcam_cache_.erase(i);   // closes the camera while the overlay is invisible
             }
+            if (std::strcmp(ov.type, "window") == 0) {
+                window_cache_.erase(i);   // stops capturing the window while its layer is hidden
+            }
             continue;
         }
         try {
@@ -958,6 +1109,10 @@ void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays,
                 layer = GetOrRenderInputOverlay(i, ov);
             } else if (std::strcmp(ov.type, "webcam") == 0) {
                 layer = GetOrRenderWebcam(i, ov);
+            } else if (std::strcmp(ov.type, "region") == 0) {
+                layer = GetOrRenderRegion(i, ov);
+            } else if (std::strcmp(ov.type, "window") == 0) {
+                layer = GetOrRenderWindow(i, ov);
             } else {
                 continue;
             }
@@ -984,9 +1139,37 @@ void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays,
 }
 
 void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
-                               const std::vector<HrOverlayDesc> &overlays, double current_fps)
+                               const std::vector<HrOverlayDesc> &overlays, double current_fps,
+                               const uint8_t *source_bgra)
 {
     if (!base_bgra || base_w <= 0 || base_h <= 0) return;
+
+    bool need_source = false, hide_desktop = false;
+    for (const auto &ov : overlays) {
+        if (!HrOverlayDrawsAnything(ov)) continue;
+        if (std::strcmp(ov.type, "region") == 0 || std::strcmp(ov.type, "window") == 0) need_source = true;
+        else if (std::strcmp(ov.type, "desktop_hidden") == 0) hide_desktop = true;
+    }
+    src_ptr_ = nullptr; src_w_ = src_h_ = 0;
+    if (source_bgra == base_bgra) source_bgra = nullptr;      // same buffer: it is about to be changed
+    if (need_source) {
+        if (source_bgra && base_stride == base_w * 4) {
+            src_ptr_ = source_bgra;
+        } else {
+            src_copy_.resize((size_t)base_w * base_h * 4);
+            for (int y = 0; y < base_h; ++y)
+                std::memcpy(src_copy_.data() + (size_t)y * base_w * 4, base_bgra + (size_t)y * base_stride,
+                            (size_t)base_w * 4);
+            src_ptr_ = src_copy_.data();
+        }
+        src_w_ = base_w; src_h_ = base_h;
+    }
+    if (hide_desktop) {
+        for (int y = 0; y < base_h; ++y) {
+            uint32_t *row = reinterpret_cast<uint32_t *>(base_bgra + (size_t)y * base_stride);
+            std::fill(row, row + base_w, 0xFF000000u);            // opaque black (B,G,R = 0)
+        }
+    }
     ForEachLayer(overlays, current_fps, [&](const CachedLayer &layer, const HrOverlayDesc &ov) {
         CompositeBgra(base_bgra, base_w, base_h, base_stride,
                       layer.bgra.data(), layer.w, layer.h, ov.x, ov.y, ov.opacity);
