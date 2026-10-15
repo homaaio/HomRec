@@ -7,6 +7,7 @@
 #include "hrc_config.h"
 #include "../utils/str_convert.h"
 #include "../core/settings_registry.h"
+#include "window_picker_dialog.h"   // HrMigrateCaptureSourceToLayers()
 
 #include <windows.h>
 #include <fstream>
@@ -75,7 +76,22 @@ void WriteOverlaysSection(std::ofstream &f, const std::vector<OverlayDef> &overl
           << p << "locked=" << FromBool(ov.locked) << "\n"
           << p << "lock_aspect=" << FromBool(ov.lock_aspect) << "\n"
           << p << "input_json_path=" << ov.input_json_path << "\n"
-          << p << "input_png_path=" << ov.input_png_path << "\n\n";
+          << p << "input_png_path=" << ov.input_png_path << "\n"
+          << p << "win_title=" << OneLine(ov.win_title) << "\n"
+          << p << "win_exe=" << OneLine(ov.win_exe) << "\n"
+          << p << "win_class=" << OneLine(ov.win_class) << "\n"
+          << p << "win_match_exe=" << FromBool(ov.win_match_exe) << "\n"
+          << p << "win_match_class=" << FromBool(ov.win_match_class) << "\n"
+          << p << "win_match_title=" << FromBool(ov.win_match_title) << "\n"
+          << p << "win_title_mode=" << ov.win_title_mode << "\n"
+          << p << "win_follow=" << FromBool(ov.win_follow) << "\n"
+          << p << "win_method=" << ov.win_method << "\n"
+          << p << "win_area=" << ov.win_area << "\n"
+          << p << "win_fps_cap=" << ov.win_fps_cap << "\n"
+          << p << "rx=" << ov.rx << "\n"
+          << p << "ry=" << ov.ry << "\n"
+          << p << "rw=" << ov.rw << "\n"
+          << p << "rh=" << ov.rh << "\n\n";
     }
 }
 
@@ -123,6 +139,22 @@ void ReadOverlaysSection(const std::unordered_map<std::string, std::string> &kv,
         if (has((p + "lock_aspect").c_str())) ov.lock_aspect = ToBool(get((p + "lock_aspect").c_str()));
         if (has((p + "input_json_path").c_str())) ov.input_json_path = get((p + "input_json_path").c_str());
         if (has((p + "input_png_path").c_str())) ov.input_png_path = get((p + "input_png_path").c_str());
+        // 8th pass: window / region layers
+        if (has((p + "win_title").c_str())) ov.win_title = get((p + "win_title").c_str());
+        if (has((p + "win_exe").c_str())) ov.win_exe = get((p + "win_exe").c_str());
+        if (has((p + "win_class").c_str())) ov.win_class = get((p + "win_class").c_str());
+        if (has((p + "win_match_exe").c_str())) ov.win_match_exe = ToBool(get((p + "win_match_exe").c_str()));
+        if (has((p + "win_match_class").c_str())) ov.win_match_class = ToBool(get((p + "win_match_class").c_str()));
+        if (has((p + "win_match_title").c_str())) ov.win_match_title = ToBool(get((p + "win_match_title").c_str()));
+        if (has((p + "win_title_mode").c_str())) ov.win_title_mode = get((p + "win_title_mode").c_str());
+        if (has((p + "win_follow").c_str())) ov.win_follow = ToBool(get((p + "win_follow").c_str()));
+        if (has((p + "win_method").c_str())) ov.win_method = get((p + "win_method").c_str());
+        if (has((p + "win_area").c_str())) ov.win_area = get((p + "win_area").c_str());
+        if (has((p + "win_fps_cap").c_str())) ov.win_fps_cap = atoi(get((p + "win_fps_cap").c_str()).c_str());
+        if (has((p + "rx").c_str())) ov.rx = atoi(get((p + "rx").c_str()).c_str());
+        if (has((p + "ry").c_str())) ov.ry = atoi(get((p + "ry").c_str()).c_str());
+        if (has((p + "rw").c_str())) ov.rw = atoi(get((p + "rw").c_str()).c_str());
+        if (has((p + "rh").c_str())) ov.rh = atoi(get((p + "rh").c_str()).c_str());
         overlays.push_back(ov);
     }
 }
@@ -314,6 +346,10 @@ bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields
     ReadOverlaysSection(kv, state.overlays);
     ReadHotkeysSection(kv, state.custom_hotkeys);
     ReadAudioSourcesSection(kv, state.audio_sources);
+
+    // 8th pass: a file saved before the Desktop split may still say "record this window / region".
+    // That is a layer now - convert it once (capture_mode goes back to desktop).
+    HrMigrateCaptureSourceToLayers(state);
 
     return true;
 }
