@@ -74,6 +74,7 @@ enum MenuCommandId {
     ID_VIEW_LOCK_UI         = 1034,
     ID_FILE_FULL_DESKTOP    = 1035,
     ID_VIEW_RESET_LAYOUT    = 1036,
+    ID_PREVIEW_TOGGLE_BTN   = 1037,   // on/off button in the preview header (replaces Settings > Disable live preview)
     ID_VIEW_DOCK_FIRST      = 1040,
     ID_VIEW_DOCK_LAST       = 1069,
     // ID_PERF_ULTRA            = 1030,
@@ -241,6 +242,8 @@ private:
     // hr_settings_set_flag()+hr_settings_save() pair against the old,
     // no-longer-authoritative homrec_settings.json.
     void PersistSettings();
+    void ToggleLivePreview();          // preview on/off (button above the preview); persists the choice
+    void UpdatePreviewToggleButton();  // label + colours of that button follow state_.disable_preview / theme
     void OnCaptureTargetChanged(); // after the capture source changed (Layers panel) - see main_frame.cpp
     // 7th pass: the capture source lives in the Layers panel now (File > Select Window / Region / Full Desktop
     // are gone). OpenCaptureSourceDialog() = the full "Capture source" window; RunSourceAction() = the quick
@@ -394,6 +397,7 @@ private:
     wxStaticText *title_lbl_ = nullptr;
     wxStaticText *version_lbl_ = nullptr;
     ColorButton *start_color_btn_ = nullptr;
+    ColorButton *preview_toggle_btn_ = nullptr;   // "Preview: ON / OFF" in the preview header
     ColorButton *pause_color_btn_ = nullptr;
     StatusDot *status_dot_ = nullptr;
     wxStaticText *status_lbl_ = nullptr;

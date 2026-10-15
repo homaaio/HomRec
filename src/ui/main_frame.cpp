@@ -1362,6 +1362,13 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     preview_title_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI").Bold()));
     headerSizer->Add(preview_title_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, 10);
     headerSizer->AddStretchSpacer(1);
+    // On/off switch of the live preview (it used to be a checkbox in Settings > Security). The choice is
+    // still stored in the config as disable_preview.
+    preview_toggle_btn_ = new ColorButton(preview_header_, ID_PREVIEW_TOGGLE_BTN, "Preview: ON");
+    preview_toggle_btn_->SetFont(wxFont(wxFontInfo(8).FaceName("Segoe UI").Bold()));
+    preview_toggle_btn_->SetMinSize(wxSize(104, 22));
+    headerSizer->Add(preview_toggle_btn_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
+    Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { ToggleLivePreview(); }, ID_PREVIEW_TOGGLE_BTN);
     preview_fps_lbl_ = new wxStaticText(preview_header_, wxID_ANY, "");
     preview_fps_lbl_->SetFont(wxFont(wxFontInfo(8).FaceName("Segoe UI")));
     headerSizer->Add(preview_fps_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
@@ -1426,7 +1433,18 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     // open the window; re-Refresh()es the panel afterward so a renamed/re-typed
     // overlay's row label picks up the change right away.
     overlays_panel_->on_edit_overlay = [this](size_t idx) {
-        if (!rec_raw_ || !overlays_panel_) return;
+        if (!rec_raw_ || !overlays_panel_ || idx >= state_.overlays.size()) return;
+        // 8th pass: window / region layers have their own settings window (what is shown + how it is found)
+        if (state_.overlays[idx].type == "window" || state_.overlays[idx].type == "region") {
+            OverlayDef &ov = state_.overlays[idx];
+            if (ShowLayerSourceDialog(this, state_, ov, theme_, lang_)) {
+                // A re-aimed window layer must be looked up again at once, not after the 1 s retry wait.
+                rec_raw_->ForgetLayerResolve(ov.id);
+                PersistSettings();
+            }
+            overlays_panel_->Refresh();
+            return;
+        }
         if (ShowOverlayEditorDialog(this, state_, idx, rec_raw_, theme_)) {
             overlays_panel_->Refresh();
         }
@@ -1525,6 +1543,7 @@ void HomRecMainFrame::ApplyThemeColours() {
     }
 
     if (start_color_btn_) start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
+    UpdatePreviewToggleButton();
     if (pause_color_btn_) pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
     if (audio_panel_) audio_panel_->ApplyTheme(theme_);
     if (dock_host_) dock_host_->SetBackgroundColour(bg);
@@ -2460,6 +2479,35 @@ void HomRecMainFrame::OnPauseClicked(wxCommandEvent &) { DoPause(); }
 // Skipped while recording: the running pipeline keeps its crop until Stop(),
 // and RefreshPreviewSettings()'s change-detection snapshot deliberately
 // stays stale so the next call after Stop() rebuilds for the new target.
+static ColorButton *s_theme_seen_btn_ = nullptr;
+void HomRecMainFrame::UpdatePreviewToggleButton() {
+    if (!preview_toggle_btn_) return;
+    const bool on = !state_.disable_preview;
+    // Also called from the stats timer (the console / a hotkey action can flip disable_preview too):
+    // only repaint when the state or the theme really changed.
+    static int s_shown = -1; static std::string s_theme;
+    if (s_shown == (on ? 1 : 0) && s_theme == state_.current_theme && s_theme_seen_btn_ == preview_toggle_btn_) return;
+    s_shown = on ? 1 : 0; s_theme = state_.current_theme; s_theme_seen_btn_ = preview_toggle_btn_;
+    preview_toggle_btn_->SetLabelText2(on ? "Preview: ON" : "Preview: OFF");
+    preview_toggle_btn_->SetColours(on ? FromColorref(theme_.success) : FromColorref(theme_.error),
+                                    FromColorref(theme_.bg));
+}
+
+// Button above the preview. Same effect the Settings checkbox had: RefreshPreviewSettings() rebuilds or
+// tears down the preview pipeline (and, mid-recording, only switches the thumbnails on/off).
+void HomRecMainFrame::ToggleLivePreview() {
+    state_.disable_preview = !state_.disable_preview;
+    UpdatePreviewToggleButton();
+    if (rec_raw_) rec_raw_->RefreshPreviewSettings();
+    // Same as the Settings dialog used to do when the preview came back on: drop the "Apply with
+    // preview off" screenshot of an editing session, the live feed is authoritative again.
+    if (!state_.disable_preview && preview_panel_ && preview_panel_->InSnapshotMode())
+        preview_panel_->ExitSnapshotMode();
+    if (state_.disable_preview && rec_raw_) rec_raw_->EndSnapshotEditing();
+    if (preview_panel_) preview_panel_->Refresh(false);
+    PersistSettings();
+}
+
 void HomRecMainFrame::OnCaptureTargetChanged() {
     if (!state_.recording && rec_raw_) rec_raw_->RefreshPreviewSettings();
     PersistSettings();
@@ -2485,31 +2533,16 @@ void HomRecMainFrame::OpenCaptureSourceDialog() {
 }
 
 void HomRecMainFrame::RunSourceAction(int action) {
-    if (state_.recording) {
-        OpenCaptureSourceDialog();      // shows the "stop the recording first" note
-        return;
-    }
     switch (action) {
-        case OverlaysDockPanel::kSrcDesktop:
-            // Back to the whole screen after a window / region was picked. The stored window / region
-            // values are kept (they are only used while the mode says Window / Region), so switching
-            // back later needs no new pick.
-            state_.capture_mode = CaptureMode::Desktop;
-            HrLog::Info("Capture target: full desktop (Layers panel).");
-            HrWgcLog::Note("Capture source: full desktop (Layers panel context menu).");
-            break;
-        case OverlaysDockPanel::kSrcPickWindow:
-            HrLog::Info("UI: window picker opened");
-            ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
-            HrLog::Info("UI: window picker closed -> capture_mode=" + HrCaptureModeToStr(state_.capture_mode) +
-                        ", window='" + state_.capture_window_title + "'");
-            break;
-        case OverlaysDockPanel::kSrcRegion:
-            ShowRegionPickerOverlay(GetHWND(), wxGetInstance(), state_);
+        case OverlaysDockPanel::kSrcToggleDesktop:
+            // The Desktop layer's eye. Works during a recording too: SyncOverlays() picks it up on the next
+            // tick (no pipeline rebuild needed).
+            state_.desktop_visible = !state_.desktop_visible;
+            HrLog::Info(std::string("Desktop layer: ") + (state_.desktop_visible ? "shown" : "hidden"));
+            PersistSettings();
             break;
         default: return;
     }
-    OnCaptureTargetChanged();
     if (overlays_panel_) overlays_panel_->RefreshSourceRow();
 }
 
@@ -2793,6 +2826,8 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
         HandleRecordingCrashed();
         return;
     }
+
+    UpdatePreviewToggleButton();
 
     // logs\pc.log - throttles itself internally to ~once every 10s, so
     // piggybacking on this existing 500ms tick (rather than adding a
