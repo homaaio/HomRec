@@ -110,3 +110,13 @@ struct HrMonitorInfo {
     bool primary = false;
 };
 std::vector<HrMonitorInfo> HrListMonitors();
+HrWindowTarget HrWindowTargetFromLayer(const OverlayDef &ov);
+
+void HrFitLayerRect(int src_w, int src_h, int canvas_w, int canvas_h, bool allow_upscale,
+                    int &x, int &y, int &w, int &h);
+
+bool HrCanvasSizeForState(const AppState &state, int &w, int &h);
+bool HrBuildWindowLayer(const AppState &picked, int canvas_w, int canvas_h, bool allow_upscale, OverlayDef &out);
+bool HrBuildRegionLayer(const AppState &picked, int canvas_w, int canvas_h, bool allow_upscale, OverlayDef &out);
+
+void HrMigrateCaptureSourceToLayers(AppState &state);
