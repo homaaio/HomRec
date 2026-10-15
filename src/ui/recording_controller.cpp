@@ -2,6 +2,7 @@
 #include "window_picker_dialog.h"  // HR_ResolveCaptureWindow()
 #include "../core/wgc_capture.h"      // 2.4: HrWgcSupported()/HrWgcProbeWindow()
 #include "../utils/log.h"
+#include "../utils/wgc_log.h"      // 7th pass: logs\wgc.log
 #include "../core/overlay_render.h"
 #include "../utils/str_convert.h"   // HrVideoFormatExt() (2.4 container choice)
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
@@ -81,7 +82,10 @@ extern "C" {
     void *hr_pl_create(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h, int output_idx);
     // 2.4: one window via Windows.Graphics.Capture (nullptr if it can't be captured that way)
     void *hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h,
-                              void *hwnd, int client_only, int draw_cursor);
+                              void *hwnd, int client_only, int draw_cursor, int smart, int fps_cap);
+    // 7th pass: follow another window handle without rebuilding the pipeline / what the source is doing now
+    int hr_pl_window_retarget(void *handle, void *hwnd);
+    int hr_pl_window_mode(void *handle);
     void hr_pl_destroy(void *handle);
     int hr_pl_start(void *handle);
     void hr_pl_stop(void *handle);
@@ -312,19 +316,47 @@ std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
     return buf;
 }
 
+bool RecordingController::WindowTargetDefined() const {
+    return state_.capture_mode == CaptureMode::Window &&
+           (!state_.capture_window_title.empty() || !state_.capture_window_exe.empty() ||
+            !state_.capture_window_class.empty());
+}
+
+std::string RecordingController::WindowTargetLabel() const {
+    if (!state_.capture_window_title.empty()) return state_.capture_window_title;
+    if (!state_.capture_window_exe.empty()) return state_.capture_window_exe;
+    return state_.capture_window_class;
+}
+
+bool RecordingController::ResolveWindowTarget(HWND &hwnd, RECT &rect) const {
+    std::string how;
+    const bool ok = HR_ResolveCaptureWindowFromState(state_, hwnd, rect, &how);
+    // One line per CHANGE of route (the resolver runs several times a second): "same window handle" ->
+    // "matched exe class (search)" -> "not found" tells the whole story of a lost / re-found window.
+    const std::string route = ok ? how : std::string("not found");
+    if (route != window_route_logged_) {
+        window_route_logged_ = route;
+        HrWgcLog::Info("Window target '" + WindowTargetLabel() + "': " + route);
+    }
+    return ok;
+}
+
+int RecordingController::WindowSourceMode() const {
+    return pipeline_ ? hr_pl_window_mode(pipeline_) : 0;
+}
+
 // Resolves the {app} filename-template placeholder - see the header
 // comment on the declaration for what this falls back to and why.
 std::string RecordingController::ResolveCaptureAppName() const {
     if (state_.capture_mode == CaptureMode::Region) return "Region";
-    if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) {
+    if (!WindowTargetDefined()) {
         return "Desktop";
     }
 
     HWND hwnd = nullptr;
     RECT r{};
-    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd,
-                                 state_.window_capture_area == "client") || !hwnd) {
-        return "Desktop"; // window's gone (closed, title changed) - fall back rather than emit "{app}" literally
+    if (!ResolveWindowTarget(hwnd, r) || !hwnd) {
+        return "Desktop"; // window's gone (closed) - fall back rather than emit "{app}" literally
     }
 
     DWORD pid = 0;
@@ -440,23 +472,24 @@ void RecordingController::ComputeOutputDims(int src_w, int src_h, int &out_w, in
 }
 
 bool RecordingController::CheckCaptureTarget(std::wstring &error_out) const {
-    if (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty()) {
+    if (WindowTargetDefined()) {
         HWND hwnd = nullptr;
         RECT r{};
-        if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd,
-                                 state_.window_capture_area == "client")) {
-            error_out = L"The window you selected (\"" + WideFromNarrow(state_.capture_window_title) +
+        if (!ResolveWindowTarget(hwnd, r)) {
+            error_out = L"The window you selected (\"" + WideFromNarrow(WindowTargetLabel()) +
                         L"\") is closed, hidden or minimized, so it can't be recorded.\n\n"
-                        L"Restore it, or choose File > Select Window... again "
-                        L"(or \"Use full desktop\") and start recording again.";
-            HrLog::Error("Start refused: selected window '" + state_.capture_window_title +
+                        L"Restore it, or pick another one in the Layers panel (double-click the first row, "
+                        L"\"Capture source...\") - or switch that layer to the full desktop - and start "
+                        L"recording again.";
+            HrLog::Error("Start refused: selected window '" + WindowTargetLabel() +
                          "' not found/minimized - not falling back to full-desktop capture.");
             return false;
         }
         if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) {
             error_out = L"The window you selected is not on any screen right now, so it can't be recorded.\n\n"
-                        L"Move it onto a screen, or choose File > Select Window... again.";
-            HrLog::Error("Start refused: selected window '" + state_.capture_window_title +
+                        L"Move it onto a screen, or pick another one in the Layers panel "
+                        L"(\"Capture source...\").";
+            HrLog::Error("Start refused: selected window '" + WindowTargetLabel() +
                          "' is entirely off-screen - not falling back to full-desktop capture.");
             return false;
         }
@@ -465,7 +498,8 @@ bool RecordingController::CheckCaptureTarget(std::wstring &error_out) const {
                state_.region_x + state_.region_w, state_.region_y + state_.region_h};
         if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) {
             error_out = L"The region you selected is no longer on any screen (a monitor may have been "
-                        L"disconnected), so it can't be recorded.\n\nChoose File > Select Region... again.";
+                        L"disconnected), so it can't be recorded.\n\nChoose the region again in the Layers panel "
+                        L"(\"Capture source...\").";
             HrLog::Error("Start refused: selected region is entirely off-screen - not falling back to "
                          "full-desktop capture.");
             return false;
@@ -495,15 +529,15 @@ void RecordingController::ResolveCaptureSize() {
     // same as before this was generalized from window-only.
     RECT target_rect{};
     bool have_target = false;
-    bool is_window = (state_.capture_mode == CaptureMode::Window && !state_.capture_window_title.empty());
+    bool is_window = WindowTargetDefined();
     bool is_region = (state_.capture_mode == CaptureMode::Region && state_.region_w > 0 && state_.region_h > 0);
     HrLog::Info("Capture target resolve: mode=" + HrCaptureModeToStr(state_.capture_mode) + ", window='" +
-                state_.capture_window_title + "', hwnd=" + std::to_string((unsigned long long)(uintptr_t)state_.capture_window_hwnd));
+                state_.capture_window_title + "' (" + state_.capture_window_exe + " / " + state_.capture_window_class +
+                "), hwnd=" + std::to_string((unsigned long long)(uintptr_t)state_.capture_window_hwnd));
 
     HWND capture_hwnd = nullptr;
     if (is_window) {
-        have_target = HR_ResolveCaptureWindow(state_.capture_window_title, capture_hwnd, target_rect,
-                                              state_.capture_window_hwnd, state_.window_capture_area == "client");
+        have_target = ResolveWindowTarget(capture_hwnd, target_rect);
     } else if (is_region) {
         target_rect.left = state_.region_x;
         target_rect.top = state_.region_y;
@@ -546,11 +580,18 @@ void RecordingController::ResolveCaptureSize() {
             HrLog::Info("Capture target (window): recording the window itself (Windows.Graphics.Capture) at " +
                         std::to_string(capture_w_) + "x" + std::to_string(capture_h_) + ", output " +
                         std::to_string(output_w_) + "x" + std::to_string(output_h_));
+            HrWgcLog::Note("Window capture: recording the window itself, canvas " + std::to_string(capture_w_) + "x" +
+                           std::to_string(capture_h_) + ", output " + std::to_string(output_w_) + "x" +
+                           std::to_string(output_h_) + ", area=" + state_.window_capture_area +
+                           ", smart=" + (state_.window_capture_smart ? "on" : "off") +
+                           ", fps cap=" + std::to_string(state_.window_capture_fps_cap));
             return;
         }
         HrLog::Warn("Window capture: Windows.Graphics.Capture isn't usable for this window "
                     "(unsupported Windows version, crash guard tripped, or Windows refused this window) - "
                     "using the SCREEN CROP instead: anything on top of the window will be recorded too.");
+        HrWgcLog::Warn("Window capture: the window source can't be used for this window (unsupported Windows, crash "
+                       "guard, or the window was refused / is smaller than 16x16) - using the screen crop.");
     } else if (is_window && have_target && !state_.WindowCaptureWantsWgc()) {
         HrLog::Info("Window capture: using the screen-crop method (the default; Windows.Graphics.Capture is "
                     "opt-in in Settings) - anything on top of the window will be recorded too.");
@@ -677,7 +718,7 @@ void RecordingController::ResolveCaptureSize() {
                             std::to_string(wx) + "," + std::to_string(wy) + ", output " +
                             std::to_string(output_w_) + "x" + std::to_string(output_h_));
             } else if (is_window) {
-                HrLog::Warn("Window capture: '" + state_.capture_window_title +
+                HrLog::Warn("Window capture: '" + WindowTargetLabel() +
                             "' is entirely off the selected monitor - falling back to full desktop.");
             } else {
                 HrLog::Warn("Region capture: the selected region is entirely off the selected "
@@ -689,8 +730,8 @@ void RecordingController::ResolveCaptureSize() {
             // than starting a recording of nothing/garbage - crop_*_ are
             // already 0 from the reset above, so capture_w_/h_/output_w_/
             // h_ (monitor-sized, set earlier in this function) stand as-is.
-            HrLog::Warn("Window capture: couldn't find a window titled '" +
-                        state_.capture_window_title + "' - falling back to full desktop.");
+            HrLog::Warn("Window capture: couldn't find the window '" +
+                        WindowTargetLabel() + "' - falling back to full desktop.");
         }
         // is_region with !have_target can't happen (is_region already
         // requires region_w/h > 0, and have_target is unconditionally set
@@ -706,7 +747,8 @@ void *RecordingController::CreatePipelineForTarget(intptr_t pipe_fd, int pvw, in
     if (use_wgc_ && wgc_hwnd_) {
         pl = hr_pl_create_window(capture_w_, capture_h_, state_.target_fps, pipe_fd, pvw, pvh,
                                  wgc_hwnd_, state_.window_capture_area == "client" ? 1 : 0,
-                                 state_.cursor_enabled ? 1 : 0);
+                                 state_.cursor_enabled ? 1 : 0,
+                                 state_.window_capture_smart ? 1 : 0, state_.window_capture_fps_cap);
         if (!pl) {
             // Don't keep retrying a source that just failed: from now on this session uses the crop.
             wgc_disabled_ = true;
@@ -741,32 +783,54 @@ void RecordingController::RetargetWindowCapture() {
     if (!pipeline_) return;
     // Region's whole point is a fixed area of the screen - it must NOT
     // track anything, so this only ever applies to Window mode.
-    if (state_.capture_mode != CaptureMode::Window || state_.capture_window_title.empty()) return;
-    // 2.4: the WGC source follows the window by itself (it IS the window) - nothing to retarget.
-    if (use_wgc_) return;
+    if (!WindowTargetDefined()) return;
     // OPTIMIZATION (2.3): while the tracked window is gone, every ~20 Hz overlay
     // tick used to run a full EnumWindows()+title scan. Retry twice a second.
-    if (window_track_lost_warned_ && std::chrono::steady_clock::now() < next_window_retarget_) return;
+    // 7th pass: a window source (which never needs a crop rect) only checks four times a second.
+    const auto now_tp = std::chrono::steady_clock::now();
+    if ((window_track_lost_warned_ || pipeline_wgc_) && now_tp < next_window_retarget_) return;
 
     HWND hwnd = nullptr;
     RECT r{};
-    if (!HR_ResolveCaptureWindow(state_.capture_window_title, hwnd, r, state_.capture_window_hwnd,
-                                 state_.window_capture_area == "client")) {
+    if (!ResolveWindowTarget(hwnd, r)) {
         if (!window_track_lost_warned_) {
             window_track_lost_warned_ = true;
-            HrLog::Warn("Window capture: '" + state_.capture_window_title +
+            HrLog::Warn("Window capture: '" + WindowTargetLabel() +
                         "' is no longer available (closed or minimized) - keeping the last "
-                        "captured position until it's back.");
+                        "captured picture until it's back.");
+            HrWgcLog::Warn("Window target '" + WindowTargetLabel() + "' lost (closed / minimized / not matching any more) "
+                           "- the last picture is kept, looking for it twice a second.");
         }
-        next_window_retarget_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        next_window_retarget_ = now_tp + std::chrono::milliseconds(500);
         return;
     }
-    // Remember the exact HWND across title changes, same reason
-    // Start()/ResolveCaptureSize() do via HR_ResolveCaptureWindow()'s
-    // preferred_hwnd fast path - so a retitled window (a browser tab, an
-    // app's "*Unsaved" indicator) keeps tracking the SAME window instead of
-    // silently falling back to title matching on every tick.
-    state_.capture_window_hwnd = hwnd;
+    // (ResolveWindowTarget already remembered the exact HWND in state_ - a retitled window (a browser
+    // tab, an app's "*Unsaved" marker) keeps tracking the SAME window as long as "follow the window" is on.)
+
+    // 7th pass: the source records a window by itself - nothing to crop, but when the program replaced its
+    // window (new main window, the old handle is gone) the source has to be pointed at the new one.
+    if (pipeline_wgc_) {
+        next_window_retarget_ = now_tp + std::chrono::milliseconds(250);
+        if (window_track_lost_warned_) {
+            window_track_lost_warned_ = false;
+            HrWgcLog::Note("Window target '" + WindowTargetLabel() + "' is back.");
+        }
+        if (hwnd != pipeline_wgc_hwnd_) {
+            if (hr_pl_window_retarget(pipeline_, hwnd)) {
+                HrWgcLog::Note("Window source follows the window to handle " +
+                               std::to_string((unsigned long long)(uintptr_t)hwnd) + " ('" +
+                               HR_WindowTitleUtf8(hwnd) + "').");
+                pipeline_wgc_hwnd_ = hwnd;
+                wgc_hwnd_ = hwnd;
+                window_follow_failed_warned_ = false;
+            } else if (!window_follow_failed_warned_) {
+                window_follow_failed_warned_ = true;
+                HrWgcLog::Warn("The window source cannot follow to another window handle (native "
+                               "Windows.Graphics.Capture is bound to its window) - restart the recording to use the new one.");
+            }
+        }
+        return;
+    }
 
     // Same monitor-relative clamp ResolveCaptureSize() applies, against
     // the monitor that pipeline_ is ACTUALLY duplicating right now
@@ -786,7 +850,7 @@ void RecordingController::RetargetWindowCapture() {
     if (ww <= 0 || wh <= 0) {
         if (!window_track_lost_warned_) {
             window_track_lost_warned_ = true;
-            HrLog::Warn("Window capture: '" + state_.capture_window_title +
+            HrLog::Warn("Window capture: '" + WindowTargetLabel() +
                         "' moved off the monitor being recorded - keeping the last "
                         "captured position until it's back on it.");
         }
@@ -2582,6 +2646,15 @@ void RecordingController::RefreshPreviewSettings() {
     now.capture_mode = state_.capture_mode;
     now.capture_window_title = state_.capture_window_title;
     now.capture_window_hwnd = state_.capture_window_hwnd;
+    now.window_capture_method = state_.window_capture_method;
+    now.window_capture_area = state_.window_capture_area;
+    now.window_title_mode = state_.window_title_mode;
+    now.window_match_exe = state_.window_match_exe;
+    now.window_match_class = state_.window_match_class;
+    now.window_match_title = state_.window_match_title;
+    now.window_follow_hwnd = state_.window_follow_hwnd;
+    now.window_capture_smart = state_.window_capture_smart;
+    now.window_capture_fps_cap = state_.window_capture_fps_cap;
     now.region_x = state_.region_x; now.region_y = state_.region_y;
     now.region_w = state_.region_w; now.region_h = state_.region_h;
     now.target_fps = state_.target_fps;

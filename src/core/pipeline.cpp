@@ -2139,13 +2139,18 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     Returns nullptr when the window can't be captured that way; the caller then falls back to
     hr_pl_create() + hr_pl_set_capture_rect() (the pre-2.4 screen crop). */
 HR_EXPORT void* hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h,
-                                    void* hwnd, int client_only, int draw_cursor) {
+                                    void* hwnd, int client_only, int draw_cursor,
+                                    int smart, int fps_cap) {
 #ifndef _WIN32
     (void)w; (void)h; (void)fps; (void)pipe_fd; (void)pv_w; (void)pv_h; (void)hwnd; (void)client_only; (void)draw_cursor;
+    (void)smart; (void)fps_cap;
     return nullptr;
 #else
     if (!ensure_libs() || !hwnd) return nullptr;
-    void* src = HrWgcCreate(static_cast<HWND>(hwnd), w, h, client_only != 0, draw_cursor != 0);
+    HrWgcOptions wopt;
+    wopt.smart   = smart != 0;
+    wopt.fps_cap = fps_cap < 0 ? 0 : fps_cap;
+    void* src = HrWgcCreate(static_cast<HWND>(hwnd), w, h, client_only != 0, draw_cursor != 0, &wopt);
     if (!src) return nullptr;
 
     auto* pl = new Pipeline();
@@ -2170,6 +2175,35 @@ HR_EXPORT void* hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int
         return nullptr;
     }
     return pl;
+#endif
+}
+
+/*  hr_pl_window_retarget  (7th pass)
+    Points a running window pipeline at another window (the program opened a new main window, the
+    window was re-created, the browser tab switch gave it a new handle...). Returns 1 when the source
+    followed, 0 when it can't (not a window pipeline, or native WGC - which is bound to its window). */
+HR_EXPORT int hr_pl_window_retarget(void* handle, void* hwnd) {
+    if (!handle || !hwnd) return 0;
+#ifdef _WIN32
+    auto* pl = static_cast<Pipeline*>(handle);
+    if (!pl->wgc_mode || !pl->dx_ctx) return 0;
+    return HrWgcSetTarget(pl->dx_ctx, static_cast<HWND>(hwnd)) ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+/*  hr_pl_window_mode  (7th pass)
+    What the window source is doing: 0 = not a window pipeline, 1 = native Windows.Graphics.Capture,
+    2 = exact window capture (PrintWindow), 3 = smart mode reading the (cheap) screen duplication. */
+HR_EXPORT int hr_pl_window_mode(void* handle) {
+    if (!handle) return 0;
+#ifdef _WIN32
+    auto* pl = static_cast<Pipeline*>(handle);
+    if (!pl->wgc_mode || !pl->dx_ctx) return 0;
+    return HrWgcMode(pl->dx_ctx);
+#else
+    return 0;
 #endif
 }
 

@@ -1,6 +1,7 @@
 #include "wgc_capture.h"
 #include "../utils/log.h"
 #include "../utils/log_paths.h"
+#include "../utils/wgc_log.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -11,6 +12,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -20,6 +22,23 @@
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
+
+// Screen duplication helpers (dxgi_capture.cpp / ui_utils.cpp, linked into the same exe). Used by the smart
+// window mode, see SmartWantsScreen() below.
+extern "C" {
+    void *hr_dx_create(int adapter_idx, int output_idx);
+    void  hr_dx_destroy(void *handle);
+    int   hr_dx_get_size(void *handle, int *out_w, int *out_h);
+    int   hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms);
+    int   hr_dx_reset(void *handle);
+    void  hr_dx_set_output_size(void *handle, int w, int h);
+    int   hr_dx_get_dirty_rows(void *handle, int *y0, int *y1);
+    int   hr_dx_output_count(int adapter_idx);
+    int   hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y, int *out_w, int *out_h,
+                            char *name_buf, int name_buf_len);
+    void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
+    int   hr_cursor_state(int *visible, int *x, int *y, unsigned long long *handle);
+}
 
 namespace {
 
@@ -233,11 +252,11 @@ bool GuardTripped() {
                 present = true;                       // this build's own flag: the last run really crashed in WGC
             } else {
                 DeleteFileW(path.c_str());            // left by an older build, whose bug is fixed
-                HrLog::Info("Window capture: cleared a crash flag left by an older HomRec build - WGC gets another chance.");
+                HrWgcLog::Note("Window capture: cleared a crash flag left by an older HomRec build - WGC gets another chance.");
             }
         }
         if (InterlockedCompareExchange(&g_guard_state, present ? 2 : 1, 0) == 0 && present) {
-            HrLog::Warn("Window capture: Windows.Graphics.Capture is switched OFF because the previous run "
+            HrWgcLog::Warn("Window capture: Windows.Graphics.Capture is switched OFF because the previous run "
                         "crashed inside it (logs\\wgc_guard.flag). Window recording uses the screen-crop "
                         "method. To try WGC again: Settings > General > Window capture > re-select it.");
         }
@@ -329,6 +348,40 @@ struct Ctx {
     uint8_t *pw_bits = nullptr;         // top-down BGRA DIB section (pw_w x pw_h)
     int      pw_w = 0, pw_h = 0;
     bool     pw_fail_warned = false, pw_slow_warned = false;
+
+    // ---- 7th pass smart mode: cheap screen duplication while the window is not covered ----------------
+    bool     smart = false;             // option (HrWgcOptions::smart)
+    int      fps_cap = 0;               // option (HrWgcOptions::fps_cap): exact captures per second, 0 = none
+    int      mode = 0;                  // 0 = exact capture (PrintWindow), 1 = screen duplication
+    bool     dx_broken = false;         // the duplication failed for good: smart mode is off for this context
+    int      dx_fail = 0;               // consecutive duplication failures
+    ULONGLONG dx_retry_at = 0;          // after a failure: not before this tick
+    void    *dx = nullptr;              // hr_dx_* context of the monitor the window is on
+    RECT     dx_mon{0, 0, 0, 0};        // that monitor, desktop coordinates
+    int      dx_w = 0, dx_h = 0;        // size of dx_buf
+    std::vector<uint8_t> dx_buf;        // BGRA copy of the whole monitor (the pointer must stay stable)
+    bool     dx_have_data = false;      // dx_buf holds a real picture since the last (re)start of the duplication
+    int      dx_wait = 0;               // ticks spent waiting for that first picture
+    bool     need_compose = true;       // the canvas must be rewritten even if nothing changed (mode switch...)
+    RECT     last_crop{0, 0, 0, 0};     // screen rect the canvas was last composed from (screen mode)
+    ULONGLONG next_occl_check = 0;      // exact mode: when to look again whether the window is still covered
+    ULONGLONG clear_since = 0;          // exact mode: since when nothing has covered it
+    bool     cur_drawn = false;         // screen mode: a pointer is baked into the canvas ...
+    int      cur_x = 0, cur_y = 0;      // ... at this position,
+    unsigned long long cur_handle = 0;  // ... with this shape
+
+    // ---- exact mode: change detection and pacing ----
+    uint64_t last_hash = 0;
+    bool     have_hash = false;
+    int      static_streak = 0;         // consecutive exact captures that came out identical
+    ULONGLONG next_pw_at = 0;           // earliest tick of the next PrintWindow call
+    DWORD    last_pw_ms = 0;            // how long the last PrintWindow call took
+    DWORD    last_input_tick = 0;       // GetLastInputInfo() at the previous frame
+    bool     gone_logged = false;       // "the window is gone" has been logged
+
+    // ---- statistics, written to wgc.log every few seconds ----
+    ULONGLONG st_t0 = 0;
+    uint32_t st_calls = 0, st_pw = 0, st_pw_ms = 0, st_pw_max = 0, st_dx_new = 0, st_dx_idle = 0, st_hold = 0, st_static = 0;
 };
 
 // Registry of live contexts. shared_ptr: a caller that looked a handle up keeps the context alive
@@ -351,8 +404,18 @@ void PwRelease(Ctx *c) {
     c->pw_w = c->pw_h = 0;
 }
 
+void DxRelease(Ctx *c) {
+    if (c->dx) { hr_dx_destroy(c->dx); c->dx = nullptr; }
+    c->dx_buf.clear();
+    c->dx_buf.shrink_to_fit();
+    c->dx_have_data = false;
+    c->dx_wait = 0;
+    c->dx_w = c->dx_h = 0;
+    c->dx_mon = RECT{0, 0, 0, 0};
+}
+
 void Teardown(Ctx *c) {
-    if (c->pw) PwRelease(c);
+    if (c->pw) { PwRelease(c); DxRelease(c); }
     if (c->session) { CloseAndRelease(c->session); }
     SafeRelease(c->session2);
     if (c->pool) { CloseAndRelease(c->pool); }
@@ -584,7 +647,7 @@ HRESULT CreateWgcDevice(Ctx *c) {
     }   // adapter + factory are released here
     c->dev = std::move(dev);
     c->dc = std::move(dc);
-    HrLog::Info("WGC init: D3D11 device created on adapter '" + adapter_name + "', feature level " +
+    HrWgcLog::Note("WGC init: D3D11 device created on adapter '" + adapter_name + "', feature level " +
                 HexStr((unsigned long long)fl));
     return S_OK;
 }
@@ -592,16 +655,16 @@ HRESULT CreateWgcDevice(Ctx *c) {
 // The actual session setup. Runs ONLY on the init thread (see InitContained()).
 bool InitImpl(Ctx *c) {
     const Api &api = GetApi();
-    if (!api.ok) { HrLog::Warn("Window capture: Windows.Graphics.Capture is not available on this system."); return false; }
+    if (!api.ok) { HrWgcLog::Warn("Window capture: Windows.Graphics.Capture is not available on this system."); return false; }
     if (!IsWindow(c->hwnd)) return false;
     HR_STEP(kStepRoInit);
-    HrLog::Info("WGC init: RoInitialize");
+    HrWgcLog::Note("WGC init: RoInitialize");
     api.RoInitialize(1 /*RO_INIT_MULTITHREADED*/);   // fresh thread: joins the MTA
 
-    HrLog::Info("WGC init: D3D11CreateDevice");
+    HrWgcLog::Note("WGC init: D3D11CreateDevice");
     HRESULT hr = CreateWgcDevice(c);
     if (FAILED(hr) || !c->dev || !c->dc) {
-        HrLog::Warn("Window capture: D3D11 device creation failed (" + HexStr((unsigned long)hr) + ") in step '" +
+        HrWgcLog::Warn("Window capture: D3D11 device creation failed (" + HexStr((unsigned long)hr) + ") in step '" +
                     kInitSteps[g_init_step] + "'.");
         return false;
     }
@@ -611,12 +674,12 @@ bool InitImpl(Ctx *c) {
     // polled with TryGetNextFrame() (no FrameArrived handler, so WGC never runs code on our context
     // from a thread of its own).
     HR_STEP(kStepWinrtDevice);
-    HrLog::Info("WGC init: D3D11 device ready, creating the WinRT device");
+    HrWgcLog::Note("WGC init: D3D11 device ready, creating the WinRT device");
     ComPtr<IDXGIDevice> dxgi;
     if (FAILED(c->dev.As(&dxgi))) return false;
     void *insp = nullptr;
     hr = api.CreateD3D11DeviceFromDXGIDevice(dxgi.Get(), &insp);
-    if (FAILED(hr) || !insp) { HrLog::Warn("Window capture: CreateDirect3D11DeviceFromDXGIDevice failed."); return false; }
+    if (FAILED(hr) || !insp) { HrWgcLog::Warn("Window capture: CreateDirect3D11DeviceFromDXGIDevice failed."); return false; }
     {
         IUnknown *unk = static_cast<IUnknown *>(insp);
         IUnknown *as_device = nullptr;
@@ -630,15 +693,15 @@ bool InitImpl(Ctx *c) {
 
     HrCaptureItemInterop *interop = nullptr;
     HR_STEP(kStepItemFactory);
-    HrLog::Info("WGC init: activating GraphicsCaptureItem factory");
+    HrWgcLog::Note("WGC init: activating GraphicsCaptureItem factory");
     hr = GetFactory(L"Windows.Graphics.Capture.GraphicsCaptureItem", kIidInterop, reinterpret_cast<void **>(&interop));
-    if (FAILED(hr) || !interop) { HrLog::Warn("Window capture: GraphicsCaptureItem factory unavailable."); return false; }
+    if (FAILED(hr) || !interop) { HrWgcLog::Warn("Window capture: GraphicsCaptureItem factory unavailable."); return false; }
     HR_STEP(kStepCreateForWindow);
-    HrLog::Info("WGC init: CreateForWindow");
+    HrWgcLog::Note("WGC init: CreateForWindow");
     hr = interop->CreateForWindow(c->hwnd, kIidItem, reinterpret_cast<void **>(&c->item));
     interop->Release();
     if (FAILED(hr) || !c->item) {
-        HrLog::Warn("Window capture: this window can't be captured (CreateForWindow " + HexStr((unsigned long)hr) +
+        HrWgcLog::Warn("Window capture: this window can't be captured (CreateForWindow " + HexStr((unsigned long)hr) +
                     ") - falling back to screen crop.");
         return false;
     }
@@ -652,17 +715,17 @@ bool InitImpl(Ctx *c) {
     HrFramePoolStatics2 *stat2 = nullptr;
     HR_STEP(kStepPoolFactory);
     hr = GetFactory(L"Windows.Graphics.Capture.Direct3D11CaptureFramePool", kIidPoolStat2, reinterpret_cast<void **>(&stat2));
-    if (FAILED(hr) || !stat2) { HrLog::Warn("Window capture: frame pool factory unavailable."); return false; }
+    if (FAILED(hr) || !stat2) { HrWgcLog::Warn("Window capture: frame pool factory unavailable."); return false; }
     HR_STEP(kStepCreatePool);
-    HrLog::Info("WGC init: CreateFreeThreaded frame pool");
+    HrWgcLog::Note("WGC init: CreateFreeThreaded frame pool");
     hr = stat2->CreateFreeThreaded(c->winrt_dev, kPixelFormatBgra8, 2, sz, reinterpret_cast<void **>(&c->pool));
     stat2->Release();
-    if (FAILED(hr) || !c->pool) { HrLog::Warn("Window capture: CreateFreeThreaded failed."); return false; }
+    if (FAILED(hr) || !c->pool) { HrWgcLog::Warn("Window capture: CreateFreeThreaded failed."); return false; }
     c->pool_w = sz.Width; c->pool_h = sz.Height;
 
     HR_STEP(kStepCreateSession);
     hr = c->pool->CreateCaptureSession(c->item, reinterpret_cast<void **>(&c->session));
-    if (FAILED(hr) || !c->session) { HrLog::Warn("Window capture: CreateCaptureSession failed."); return false; }
+    if (FAILED(hr) || !c->session) { HrWgcLog::Warn("Window capture: CreateCaptureSession failed."); return false; }
 
     // Optional niceties - every failure here is ignored (older builds simply lack the interfaces).
     HR_STEP(kStepSessionOptions);
@@ -677,9 +740,9 @@ bool InitImpl(Ctx *c) {
     }
 
     HR_STEP(kStepStartCapture);
-    HrLog::Info("WGC init: StartCapture");
+    HrWgcLog::Note("WGC init: StartCapture");
     hr = c->session->StartCapture();
-    if (FAILED(hr)) { HrLog::Warn("Window capture: StartCapture failed (" + HexStr((unsigned long)hr) + ")."); return false; }
+    if (FAILED(hr)) { HrWgcLog::Warn("Window capture: StartCapture failed (" + HexStr((unsigned long)hr) + ")."); return false; }
 
     c->geom_w = c->geom_h = -1;
     c->ok = true;
@@ -716,7 +779,7 @@ InitResult InitContained(Ctx *c) {
     EnsureInitVeh();
 
     const std::string shims = CompatShimInfo();
-    if (!shims.empty()) HrLog::Warn("Window capture: " + shims + ". Windows hooks API calls of such processes; if WGC "
+    if (!shims.empty()) HrWgcLog::Warn("Window capture: " + shims + ". Windows hooks API calls of such processes; if WGC "
                                     "misbehaves, clear hr.exe > Properties > Compatibility (see homrec.log).");
 
     auto job = std::make_shared<InitJob>();
@@ -739,7 +802,7 @@ InitResult InitContained(Ctx *c) {
     if (job->faulted) {
         InterlockedExchange(&g_session_disabled, 1);
         const LONG st = job->fault_step;
-        HrLog::Warn("Window capture: Windows.Graphics.Capture jumped to an invalid address (" + HexStr(job->fault_target) +
+        HrWgcLog::Warn("Window capture: Windows.Graphics.Capture jumped to an invalid address (" + HexStr(job->fault_target) +
                     "; return address " + ModuleOffset(job->fault_ret) + ", stack " + HexStr(job->fault_rsp) +
                     ") in step '" + kInitSteps[(st >= 0 && st <= kStepDone) ? st : 0] +
                     "'. The fault was contained (helper thread parked), WGC is switched off until HomRec is "
@@ -750,7 +813,7 @@ InitResult InitContained(Ctx *c) {
     if (w != WAIT_OBJECT_0 || !job->finished) {
         InterlockedExchange(&g_session_disabled, 1);
         const LONG st = g_init_step;
-        HrLog::Warn("Window capture: Windows.Graphics.Capture did not finish within " +
+        HrWgcLog::Warn("Window capture: Windows.Graphics.Capture did not finish within " +
                     std::to_string(kInitTimeoutMs / 1000) + " s (stuck in step '" +
                     kInitSteps[(st >= 0 && st <= kStepDone) ? st : 0] + "') - falling back to the screen crop.");
         AbandonCtx(c);
@@ -917,15 +980,309 @@ void PwDrawCursor(Ctx *c, const RECT &wr) {
                ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
 }
 
-// One frame via PrintWindow. Called with c->mu held. Same return codes as HrWgcCapture().
-int PwCapture(Ctx *c, uint8_t *out) {
-    if (!IsWindow(c->hwnd)) return kError;
-    if (IsIconic(c->hwnd)) return kTimeout;                 // a minimised window has nothing to draw
+// ---------------------------------------------------------------------------------------------
+// 7th pass: smart mode + a much cheaper exact mode
+//
+// Measured on a real PC (Chrome, 1080p): the PrintWindow backend cost ~30% CPU and made every window
+// dragged over the recorded one stutter. Two reasons, both fixed here:
+//   * PrintWindow makes the target (and DWM) redraw the whole window for every single frame, even when
+//     nothing changed, and every frame went through a full colour conversion in the pipeline.
+//   * a window that is simply in front (the normal case) needs none of that: its picture is just a part
+//     of the screen.
+// So, per call:
+//   1. smart mode on and the window uncovered (and on one monitor)  ->  cut it out of the screen duplication
+//      (cheap; DXGI says "nothing changed" for free, and only the changed rows are copied);
+//   2. otherwise PrintWindow, but (a) no per-frame buffer clear, (b) paced: never more than 50% duty
+//      cycle, optional fps cap, slower polling while the picture stays identical and the user is idle,
+//      and (c) an identical picture is reported as "no new frame" so the pipeline re-sends the last
+//      converted frame (that path costs almost nothing) instead of converting the same pixels again.
+// ---------------------------------------------------------------------------------------------
+constexpr int kFallback = -100;       // internal: "leave the screen reading, use the exact capture"
+constexpr int kFallbackKeep = -101;   // internal: "exact capture for THIS frame, but stay in screen mode (it is starting up)"
 
-    RECT wr{};
-    if (!GetWindowRect(c->hwnd, &wr)) return kError;
+// True when another program's window lies over `want` (the window we record). Walks the z-order ABOVE the
+// target. Windows that cannot change what the screen duplication shows are skipped: invisible /
+// minimized / cloaked ones, click-through overlays, windows hidden from capture, and the target
+// program's own popups (menus, tooltips - they belong to the picture).
+bool CoveredByOthers(HWND target, const RECT &want) {
+    DWORD tpid = 0;
+    GetWindowThreadProcessId(target, &tpid);
+    int guard = 0;
+    for (HWND w = GetWindow(target, GW_HWNDPREV); w && guard < 4096; w = GetWindow(w, GW_HWNDPREV), ++guard) {
+        if (!IsWindowVisible(w)) continue;
+        RECT r{}, t{};
+        if (!GetWindowRect(w, &r) || !IntersectRect(&t, &r, &want)) continue;
+        if (IsIconic(w)) continue;
+        const LONG_PTR ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+        if ((ex & WS_EX_LAYERED) && (ex & WS_EX_TRANSPARENT)) continue;          // click-through overlay
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        if (pid == tpid) continue;                                              // the program's own popups
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) continue;
+        DWORD aff = 0;
+        if (GetWindowDisplayAffinity(w, &aff) && aff == 0x11 /*WDA_EXCLUDEFROMCAPTURE*/) continue;
+        RECT fr{};   // visible frame, without the invisible resize border Windows adds around most windows
+        if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, &fr, sizeof(fr))) &&
+            !IntersectRect(&t, &fr, &want)) continue;
+        return true;
+    }
+    return false;
+}
+
+// Makes sure c->dx duplicates the monitor `mr`. False = not possible right now (the caller uses the exact
+// capture); permanent problems set c->dx_broken.
+bool DxEnsure(Ctx *c, const RECT &mr, ULONGLONG now) {
+    if (c->dx && EqualRect(&c->dx_mon, &mr)) return true;
+    if (now < c->dx_retry_at) return false;
+
+    const int mw = (int)(mr.right - mr.left), mh = (int)(mr.bottom - mr.top);
+    int out_idx = -1;
+    const int n = hr_dx_output_count(0);
+    for (int i = 0; i < n && out_idx < 0; ++i) {
+        int ox = 0, oy = 0, ow = 0, oh = 0;
+        if (hr_dx_output_desc(0, i, &ox, &oy, &ow, &oh, nullptr, 0) && ox == mr.left && oy == mr.top &&
+            ow == mw && oh == mh) out_idx = i;
+    }
+    if (out_idx < 0) {
+        c->dx_retry_at = now + 2000;     // e.g. the monitor sits on another GPU: exact capture, try again later
+        HrWgcLog::Info("Smart window capture: monitor " + std::to_string(mw) + "x" + std::to_string(mh) + " at " +
+                       std::to_string(mr.left) + "," + std::to_string(mr.top) +
+                       " is not an output of the first GPU - using the exact capture for this window.");
+        return false;
+    }
+    DxRelease(c);
+    void *dx = hr_dx_create(0, out_idx);
+    if (!dx) {
+        if (++c->dx_fail >= 3) {
+            c->dx_broken = true;
+            HrWgcLog::Warn("Smart window capture: the screen duplication can't be created (3 tries) - smart mode is "
+                           "off for this recording, the exact window capture is used all the time.");
+        } else {
+            c->dx_retry_at = now + 1500;
+            HrWgcLog::Info("Smart window capture: screen duplication of output " + std::to_string(out_idx) +
+                           " failed (try " + std::to_string(c->dx_fail) + ") - using the exact capture meanwhile.");
+        }
+        return false;
+    }
+    int dw = 0, dh = 0;
+    hr_dx_get_size(dx, &dw, &dh);
+    if (dw != mw || dh != mh || dw <= 0 || dh <= 0) {
+        hr_dx_destroy(dx);
+        c->dx_broken = true;
+        HrWgcLog::Warn("Smart window capture: the duplication reports " + std::to_string(dw) + "x" + std::to_string(dh) +
+                       " for a " + std::to_string(mw) + "x" + std::to_string(mh) +
+                       " monitor (scaling / rotation?) - smart mode is off, the exact window capture is used.");
+        return false;
+    }
+    c->dx = dx;
+    c->dx_mon = mr;
+    c->dx_w = dw; c->dx_h = dh;
+    c->dx_buf.assign((size_t)dw * dh * 4, 0);
+    hr_dx_set_output_size(dx, dw, dh);   // tell the duplication the real size of dx_buf: it never stretches into it
+    c->dx_have_data = false;
+    c->dx_wait = 0;
+    c->mode = 0;                         // freshly created: the caller switches over (and primes it) explicitly
+    c->need_compose = true;
+    HrWgcLog::Info("Smart window capture: duplicating output " + std::to_string(out_idx) + " (" + std::to_string(dw) +
+                   "x" + std::to_string(dh) + ") for the window.");
+    return true;
+}
+
+// Decides, for this call, between the screen duplication (true) and the exact capture (false).
+bool SmartWantsScreen(Ctx *c, const RECT &want, RECT &mon_out, ULONGLONG now) {
+    if (!c->smart || c->dx_broken) return false;
+    const int ww = (int)(want.right - want.left), wh = (int)(want.bottom - want.top);
+    if ((ww & ~1) > c->canvas_w || (wh & ~1) > c->canvas_h) return false;   // would have to be scaled: the exact path does that
+    const HMONITOR mon = MonitorFromRect(&want, MONITOR_DEFAULTTONULL);
+    if (!mon) return false;
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return false;
+    const RECT &m = mi.rcMonitor;
+    if (want.left < m.left || want.top < m.top || want.right > m.right || want.bottom > m.bottom)
+        return false;                                                // spans monitors / partly off-screen
+    mon_out = m;
+
+    if (c->mode == 1) return !CoveredByOthers(c->hwnd, want);        // on the screen: check every frame (cheap)
+
+    // On the exact capture: look again every 250 ms, and go back to the screen only after the window has
+    // been uncovered for 400 ms (dragging a window around over it must not make the source flap).
+    if (now < c->next_occl_check) return false;
+    c->next_occl_check = now + 250;
+    if (CoveredByOthers(c->hwnd, want)) { c->clear_since = 0; return false; }
+    if (!c->clear_since) c->clear_since = now;
+    return now - c->clear_since >= 400;
+}
+
+// Draws the pointer into the canvas (screen mode), only when it really is over the recorded window.
+bool CursorOverWindow(Ctx *c, const RECT &want, int *x, int *y, unsigned long long *h) {
+    int vis = 0, px = 0, py = 0;
+    unsigned long long hh = 0;
+    if (!hr_cursor_state(&vis, &px, &py, &hh) || !vis) return false;
+    POINT pt{px, py};
+    if (!PtInRect(&want, pt)) return false;
+    HWND under = WindowFromPoint(pt);
+    if (!under || GetAncestor(under, GA_ROOT) != GetAncestor(c->hwnd, GA_ROOT)) return false;
+    *x = px; *y = py; *h = hh;
+    return true;
+}
+
+// Screen-duplication frame. kOk = canvas rewritten, kTimeout = nothing changed (canvas untouched),
+// kFallback = use the exact capture for this frame.
+int DxFrame(Ctx *c, const RECT &want, const RECT &mon, uint8_t *out, int timeout_ms, ULONGLONG now) {
+    if (!DxEnsure(c, mon, now)) return kFallback;
+    if (c->mode != 1) {
+        // Coming back from the exact capture: restart the duplication so the next delivery is a complete,
+        // current picture (it would otherwise only carry what changed since it was last read).
+        hr_dx_reset(c->dx);
+        c->dx_have_data = false;
+        c->dx_wait = 0;
+        c->need_compose = true;
+        c->mode = 1;
+        HrWgcLog::Info("Smart window capture: window is uncovered -> reading the screen (cheap mode).");
+    }
+
+    const int W = c->dx_w, H = c->dx_h;
+    const int rw = (int)(want.right - want.left) & ~1, rh = (int)(want.bottom - want.top) & ~1;
+    const int rx = (int)(want.left - mon.left), ry = (int)(want.top - mon.top);
+    if (rw < 2 || rh < 2 || rx < 0 || ry < 0 || rx + rw > W || ry + rh > H) return kFallback;
+
+    const int r = hr_dx_capture(c->dx, c->dx_buf.data(), std::max(0, std::min(timeout_ms, 33)));
+    bool new_pixels = false;
+    if (r == kOk) {
+        int y0 = 0, y1 = 0;
+        const bool partial = hr_dx_get_dirty_rows(c->dx, &y0, &y1) != 0;
+        // Only some rows of the screen changed: if none of them is a row of our window the picture is the same.
+        new_pixels = !partial || (y1 > ry && y0 < ry + rh);
+        c->dx_have_data = true;
+        c->dx_fail = 0;
+        ++c->st_dx_new;
+    } else if (r == kTimeout) {
+        ++c->st_dx_idle;
+        if (!c->dx_have_data) {
+            // Nothing delivered since the (re)start: the buffer is empty, don't build a picture from it.
+            if (++c->dx_wait > 40) {
+                c->dx_wait = 0;
+                if (++c->dx_fail >= 3) {
+                    c->dx_broken = true;
+                    HrWgcLog::Warn("Smart window capture: the screen duplication delivers nothing - smart mode is "
+                                   "off, the exact window capture is used all the time.");
+                } else {
+                    c->dx_retry_at = now + 1500;
+                    HrWgcLog::Info("Smart window capture: the screen duplication delivered no first picture - trying again later.");
+                }
+                return kFallback;
+            }
+            return kFallbackKeep;
+        }
+    } else if (r == kLost) {
+        hr_dx_reset(c->dx);
+        c->dx_have_data = false;
+        c->dx_wait = 0;
+        if (++c->dx_fail >= 5) {
+            c->dx_broken = true;
+            HrWgcLog::Warn("Smart window capture: the screen duplication keeps getting lost - smart mode is off.");
+            return kFallback;
+        }
+        return kFallbackKeep;
+    } else {
+        c->dx_broken = true;
+        HrWgcLog::Warn("Smart window capture: the screen duplication reported an error (" + std::to_string(r) +
+                       ") - smart mode is off, the exact window capture is used all the time.");
+        return kFallback;
+    }
+
+    const RECT crop{want.left, want.top, want.left + rw, want.top + rh};
+    int cx = 0, cy = 0;
+    unsigned long long ch = 0;
+    const bool cur_here = c->cursor && CursorOverWindow(c, want, &cx, &cy, &ch);
+    const bool cur_changed = (cur_here != c->cur_drawn) || (cur_here && (cx != c->cur_x || cy != c->cur_y || ch != c->cur_handle));
+
+    if (!new_pixels && !c->need_compose && EqualRect(&crop, &c->last_crop) && !cur_changed) return kTimeout;
+
+    Compose(c, c->dx_buf.data() + ((size_t)ry * W + rx) * 4, W * 4, rw, rh, out);
+    if (cur_here) {
+        const int ox = (c->canvas_w - std::min(rw, c->canvas_w)) / 2, oy = (c->canvas_h - std::min(rh, c->canvas_h)) / 2;
+        hr_composite_cursor(out, c->canvas_w, c->canvas_h, (int)want.left - ox, (int)want.top - oy);
+    }
+    c->cur_drawn = cur_here; c->cur_x = cx; c->cur_y = cy; c->cur_handle = ch;
+    c->last_crop = crop;
+    c->need_compose = false;
+    return kOk;
+}
+
+// 64-bit hash of a w x h BGRA region (4 independent lanes keep the multiplier chains busy: ~0.5 ms for 1080p).
+uint64_t HashRegion(const uint8_t *base, int pitch, int w, int h) {
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ (uint64_t)w, h1 = 0xC2B2AE3D27D4EB4Full ^ (uint64_t)h,
+             h2 = 0x165667B19E3779F9ull, h3 = 0x27D4EB2F165667C5ull;
+    const size_t words = (size_t)w * 4 / 8;
+    for (int y = 0; y < h; ++y) {
+        const uint8_t *row = base + (size_t)y * pitch;
+        size_t i = 0;
+        for (; i + 4 <= words; i += 4) {
+            uint64_t a, b, c2, d;
+            std::memcpy(&a, row + (i + 0) * 8, 8);
+            std::memcpy(&b, row + (i + 1) * 8, 8);
+            std::memcpy(&c2, row + (i + 2) * 8, 8);
+            std::memcpy(&d, row + (i + 3) * 8, 8);
+            h0 = (h0 ^ a) * 0x100000001B3ull + (h0 >> 29);
+            h1 = (h1 ^ b) * 0x100000001B3ull + (h1 >> 29);
+            h2 = (h2 ^ c2) * 0x100000001B3ull + (h2 >> 29);
+            h3 = (h3 ^ d) * 0x100000001B3ull + (h3 >> 29);
+        }
+        for (; i < words; ++i) {
+            uint64_t a;
+            std::memcpy(&a, row + i * 8, 8);
+            h0 = (h0 ^ a) * 0x100000001B3ull + (h0 >> 29);
+        }
+    }
+    return h0 ^ (h1 * 31) ^ (h2 * 131) ^ (h3 * 1031);
+}
+
+void StatsTick(Ctx *c, ULONGLONG now) {
+    if (!c->st_t0) { c->st_t0 = now; return; }
+    if (now - c->st_t0 < 5000) return;
+    const double secs = (double)(now - c->st_t0) / 1000.0;
+    HrWgcLog::Debug(std::string("window capture stats (") + (c->mode == 1 ? "screen" : "exact") + " mode, last " +
+                    std::to_string((int)(secs + 0.5)) + " s): calls " + std::to_string(c->st_calls) +
+                    ", exact captures " + std::to_string(c->st_pw) + " (avg " +
+                    std::to_string(c->st_pw ? c->st_pw_ms / c->st_pw : 0) + " ms, max " + std::to_string(c->st_pw_max) +
+                    " ms), identical pictures skipped " + std::to_string(c->st_static) + ", screen frames " +
+                    std::to_string(c->st_dx_new) + " (idle " + std::to_string(c->st_dx_idle) + "), held " +
+                    std::to_string(c->st_hold) + ", static streak " + std::to_string(c->static_streak));
+    c->st_t0 = now;
+    c->st_calls = c->st_pw = c->st_pw_ms = c->st_pw_max = c->st_dx_new = c->st_dx_idle = c->st_hold = c->st_static = 0;
+}
+
+// Exact frame via PrintWindow. `wr` = GetWindowRect() of the window. kOk = canvas rewritten; kTimeout = the
+// picture is the same as before / not due yet (canvas untouched).
+int PwFrame(Ctx *c, const RECT &wr, uint8_t *out, ULONGLONG now) {
     const int ww = (int)(wr.right - wr.left), wh = (int)(wr.bottom - wr.top);
     if (ww < 2 || wh < 2 || ww > 16384 || wh > 16384) return kTimeout;
+
+    // --- pacing -----------------------------------------------------------------------------------
+    // The user is active -> back to the full rate; idle and the picture stays identical -> poll slower.
+    // Input only counts while the recorded window is the one in front (typing / clicking elsewhere does not
+    // change it; its own animations are caught by the identical-picture test).
+    LASTINPUTINFO li{};
+    li.cbSize = sizeof(li);
+    if (GetLastInputInfo(&li) && li.dwTime != c->last_input_tick) {
+        c->last_input_tick = li.dwTime;
+        const HWND fg = GetForegroundWindow();
+        if (fg && GetAncestor(fg, GA_ROOT) == GetAncestor(c->hwnd, GA_ROOT)) {
+            c->static_streak = 0;
+            c->next_pw_at = 0;           // look right away, don't wait out a slow-poll interval
+        }
+    }
+    DWORD min_gap = 0;
+    if (c->fps_cap > 0) min_gap = (DWORD)(1000 / c->fps_cap);
+    if (c->static_streak >= 30)      min_gap = std::max<DWORD>(min_gap, 250);
+    else if (c->static_streak >= 4)  min_gap = std::max<DWORD>(min_gap, 100);
+    // Never spend more than half the time inside PrintWindow: a window that needs 40 ms per picture is
+    // asked at most every 80 ms (this is what keeps other windows from stuttering while the target redraws).
+    min_gap = std::max<DWORD>(min_gap, c->last_pw_ms);
+    if (c->have_hash && now < c->next_pw_at) return kTimeout;
 
     if (!c->pw_dc) {
         HDC screen = GetDC(nullptr);
@@ -951,28 +1308,30 @@ int PwCapture(Ctx *c, uint8_t *out) {
         if (!bmp || !bits) { if (bmp) DeleteObject(bmp); return kError; }
         c->pw_bmp = bmp;
         c->pw_old = static_cast<HBITMAP>(SelectObject(c->pw_dc, bmp));
-        c->pw_bits = static_cast<uint8_t *>(bits);
+        c->pw_bits = static_cast<uint8_t *>(bits);          // CreateDIBSection memory starts zeroed (black)
         c->pw_w = ww; c->pw_h = wh;
+        c->have_hash = false;
     }
-
-    // Win10/11 windows have an invisible resize border that DWM never paints: start from black so it
-    // can't show stale pixels (it is cropped away below anyway unless the frame bounds say otherwise).
-    std::memset(c->pw_bits, 0, (size_t)ww * wh * 4);
+    // (No per-frame clear any more: the invisible resize border is never painted and is cropped away below,
+    //  so it stays black from the allocation - the old 8 MB memset per frame was pure cost.)
 
     const DWORD t0 = GetTickCount();
     const BOOL ok = PrintWindow(c->hwnd, c->pw_dc, PW_RENDERFULLCONTENT);
     const DWORD took = GetTickCount() - t0;
+    ++c->st_pw; c->st_pw_ms += took; c->st_pw_max = std::max<uint32_t>(c->st_pw_max, took);
+    c->last_pw_ms = took;
+    c->next_pw_at = now + std::max<DWORD>(min_gap, took);
     if (!ok) {
         if (!c->pw_fail_warned) {
             c->pw_fail_warned = true;
-            HrLog::Warn("Window capture (PrintWindow): Windows refused to draw this window - the last picture is repeated until it works.");
+            HrWgcLog::Warn("Window capture (PrintWindow): Windows refused to draw this window - the last picture is repeated until it works.");
         }
         return kTimeout;
     }
     if (took > 250 && !c->pw_slow_warned) {
         c->pw_slow_warned = true;
-        HrLog::Warn("Window capture (PrintWindow): the window needs " + std::to_string(took) +
-                    " ms to draw itself - the recording will drop frames while it is that slow.");
+        HrWgcLog::Warn("Window capture (PrintWindow): the window needs " + std::to_string(took) +
+                       " ms to draw itself - the recording will drop frames while it is that slow.");
     }
     if (c->cursor) PwDrawCursor(c, wr);
 
@@ -992,11 +1351,70 @@ int PwCapture(Ctx *c, uint8_t *out) {
     rw &= ~1; rh &= ~1;
     if (rw < 2 || rh < 2) return kTimeout;
 
-    // Always reported as a NEW frame, even when the picture is identical to the last one: the pipeline
-    // counts every "no new frame" (timeout) answer as a dropped frame in classic (non-GPU) mode, which
-    // would put a false "System overloaded - dropping frames" banner on any static page.
-    Compose(c, c->pw_bits + ((size_t)ry * ww + rx) * 4, ww * 4, rw, rh, out);
+    // Same picture as last time (and the canvas already holds it)? Then there is nothing new to hand over:
+    // reporting "no new frame" lets the pipeline re-send the frame it already converted instead of
+    // converting identical pixels again (the pipeline does not count this as a dropped frame in the
+    // overload warning - only real stalls are).
+    const uint8_t *region = c->pw_bits + ((size_t)ry * ww + rx) * 4;
+    const uint64_t hsh = HashRegion(region, ww * 4, rw, rh) ^ ((uint64_t)rw << 20) ^ ((uint64_t)rh << 40);
+    if (c->have_hash && !c->need_compose && hsh == c->last_hash) {
+        ++c->static_streak;
+        ++c->st_static;
+        return kTimeout;
+    }
+    c->last_hash = hsh;
+    c->have_hash = true;
+    c->static_streak = 0;
+    c->need_compose = false;
+    Compose(c, region, ww * 4, rw, rh, out);
+    c->cur_drawn = false;
     return kOk;
+}
+
+// One frame. Called with c->mu held. Same return codes as HrWgcCapture().
+int PwCapture(Ctx *c, uint8_t *out, int timeout_ms) {
+    const ULONGLONG now = GetTickCount64();
+    ++c->st_calls;
+    StatsTick(c, now);
+
+    if (!IsWindow(c->hwnd)) {
+        // The window is gone (closed / re-created). Hold the last picture: the recording keeps its timeline
+        // and RecordingController re-targets us (HrWgcSetTarget) as soon as the window is found again.
+        if (!c->gone_logged) {
+            c->gone_logged = true;
+            HrWgcLog::Note("Window capture: the recorded window is gone - holding the last picture until it is found again.");
+        }
+        ++c->st_hold;
+        return kTimeout;
+    }
+    if (c->gone_logged) { c->gone_logged = false; HrWgcLog::Info("Window capture: the recorded window is back."); }
+    if (IsIconic(c->hwnd)) { ++c->st_hold; return kTimeout; }       // a minimised window has nothing to draw
+
+    RECT wr{};
+    if (!GetWindowRect(c->hwnd, &wr)) return kTimeout;
+    RECT frame{}, client{};
+    if (!WindowRects(c->hwnd, frame, client)) return kTimeout;
+    const RECT &want = c->client_only ? client : frame;
+    if (want.right - want.left < 2 || want.bottom - want.top < 2) { ++c->st_hold; return kTimeout; }
+
+    RECT mon{};
+    if (SmartWantsScreen(c, want, mon, now)) {
+        const int r = DxFrame(c, want, mon, out, timeout_ms, now);
+        if (r == kFallbackKeep) return PwFrame(c, wr, out, now);   // starting up: exact frame, stay in screen mode
+        if (r != kFallback) return r;
+        // not possible this frame (duplication not ready / failed): exact capture below
+    }
+    if (c->mode == 1) {
+        c->mode = 0;                         // the window got covered (or the duplication gave up)
+        c->need_compose = true;
+        c->have_hash = false;
+        c->static_streak = 0;
+        c->clear_since = 0;
+        c->next_occl_check = now + 250;
+        c->next_pw_at = 0;
+        HrWgcLog::Info("Smart window capture: window is covered / duplication unavailable -> exact window capture (PrintWindow).");
+    }
+    return PwFrame(c, wr, out, now);
 }
 
 // ---- "native" (WinRT) Windows.Graphics.Capture: is it allowed to run in this process? ----------
@@ -1065,19 +1483,24 @@ std::shared_ptr<Ctx> MakeCtx(HWND hwnd, int canvas_w, int canvas_h, bool client_
     return sp;
 }
 
-void *CreatePrintWindowCtx(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor) {
+void *CreatePrintWindowCtx(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor,
+                           const HrWgcOptions &opt) {
     auto sp = MakeCtx(hwnd, canvas_w, canvas_h, client_only, draw_cursor);
     Ctx *c = sp.get();
     c->pw = true;
     c->ok = true;
+    c->smart = opt.smart;
+    c->fps_cap = std::max(0, std::min(opt.fps_cap, 240));
     {
         std::lock_guard<std::mutex> lk(g_registry_mu);
         g_registry.push_back(sp);
     }
-    HrLog::Info("Window capture: using the PrintWindow backend (" + std::to_string(c->canvas_w) + "x" +
-                std::to_string(c->canvas_h) + (client_only ? ", content area only" : ", whole window") +
-                ") - records this ONE window, even when other windows cover it. No GPU zero-copy, so it costs "
-                "more CPU than a desktop recording.");
+    HrWgcLog::Note("Window capture: using the PrintWindow backend (" + std::to_string(c->canvas_w) + "x" +
+                   std::to_string(c->canvas_h) + (client_only ? ", content area only" : ", whole window") +
+                   (c->smart ? ", SMART mode: cheap screen reading while the window is uncovered, exact capture when covered"
+                             : ", exact capture only") +
+                   (c->fps_cap > 0 ? ", exact captures capped at " + std::to_string(c->fps_cap) + "/s" : std::string()) +
+                   ") - records this ONE window, even when other windows cover it.");
     return c;
 }
 
@@ -1129,8 +1552,18 @@ bool HrWgcProbeWindow(HWND hwnd) {
     return true;
 }
 
-void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor) {
-    if (!hwnd || canvas_w < 2 || canvas_h < 2 || !HrWgcSupported()) return nullptr;
+void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool draw_cursor,
+                  const HrWgcOptions *opt) {
+    HrWgcLog::WriteSessionHeaderOnce();
+    const HrWgcOptions options = opt ? *opt : HrWgcOptions();
+    HrWgcLog::Info("HrWgcCreate: hwnd " + std::to_string((unsigned long long)(uintptr_t)hwnd) + ", canvas " +
+                   std::to_string(canvas_w) + "x" + std::to_string(canvas_h) + ", " +
+                   (client_only ? "client area" : "whole window") + ", cursor " + (draw_cursor ? "on" : "off") +
+                   ", smart " + (options.smart ? "on" : "off") + ", fps cap " + std::to_string(options.fps_cap));
+    if (!hwnd || canvas_w < 2 || canvas_h < 2 || !HrWgcSupported()) {
+        HrWgcLog::Warn("HrWgcCreate: refused (no window / canvas too small / window capture unsupported on this PC).");
+        return nullptr;
+    }
 
     if (NativeWgcAllowed()) {
         GuardScope guard;
@@ -1142,7 +1575,7 @@ void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool 
                 std::lock_guard<std::mutex> lk(g_registry_mu);
                 g_registry.push_back(sp);
             }
-            HrLog::Info("Window capture: using Windows.Graphics.Capture (" + std::to_string(c->canvas_w) + "x" +
+            HrWgcLog::Note("Window capture: using Windows.Graphics.Capture (" + std::to_string(c->canvas_w) + "x" +
                         std::to_string(c->canvas_h) + (client_only ? ", content area only" : ", whole window") + ").");
             return c;
         }
@@ -1151,7 +1584,7 @@ void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool 
             // keep it alive for the rest of the process (deliberate leak) and never release its objects.
             new std::shared_ptr<Ctx>(sp);
             MarkNativeBad();
-            HrLog::Warn("Window capture: native Windows.Graphics.Capture is unusable on this PC (remembered in "
+            HrWgcLog::Warn("Window capture: native Windows.Graphics.Capture is unusable on this PC (remembered in "
                         "logs\\wgc_native_bad.flag) - recording the window with the PrintWindow backend instead of "
                         "the screen crop.");
         } else {
@@ -1159,7 +1592,7 @@ void *HrWgcCreate(HWND hwnd, int canvas_w, int canvas_h, bool client_only, bool 
         }
     }
     if (!PwAvailable()) return nullptr;
-    return CreatePrintWindowCtx(hwnd, canvas_w, canvas_h, client_only, draw_cursor);
+    return CreatePrintWindowCtx(hwnd, canvas_w, canvas_h, client_only, draw_cursor, options);
 }
 
 bool HrWgcIsHandle(void *handle) {
@@ -1192,7 +1625,7 @@ int HrWgcCapture(void *handle, uint8_t *out_bgra, int timeout_ms) {
         {
             std::lock_guard<std::mutex> lk(c->mu);
             if (c->dead || !c->ok) return kError;
-            if (c->pw) return PwCapture(c, out_bgra);   // PrintWindow: synchronous, the pipeline paces the calls
+            if (c->pw) return PwCapture(c, out_bgra, timeout_ms);   // PrintWindow / smart: synchronous, the pipeline paces the calls
             if (!c->pool) return kError;
 
             // Only the first frames are watched - once capture is proven to work there is no file churn.
@@ -1250,4 +1683,30 @@ void HrWgcSetCursor(void *handle, bool on) {
     if (sp->dead) return;
     sp->cursor = on;
     if (sp->session2) sp->session2->put_IsCursorCaptureEnabled(on ? TRUE : FALSE);
+}
+
+bool HrWgcSetTarget(void *handle, HWND hwnd) {
+    std::shared_ptr<Ctx> sp = FindCtx(handle);
+    if (!sp || !hwnd) return false;
+    std::lock_guard<std::mutex> lk(sp->mu);
+    if (sp->dead || !sp->pw) return false;               // native WGC is bound to its window
+    if (sp->hwnd == hwnd) return true;
+    HrWgcLog::Note("Window capture: re-targeting to window " + std::to_string((unsigned long long)(uintptr_t)hwnd) +
+                   " (was " + std::to_string((unsigned long long)(uintptr_t)sp->hwnd) + ").");
+    sp->hwnd = hwnd;
+    sp->gone_logged = false;
+    sp->have_hash = false;
+    sp->static_streak = 0;
+    sp->need_compose = true;
+    sp->next_pw_at = 0;
+    sp->clear_since = 0;
+    sp->next_occl_check = 0;
+    return true;
+}
+
+int HrWgcMode(void *handle) {
+    std::shared_ptr<Ctx> sp = FindCtx(handle);
+    if (!sp) return 0;
+    if (!sp->pw) return 1;
+    return sp->mode == 1 ? 3 : 2;
 }
