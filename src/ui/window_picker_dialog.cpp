@@ -219,6 +219,21 @@ HrWindowTarget HrWindowTargetFromState(const AppState &st) {
     return t;
 }
 
+HrWindowTarget HrWindowTargetFromLayer(const OverlayDef &ov) {
+    HrWindowTarget t;
+    t.title = ov.win_title;
+    t.exe = ov.win_exe;
+    t.cls = ov.win_class;
+    t.match_title = ov.win_match_title;
+    t.match_exe = ov.win_match_exe;
+    t.match_class = ov.win_match_class;
+    t.title_mode = HrTitleModeFromStr(ov.win_title_mode);
+    t.follow_hwnd = ov.win_follow;
+    t.preferred = ov.win_hwnd;
+    t.client_only = ov.win_area == "client";
+    return t;
+}
+
 bool HR_ResolveWindowTarget(const HrWindowTarget &t, HWND &out_hwnd, RECT &out_rect, std::string *how) {
     HWND found = nullptr;
     const Criteria crit = CriteriaFor(t);
@@ -913,4 +928,117 @@ void ShowRegionPickerOverlay(HWND parent, HINSTANCE hInst, AppState &state) {
         state.region_w = ctx.result.right - ctx.result.left;
         state.region_h = ctx.result.bottom - ctx.result.top;
     }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// 8th pass: window / region layers
+// ---------------------------------------------------------------------------------------------
+bool HrCanvasSizeForState(const AppState &state, int &w, int &h) {
+    const auto mons = HrListMonitors();
+    if (mons.empty()) return false;
+    size_t idx = state.monitor_id > 0 ? (size_t)(state.monitor_id - 1) : 0;
+    if (idx >= mons.size()) idx = 0;
+    w = mons[idx].w;
+    h = mons[idx].h;
+    return w > 0 && h > 0;
+}
+
+void HrFitLayerRect(int src_w, int src_h, int canvas_w, int canvas_h, bool allow_upscale,
+                    int &x, int &y, int &w, int &h) {
+    if (src_w <= 0 || src_h <= 0 || canvas_w <= 0 || canvas_h <= 0) {
+        x = 0; y = 0; w = canvas_w > 0 ? canvas_w : 640; h = canvas_h > 0 ? canvas_h : 360;
+        return;
+    }
+    double sc = std::min((double)canvas_w / src_w, (double)canvas_h / src_h);
+    if (!allow_upscale && sc > 1.0) sc = 1.0;
+    w = std::max(2, (int)(src_w * sc + 0.5));
+    h = std::max(2, (int)(src_h * sc + 0.5));
+    w &= ~1; h &= ~1;
+    if (w < 2) w = 2;
+    if (h < 2) h = 2;
+    x = (canvas_w - w) / 2;
+    y = (canvas_h - h) / 2;
+}
+
+namespace {
+std::string FreshLayerId(const AppState &state, const char *base) {
+    for (int n = 1;; ++n) {
+        const std::string id = std::string(base) + "_" + std::to_string(n);
+        bool taken = false;
+        for (const auto &o : state.overlays) if (o.id == id) { taken = true; break; }
+        if (!taken) return id;
+    }
+}
+}
+
+bool HrBuildWindowLayer(const AppState &picked, int canvas_w, int canvas_h, bool allow_upscale, OverlayDef &out) {
+    if (picked.capture_window_title.empty() && picked.capture_window_exe.empty() && picked.capture_window_class.empty())
+        return false;
+    OverlayDef ov;
+    ov.id = FreshLayerId(picked, "ov_win");
+    ov.type = "window";
+    ov.visible = true;
+    ov.win_title = picked.capture_window_title;
+    ov.win_exe = picked.capture_window_exe;
+    ov.win_class = picked.capture_window_class;
+    ov.win_match_exe = picked.window_match_exe;
+    ov.win_match_class = picked.window_match_class;
+    ov.win_match_title = picked.window_match_title;
+    ov.win_title_mode = picked.window_title_mode;
+    ov.win_follow = picked.window_follow_hwnd;
+    ov.win_method = picked.WindowCaptureWantsWgc() ? "wgc" : "screen";
+    ov.win_area = picked.window_capture_area == "client" ? "client" : "window";
+    ov.win_fps_cap = picked.window_capture_fps_cap;
+    ov.win_hwnd = picked.capture_window_hwnd;
+    ov.lock_aspect = true;      // a resize of a window picture should not distort it
+
+    // The window's current size decides the first placement (aspect ratio is kept from then on).
+    int sw = 0, sh = 0;
+    HWND hw = nullptr;
+    RECT r{};
+    if (HR_ResolveWindowTarget(HrWindowTargetFromLayer(ov), hw, r, nullptr) && hw) {
+        sw = r.right - r.left;
+        sh = r.bottom - r.top;
+        ov.win_hwnd = hw;
+        if (ov.win_exe.empty()) ov.win_exe = HR_WindowExeName(hw);
+        if (ov.win_class.empty()) ov.win_class = HR_WindowClassName(hw);
+    }
+    HrFitLayerRect(sw, sh, canvas_w, canvas_h, allow_upscale, ov.x, ov.y, ov.w, ov.h);
+    out = ov;
+    return true;
+}
+
+bool HrBuildRegionLayer(const AppState &picked, int canvas_w, int canvas_h, bool allow_upscale, OverlayDef &out) {
+    if (picked.region_w <= 0 || picked.region_h <= 0) return false;
+    OverlayDef ov;
+    ov.id = FreshLayerId(picked, "ov_reg");
+    ov.type = "region";
+    ov.visible = true;
+    ov.rx = picked.region_x; ov.ry = picked.region_y;
+    ov.rw = picked.region_w; ov.rh = picked.region_h;
+    ov.lock_aspect = true;
+    HrFitLayerRect(ov.rw, ov.rh, canvas_w, canvas_h, allow_upscale, ov.x, ov.y, ov.w, ov.h);
+    out = ov;
+    return true;
+}
+
+void HrMigrateCaptureSourceToLayers(AppState &state) {
+    if (state.capture_mode == CaptureMode::Desktop) return;
+    int cw = 0, ch = 0;
+    if (!HrCanvasSizeForState(state, cw, ch)) { cw = 1920; ch = 1080; }
+    OverlayDef layer;
+    bool made = false;
+    if (state.capture_mode == CaptureMode::Window) made = HrBuildWindowLayer(state, cw, ch, true, layer);
+    else if (state.capture_mode == CaptureMode::Region) made = HrBuildRegionLayer(state, cw, ch, true, layer);
+    if (made) {
+        // Layers further down the list are drawn over the ones above: the picture the old recording WAS
+        // goes under the overlays that were already set up.
+        state.overlays.insert(state.overlays.begin(), layer);
+        state.desktop_visible = false;
+        HrWgcLog::Note(std::string("Capture source migrated: the old \"") +
+                       (state.capture_mode == CaptureMode::Window ? "window" : "region") +
+                       "\" capture is now a layer (" + layer.id + "); the Desktop layer is hidden like before.");
+    }
+    state.capture_mode = CaptureMode::Desktop;
 }
