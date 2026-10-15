@@ -8,6 +8,8 @@
 #include "pc_analytics_dialog.h"
 #include "log_viewer_dialog.h"
 #include "window_picker_dialog.h"
+#include "capture_source_dialog.h"
+#include "overlay_geometry.h"
 #include "hide_window_dialog.h"
 #include "custom_messagebox.h"
 #include "hrc_config.h"
@@ -16,6 +18,7 @@
 #include "../utils/str_convert.h"   // HrCaptureModeToStr() for the picker log line
 #include "../utils/pc_log.h"
 #include "../utils/plugin_log.h"
+#include "../utils/wgc_log.h"
 #include "../utils/update.h"
 #include <wx/dcbuffer.h>
 #include <wx/msw/private.h>
@@ -205,12 +208,39 @@ constexpr int kOverlayHandle = 10;
 // Where an overlay's rectangle lands inside the on-screen preview bitmap.
 // `prev` is the bitmap's rect within the panel, sx/sy convert overlay-space
 // (native capture) pixels to on-screen pixels.
+//
+// 7th pass: the returned rectangle ALWAYS lies inside `prev`. It used to be inflated to a minimum of 20 px
+// without looking at the picture's border and was never cut to it, so a small overlay near the right /
+// bottom edge - or one left outside a smaller picture (another window / monitor was picked) - had its
+// frame drawn out in the letterbox bars: it looked as if it had slipped under the preview, and it could not
+// be grabbed any more. Now: the part of the overlay that is inside the picture is shown; a tiny one is
+// enlarged inwards only; one that is completely outside gets a small stub parked on the nearest edge so it
+// can still be picked up and dragged back.
 wxRect OverlayScreenRect(const OverlayDef &ov, const wxRect &prev, double sx, double sy) {
-    int rx = prev.GetX() + (int)(ov.x * sx);
-    int ry = prev.GetY() + (int)(ov.y * sy);
-    int rw = std::max(kOverlayHandle * 2, (int)(ov.w * sx));
-    int rh = std::max(kOverlayHandle * 2, (int)(ov.h * sy));
-    return wxRect(rx, ry, rw, rh);
+    const int minpx = kOverlayHandle * 2;
+    const int rx = prev.GetX() + (int)(ov.x * sx);
+    const int ry = prev.GetY() + (int)(ov.y * sy);
+    const int rw = std::max(1, (int)(ov.w * sx));
+    const int rh = std::max(1, (int)(ov.h * sy));
+    wxRect r(rx, ry, rw, rh);
+    r.Intersect(prev);
+    if (r.IsEmpty() || r.GetWidth() <= 0 || r.GetHeight() <= 0) {
+        const int w = std::min(minpx, prev.GetWidth()), h = std::min(minpx, prev.GetHeight());
+        const int x = std::clamp(rx, prev.GetX(), prev.GetX() + std::max(0, prev.GetWidth() - w));
+        const int y = std::clamp(ry, prev.GetY(), prev.GetY() + std::max(0, prev.GetHeight() - h));
+        return wxRect(x, y, w, h);
+    }
+    if (r.GetWidth() < minpx) {
+        const int w = std::min(minpx, prev.GetWidth());
+        r.SetX(std::min(r.GetX(), prev.GetX() + prev.GetWidth() - w));
+        r.SetWidth(w);
+    }
+    if (r.GetHeight() < minpx) {
+        const int h = std::min(minpx, prev.GetHeight());
+        r.SetY(std::min(r.GetY(), prev.GetY() + prev.GetHeight() - h));
+        r.SetHeight(h);
+    }
+    return r;
 }
 } // namespace
 
@@ -421,6 +451,9 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         double sy = (double)prevRect.GetHeight() / nh;
         if (selected_overlay_index_ >= (int)state_.overlays.size()) selected_overlay_index_ = -1;
 
+        // Nothing of the frames / labels may be painted outside the picture (see OverlayScreenRect()).
+        dc.SetClippingRegion(prevRect);
+
         for (size_t i = 0; i < state_.overlays.size(); ++i) {
             const auto &ov = state_.overlays[i];
             // In snapshot mode every overlay is shown/draggable, even a
@@ -448,10 +481,11 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
 
             wxString label = wxString::FromUTF8((ov.name.empty() ? ov.type : ov.name).c_str());
             if (!ov.visible) label += " (hidden)";
+            if (ov.locked) label += " (locked)";
             if (!label.empty()) {
                 wxSize te = dc.GetTextExtent(label);
-                int ty = r.GetY() >= te.GetHeight() + 2 ? r.GetY() - te.GetHeight() - 2
-                                                         : r.GetY() + kOverlayHandle + 2;
+                int ty = r.GetY() - prevRect.GetY() >= te.GetHeight() + 2 ? r.GetY() - te.GetHeight() - 2
+                                                                          : r.GetY() + kOverlayHandle + 2;
                 dc.SetPen(*wxTRANSPARENT_PEN);
                 dc.SetBrush(wxBrush(wxColour(20, 20, 26)));
                 dc.DrawRectangle(r.GetX(), ty, te.GetWidth() + 6, te.GetHeight() + 2);
@@ -459,6 +493,20 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
                 dc.DrawText(label, r.GetX() + 3, ty + 1);
             }
         }
+
+        // Centre guides while a dragged overlay is snapped to the middle of the picture.
+        if (drag_overlay_index_ >= 0 && (snap_center_x_ || snap_center_y_)) {
+            dc.SetPen(wxPen(wxColour(255, 210, 90), 1, wxPENSTYLE_SHORT_DASH));
+            if (snap_center_x_) {
+                const int gx = prevRect.GetX() + prevRect.GetWidth() / 2;
+                dc.DrawLine(gx, prevRect.GetY(), gx, prevRect.GetBottom());
+            }
+            if (snap_center_y_) {
+                const int gy = prevRect.GetY() + prevRect.GetHeight() / 2;
+                dc.DrawLine(prevRect.GetX(), gy, prevRect.GetRight(), gy);
+            }
+        }
+        dc.DestroyClippingRegion();
     }
 
     if (snapshot_mode_) {
@@ -522,6 +570,14 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
     int hit = HitTestOverlay(evt.GetX(), evt.GetY(), corner);
     if (hit >= 0) {
         auto &ov = state_.overlays[(size_t)hit];
+        if (ov.locked) {
+            // "Lock position and size" (Layers panel): can be selected, can't be moved or resized.
+            selected_overlay_index_ = hit;
+            drag_overlay_index_ = -1;
+            drag_corner_ = Corner::kNone;
+            Refresh();
+            return;
+        }
         drag_corner_ = corner;
         drag_overlay_index_ = hit;
         selected_overlay_index_ = hit;
@@ -563,6 +619,7 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
                       ? -1 : HitTestOverlay(evt.GetX(), evt.GetY(), corner);
         wxStockCursor cur = wxCURSOR_ARROW;
         if (state_.disable_preview && !snapshot_mode_ && !state_.overlays.empty()) cur = wxCURSOR_HAND;
+        else if (hit >= 0 && state_.overlays[(size_t)hit].locked) cur = wxCURSOR_ARROW;   // locked: nothing to grab
         else if (hit >= 0) {
             cur = corner == Corner::kBottomRight ? wxCURSOR_SIZENWSE
                 : corner == Corner::kTopLeft     ? wxCURSOR_SIZENWSE
@@ -594,28 +651,32 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
     int dy = (int)std::lround((evt.GetY() - drag_start_mouse_y_) / sy);
 
     auto &ov = state_.overlays[(size_t)drag_overlay_index_];
+    using namespace HrOverlayGeom;
+    const Rect start{drag_start_ov_x_, drag_start_ov_y_, drag_start_ov_w_, drag_start_ov_h_};
+    // Shift = keep the overlay's proportions (a 500x500 picture can't become 1000x200); an overlay with
+    // "Keep proportions" ticked does it without Shift, and Shift then lets go of it.
+    const bool keep = KeepAspect(ov.lock_aspect, evt.ShiftDown());
+    snap_center_x_ = snap_center_y_ = false;
     if (drag_corner_ == Corner::kBottomRight) {
         // Top-left corner stays put; bottom-right corner follows the mouse.
-        ov.w = std::max(10, drag_start_ov_w_ + dx);
-        ov.h = std::max(10, drag_start_ov_h_ + dy);
+        const Rect r = ResizeBottomRight(start, dx, dy, cw, ch, keep);
+        ov.w = r.w; ov.h = r.h;
     } else if (drag_corner_ == Corner::kTopLeft) {
-        // Bottom-right corner (drag_start_ov_x_+w, drag_start_ov_y_+h)
-        // stays put; the top-left corner follows the mouse instead. Clamp
-        // width/height to a 10px floor the same way the other handle
-        // does, and keep x/y consistent with whatever size that floor
-        // ends up clamping to (so the box doesn't "jump" once the mouse
-        // drags past the minimum size).
-        int new_w = std::max(10, drag_start_ov_w_ - dx);
-        int new_h = std::max(10, drag_start_ov_h_ - dy);
-        int anchor_right  = drag_start_ov_x_ + drag_start_ov_w_;
-        int anchor_bottom = drag_start_ov_y_ + drag_start_ov_h_;
-        ov.w = new_w;
-        ov.h = new_h;
-        ov.x = std::clamp(anchor_right - new_w, 0, std::max(0, cw - new_w));
-        ov.y = std::clamp(anchor_bottom - new_h, 0, std::max(0, ch - new_h));
+        // Bottom-right corner stays put; the top-left corner follows the mouse instead.
+        const Rect r = ResizeTopLeft(start, dx, dy, cw, ch, keep);
+        ov.x = r.x; ov.y = r.y; ov.w = r.w; ov.h = r.h;
     } else {
-        ov.x = std::clamp(drag_start_ov_x_ + dx, 0, std::max(0, cw - ov.w));
-        ov.y = std::clamp(drag_start_ov_y_ + dy, 0, std::max(0, ch - ov.h));
+        Rect r = start;
+        r.x += dx; r.y += dy;
+        ClampMove(r, cw, ch);
+        // Centre snap (hold Alt to move freely): ~8 screen pixels of pull toward the middle of the picture.
+        if (!evt.AltDown()) {
+            const int thr = std::max(2, (int)std::lround(8.0 / std::min(sx, sy)));
+            const Snap sn = SnapToCenter(r, cw, ch, thr);
+            snap_center_x_ = sn.x;
+            snap_center_y_ = sn.y;
+        }
+        ov.x = r.x; ov.y = r.y;
     }
     if (dx != 0 || dy != 0) drag_moved_ = true;
     Refresh();
@@ -626,6 +687,7 @@ void PreviewPanel::EndDrag() {
     if (HasCapture()) ReleaseMouse();
     drag_overlay_index_ = -1; // selected_overlay_index_ stays - the frame stays highlighted
     drag_corner_ = Corner::kNone;
+    snap_center_x_ = snap_center_y_ = false;
     // This in-place drag-on-the-preview path bypasses both
     // OverlaysDockPanel::Refresh() and ShowOverlayEditorDialog() (the
     // other places that persist state_.overlays), so a finished drag has to
@@ -671,6 +733,7 @@ void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
         if (GetNativeSize(cw, ch)) {
             int step = evt.ShiftDown() ? 10 : 1;
             auto &ov = state_.overlays[(size_t)selected_overlay_index_];
+            if (ov.locked) return;      // "Lock position and size"
             if (key == WXK_LEFT)  ov.x -= step;
             if (key == WXK_RIGHT) ov.x += step;
             if (key == WXK_UP)    ov.y -= step;
@@ -688,6 +751,7 @@ void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
 void PreviewPanel::OnCaptureLost(wxMouseCaptureLostEvent &) {
     drag_overlay_index_ = -1;
     drag_corner_ = Corner::kNone;
+    snap_center_x_ = snap_center_y_ = false;
     Refresh();
 }
 
@@ -879,6 +943,7 @@ HomRecMainFrame::HomRecMainFrame()
     // unless the user had actually turned one off last session.
     HrPcLog::SetEnabled(state_.system_logging_enabled);
     HrPluginLog::SetEnabled(state_.plugin_logging_enabled);
+    HrWgcLog::SetEnabled(state_.wgc_logging_enabled);
 
     lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
     theme_ = GetBuiltinTheme(state_.current_theme);
@@ -1045,9 +1110,8 @@ void HomRecMainFrame::BuildMenuBar() {
     auto *fileMenu = new wxMenu();
     fileMenu->Append(ID_FILE_OPEN_RECORDINGS, wxString::FromUTF8(lang_.Get("open_recordings")));
     fileMenu->Append(ID_FILE_OPEN_PROGRAM_FILES, wxString::FromUTF8(lang_.Get("open_program_files")));
-    fileMenu->Append(ID_FILE_SELECT_WINDOW, wxString::FromUTF8(lang_.Get("select_window")));
-    fileMenu->Append(ID_FILE_SELECT_REGION, wxString::FromUTF8(lang_.Get("select_region")));
-    fileMenu->Append(ID_FILE_FULL_DESKTOP, wxString::FromUTF8(lang_.Get("full_desktop")));
+    // 7th pass: "Select Window / Select Region / Full Desktop" moved into the Layers panel (first row =
+    // the capture source; double-click it). The menu ids stay defined (the ctor binds an id range).
     fileMenu->Append(ID_FILE_HIDE_WINDOW, wxString::FromUTF8(lang_.Get("hide_window")));
     fileMenu->AppendSeparator();
     fileMenu->Append(ID_FILE_EXPORT_HRC, wxString::FromUTF8(lang_.Get("export_hrc")));
@@ -1061,7 +1125,7 @@ void HomRecMainFrame::BuildMenuBar() {
     auto *viewMenu = new wxMenu();
     viewMenu->Append(ID_VIEW_ALWAYS_ON_TOP, wxString::FromUTF8(lang_.Get("always_on_top")));
     viewMenu->Append(ID_VIEW_FULLSCREEN, wxString::FromUTF8(lang_.Get("fullscreen")) + "\tF11");
-    viewMenu->AppendCheckItem(ID_VIEW_OVERLAYS_PANEL, wxString::FromUTF8(lang_.Get("overlays_panel")));
+    viewMenu->AppendCheckItem(ID_VIEW_OVERLAYS_PANEL, wxString::FromUTF8(lang_.Get("layers_panel")));
     viewMenu->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
     viewMenu->AppendCheckItem(ID_VIEW_AUDIO_PANEL, wxString::FromUTF8(lang_.Get("audio_mixer")));
     viewMenu->Check(ID_VIEW_AUDIO_PANEL, state_.show_audio_panel);
@@ -1071,7 +1135,7 @@ void HomRecMainFrame::BuildMenuBar() {
         auto *moveMenu = new wxMenu();
         const wxString paneNames[3] = { "Controls (Start / Pause)",
                                         wxString::FromUTF8(lang_.Get("audio_mixer")),
-                                        wxString::FromUTF8(lang_.Get("overlays_panel")) };
+                                        wxString::FromUTF8(lang_.Get("layers_panel")) };
         const wxString slotNames[5] = { "Left", "Right", "Top", "Bottom", "Floating window" };
         for (int p = 0; p < 3; ++p) {
             auto *sub = new wxMenu();
@@ -1369,6 +1433,15 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     };
     overlays_panel_->on_overlay_added = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_added"); };
     overlays_panel_->on_overlay_removed = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_removed"); };
+    // 7th pass: the panel is "Layers" - first row = capture source (see overlays_dock_panel.h).
+    overlays_panel_->tr = [this](const char *key) { return lang_.Get(key); };
+    overlays_panel_->get_canvas_size = [this](int &w, int &h) {
+        return rec_raw_ && rec_raw_->GetPreviewNativeSize(w, h) && w > 0 && h > 0;
+    };
+    overlays_panel_->get_source_mode = [this]() { return rec_raw_ ? rec_raw_->WindowSourceMode() : 0; };
+    overlays_panel_->on_edit_source = [this]() { OpenCaptureSourceDialog(); };
+    overlays_panel_->on_source_action = [this](int action) { RunSourceAction(action); };
+    overlays_panel_->Refresh();    // re-read the row texts now that the language table is wired in
     overlays_panel_->SetVisible(state_.show_overlays_panel);
 }
 
@@ -1548,7 +1621,7 @@ void HomRecMainFrame::SetupDocking() {
                      .CloseButton(true).MaximizeButton(false).PinButton(false));
 
     aui_.AddPane(overlays_host_, wxAuiPaneInfo().Name("overlays")
-                     .Caption(wxString::FromUTF8(lang_.Get("overlays_panel")))
+                     .Caption(wxString::FromUTF8(lang_.Get("layers_panel")))
                      .Right().Layer(1).Position(0)
                      .BestSize(wxSize(250, 500)).MinSize(wxSize(170, 120))
                      .FloatingSize(wxSize(280, 460))
@@ -1723,7 +1796,8 @@ void HomRecMainFrame::ApplyLanguageText() {
         // Pane captions (the perspective restored at startup carries the old language's text).
         aui_.GetPane("controls").Caption("HomRec");
         aui_.GetPane("audio").Caption(wxString::FromUTF8(lang_.Get("audio_mixer")));
-        aui_.GetPane("overlays").Caption(wxString::FromUTF8(lang_.Get("overlays_panel")));
+        aui_.GetPane("overlays").Caption(wxString::FromUTF8(lang_.Get("layers_panel")));
+        if (overlays_panel_) overlays_panel_->Refresh();     // row texts (language) - keeps selection and scroll
         aui_.Update();
     }
 
@@ -2391,6 +2465,54 @@ void HomRecMainFrame::OnCaptureTargetChanged() {
     PersistSettings();
 }
 
+void HomRecMainFrame::OpenCaptureSourceDialog() {
+    if (state_.recording) {
+        // A running recording keeps the source it was started with (ffmpeg was told the picture size);
+        // say so instead of silently doing nothing.
+        wxMessageBox(wxString::FromUTF8(lang_.Get("src_busy").c_str()), wxString::FromUTF8(lang_.Get("src_dialog_title").c_str()),
+                     wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+    const int live = rec_raw_ ? rec_raw_->WindowSourceMode() : 0;
+    HrLog::Info("UI: capture source dialog opened");
+    const bool changed = ShowCaptureSourceDialog(this, state_, theme_, lang_, live);
+    HrLog::Info(std::string("UI: capture source dialog closed -> ") + (changed ? "changed" : "unchanged") +
+                ", capture_mode=" + HrCaptureModeToStr(state_.capture_mode));
+    if (changed) {
+        OnCaptureTargetChanged();
+        if (overlays_panel_) overlays_panel_->RefreshSourceRow();
+    }
+}
+
+void HomRecMainFrame::RunSourceAction(int action) {
+    if (state_.recording) {
+        OpenCaptureSourceDialog();      // shows the "stop the recording first" note
+        return;
+    }
+    switch (action) {
+        case OverlaysDockPanel::kSrcDesktop:
+            // Back to the whole screen after a window / region was picked. The stored window / region
+            // values are kept (they are only used while the mode says Window / Region), so switching
+            // back later needs no new pick.
+            state_.capture_mode = CaptureMode::Desktop;
+            HrLog::Info("Capture target: full desktop (Layers panel).");
+            HrWgcLog::Note("Capture source: full desktop (Layers panel context menu).");
+            break;
+        case OverlaysDockPanel::kSrcPickWindow:
+            HrLog::Info("UI: window picker opened");
+            ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
+            HrLog::Info("UI: window picker closed -> capture_mode=" + HrCaptureModeToStr(state_.capture_mode) +
+                        ", window='" + state_.capture_window_title + "'");
+            break;
+        case OverlaysDockPanel::kSrcRegion:
+            ShowRegionPickerOverlay(GetHWND(), wxGetInstance(), state_);
+            break;
+        default: return;
+    }
+    OnCaptureTargetChanged();
+    if (overlays_panel_) overlays_panel_->RefreshSourceRow();
+}
+
 void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
     const int menu_id = evt.GetId();
     if (menu_id >= ID_VIEW_DOCK_FIRST && menu_id <= ID_VIEW_DOCK_LAST) {
@@ -2413,27 +2535,6 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         case ID_FILE_OPEN_PROGRAM_FILES:
             OpenProgramFilesFolder();
-            break;
-        case ID_FILE_SELECT_WINDOW:
-            HrLog::Info("UI: window picker opened");
-            ShowWindowPickerDialog(GetHWND(), wxGetInstance(), state_);
-            HrLog::Info("UI: window picker closed -> capture_mode=" + HrCaptureModeToStr(state_.capture_mode) +
-                        ", window='" + state_.capture_window_title + "'");
-            OnCaptureTargetChanged();
-            break;
-        case ID_FILE_SELECT_REGION:
-            ShowRegionPickerOverlay(GetHWND(), wxGetInstance(), state_);
-            OnCaptureTargetChanged();
-            break;
-        case ID_FILE_FULL_DESKTOP:
-            // Back to the whole screen after a window / region was picked. The stored region
-            // rectangle is kept (it is only ever used while the mode is Region), so picking
-            // "Select Region" again starts from a clean overlay as before.
-            state_.capture_mode = CaptureMode::Desktop;
-            state_.capture_window_title.clear();
-            state_.capture_window_hwnd = nullptr;
-            HrLog::Info("Capture target: full desktop (File > Full Desktop).");
-            OnCaptureTargetChanged();
             break;
         case ID_FILE_HIDE_WINDOW:
             ShowHideWindowDialog(GetHWND(), wxGetInstance(), state_);
@@ -2677,6 +2778,9 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
 
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
+    // Layers panel, first row: shows what is recorded and (window capture) what the recorder is doing
+    // right now (smart mode flips between "smart" and "exact"); repaints only when that text changed.
+    if (overlays_panel_ && state_.show_overlays_panel) overlays_panel_->RefreshSourceRow();
 
     // See rec_->crashed()'s doc comment - PollStats() just flagged this,
     // it doesn't stop anything itself (that touches wx UI state, which

@@ -213,6 +213,8 @@ private:
     int idle_ticks_ = 0;
     int req_pv_w_ = 0, req_pv_h_ = 0;  // last thumbnail size requested from the pipeline
     bool drag_moved_ = false;        // a drag actually changed the overlay
+    // 7th pass: the overlay being dragged is snapped to the picture's centre on this axis right now (draws a guide line).
+    bool snap_center_x_ = false, snap_center_y_ = false;
     bool overlay_save_pending_ = false;
     wxTimer overlay_save_timer_;
 };
@@ -239,7 +241,12 @@ private:
     // hr_settings_set_flag()+hr_settings_save() pair against the old,
     // no-longer-authoritative homrec_settings.json.
     void PersistSettings();
-    void OnCaptureTargetChanged(); // after File > Select Window/Region - see main_frame.cpp
+    void OnCaptureTargetChanged(); // after the capture source changed (Layers panel) - see main_frame.cpp
+    // 7th pass: the capture source lives in the Layers panel now (File > Select Window / Region / Full Desktop
+    // are gone). OpenCaptureSourceDialog() = the full "Capture source" window; RunSourceAction() = the quick
+    // items of the source row's context menu (OverlaysDockPanel::SourceAction).
+    void OpenCaptureSourceDialog();
+    void RunSourceAction(int action);
 
     // -- 2.4: dockable panels (wxAUI) -------------------------------------------------
     // Controls (Start/Pause/status/time), Audio Mixer and Overlays are AUI panes around

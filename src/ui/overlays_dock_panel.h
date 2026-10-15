@@ -37,6 +37,14 @@
 // merged position+settings+preview window (see overlay_editor_dialog.h)
 // via on_edit_overlay instead of doing either of the two old flows itself.
 //
+// 7th pass: the panel is now called "Layers" and its FIRST row is not an overlay but the capture source -
+// what is being recorded (desktop + monitor, one window, a region). Double-click it (or its context menu)
+// opens the capture-source window that replaced File > Select Window / Region / Full Desktop. Overlays
+// follow from row 2; rows lower in the list are drawn over the ones above them. Every overlay row has an
+// eye on its right edge that hides / shows the overlay with one click; double-click a row opens that
+// overlay's settings; the context menu got Duplicate, Move up/down, Center, Lock position and size and
+// Keep proportions.
+//
 // 2.4: the panel now reflows - Resize(w, h) re-positions the raw child controls, which
 // is what lets it live in a resizable / floating dock pane - and the list is owner-drawn
 // (HandleDrawItem) so each row can show the PNG icon for its overlay type
@@ -46,7 +54,10 @@
 
 #include <windows.h>
 #include <functional>
+#include <string>
+#include <vector>
 #include "app_state.h"
+#include "window_picker_dialog.h"   // HrMonitorInfo
 
 class OverlaysDockPanel {
 public:
@@ -87,6 +98,23 @@ public:
     std::function<void()> on_overlay_added;
     std::function<void()> on_overlay_removed;
 
+    // 7th pass - wiring done by main_frame.cpp (the panel itself knows neither the language table nor the
+    // recorder):
+    //   tr               - text for a language key ("" -> the key itself is shown)
+    //   get_canvas_size  - native size of the picture the overlays are placed in ("Center" needs it)
+    //   get_source_mode  - RecordingController::WindowSourceMode() (tag on the source row)
+    //   on_edit_source   - open the capture-source window
+    //   on_source_action - quick actions of the source row's context menu
+    enum SourceAction { kSrcDesktop = 1, kSrcPickWindow, kSrcRegion };
+    std::function<std::string(const char *key)> tr;
+    std::function<bool(int &w, int &h)> get_canvas_size;
+    std::function<int()> get_source_mode;
+    std::function<void()> on_edit_source;
+    std::function<void(int action)> on_source_action;
+
+    // Re-reads what the source row shows (called from the UI timer; repaints only when it changed).
+    void RefreshSourceRow();
+
 private:
     // Popup menu anchored under the "+" button; dispatches to one of the
     // Add* methods below based on what was picked.
@@ -113,7 +141,23 @@ private:
     void ToggleVisibility(size_t idx);
     void RemoveAt(size_t idx);
     void RenameAt(size_t idx);
+    void DuplicateAt(size_t idx);
+    void MoveBy(size_t idx, int delta);     // -1 = one row up, +1 = one row down
+    void CenterAt(size_t idx);
     void ClosePanel();
+
+    // 7th pass list helpers. Row 0 is the capture source, row r >= 1 is overlay r-1 (or the "no overlays yet"
+    // hint when there are none).
+    void RebuildList();                      // refills the rows, keeps selection and scroll position
+    void SelectOverlay(size_t idx);
+    int  RowAtPoint(POINT client_pt, RECT *rc_out) const;
+    int  OverlayOfRow(int row) const;        // -1 for the source row / the hint row
+    void OnListMouse(UINT msg, LPARAM lparam, bool &handled);
+    void OnListKey(WPARAM vk, bool &handled);
+    void ShowSourceContextMenu(HWND owner, POINT screen_pt);
+    std::string T(const char *key, const char *fallback) const;
+    std::wstring SourceText(std::wstring *tag) const;
+    std::string NewOverlayId() const;
 
     // Right-click / keyboard context-menu support for a single row --
     // list_ is subclassed (see Create()) so this panel can react to
@@ -127,7 +171,13 @@ private:
     HWND hwnd_ = nullptr;
     HWND list_ = nullptr;
     WNDPROC orig_list_proc_ = nullptr;
-    int next_id_ = 1; // resets per session, not globally unique - pre-existing behavior, not new here
+    int next_id_ = 1; // resets per session; NewOverlayId() skips ids that are already taken
+    std::wstring last_source_sig_;
+    // Monitor list for the source row: enumerating displays is not free and the row is repainted often,
+    // so it is re-read at most every few seconds (a monitor plugged in shows up within that).
+    const std::vector<HrMonitorInfo> &Monitors() const;
+    mutable std::vector<HrMonitorInfo> mon_cache_;
+    mutable DWORD mon_cache_tick_ = 0;
 };
 
 enum OverlaysDockPanelControlId {

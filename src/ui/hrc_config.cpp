@@ -72,6 +72,8 @@ void WriteOverlaysSection(std::ofstream &f, const std::vector<OverlayDef> &overl
           << p << "webcam_index=" << ov.webcam_index << "\n"
           << p << "webcam_name=" << OneLine(ov.webcam_name) << "\n"
           << p << "visible=" << FromBool(ov.visible) << "\n"
+          << p << "locked=" << FromBool(ov.locked) << "\n"
+          << p << "lock_aspect=" << FromBool(ov.lock_aspect) << "\n"
           << p << "input_json_path=" << ov.input_json_path << "\n"
           << p << "input_png_path=" << ov.input_png_path << "\n\n";
     }
@@ -117,6 +119,8 @@ void ReadOverlaysSection(const std::unordered_map<std::string, std::string> &kv,
         if (has((p + "webcam_index").c_str())) ov.webcam_index = atoi(get((p + "webcam_index").c_str()).c_str());
         if (has((p + "webcam_name").c_str())) ov.webcam_name = get((p + "webcam_name").c_str());
         if (has((p + "visible").c_str())) ov.visible = ToBool(get((p + "visible").c_str()));
+        if (has((p + "locked").c_str())) ov.locked = ToBool(get((p + "locked").c_str()));
+        if (has((p + "lock_aspect").c_str())) ov.lock_aspect = ToBool(get((p + "lock_aspect").c_str()));
         if (has((p + "input_json_path").c_str())) ov.input_json_path = get((p + "input_json_path").c_str());
         if (has((p + "input_png_path").c_str())) ov.input_png_path = get((p + "input_png_path").c_str());
         overlays.push_back(ov);

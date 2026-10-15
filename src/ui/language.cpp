@@ -93,6 +93,158 @@ std::unordered_map<std::string, std::string> BuiltinEnglish() {
         {"resolution_mode_custom", "Custom (width x height)"},
         {"resolution_full", "Full screen (Native, 100%)"},
         {"add_language", "Add Language..."},
+
+        // ---- 7th pass: Layers panel / capture source (keys below are NOT in kLangRequiredKeys: a language file
+        // that predates them keeps working - English, or the built-in Russian table, fills the gaps) ----
+        {"layers_panel", "Layers"},
+        {"src_busy", "A recording is running - it keeps the source it was started with. Stop the recording to change the capture source."},
+        {"layers_empty", "No overlays yet. Click + to add one."},
+        {"settings_source_moved", "What is recorded (monitor, window, region) and how a window is captured now lives in the Layers panel: double-click its first row (\"Capture source\")."},
+        {"src_dialog_title", "Capture source"},
+        {"src_what", "What to record"},
+        {"src_desktop", "The whole desktop"},
+        {"src_window", "One window"},
+        {"src_region", "A region of the screen"},
+        {"src_desktop_head", "Desktop"},
+        {"src_monitor", "Monitor:"},
+        {"src_monitor_word", "Monitor"},
+        {"src_primary", "(main)"},
+        {"src_window_head", "Window"},
+        {"src_pick_window", "Pick window…"},
+        {"src_window_none", "(no window picked yet)"},
+        {"src_find_by", "How to find the window again (everything ticked must match):"},
+        {"src_match_exe", "Program"},
+        {"src_match_class", "Window class"},
+        {"src_match_title", "Title"},
+        {"src_title_exact", "is exactly"},
+        {"src_title_prefix", "starts with"},
+        {"src_title_contains", "contains"},
+        {"src_follow_hwnd", "Keep recording the same window while it exists, even when its title changes (browser tabs)"},
+        {"src_find_hint", "Tip: for a browser keep \"Program\" ticked and \"Title\" off - the title changes with every tab."},
+        {"src_test_match", "Test: find it now"},
+        {"src_test_found", "Found:"},
+        {"src_test_notfound", "Not found right now (closed or minimized?)"},
+        {"src_how", "How the window is recorded"},
+        {"src_method_window", "The window itself - windows on top of it do not get into the recording"},
+        {"src_method_screen", "A part of the screen - the lightest way, but anything on top of the window is recorded too"},
+        {"src_area_window", "Whole window (title bar and borders included)"},
+        {"src_area_client", "Only the content area"},
+        {"src_smart", "Smart mode"},
+        {"src_smart_hint", "While nothing covers the window it is cut out of the screen (cheap, like a desktop recording); the exact window capture is used only while something lies on top of it."},
+        {"src_fps_cap", "Limit of the exact capture, frames per second (0 = as Target FPS):"},
+        {"src_live_now", "Right now:"},
+        {"src_live_native", "native Windows capture"},
+        {"src_live_exact", "exact window capture (PrintWindow)"},
+        {"src_live_smart", "smart mode - reading the screen (cheap)"},
+        {"src_retry_native", "Try the native Windows capture again…"},
+        {"src_retry_native_msg", "The native Windows capture (Windows.Graphics.Capture) failed or crashed on this PC earlier, so HomRec uses the compatible window capture instead.\n\nRe-enable it only to experiment. If it crashes again, HomRec switches it off by itself at the next start.\n\nTry it again?"},
+        {"src_region_head", "Region"},
+        {"src_pick_region", "Select region…"},
+        {"src_region_none", "(no region selected yet)"},
+        {"src_ok", "OK"},
+        {"src_need_window", "Pick a window first (or choose another source)."},
+        {"src_need_criteria", "Tick at least one way to find the window (program, class, title or \"keep recording the same window\")."},
+        {"src_need_region", "Select a region first (or choose another source)."},
+        {"src_row_desktop", "Desktop"},
+        {"src_row_window", "Window"},
+        {"src_row_region", "Region"},
+        {"src_tag_native", "native"},
+        {"src_tag_exact", "exact"},
+        {"src_tag_smart", "smart"},
+        {"src_tag_screen", "screen crop"},
+        {"ctx_hide", "Hide"},
+        {"ctx_show", "Show"},
+        {"ctx_rename", "Rename…"},
+        {"ctx_settings", "Settings…"},
+        {"ctx_duplicate", "Duplicate"},
+        {"ctx_forward", "Move up"},
+        {"ctx_backward", "Move down"},
+        {"ctx_center", "Center on the picture"},
+        {"ctx_lock", "Lock position and size"},
+        {"ctx_keep_prop", "Keep proportions when resizing"},
+        {"ctx_delete", "Delete"},
+        {"ctx_src_settings", "Capture source…"},
+        {"ctx_src_desktop", "Record the whole desktop"},
+        {"ctx_src_window", "Pick a window…"},
+        {"ctx_src_region", "Select a region…"},
+    };
+}
+
+// Russian text for the 7th pass keys: used when the language code starts with "ru" and the .hrl has no value for
+// the key yet (a Russian file written before the Layers panel simply doesn't know them).
+std::unordered_map<std::string, std::string> BuiltinRussianNew() {
+    return {
+        {"layers_panel", "Слои"},
+        {"src_busy", "Идёт запись — она продолжает с тем источником, с которым началась. Останови запись, чтобы сменить источник захвата."},
+        {"layers_empty", "Оверлеев пока нет. Нажмите +, чтобы добавить."},
+        {"settings_source_moved", "Что записывается (монитор, окно, область) и как захватывается окно — теперь в панели «Слои»: двойной клик по первой строке («Источник захвата»)."},
+        {"src_dialog_title", "Источник захвата"},
+        {"src_what", "Что записывать"},
+        {"src_desktop", "Весь рабочий стол"},
+        {"src_window", "Одно окно"},
+        {"src_region", "Область экрана"},
+        {"src_desktop_head", "Рабочий стол"},
+        {"src_monitor", "Монитор:"},
+        {"src_monitor_word", "Монитор"},
+        {"src_primary", "(основной)"},
+        {"src_window_head", "Окно"},
+        {"src_pick_window", "Выбрать окно…"},
+        {"src_window_none", "(окно ещё не выбрано)"},
+        {"src_find_by", "Как снова найти окно (должно совпасть всё, что отмечено):"},
+        {"src_match_exe", "Программа"},
+        {"src_match_class", "Класс окна"},
+        {"src_match_title", "Название"},
+        {"src_title_exact", "точно такое"},
+        {"src_title_prefix", "начинается с"},
+        {"src_title_contains", "содержит"},
+        {"src_follow_hwnd", "Пока окно существует — писать именно его, даже если название поменялось (вкладки браузера)"},
+        {"src_find_hint", "Совет: для браузера оставь «Программа» и сними «Название» — оно меняется с каждой вкладкой."},
+        {"src_test_match", "Проверить: найти сейчас"},
+        {"src_test_found", "Найдено:"},
+        {"src_test_notfound", "Сейчас не найдено (закрыто или свёрнуто?)"},
+        {"src_how", "Как записывать окно"},
+        {"src_method_window", "Само окно — другие окна поверх него в запись не попадут"},
+        {"src_method_screen", "Кусок экрана — самый лёгкий способ, но всё, что лежит поверх окна, тоже попадёт в запись"},
+        {"src_area_window", "Всё окно (с заголовком и рамками)"},
+        {"src_area_client", "Только содержимое окна"},
+        {"src_smart", "Умный режим"},
+        {"src_smart_hint", "Пока окно ничем не закрыто — оно вырезается из экрана (дёшево, как запись рабочего стола); точный захват окна включается только пока поверх него что-то лежит."},
+        {"src_fps_cap", "Лимит точного захвата, кадров/с (0 = как Target FPS):"},
+        {"src_live_now", "Сейчас:"},
+        {"src_live_native", "системный захват Windows"},
+        {"src_live_exact", "точный захват окна (PrintWindow)"},
+        {"src_live_smart", "умный режим — читает экран (дёшево)"},
+        {"src_retry_native", "Снова попробовать системный захват Windows…"},
+        {"src_retry_native_msg", "Системный захват Windows (Windows.Graphics.Capture) раньше падал или не работал на этом ПК, поэтому HomRec использует совместимый захват окна.\n\nВключай снова только для эксперимента. Если он опять упадёт, HomRec сам выключит его при следующем запуске.\n\nПопробовать ещё раз?"},
+        {"src_region_head", "Область"},
+        {"src_pick_region", "Выбрать область…"},
+        {"src_region_none", "(область ещё не выбрана)"},
+        {"src_ok", "OK"},
+        {"src_need_window", "Сначала выбери окно (или другой источник)."},
+        {"src_need_criteria", "Отметь хотя бы один способ находить окно (программа, класс, название или «писать именно его»)."},
+        {"src_need_region", "Сначала выбери область (или другой источник)."},
+        {"src_row_desktop", "Рабочий стол"},
+        {"src_row_window", "Окно"},
+        {"src_row_region", "Область"},
+        {"src_tag_native", "системный"},
+        {"src_tag_exact", "точный"},
+        {"src_tag_smart", "умный"},
+        {"src_tag_screen", "кусок экрана"},
+        {"ctx_hide", "Скрыть"},
+        {"ctx_show", "Показать"},
+        {"ctx_rename", "Переименовать…"},
+        {"ctx_settings", "Настройки…"},
+        {"ctx_duplicate", "Дублировать"},
+        {"ctx_forward", "Выше"},
+        {"ctx_backward", "Ниже"},
+        {"ctx_center", "По центру кадра"},
+        {"ctx_lock", "Закрепить положение и размер"},
+        {"ctx_keep_prop", "Сохранять пропорции при изменении размера"},
+        {"ctx_delete", "Удалить"},
+        {"ctx_src_settings", "Источник захвата…"},
+        {"ctx_src_desktop", "Записывать весь рабочий стол"},
+        {"ctx_src_window", "Выбрать окно…"},
+        {"ctx_src_region", "Выбрать область…"},
     };
 }
 
@@ -171,6 +323,14 @@ LanguageTable LanguageTable::Load(const std::string &code, const std::string &la
     table.strings_ = BuiltinEnglish();
     if (code == "en") return table;
 
+    // 7th pass keys: the built-in Russian text goes in first for any "ru..." code, so it is there even when the
+    // file is missing / unreadable; a value found in the .hrl below replaces it.
+    const bool is_ru = code.size() >= 2 && (code[0] == 'r' || code[0] == 'R') && (code[1] == 'u' || code[1] == 'U');
+    const auto ru_new = BuiltinRussianNew();
+    if (is_ru) {
+        for (const auto &kv : ru_new) table.strings_[kv.first] = kv.second;
+    }
+
     std::string path = langsDir + "\\" + code + ".hrl";
 
     std::string json;
@@ -182,6 +342,14 @@ LanguageTable LanguageTable::Load(const std::string &code, const std::string &la
         char buf[512] = {};
         if (hr_lang_get_value(json.c_str(), key.c_str(), buf, sizeof(buf)) == 1 && buf[0] != '\0') {
             table.strings_[key] = buf;
+        }
+    }
+
+    // 7th pass keys (not "required"): taken from the file when it has them.
+    for (const auto &kv : ru_new) {
+        char buf[1024] = {};
+        if (hr_lang_get_value(json.c_str(), kv.first.c_str(), buf, sizeof(buf)) == 1 && buf[0] != '\0') {
+            table.strings_[kv.first] = buf;
         }
     }
 
