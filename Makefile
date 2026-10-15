@@ -50,6 +50,7 @@ OBJS := \
 	src/ui/pc_analytics_dialog.o \
 	src/ui/log_viewer_dialog.o \
 	src/ui/window_picker_dialog.o \
+	src/ui/capture_source_dialog.o \
 	src/ui/hide_window_dialog.o \
 	src/ui/overlays_dock_panel.o \
 	src/ui/overlay_editor_dialog.o \
@@ -57,6 +58,7 @@ OBJS := \
 	src/utils/log_paths.o \
 	src/utils/plugin_log.o \
 	src/utils/pc_log.o \
+	src/utils/wgc_log.o \
 	src/utils/system_integration.o \
 	src/utils/crash_handler.o \
 	src/utils/archive.o \

@@ -44,6 +44,7 @@ set(HR_SOURCES
     src/ui/pc_analytics_dialog.cpp
     src/ui/log_viewer_dialog.cpp
     src/ui/window_picker_dialog.cpp
+    src/ui/capture_source_dialog.cpp
     src/ui/hide_window_dialog.cpp
     src/ui/overlays_dock_panel.cpp
     src/ui/overlay_editor_dialog.cpp
@@ -51,6 +52,7 @@ set(HR_SOURCES
     src/utils/log_paths.cpp
     src/utils/plugin_log.cpp
     src/utils/pc_log.cpp
+    src/utils/wgc_log.cpp
     src/utils/system_integration.cpp
     src/utils/crash_handler.cpp
     src/utils/archive.cpp
