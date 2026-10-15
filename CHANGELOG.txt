@@ -1,7 +1,66 @@
 welcome to changelog :D
 
-[Version 2.4.0] - (2026-10-05)
-Window capture, MKV, dockable panels, a new Audio Mixer.
+Layers panel, capture source window, window matching, smart capture (2026-10-13, seventh pass)
+- Reported (test on the real PC): recording a selected window (the PrintWindow backend) = ~30% CPU, ~100 MB RAM, 0.5 MB/s disk;
+    other windows dragged over the recorded one looked choppy and the PC got loud; ONE changed letter in the window title (switching a
+    Chrome tab) and HomRec lost the window; overlays could crawl under the preview when the preview was resized by the UI.
+- Added (src/ui/capture_source_dialog.h/.cpp): "Capture source" window. Replaces File > Select Window / Select Region / Full Desktop.
+    What is recorded: the whole desktop (and WHICH monitor), one window, or a region. For a window: how it is found again - by program
+    (exe), by window class and/or by title (exactly / starts with / contains - each switchable), "keep following the same window while its
+    title changes" (browser tabs), a "Test: find it now" button, how it is recorded (the window itself / a part of the screen; whole window
+    / content area only), the smart mode and the fps limit for the exact capture, and an explicit "try native Windows capture
+    again" button. Works on a copy: nothing changes until OK. Opens from the first row of the Layers panel (double-click / context menu).
+- Changed (src/ui/overlays_dock_panel.h/.cpp): the "Overlays" panel is now "Layers". Its FIRST row is the capture source (pinned, cannot be
+    moved / deleted; shows desktop+monitor / program+title / region and a tag with the current capture mode). Overlays follow; rows lower
+    in the list are drawn over the ones above. Every overlay row has an eye on the right edge (one click hides / shows the overlay) and a
+    lock icon; double-click a row opens that overlay's settings. Context menu: Hide/Show, Rename, Edit, Duplicate, Move up / Move down,
+    Center, Lock position and size, Keep proportions, Delete. Keyboard: Enter = settings (source row: Capture source), F2 = rename, Space = hide / show. List is rebuilt without
+    losing selection and scroll position.
+- Added (src/ui/overlay_geometry.h, header-only, covered by a native unit test): ResizeBottomRight / ResizeTopLeft / ClampMove /
+    SnapToCenter / KeepAspect. One implementation for the preview and the overlay editor, so both behave identically.
+- Added (src/ui/main_frame.cpp PreviewPanel, src/ui/overlay_editor_dialog.cpp): Shift while resizing keeps the overlay's proportions
+    (500x500 can no longer become 1000x200; the whole-desktop layer is proportional by default). Center snap: moving an overlay close to the
+    middle of the picture (horizontally / vertically, each on its own) puts it exactly on the middle, with a guide line; Alt disables the
+    snap for one drag. New per-overlay "Lock position and size" and "Keep proportions" (OverlayDef::locked / lock_aspect, saved in .hrc).
+- Fixed (src/ui/main_frame.cpp PreviewPanel::OverlayScreenRect and drag/resize): overlays could end up UNDER the preview when it was
+    resized by UI elements. Causes: the handle rectangle was inflated by 20 px past the picture and never clipped to it; resizing was not
+    clamped to the picture, so an overlay could be dragged out of the canvas and become unreachable. Now the rectangle is clipped to the
+    picture, resizing/moving is clamped, and an overlay that is outside a smaller canvas is shown as a small stub at the edge (it is never
+    moved on its own).
+- Added (src/core/wgc_capture.cpp): SMART mode of the window source. While the recorded window is not covered by other windows the frame is
+    a cheap crop of the desktop duplication; when something is on top of it the exact PrintWindow picture is used. A static picture is
+    detected by a cheap hash and reported as "no new frame", so the pipeline repeats the previous frame instead of re-encoding / re-sending
+    the same pixels. Pacing and an optional fps cap (window_capture_fps_cap) for the exact capture. No per-frame memset of the canvas.
+    HrWgcOptions{smart, fps_cap}; HrWgcSetTarget(); HrWgcMode() (0 unknown, 1 native, 2 exact, 3 smart).
+- Changed (src/core/wgc_capture.cpp): an odd / mismatching canvas size is detected before the first frame; a failed duplication frame
+    falls back without losing the source (internal kFallbackKeep); the "input reset" hack is only applied while the recorded window is
+    the foreground window.
+- Changed (src/core/pipeline.cpp): hr_pl_create_window() takes smart + fps_cap; new hr_pl_window_retarget() (re-aims a RUNNING window
+    source at another window without restarting the recording) and hr_pl_window_mode().
+- Fixed (src/ui/recording_controller.cpp): the window is no longer lost when its title changes. A target is now described by program +
+    class + title + a "follow the same HWND" flag (learned automatically on first match). ResolveWindowTarget() uses the switches the person
+    chose; RetargetWindowCapture() rewritten - a lost window is searched again (all enabled criteria) and the running source is re-aimed.
+    PreviewCaptureSettings / RefreshPreviewSettings carry the new settings; messages point to Layers > Capture source.
+- Added (src/ui/window_picker_dialog.h/.cpp): matching API and HrListMonitors() / HrMonitorInfo (monitor list with names / sizes / primary).
+- Added (src/utils/wgc_log.h/.cpp): logs\wgc.log - what the window source does, step by step (chosen backend, target resolution and every
+    re-find, mode switches smart<->exact, static-picture detection, fps / pacing, native WGC guard state, errors). Warn / Error are also
+    mirrored to homrec.log. Switch: Settings > Security > "Window capture logging (logs/wgc.log)" (wgc_logging_enabled, default on).
+- Changed (src/ui/settings_dialog.cpp): the monitor choice and the "Window capture" section are removed from Settings - they live in the
+    Capture source window now (a short note says where). Added the wgc.log checkbox.
+- Changed (src/ui/main_frame.cpp / .h): File menu no longer has Select Window / Select Region / Full Desktop (enum ids kept so the menu
+    id range stays valid). OpenCaptureSourceDialog(), RunSourceAction(); the dialog is refused while recording (a clear message);
+    after OK the preview pipeline is refreshed (OnCaptureTargetChanged). The Layers source row is refreshed from the stats timer.
+- Changed (src/core/settings_registry.cpp, src/ui/hrc_config.cpp, src/ui/app_state.h): new saved fields - capture_window_exe,
+    capture_window_class, window_match_exe/class/title, window_title_mode, window_follow_hwnd, window_capture_smart,
+    window_capture_fps_cap, wgc_logging_enabled; per overlay: locked, lock_aspect. Old .hrc files load unchanged (all new fields have
+    defaults). window_capture_method "crop"/"auto" (2.4.0) are still read as "screen".
+- Added (src/ui/language.cpp): ~70 new keys (layers_*, src_*, ctx_*, settings_source_moved, ...). They are NOT in kLangRequiredKeys, so old
+    .hrl language files keep loading; English is built in for all of them and a built-in Russian table is used for ru* languages
+    (values present in the .hrl still win).
+- Changed (Makefile, CMakeLists.txt): + src/ui/capture_source_dialog, src/utils/wgc_log. (overlay_geometry.h is header-only.)
+- Known limits: native WGC still faults at CreateForWindow on the tested PC (exact cause not found, native is not auto re-armed - only by
+    the button in the Capture source window). Only syntax-compiled (MinGW cross) in the dev sandbox: nothing here was run - see
+    TEST_CHECKLIST.txt in the project root for what has to be checked on a real Windows PC.
 
 Window capture without WinRT, lower CPU (2026-10-11, sixth pass)
 - Log facts (homrec.log 2026-10-11): the contained fault is identical on every start - "jumped to an invalid address ... in step
@@ -21,6 +80,9 @@ Window capture without WinRT, lower CPU (2026-10-11, sixth pass)
     the full-GPU ddagrab path, window recording cannot).
 - Config (homrec.hrc): gpu_capture_ddagrab=1 - desktop recordings are captured, converted and encoded by ffmpeg on the GPU (no readback,
     no HomRec capture pipeline, no frame queue in RAM). Falls back automatically if this ffmpeg has no ddagrab (see homrec.log).
+
+[Version 2.4.0] - (2026-10-05)
+Window capture, MKV, dockable panels, a new Audio Mixer.
 
 Crash fix (2026-10-10, fifth pass) - recording a separate window still crashed (dump crash_20261010_174951.dmp)
 - Dump facts: execute (DEP) fault at "hr.exe base - 0x40000000" again (base 0x7FF72F4C0000, target 0x7FF6EF4C0000), GUI
