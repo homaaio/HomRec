@@ -837,9 +837,8 @@ private:
             "Window capture logging (logs/wgc.log)", state_.wgc_logging_enabled);
 
         AddSectionHeading(page, pageRoot, accent, bg, "Live Preview");
-        disable_preview_chk_ = AddCheck(page, pageRoot, text, bg,
-            "Disable live preview (for performance)", state_.disable_preview);
-
+        // The on/off switch for the live preview moved to the button above the preview itself (main
+        // window). It is still stored in the config as disable_preview; only these two knobs stay here.
         auto *previewRow = new wxBoxSizer(wxHORIZONTAL);
         auto *pqLbl = new wxStaticText(page, wxID_ANY, "Preview resolution:");
         pqLbl->SetForegroundColour(text);
@@ -866,16 +865,6 @@ private:
                                             state_.preview_fps);
         previewRow->Add(preview_fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
         pageRoot->Add(previewRow, 0, wxALL, 16);
-
-        auto updatePreviewControlsEnabled = [this]() {
-            bool enabled = !disable_preview_chk_->GetValue();
-            preview_quality_choice_->Enable(enabled);
-            preview_fps_spin_->Enable(enabled);
-        };
-        updatePreviewControlsEnabled();
-        disable_preview_chk_->Bind(wxEVT_CHECKBOX, [updatePreviewControlsEnabled](wxCommandEvent &) {
-            updatePreviewControlsEnabled();
-        });
 
         AddSectionHeading(page, pageRoot, accent, bg, "Reset");
         auto *resetRow = new wxBoxSizer(wxHORIZONTAL);
@@ -1040,7 +1029,6 @@ private:
         sys_log_chk_->SetValue(hr_settings_get_flag(def, "system_logging_enabled") != 0);
         plugin_log_chk_->SetValue(hr_settings_get_flag(def, "plugin_logging_enabled") != 0);
         wgc_log_chk_->SetValue(true);
-        disable_preview_chk_->SetValue(hr_settings_get_flag(def, "disable_preview") != 0);
         preview_quality_choice_->SetSelection(2); // 100%
         preview_fps_spin_->SetValue(15);
         preview_quality_choice_->Enable(true);
@@ -1142,7 +1130,7 @@ private:
         HrPluginLog::SetEnabled(state_.plugin_logging_enabled);
         HrWgcLog::SetEnabled(state_.wgc_logging_enabled);
 
-        state_.disable_preview = disable_preview_chk_->GetValue();
+        // state_.disable_preview is no longer edited here (button above the preview) - left untouched.
         {
             static const int kPreviewQualityPct[] = {50, 75, 100};
             int sel = preview_quality_choice_->GetSelection();
@@ -1273,7 +1261,6 @@ private:
 
     // Security
     wxCheckBox *sys_log_chk_ = nullptr, *plugin_log_chk_ = nullptr, *wgc_log_chk_ = nullptr;
-    wxCheckBox *disable_preview_chk_ = nullptr;
     wxChoice *preview_quality_choice_ = nullptr;
     wxSpinCtrl *preview_fps_spin_ = nullptr;
 
