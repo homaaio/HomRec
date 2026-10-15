@@ -1,9 +1,13 @@
 #include "window_picker_dialog.h"
 #include "modal_util.h"
 #include "win32_theme.h"
+#include "../utils/wgc_log.h"
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
+#include <cwctype>
 #include <windowsx.h> // GET_X_LPARAM/GET_Y_LPARAM - ShowRegionPickerOverlay()'s drag tracking
 
 // dwmapi.h ships with this project's MinGW-w64 toolchain (already linked
@@ -92,66 +96,198 @@ std::wstring WindowTitleOf(HWND hwnd) {
 
 } // namespace
 
-bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out_rect,
-                             HWND preferred_hwnd, bool client_only) {
-    HWND found = nullptr;
+// ---------------------------------------------------------------------------------------------
+// Window lookup (7th pass: exe + class + title, see window_picker_dialog.h)
+// ---------------------------------------------------------------------------------------------
+namespace {
 
-    // 1) The exact window that was picked - immune to title changes.
-    if (preferred_hwnd && IsWindow(preferred_hwnd) && IsCapturableWindow(preferred_hwnd)) {
-        found = preferred_hwnd;
+std::wstring ClassNameOf(HWND hwnd) {
+    wchar_t buf[256] = {};
+    const int n = GetClassNameW(hwnd, buf, 256);
+    return n > 0 ? std::wstring(buf, (size_t)n) : std::wstring();
+}
+
+std::wstring ToLowerW(std::wstring s) {
+    for (auto &c : s) c = (wchar_t)towlower(c);
+    return s;
+}
+
+// pid -> exe name, cached for a few seconds: matching walks every top-level window, and OpenProcess +
+// QueryFullProcessImageName per window per call would add up (the capture loop re-checks ~20x/s).
+std::wstring ExeNameOfPid(DWORD pid) {
+    struct Entry { std::wstring exe; ULONGLONG when = 0; };
+    static std::mutex mu;
+    static std::unordered_map<DWORD, Entry> cache;
+    const ULONGLONG now = GetTickCount64();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(pid);
+        if (it != cache.end() && now - it->second.when < 5000) return it->second.exe;
+    }
+    std::wstring exe;
+    if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        wchar_t path[MAX_PATH] = {};
+        DWORD len = MAX_PATH;
+        if (QueryFullProcessImageNameW(h, 0, path, &len) && len > 0) {
+            exe.assign(path, len);
+            const size_t slash = exe.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) exe = exe.substr(slash + 1);
+            exe = ToLowerW(exe);
+        }
+        CloseHandle(h);
+    }
+    std::lock_guard<std::mutex> lk(mu);
+    if (cache.size() > 256) cache.clear();
+    cache[pid] = Entry{exe, now};
+    return exe;
+}
+
+std::wstring ExeNameOf(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    return pid ? ExeNameOfPid(pid) : std::wstring();
+}
+
+// 0 = no match; otherwise a quality (higher is better): exact 4, exact ignoring case 3, prefix 2, contains 1.
+int TitleQuality(const std::wstring &title, const std::wstring &wanted, int mode) {
+    if (wanted.empty()) return 0;
+    if (title == wanted) return 4;
+    if (TitlesEqualNoCase(title, wanted)) return 3;
+    if (mode == 0) return 0;
+    const std::wstring lt = ToLowerW(title), lw = ToLowerW(wanted);
+    if (mode == 1) return (lt.size() >= lw.size() && lt.compare(0, lw.size(), lw) == 0) ? 2 : 0;
+    return lt.find(lw) != std::wstring::npos ? 1 : 0;
+}
+
+struct Criteria {
+    bool use_exe = false, use_class = false, use_title = false;
+    std::wstring exe, cls, title;
+    int title_mode = 0;
+};
+
+// Which of the three criteria are actually usable: enabled AND have a stored value. If that leaves none,
+// the stored title decides (the behaviour before the Layers panel, and the only thing an old settings file has).
+Criteria CriteriaFor(const HrWindowTarget &t) {
+    Criteria c;
+    c.exe = WideFromNarrow(t.exe);
+    c.cls = WideFromNarrow(t.cls);
+    c.title = WideFromNarrow(t.title);
+    c.title_mode = t.title_mode;
+    c.use_exe = t.match_exe && !c.exe.empty();
+    c.use_class = t.match_class && !c.cls.empty();
+    c.use_title = t.match_title && !c.title.empty();
+    if (!c.use_exe && !c.use_class && !c.use_title && !c.title.empty()) {
+        c.use_title = true;
+        c.title_mode = 0;
+    }
+    return c;
+}
+
+// -1 = does not match, otherwise a quality (title quality; 1 when the title isn't compared).
+int MatchQuality(HWND hwnd, const Criteria &c, const std::wstring &title) {
+    if (c.use_class && ClassNameOf(hwnd) != c.cls) return -1;
+    if (c.use_exe && ExeNameOf(hwnd) != c.exe) return -1;
+    int q = 1;
+    if (c.use_title) {
+        q = TitleQuality(title, c.title, c.title_mode);
+        if (q == 0) return -1;
+    }
+    return q;
+}
+
+} // namespace
+
+std::string HR_WindowExeName(HWND hwnd) { return hwnd ? NarrowFromWide(ExeNameOf(hwnd)) : std::string(); }
+std::string HR_WindowClassName(HWND hwnd) { return hwnd ? NarrowFromWide(ClassNameOf(hwnd)) : std::string(); }
+std::string HR_WindowTitleUtf8(HWND hwnd) { return hwnd ? NarrowFromWide(WindowTitleOf(hwnd)) : std::string(); }
+
+int HrTitleModeFromStr(const std::string &s) { return s == "prefix" ? 1 : (s == "contains" ? 2 : 0); }
+const char *HrTitleModeToStr(int mode) { return mode == 1 ? "prefix" : (mode == 2 ? "contains" : "exact"); }
+
+HrWindowTarget HrWindowTargetFromState(const AppState &st) {
+    HrWindowTarget t;
+    t.title = st.capture_window_title;
+    t.exe = st.capture_window_exe;
+    t.cls = st.capture_window_class;
+    t.match_title = st.window_match_title;
+    t.match_exe = st.window_match_exe;
+    t.match_class = st.window_match_class;
+    t.title_mode = HrTitleModeFromStr(st.window_title_mode);
+    t.follow_hwnd = st.window_follow_hwnd;
+    t.preferred = st.capture_window_hwnd;
+    t.client_only = st.window_capture_area == "client";
+    return t;
+}
+
+bool HR_ResolveWindowTarget(const HrWindowTarget &t, HWND &out_hwnd, RECT &out_rect, std::string *how) {
+    HWND found = nullptr;
+    const Criteria crit = CriteriaFor(t);
+    const bool have_criteria = crit.use_exe || crit.use_class || crit.use_title;
+    std::string route;
+
+    // 1) The window recorded so far. With "follow the window" it wins whatever its title is now; without
+    //    it, it only wins while it still satisfies the criteria (otherwise something else may fit better).
+    if (t.preferred && IsWindow(t.preferred) && IsCapturableWindow(t.preferred)) {
+        if (t.follow_hwnd || !have_criteria) {
+            found = t.preferred;
+            route = "same window handle";
+        } else if (MatchQuality(t.preferred, crit, WindowTitleOf(t.preferred)) >= 0) {
+            found = t.preferred;
+            route = "same window handle (still matches)";
+        }
     }
 
-    // 2) Fall back to the stored title (the only thing left after an app
-    //    restart, or once the picked window was closed and re-opened).
-    if (!found && !title.empty()) {
-        std::wstring wtitle = WideFromNarrow(title);
-
+    // 2) Search all windows for the best match (top of the z-order wins ties).
+    if (!found && have_criteria) {
         struct Ctx {
-            const std::wstring *wanted;
-            HWND exact = nullptr;
-            HWND loose = nullptr;   // case-insensitive match, only used if nothing matches exactly
+            const Criteria *crit;
+            DWORD self_pid;
+            HWND best = nullptr;
+            int best_q = -1;
+            bool best_iconic = true;
         };
-        Ctx ctx{&wtitle};
-
+        Ctx ctx{&crit, GetCurrentProcessId()};
         EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
             auto *c = reinterpret_cast<Ctx *>(lp);
             if (!IsCapturableWindow(hwnd)) return TRUE;
-
-            std::wstring t = WindowTitleOf(hwnd);
-            if (t.empty()) return TRUE;
-
-            if (t == *c->wanted) {
-                c->exact = hwnd;
-                return FALSE;  // exact match, stop enumerating
-            }
-            if (!c->loose && TitlesEqualNoCase(t, *c->wanted)) c->loose = hwnd;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid == c->self_pid) return TRUE;           // never HomRec's own windows
+            const std::wstring title = WindowTitleOf(hwnd);
+            if (title.empty()) return TRUE;
+            const int q = MatchQuality(hwnd, *c->crit, title);
+            if (q < 0) return TRUE;
+            const bool iconic = IsIconic(hwnd) != 0;
+            // A restored window beats a minimized one; then better title match; then z-order (first seen).
+            const bool better = !c->best || (c->best_iconic && !iconic) ||
+                                (c->best_iconic == iconic && q > c->best_q);
+            if (better) { c->best = hwnd; c->best_q = q; c->best_iconic = iconic; }
             return TRUE;
         }, reinterpret_cast<LPARAM>(&ctx));
-
-        found = ctx.exact ? ctx.exact : ctx.loose;
+        if (ctx.best) {
+            found = ctx.best;
+            route = std::string("matched ") + (crit.use_exe ? "exe " : "") + (crit.use_class ? "class " : "") +
+                    (crit.use_title ? "title " : "") + "(search)";
+        }
     }
 
     if (!found) return false;
 
-    // A minimized window has no on-screen pixels to crop to (its rect is
-    // parked at -32000,-32000) - treat it as "not available" rather than
-    // letting the caller compute a crop rect that lands off every monitor.
+    // A minimized window has no on-screen pixels to crop to (its rect is parked at -32000,-32000) - treat
+    // it as "not available" rather than letting the caller compute a crop rect that lands off every monitor.
     if (IsIconic(found)) return false;
 
-    // DWMWA_EXTENDED_FRAME_BOUNDS, not GetWindowRect(): on Win10/11,
-    // GetWindowRect() includes several pixels of invisible resize-grip
-    // margin around most app windows (part of how the new-style thin
-    // borders are implemented) - cropping DXGI's frame to *that* rect
-    // would capture a sliver of desktop wallpaper around three edges of
-    // the window instead of the window itself. The DWM attribute gives
-    // the actual visible bounds, matching what the user sees on screen.
+    // DWMWA_EXTENDED_FRAME_BOUNDS, not GetWindowRect(): on Win10/11, GetWindowRect() includes several
+    // pixels of invisible resize-grip margin around most app windows - cropping DXGI's frame to *that*
+    // rect would capture a sliver of desktop wallpaper around three edges of the window instead of the
+    // window itself. The DWM attribute gives the actual visible bounds, matching what the user sees.
     RECT r{};
     if (FAILED(DwmGetWindowAttribute(found, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))) {
         if (!GetWindowRect(found, &r)) return false;  // last-resort fallback
     }
     if (r.right <= r.left || r.bottom <= r.top) return false;  // degenerate
 
-    if (client_only) {
+    if (t.client_only) {
         RECT cr{};
         POINT origin{0, 0};
         if (GetClientRect(found, &cr) && ClientToScreen(found, &origin) && cr.right > 0 && cr.bottom > 0) {
@@ -162,7 +298,73 @@ bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out
 
     out_hwnd = found;
     out_rect = r;
+    if (how) *how = route;
     return true;
+}
+
+extern "C" {
+    void *hr_di_create();
+    void hr_di_destroy(void *handle);
+    void hr_di_refresh(void *handle);
+    int hr_di_count(void *handle);
+    int hr_di_get(void *handle, int index, int *x, int *y, int *w, int *h, float *dpi);
+}
+
+std::vector<HrMonitorInfo> HrListMonitors() {
+    std::vector<HrMonitorInfo> out;
+    void *di = hr_di_create();
+    if (!di) return out;
+    hr_di_refresh(di);
+    const int n = hr_di_count(di);
+    for (int i = 0; i < n; ++i) {
+        HrMonitorInfo m;
+        float dpi = 96.0f;
+        if (!hr_di_get(di, i, &m.x, &m.y, &m.w, &m.h, &dpi)) continue;
+        m.primary = (i == 0);   // display_info.cpp sorts the primary monitor first
+        out.push_back(m);
+    }
+    hr_di_destroy(di);
+    return out;
+}
+
+bool HR_ResolveCaptureWindow(const std::string &title, HWND &out_hwnd, RECT &out_rect,
+                             HWND preferred_hwnd, bool client_only) {
+    // pre-Layers-panel contract: exact title (then case-insensitive), the picked handle first.
+    HrWindowTarget t;
+    t.title = title;
+    t.match_exe = false;
+    t.match_class = false;
+    t.match_title = true;
+    t.title_mode = 0;
+    t.follow_hwnd = true;
+    t.preferred = preferred_hwnd;
+    t.client_only = client_only;
+    return HR_ResolveWindowTarget(t, out_hwnd, out_rect, nullptr);
+}
+
+bool HR_ResolveCaptureWindowFromState(AppState &state, HWND &out_hwnd, RECT &out_rect, std::string *how) {
+    const HrWindowTarget t = HrWindowTargetFromState(state);
+    if (!HR_ResolveWindowTarget(t, out_hwnd, out_rect, how)) return false;
+    // Learn what an old settings file never stored, so the next start can find the window by program/class.
+    if (state.capture_window_exe.empty()) state.capture_window_exe = HR_WindowExeName(out_hwnd);
+    if (state.capture_window_class.empty()) state.capture_window_class = HR_WindowClassName(out_hwnd);
+    if (out_hwnd != state.capture_window_hwnd) {
+        HrWgcLog::Info("Window target: now recording window " + std::to_string((unsigned long long)(uintptr_t)out_hwnd) +
+                       " ('" + HR_WindowTitleUtf8(out_hwnd) + "', " + HR_WindowExeName(out_hwnd) + " / " +
+                       HR_WindowClassName(out_hwnd) + "), found by: " + (how ? *how : std::string("?")));
+    }
+    state.capture_window_hwnd = out_hwnd;
+    return true;
+}
+
+void HR_RememberPickedWindow(AppState &state, HWND hwnd, const std::string &title_utf8) {
+    state.capture_window_title = title_utf8;
+    state.capture_window_hwnd = hwnd;
+    state.capture_window_exe = HR_WindowExeName(hwnd);
+    state.capture_window_class = HR_WindowClassName(hwnd);
+    state.capture_mode = CaptureMode::Window;
+    HrWgcLog::Note("Window target picked: '" + title_utf8 + "' (" + state.capture_window_exe + " / " +
+                   state.capture_window_class + ", handle " + std::to_string((unsigned long long)(uintptr_t)hwnd) + ")");
 }
 
 namespace {
@@ -356,16 +558,18 @@ LRESULT CALLBACK PickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 HWND list = GetDlgItem(hwnd, IDC_WP_LIST);
                 int sel = (int)SendMessageW(list, LB_GETCURSEL, 0, 0);
                 if (sel >= 0 && sel < (int)ctx->entries->size()) {
-                    ctx->state->capture_window_title = NarrowFromWide((*ctx->entries)[(size_t)sel].title);
-                    // Remember the exact window too - see AppState::capture_window_hwnd.
-                    ctx->state->capture_window_hwnd = (*ctx->entries)[(size_t)sel].hwnd;
-                    ctx->state->capture_mode = CaptureMode::Window;
+                    // Title, the exact window (AppState::capture_window_hwnd), and - new - its program and
+                    // window class, so the window can be found again after a restart / a title change.
+                    HR_RememberPickedWindow(*ctx->state, (*ctx->entries)[(size_t)sel].hwnd,
+                                            NarrowFromWide((*ctx->entries)[(size_t)sel].title));
                     HrCloseModalWindow(hwnd);
                 }
             } else if (id == IDC_WP_DESKTOP) {
                 ctx->state->capture_mode = CaptureMode::Desktop;
                 ctx->state->capture_window_title.clear();
                 ctx->state->capture_window_hwnd = nullptr;
+                ctx->state->capture_window_exe.clear();
+                ctx->state->capture_window_class.clear();
                 HrCloseModalWindow(hwnd);
             } else if (id == IDC_WP_LIST && HIWORD(wParam) == LBN_DBLCLK) {
                 // Double-click a row = same as "Record this window", matching

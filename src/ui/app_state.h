@@ -59,6 +59,12 @@ struct OverlayDef {
     // the device. Empty for overlays added before this existed.
     std::string webcam_name;
     bool visible = true;
+    // 7th pass (Layers panel): "Lock" in the row's context menu - a locked overlay can't be dragged,
+    // resized or nudged on the preview by accident (the editor dialog and the numeric fields still
+    // work). "Keep proportions" makes every resize of this overlay keep its aspect ratio (holding Shift
+    // while resizing does the same for any overlay, and inverts this flag when it is on).
+    bool locked = false;
+    bool lock_aspect = false;
 
     // For type == "input_overlay" (the "External Overlay" import, see
     // overlays_dock_panel.cpp / input_overlay.h): a keyboard/mouse
@@ -198,6 +204,35 @@ struct AppState {
     // What part of the window is recorded: "window" (title bar + borders +
     // content - the WHOLE window) or "client" (only the content area).
     std::string window_capture_area   = "window";
+
+    // -- 7th pass capture source (Layers panel > Capture source...) ------------------------------------
+    // How the recorded window is FOUND again (after a restart, or when its handle is gone). Window
+    // titles change constantly (every browser tab switch), so the title is only one optional criterion:
+    //   capture_window_exe / capture_window_class - learned from the window when it is picked (or the
+    //                        first time it is resolved), e.g. "chrome.exe" / "Chrome_WidgetWin_1".
+    //   window_match_exe / _class / _title - which of them must match (all enabled ones must). When none
+    //                        of the enabled criteria has a value to compare, the stored title is used
+    //                        (exactly the pre-Layers-panel behaviour).
+    //   window_title_mode  - "exact" | "prefix" | "contains" (how the title is compared when enabled;
+    //                        case is ignored after an exact attempt).
+    //   window_follow_hwnd - keep recording the very same window for as long as it exists, whatever its
+    //                        title is now (the pre-Layers-panel behaviour, now switchable).
+    std::string capture_window_exe;
+    std::string capture_window_class;
+    bool        window_match_exe   = true;
+    bool        window_match_class = true;
+    bool        window_match_title = false;
+    std::string window_title_mode  = "exact";
+    bool        window_follow_hwnd = true;
+    // "Smart" window capture (only used with window_capture_method == "wgc", PrintWindow backend):
+    // while nothing covers the window its picture is cut out of a cheap screen duplication (like a
+    // desktop recording, nothing is recomputed while nothing changes); the moment another window
+    // overlaps it, it switches to the exact per-window capture (PrintWindow). Off = always the exact one.
+    bool        window_capture_smart = true;
+    // Upper limit (frames/s) for the exact per-window capture, which is expensive. 0 = Target FPS.
+    int         window_capture_fps_cap = 0;
+    // Settings > Security: logs/wgc.log (window capture diagnostics).
+    bool        wgc_logging_enabled = true;
 
     // -- 2.4 dockable UI ---------------------------------------------------
     // Freezes the panel layout (no dragging, floating or resizing of panels).

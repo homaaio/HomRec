@@ -132,6 +132,17 @@ const std::vector<SettingDef> &All() {
         // 2.4: how a selected window is captured / which part of it (see app_state.h)
         v.push_back(StrField("window_capture_method", "capture", &AppState::window_capture_method));
         v.push_back(StrField("window_capture_area", "capture", &AppState::window_capture_area));
+        // 7th pass: capture source (Layers panel > Capture source...) - how the window is found again,
+        // smart mode, FPS cap of the exact per-window capture (see app_state.h).
+        v.push_back(StrField("capture_window_exe", "capture", &AppState::capture_window_exe));
+        v.push_back(StrField("capture_window_class", "capture", &AppState::capture_window_class));
+        v.push_back(BoolField("window_match_exe", "capture", &AppState::window_match_exe));
+        v.push_back(BoolField("window_match_class", "capture", &AppState::window_match_class));
+        v.push_back(BoolField("window_match_title", "capture", &AppState::window_match_title));
+        v.push_back(StrField("window_title_mode", "capture", &AppState::window_title_mode));
+        v.push_back(BoolField("window_follow_hwnd", "capture", &AppState::window_follow_hwnd));
+        v.push_back(BoolField("window_capture_smart", "capture", &AppState::window_capture_smart));
+        v.push_back(IntField("window_capture_fps_cap", "capture", &AppState::window_capture_fps_cap));
         v.push_back(IntField("region_x", "capture", &AppState::region_x));
         v.push_back(IntField("region_y", "capture", &AppState::region_y));
         v.push_back(IntField("region_w", "capture", &AppState::region_w));
@@ -230,6 +241,7 @@ const std::vector<SettingDef> &All() {
         // -- [security] --------------------------------------------------------
         v.push_back(BoolField("system_logging_enabled", "security", &AppState::system_logging_enabled));
         v.push_back(BoolField("plugin_logging_enabled", "security", &AppState::plugin_logging_enabled));
+        v.push_back(BoolField("wgc_logging_enabled", "security", &AppState::wgc_logging_enabled));
 
         // -- [system] ------------------------------------------------------------
         // NEW section: desktop_shortcut_enabled/_path and autostart_enabled
