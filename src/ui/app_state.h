@@ -73,6 +73,22 @@ struct OverlayDef {
     // extracted files under plugins/input_overlays/<name>/.
     std::string input_json_path;
     std::string input_png_path;
+
+    // 8th pass (Desktop split): "window" and "region" are LAYERS now (the Desktop layer only shows the
+    // monitor). type == "window": one program's window, found again by the rules below (same meaning as
+    // the AppState::window_* fields they were copied from); type == "region": a rectangle of the screen
+    // (rx/ry/rw/rh, virtual-desktop pixels). x/y/w/h stay "where the layer is drawn in the picture".
+    std::string win_title, win_exe, win_class;
+    bool        win_match_exe   = true;
+    bool        win_match_class = true;
+    bool        win_match_title = false;
+    std::string win_title_mode  = "exact";    // "exact" | "prefix" | "contains"
+    bool        win_follow      = true;       // keep the very same window while its title changes
+    std::string win_method      = "screen";   // "screen" (cut out of the desktop picture) | "wgc" (the window itself)
+    std::string win_area        = "window";   // "window" | "client"
+    int         win_fps_cap     = 0;          // exact capture only; 0 = no limit beyond the recording fps
+    int         rx = 0, ry = 0, rw = 0, rh = 0;
+    HWND        win_hwnd = nullptr;           // runtime only (a handle means nothing after a restart)
 };
 
 // One extra audio source in the Audio Mixer (2.4). The built-in "Microphone"
@@ -288,7 +304,13 @@ struct AppState {
     int          monitor_id    = 1;
     int          monitor_left  = 0;
     int          monitor_top   = 0;
+    // 8th pass: since the Desktop split this stays Desktop (window / region recording = layers, see
+    // OverlayDef::type "window" / "region"). Old config files that still say window / region are converted
+    // to a layer when they are loaded (HrMigrateCaptureSourceToLayers).
     CaptureMode  capture_mode  = CaptureMode::Desktop;
+    // The Desktop layer's eye: false = the monitor picture is not drawn (the other layers still can use it
+    // as their source, e.g. a region layer).
+    bool         desktop_visible = true;
     std::string  capture_window_title;
     // The exact HWND the person picked in File > Select Window... Runtime-
     // only (deliberately NOT in HrSettingsRegistry - a handle is meaningless
