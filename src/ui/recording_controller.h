@@ -382,6 +382,22 @@ private:
     // logic to size its preview-only pipeline).
     void ResolveCaptureSize();
     void RetargetWindowCapture();
+    // 8th pass (Desktop split): finds the window of a "window" layer again (program / class / title rules,
+    // see window_picker_dialog.h) and fills the layer's descriptor for the compositor: where the window is
+    // on the monitor now, and whether the window itself or a cut-out of the screen picture is shown.
+    // Throttled per layer (a lost window is only searched for about once a second).
+    void ResolveWindowLayer(OverlayDef &ov, HrOverlayDesc &d);
+public:
+    // The layer's window rules were edited: search again on the very next tick.
+    void ForgetLayerResolve(const std::string &layer_id) { layer_resolve_.erase(layer_id); }
+private:
+    struct LayerResolveState {
+        bool found = false;
+        RECT rect{};
+        std::chrono::steady_clock::time_point next{};
+        std::string logged;     // last "found by" text written to wgc.log (avoid log spam)
+    };
+    std::unordered_map<std::string, LayerResolveState> layer_resolve_;
     // Applies Settings > General's "Preview quality" (preview_quality_pct)
     // to the preview panel's pixel size before it's handed to the
     // pipeline as its thumbnail render target - the pipeline (and the GPU/

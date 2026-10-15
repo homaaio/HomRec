@@ -886,6 +886,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     bool any_overlay = false;
     for (const auto &o : state_.overlays)
         if (o.visible && o.w > 0 && o.h > 0) { any_overlay = true; break; }
+    if (!state_.desktop_visible) any_overlay = true;   // a hidden Desktop layer needs the CPU pipeline (ddagrab can't blank it)
 
     const char *why = nullptr;
     if (!ffmpeg_found_)                                   why = "ffmpeg not found";
@@ -1771,7 +1772,9 @@ void RecordingController::SyncOverlays() {
     // rather than needing its own change-tracking like the overlay list
     // below (which is expensive enough per-tick to be worth skipping when
     // unchanged).
-    hr_pl_set_include_cursor(pipeline_, state_.cursor_enabled ? 1 : 0);
+    // (With the Desktop layer hidden the pointer would be drawn at its DESKTOP position on top of the
+    // other layers, where it does not belong - so it is not drawn then.)
+    hr_pl_set_include_cursor(pipeline_, (state_.cursor_enabled && state_.desktop_visible) ? 1 : 0);
     // GPU colour conversion (Settings > Video): only ever takes effect for NV12
     // output, i.e. hardware encoders - the capture loop checks that itself.
     hr_pl_set_gpu_convert(pipeline_, state_.gpu_convert ? 1 : 0);
@@ -1805,9 +1808,18 @@ void RecordingController::SyncOverlays() {
     std::vector<HrOverlayDesc> &descs = overlays_scratch_;
     descs.clear();
     descs.reserve(state_.overlays.size());
-    for (const auto &ov : state_.overlays) {
+    for (auto &ov : state_.overlays) {
         HrOverlayDesc d{};
         std::strncpy(d.type, ov.type.c_str(), sizeof(d.type) - 1);
+        if (ov.type == "region") {
+            // monitor-relative pixels of the rectangle that is cut out of the captured monitor picture
+            d.src_x = ov.rx - state_.monitor_left;
+            d.src_y = ov.ry - state_.monitor_top;
+            d.src_w = ov.rw;
+            d.src_h = ov.rh;
+        } else if (ov.type == "window") {
+            ResolveWindowLayer(ov, d);
+        }
         std::strncpy(d.text, ov.text.c_str(), sizeof(d.text) - 1);
         std::strncpy(d.image_path, ov.image_path.c_str(), sizeof(d.image_path) - 1);
         std::strncpy(d.input_json_path, ov.input_json_path.c_str(), sizeof(d.input_json_path) - 1);
@@ -1822,6 +1834,17 @@ void RecordingController::SyncOverlays() {
         // wants 0-255 (what CompositeBgra actually multiplies alpha by).
         int pct = ov.opacity < 0 ? 0 : (ov.opacity > 100 ? 100 : ov.opacity);
         d.opacity = (unsigned char)((pct * 255 + 50) / 100);
+        descs.push_back(d);
+    }
+    // The Desktop layer's closed eye. Appended at the END on purpose: the compositor keeps its per-layer
+    // caches (webcams, GIFs...) by list position, and this entry must not shift everyone else's.
+    if (!state_.desktop_visible) {
+        HrOverlayDesc d{};
+        std::strncpy(d.type, "desktop_hidden", sizeof(d.type) - 1);
+        d.visible = 1;
+        d.w = capture_w_ > 0 ? capture_w_ : 1;
+        d.h = capture_h_ > 0 ? capture_h_ : 1;
+        d.opacity = 255;
         descs.push_back(d);
     }
 
@@ -1841,6 +1864,46 @@ void RecordingController::SyncOverlays() {
     hr_pl_set_overlays(pipeline_, descs.empty() ? nullptr : descs.data(), (int)descs.size());
     last_overlays_sent_.swap(descs); // descs (== overlays_scratch_) keeps the old buffer for reuse
     last_overlays_sent_valid_ = true;
+}
+
+void RecordingController::ResolveWindowLayer(OverlayDef &ov, HrOverlayDesc &d) {
+    if (!ov.visible) return;                       // a hidden layer is not followed
+    LayerResolveState &st = layer_resolve_[ov.id];
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= st.next) {
+        HWND hw = nullptr;
+        RECT r{};
+        std::string how;
+        if (HR_ResolveWindowTarget(HrWindowTargetFromLayer(ov), hw, r, &how) && hw) {
+            st.found = true;
+            st.rect = r;
+            if (hw != ov.win_hwnd) {
+                ov.win_hwnd = hw;
+                if (ov.win_exe.empty()) ov.win_exe = HR_WindowExeName(hw);
+                if (ov.win_class.empty()) ov.win_class = HR_WindowClassName(hw);
+                const std::string msg = "Window layer '" + ov.id + "': now showing '" + HR_WindowTitleUtf8(hw) +
+                                        "' (" + HR_WindowExeName(hw) + " / " + HR_WindowClassName(hw) +
+                                        "), found by: " + how;
+                if (msg != st.logged) { st.logged = msg; HrWgcLog::Info(msg); }
+            }
+            st.next = now + std::chrono::milliseconds(33);
+        } else {
+            st.found = false;
+            if (ov.win_hwnd && !IsWindow(ov.win_hwnd)) ov.win_hwnd = nullptr;
+            st.next = now + std::chrono::milliseconds(1000);   // searching = enumerating every window
+        }
+    }
+    if (!st.found) return;                         // d.src_w == 0 -> the compositor draws nothing
+    d.src_x = (int)st.rect.left - state_.monitor_left;
+    d.src_y = (int)st.rect.top - state_.monitor_top;
+    d.src_w = (int)(st.rect.right - st.rect.left);
+    d.src_h = (int)(st.rect.bottom - st.rect.top);
+    d.win_client_only = ov.win_area == "client" ? 1 : 0;
+    d.win_fps_cap = ov.win_fps_cap;
+    if (ov.win_method == "wgc" && ov.win_hwnd && HrWgcSupported()) {
+        d.win_method = 1;
+        d.hwnd = (long long)(intptr_t)ov.win_hwnd;
+    }
 }
 
 bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
