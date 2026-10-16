@@ -243,6 +243,7 @@ private:
     // no-longer-authoritative homrec_settings.json.
     void PersistSettings();
     void ToggleLivePreview();          // preview on/off (button above the preview); persists the choice
+    void UpdatePreviewFpsLabel();      // FPS readout next to the Preview ON/OFF button (always visible, fixed width)
     void UpdatePreviewToggleButton();  // label + colours of that button follow state_.disable_preview / theme
     void OnCaptureTargetChanged(); // after the capture source changed (Layers panel) - see main_frame.cpp
     // 7th pass: the capture source lives in the Layers panel now (File > Select Window / Region / Full Desktop
@@ -337,6 +338,9 @@ private:
     // Stop" and "ffmpeg died and we're cleaning up after it" so it can
     // show the right message.
     bool recording_crashed_pending_notice_ = false;
+    // The crash was the full-GPU (ddagrab) ffmpeg dying (e.g. a game changed the display mode): once the
+    // interrupted recording is finalized, a new one is started right away with the normal pipeline.
+    bool recording_restart_after_crash_ = false;
     void SetStatusState(const wxString &text, COLORREF dotColor);
     void ToggleFullscreenNative();
     // Un-minimizes + un-hides the window from the tray, in that order -
