@@ -292,6 +292,10 @@ public:
     // same crash while the resulting StopAsync() finalize is in flight.
     bool crashed() const { return crashed_; }
     void AcknowledgeCrash() { crashed_ = false; }
+    // True when the crash reported by crashed() was the full-GPU (ddagrab) ffmpeg dying - the UI
+    // then restarts the recording at once with the normal pipeline (ddagrab is blocked for the
+    // rest of the session). Stays valid after AcknowledgeCrash(); reset by the next Start().
+    bool crash_was_ddagrab() const { return crash_was_ddagrab_; }
 
     // True once the preview-only pipeline has failed to (re)start several
     // times in a row (e.g. DXGI dx_create() keeps returning null - RDP,
@@ -324,6 +328,8 @@ public:
     int output_width() const { return output_w_ > 0 ? output_w_ : capture_w_; }
     int output_height() const { return output_h_ > 0 ? output_h_ : capture_h_; }
     double current_fps() const { return current_fps_; }
+    // Capture-loop rate of the (idle) live-preview pipeline; 0 when no pipeline is running.
+    double preview_pipeline_fps() const;
 
     // Called by AudioPanel whenever a mic/system volume slider or mute
     // checkbox changes, so Start()/Stop() know what to actually record
@@ -508,6 +514,11 @@ private:
     // (no HomRec pipeline attached, so no overlays/pause). See TryStartDdagrab().
     bool ddagrab_active_ = false;
     bool ddagrab_pause_warned_ = false;
+    bool ddagrab_blocked_ = false;        // ddagrab died mid-recording once: not used again this session
+    bool crash_was_ddagrab_ = false;      // see crash_was_ddagrab()
+    double crash_video_elapsed_sec_ = 0.0; // recording time at the moment ffmpeg died (0 = no crash)
+    long long ddagrab_last_frames_ = -1;   // -progress frame count at the last FPS sample
+    std::chrono::steady_clock::time_point ddagrab_last_frames_t_{};
     int  ddagrab_probe_ = 0;     // 0 = not probed yet, 1 = ffmpeg has ddagrab, 2 = it doesn't
     bool TryStartDdagrab(const std::wstring &codec_args, bool codec_is_hw,
                          std::chrono::steady_clock::time_point &t_video_go);
