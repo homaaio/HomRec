@@ -1369,8 +1369,19 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     preview_toggle_btn_->SetMinSize(wxSize(104, 22));
     headerSizer->Add(preview_toggle_btn_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { ToggleLivePreview(); }, ID_PREVIEW_TOGGLE_BTN);
-    preview_fps_lbl_ = new wxStaticText(preview_header_, wxID_ANY, "");
+    // FPS readout. It used to be created EMPTY, was only filled while recording and was auto-sized: the sizer
+    // had placed a zero-width label at the right edge, so when text appeared the label grew to the right,
+    // outside the header, and was never seen (and the header itself was never re-laid out). Now it has a
+    // fixed width (room for "FPS: 000.0"), never resizes itself and always shows something.
+    preview_fps_lbl_ = new wxStaticText(preview_header_, wxID_ANY,
+                                        wxString::FromUTF8(lang_.Get("fps")) + wxString::FromUTF8(" \u2014"),
+                                        wxDefaultPosition, wxDefaultSize,
+                                        wxST_NO_AUTORESIZE | wxALIGN_RIGHT);
     preview_fps_lbl_->SetFont(wxFont(wxFontInfo(8).FaceName("Segoe UI")));
+    {
+        const wxSize ext = preview_fps_lbl_->GetTextExtent(wxString::FromUTF8(lang_.Get("fps")) + " 000.0");
+        preview_fps_lbl_->SetMinSize(wxSize(ext.x + 16, -1));
+    }
     headerSizer->Add(preview_fps_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
     preview_header_->SetSizer(headerSizer);
     pcSizer->Add(preview_header_, 0, wxEXPAND);
@@ -2086,6 +2097,7 @@ void HomRecMainFrame::HandleRecordingCrashed() {
     Update();
 
     recording_crashed_pending_notice_ = true;
+    recording_restart_after_crash_ = rec_ && rec_->crash_was_ddagrab();
     rec_->StopAsync([this]() {
         CallAfter([this]() { OnRecordingFinalized(); });
     });
@@ -2110,6 +2122,24 @@ void HomRecMainFrame::OnRecordingFinalized() {
     // still finalized and kept).
     if (recording_crashed_pending_notice_) {
         recording_crashed_pending_notice_ = false;
+        if (recording_restart_after_crash_) {
+            // Full-GPU (ddagrab) capture died - typically because a game switched the display mode (or
+            // went fullscreen) while recording. Do NOT pop up a modal box over the game: just carry on
+            // in a new file with the normal capture pipeline (ddagrab is blocked for this session, see
+            // RecordingController::PollStats()), and say so in the status line + homrec.log.
+            recording_restart_after_crash_ = false;
+            HrLog::Warn("Recording: full-GPU capture stopped (display mode change?) - the part captured so far "
+                        "was saved; continuing in a NEW file with the normal capture pipeline.");
+            CallAfter([this]() {
+                if (state_.recording) return;
+                DoStart();
+                if (state_.recording)
+                    SetStatusState(wxString::FromUTF8("\u26A0 Full-GPU capture stopped (display mode changed) \u2014 "
+                                                      "recording continues in a new file"),
+                                   theme_.warning);
+            });
+            return;   // no summary popup in between
+        }
         wxMessageBox(
             wxString::FromUTF8(
                 "Recording stopped unexpectedly \u2014 the encoder process ended on its "
@@ -2479,6 +2509,23 @@ void HomRecMainFrame::OnPauseClicked(wxCommandEvent &) { DoPause(); }
 // Skipped while recording: the running pipeline keeps its crop until Stop(),
 // and RefreshPreviewSettings()'s change-detection snapshot deliberately
 // stays stale so the next call after Stop() rebuilds for the new target.
+// FPS readout in the preview header (next to the Preview ON/OFF button). Recording: the recording's real fps
+// (HomRec's pipeline, or ffmpeg's own -progress count for full-GPU/ddagrab recordings). Idle with the preview
+// on: the capture rate of the preview pipeline. Otherwise a dash - the label itself is always there.
+void HomRecMainFrame::UpdatePreviewFpsLabel() {
+    if (!preview_fps_lbl_) return;
+    wxString txt = wxString::FromUTF8(lang_.Get("fps"));
+    if (state_.recording) {
+        txt += wxString::Format(" %.1f", rec_ ? rec_->current_fps() : 0.0);
+    } else if (!state_.disable_preview && rec_) {
+        txt += wxString::Format(" %.1f", rec_->preview_pipeline_fps());
+    } else {
+        txt += wxString::FromUTF8(" \u2014");
+    }
+    // Fixed-size label (wxST_NO_AUTORESIZE): no re-layout needed, only repaint when the text changed.
+    if (preview_fps_lbl_->GetLabel() != txt) preview_fps_lbl_->SetLabel(txt);
+}
+
 static ColorButton *s_theme_seen_btn_ = nullptr;
 void HomRecMainFrame::UpdatePreviewToggleButton() {
     if (!preview_toggle_btn_) return;
@@ -2828,6 +2875,7 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     }
 
     UpdatePreviewToggleButton();
+    UpdatePreviewFpsLabel();
 
     // logs\pc.log - throttles itself internally to ~once every 10s, so
     // piggybacking on this existing 500ms tick (rather than adding a
@@ -2858,7 +2906,6 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
                        wxString::Format(" %dx%d", rec_ ? rec_->output_width() : 0,
                                         rec_ ? rec_->output_height() : 0);
         setLabel(res_lbl_, res);
-        setLabel(preview_fps_lbl_, fps);
         wxString state_word = wxString::FromUTF8(lang_.Get(state_.paused ? "paused" : "recording"));
         setLabel(file_lbl_, state_word + wxString::FromUTF8(" \u2014 ") + t);
         // Overload warning: rec_->overloaded() only turns on after a
