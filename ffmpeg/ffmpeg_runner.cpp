@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -88,6 +89,15 @@ struct FfmpegCtx {
     int  grab_off_x{0}, grab_off_y{0};
     int  grab_w{0}, grab_h{0};   /* 0x0 = the whole output */
     bool grab_cursor{true};
+
+    /* Diagnostics for the ddagrab path (stderr of a GUI-launched ffmpeg used to go
+     * nowhere, so a mid-recording death left no trace of the reason):
+     *   log_path      - ffmpeg's stderr is redirected here (logs\ffmpeg_ddagrab.log)
+     *   progress_path - "-progress" file; its last "frame=N" line is the live frame
+     *                   count the UI turns into an FPS value (ddagrab bypasses
+     *                   HomRec's own pipeline, which is what normally measures it). */
+    std::string log_path;
+    std::string progress_path;
 };
 
 /* -- Helpers ---------------------------------------------------------------- */
@@ -106,6 +116,7 @@ static int64_t _file_size(const char *path) {
 /* -- Process launch helpers ------------------------------------------------- */
 
 static bool _wants_hw_pixfmt(const std::string &codec_args);
+static std::wstring _utf8_to_wide(const std::string &s);
 
 #ifdef _WIN32
 // Plain CreatePipe() (used here previously) hands back an anonymous
@@ -169,6 +180,16 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
         SetHandleInformation(hWriteStdin, HANDLE_FLAG_INHERIT, 0);   // child must only inherit the read end
     }
 
+    // ddagrab mode: send ffmpeg's stderr to a log file so that a failure mid-recording
+    // (display mode change by a game, encoder error, ...) leaves its reason behind.
+    HANDLE hErrLog = INVALID_HANDLE_VALUE;
+    if (ctx->gpu_capture && !ctx->log_path.empty()) {
+        SECURITY_ATTRIBUTES sa_log{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        hErrLog = CreateFileW(_utf8_to_wide(ctx->log_path).c_str(), GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, &sa_log, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
@@ -176,7 +197,7 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
         si.hStdInput = hReadStdin;
         si.dwFlags  |= STARTF_USESTDHANDLES;
         si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-        si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+        si.hStdError  = (hErrLog != INVALID_HANDLE_VALUE) ? hErrLog : GetStdHandle(STD_ERROR_HANDLE);
     }
     si.wShowWindow = SW_HIDE;
 
@@ -191,6 +212,7 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
                                nullptr, nullptr, &si, &pi) != 0);
 
     if (want_stdin && hReadStdin) CloseHandle(hReadStdin);
+    if (hErrLog != INVALID_HANDLE_VALUE) CloseHandle(hErrLog);   // the child keeps its own copy
 
     if (!ok) {
         if (want_stdin && hWriteStdin) CloseHandle(hWriteStdin);
@@ -291,6 +313,13 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     const wchar_t *raw_pixfmt = _wants_hw_pixfmt(ctx->codec_args) ? L"nv12" : L"yuv420p";
 
     ss << Q(ctx->ffmpeg_path);
+
+    if (ctx->gpu_capture) {
+        // -nostats: the \r-terminated stats line would flood the stderr log; the live frame
+        // count comes from -progress instead (key=value blocks, independent of -loglevel).
+        ss << L" -hide_banner -nostats -loglevel info";
+        if (!ctx->progress_path.empty()) ss << L" -progress " << Q(ctx->progress_path);
+    }
 
     if (ctx->gpu_capture) {
         /* ddagrab fast path. Documented ffmpeg recipes (doc/filters.texi):
@@ -487,6 +516,107 @@ HR_EXPORT void hr_ff_set_gpu_capture(void *h, int enable, int output_idx,
     ctx->grab_h = h2 > 0 ? h2 : 0;
     ctx->grab_cursor = (draw_mouse != 0);
     if (ctx->gpu_capture) ctx->pipe_input = false;
+}
+
+/*
+ * hr_ff_set_diag_paths
+ * ddagrab mode only. log_path: ffmpeg's stderr is written there. progress_path: ffmpeg's
+ * "-progress" output (read back by hr_ff_progress_frames()). Either may be NULL/empty.
+ * Must be called before hr_ff_start().
+ */
+HR_EXPORT void hr_ff_set_diag_paths(void *h, const char *log_path, const char *progress_path) {
+    if (!h) return;
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    ctx->log_path      = log_path ? log_path : "";
+    ctx->progress_path = progress_path ? progress_path : "";
+}
+
+#ifdef _WIN32
+// Reads up to `cap` bytes from the END of a file another process may still be writing.
+static std::string _read_file_tail(const std::string &utf8_path, size_t cap) {
+    std::string out;
+    if (utf8_path.empty() || cap == 0) return out;
+    HANDLE f = CreateFileW(_utf8_to_wide(utf8_path).c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return out;
+    LARGE_INTEGER sz{};
+    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0) {
+        long long want = sz.QuadPart < (long long)cap ? sz.QuadPart : (long long)cap;
+        LARGE_INTEGER pos{};
+        pos.QuadPart = sz.QuadPart - want;
+        if (SetFilePointerEx(f, pos, nullptr, FILE_BEGIN)) {
+            out.resize((size_t)want);
+            DWORD got = 0;
+            if (ReadFile(f, &out[0], (DWORD)want, &got, nullptr)) out.resize(got);
+            else out.clear();
+        }
+    }
+    CloseHandle(f);
+    return out;
+}
+#endif
+
+/*
+ * hr_ff_progress_frames
+ * Number of frames ffmpeg has encoded so far, from the last "frame=N" line of its -progress
+ * file; -1 if unknown (no progress file yet / not ddagrab mode).
+ */
+HR_EXPORT long long hr_ff_progress_frames(const void *handle) {
+    if (!handle) return -1;
+#ifdef _WIN32
+    const auto *ctx = static_cast<const FfmpegCtx *>(handle);
+    if (ctx->progress_path.empty()) return -1;
+    const std::string tail = _read_file_tail(ctx->progress_path, 2048);
+    size_t at = std::string::npos;
+    for (size_t i = tail.rfind("frame="); i != std::string::npos;
+         i = (i == 0) ? std::string::npos : tail.rfind("frame=", i - 1)) {
+        if (i == 0 || tail[i - 1] == '\n') { at = i; break; }   // a line that STARTS with frame=
+    }
+    if (at == std::string::npos) return -1;
+    char *end = nullptr;
+    long long v = std::strtoll(tail.c_str() + at + 6, &end, 10);
+    return (end && end != tail.c_str() + at + 6) ? v : -1;
+#else
+    return -1;
+#endif
+}
+
+/*
+ * hr_ff_read_log_tail
+ * Copies the last bytes of ffmpeg's stderr log (see hr_ff_set_diag_paths) into buf
+ * (NUL-terminated). Returns the number of bytes written (0 if there is no log).
+ */
+HR_EXPORT int hr_ff_read_log_tail(const void *handle, char *buf, int buf_len) {
+    if (!buf || buf_len <= 0) return 0;
+    buf[0] = '\0';
+    if (!handle) return 0;
+#ifdef _WIN32
+    const auto *ctx = static_cast<const FfmpegCtx *>(handle);
+    const std::string tail = _read_file_tail(ctx->log_path, (size_t)buf_len - 1);
+    std::memcpy(buf, tail.data(), tail.size());
+    buf[tail.size()] = '\0';
+    return (int)tail.size();
+#else
+    return 0;
+#endif
+}
+
+/*
+ * hr_ff_exit_code
+ * Exit code of the ffmpeg process once it has ended; -1 while it is still running / unknown.
+ */
+HR_EXPORT int hr_ff_exit_code(const void *handle) {
+    if (!handle) return -1;
+#ifdef _WIN32
+    const auto *ctx = static_cast<const FfmpegCtx *>(handle);
+    if (!ctx->hProcess) return -1;
+    DWORD code = STILL_ACTIVE;
+    if (!GetExitCodeProcess(ctx->hProcess, &code) || code == STILL_ACTIVE) return -1;
+    return (int)code;
+#else
+    return -1;
+#endif
 }
 
 HR_EXPORT void hr_ff_set_pipe_input(void *h, int enable) {
