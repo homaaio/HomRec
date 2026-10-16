@@ -3,6 +3,7 @@
 #include "../core/wgc_capture.h"      // 2.4: HrWgcSupported()/HrWgcProbeWindow()
 #include "../utils/log.h"
 #include "../utils/wgc_log.h"      // 7th pass: logs\wgc.log
+#include "../utils/log_paths.h"    // logs\ffmpeg_ddagrab.log (+ progress file)
 #include "../core/overlay_render.h"
 #include "../utils/str_convert.h"   // HrVideoFormatExt() (2.4 container choice)
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
@@ -129,6 +130,11 @@ extern "C" {
     int hr_ff_wait(void *handle, int timeout_ms);
     int hr_ff_is_running(const void *handle);
     double hr_ff_output_size_mb(const void *handle);
+    // ddagrab diagnostics (ffmpeg_runner.cpp): stderr log, live frame count, exit code
+    void hr_ff_set_diag_paths(void *h, const char *log_path, const char *progress_path);
+    long long hr_ff_progress_frames(const void *handle);
+    int hr_ff_read_log_tail(const void *handle, char *buf, int buf_len);
+    int hr_ff_exit_code(const void *handle);
     void hr_ff_kill(void *handle);
 
     // audio.cpp
@@ -864,6 +870,36 @@ void RecordingController::RetargetWindowCapture() {
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
 }
 
+// Writes the reason an ffmpeg process died into homrec.log: its exit code plus the last lines of
+// its stderr (only the full-GPU/ddagrab ffmpeg has a stderr log - see hr_ff_set_diag_paths()).
+// A GUI app has no console, so before this the reason was simply lost.
+static void LogFfmpegDeathDetails(void *ff, const std::string &what) {
+    std::string msg = what + " - ffmpeg exit code " + std::to_string(hr_ff_exit_code(ff));
+    char buf[4096] = {};
+    const int n = hr_ff_read_log_tail(ff, buf, (int)sizeof(buf));
+    if (n > 0) {
+        std::string raw(buf, (size_t)n);
+        for (char &c : raw) if (c == '\r') c = '\n';
+        std::vector<std::string> lines;
+        size_t from = 0;
+        while (from < raw.size()) {
+            size_t nl = raw.find('\n', from);
+            std::string ln = raw.substr(from, nl == std::string::npos ? std::string::npos : nl - from);
+            if (!ln.empty()) lines.push_back(ln);
+            if (nl == std::string::npos) break;
+            from = nl + 1;
+        }
+        const size_t keep = 10;
+        const size_t first = lines.size() > keep ? lines.size() - keep : 0;
+        msg += "; last ffmpeg output (logs\\ffmpeg_ddagrab.log): ";
+        for (size_t i = first; i < lines.size(); ++i) {
+            if (i > first) msg += " | ";
+            msg += lines[i];
+        }
+    }
+    HrLog::Error(msg);
+}
+
 // ---------------------------------------------------------------------------
 // TryStartDdagrab
 //
@@ -890,6 +926,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
 
     const char *why = nullptr;
     if (!ffmpeg_found_)                                   why = "ffmpeg not found";
+    else if (ddagrab_blocked_)                            why = "it already failed mid-recording in this session (a game changing the display mode?)";
     else if (!codec_is_hw)                                why = "a software encoder is selected (ddagrab needs nvenc/qsv/amf)";
     else if (state_.capture_mode == CaptureMode::Window)  why = "window capture follows a moving window";
     else if (any_overlay)                                 why = "overlays/plugins are active and need the CPU pipeline";
@@ -919,6 +956,13 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     hr_ff_set_gpu_capture(ff, /*enable=*/1, capture_output_idx_,
                           crop_x_, crop_y_, crop_w_, crop_h_,
                           state_.cursor_enabled ? 1 : 0);
+    // ffmpeg's stderr + a -progress file (live frame count for the FPS readout).
+    {
+        const std::string ff_log  = NarrowFromWide(HrLogPaths::LogFilePath(L"ffmpeg_ddagrab.log"));
+        const std::string ff_prog = NarrowFromWide(HrLogPaths::LogFilePath(L"ffmpeg_ddagrab_progress.txt"));
+        RemoveFileUtf8(ff_prog);   // a stale file must not report old frame counts
+        hr_ff_set_diag_paths(ff, ff_log.c_str(), ff_prog.c_str());
+    }
     if (hr_ff_start(ff) != 0) {
         HrLog::Warn("Recording: couldn't launch ffmpeg for ddagrab capture -> using the normal capture pipeline.");
         hr_ff_destroy(ff);
@@ -941,6 +985,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
     if (died) {
+        LogFfmpegDeathDetails(ff, "Recording: ffmpeg exited while starting ddagrab capture");
         HrLog::Warn("Recording: ffmpeg exited while starting ddagrab capture (unsupported on this "
                     "GPU/driver/ffmpeg build?) -> falling back to the normal capture pipeline.");
         hr_ff_destroy(ff);
@@ -1054,6 +1099,10 @@ bool RecordingController::Start(std::wstring &error_out) {
     // capturing and otherwise cleans up after itself so the normal pipeline
     // below takes over exactly as before.
     ddagrab_active_ = false;
+    crash_was_ddagrab_ = false;
+    crash_video_elapsed_sec_ = 0.0;
+    ddagrab_last_frames_ = -1;
+    current_fps_ = 0.0;
     std::chrono::steady_clock::time_point t_video_go{};
     if (TryStartDdagrab(codec_args, codec_is_hw, t_video_go)) {
         ddagrab_active_ = true;
@@ -1489,7 +1538,8 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         // overload) instead of cutting the accurate audio down to match.
         merged = hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
                               WideFromNarrow(audio_wav).c_str(),
-                              elapsed_seconds(), av_start_skew_sec_) != 0;
+                              (crash_video_elapsed_sec_ > 0.0 ? crash_video_elapsed_sec_ : elapsed_seconds()),
+                              av_start_skew_sec_) != 0;
         if (!merged) {
             HrLog::Error("Recording: merging the captured audio into the video failed -- "
                         "keeping '" + audio_wav + "' next to the (silent) video instead "
@@ -1679,15 +1729,49 @@ void RecordingController::PollStats() {
         HrLog::Error("Recording: the ffmpeg process ended unexpectedly mid-recording "
                      "(crashed, was closed externally, or hit a fatal error) - flagging "
                      "this as a crash so the UI can stop and finalize what was captured.");
+        crash_was_ddagrab_ = ddagrab_active_;
+        crash_video_elapsed_sec_ = elapsed_seconds();   // so the finalize step doesn't "stretch" a short video
+        LogFfmpegDeathDetails(ffproc_, ddagrab_active_
+            ? "Recording: the full-GPU (ddagrab) ffmpeg died mid-recording"
+            : "Recording: the ffmpeg encoder died mid-recording");
+        if (ddagrab_active_) {
+            // ddagrab can't follow a display mode change (a game switching to its own fullscreen
+            // resolution, alt-tab out of it, ...). Don't use it again this session: the UI restarts
+            // the recording right away and the normal pipeline stretches frames to a fixed size.
+            ddagrab_blocked_ = true;
+            HrLog::Warn("Recording: full-GPU (ddagrab) capture is switched off for the rest of this "
+                        "session - the next recording uses the normal capture pipeline.");
+        }
         crashed_ = true;
         return;
     }
 
     long long frames = 0, drops = 0;
     double fps = 0.0;
-    if (pipeline_) hr_pl_stats(pipeline_, &frames, &drops, &fps);
-    state_.frame_count = (long)frames;
-    current_fps_ = fps;
+    if (ddagrab_active_) {
+        // ffmpeg captures by itself: HomRec's pipeline sees no frames, so the number comes from
+        // ffmpeg's own -progress file (frames encoded per second, over >= 1 s windows).
+        const long long fr = ffproc_ ? hr_ff_progress_frames(ffproc_) : -1;
+        if (fr >= 0) {
+            const auto now = std::chrono::steady_clock::now();
+            if (ddagrab_last_frames_ < 0) {
+                ddagrab_last_frames_ = fr;
+                ddagrab_last_frames_t_ = now;
+            } else {
+                const double dt = std::chrono::duration<double>(now - ddagrab_last_frames_t_).count();
+                if (dt >= 1.0) {
+                    current_fps_ = (double)(fr - ddagrab_last_frames_) / dt;
+                    ddagrab_last_frames_ = fr;
+                    ddagrab_last_frames_t_ = now;
+                }
+            }
+            state_.frame_count = (long)fr;
+        }
+    } else {
+        if (pipeline_) hr_pl_stats(pipeline_, &frames, &drops, &fps);
+        state_.frame_count = (long)frames;
+        current_fps_ = fps;
+    }
 
     // Overload warning: a few consecutive ticks of new drops while
     // actually recording (not paused) means the capture/encode pipeline
@@ -2896,6 +2980,14 @@ void RecordingController::EndSnapshotEditing() {
         TeardownPreview();
     }
     snapshot_forced_preview_ = false;
+}
+
+double RecordingController::preview_pipeline_fps() const {
+    if (!pipeline_) return 0.0;
+    long long frames = 0, drops = 0;
+    double fps = 0.0;
+    hr_pl_stats(pipeline_, &frames, &drops, &fps);
+    return fps;
 }
 
 double RecordingController::elapsed_seconds() const {
