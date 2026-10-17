@@ -89,6 +89,7 @@ struct FfmpegCtx {
     int  grab_off_x{0}, grab_off_y{0};
     int  grab_w{0}, grab_h{0};   /* 0x0 = the whole output */
     bool grab_cursor{true};
+    bool normal_priority{false};
 
     /* Diagnostics for the ddagrab path (stderr of a GUI-launched ffmpeg used to go
      * nowhere, so a mid-recording death left no trace of the reason):
@@ -204,8 +205,8 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
     PROCESS_INFORMATION pi{};
     std::wstring mut_cmd = cmdline;
     DWORD priority_class = CREATE_NO_WINDOW |
-        (_wants_hw_pixfmt(ctx->codec_args) ? ABOVE_NORMAL_PRIORITY_CLASS
-                                            : NORMAL_PRIORITY_CLASS);
+        ((_wants_hw_pixfmt(ctx->codec_args) && !ctx->normal_priority) ? ABOVE_NORMAL_PRIORITY_CLASS
+                                                                       : NORMAL_PRIORITY_CLASS);
     bool ok = (CreateProcessW(nullptr, mut_cmd.data(),
                                nullptr, nullptr, want_stdin ? TRUE : FALSE,
                                priority_class,
@@ -504,6 +505,11 @@ HR_EXPORT void hr_ff_set_output_size(void *h, int out_w, int out_h) {
  * Only sensible with a hardware encoder (nvenc/qsv/amf) and when output size
  * == captured size (ddagrab has no scaler). The caller decides that.
  */
+HR_EXPORT void hr_ff_set_normal_priority(void *h, int enable) {
+    if (!h) return;
+    static_cast<FfmpegCtx *>(h)->normal_priority = (enable != 0);
+}
+
 HR_EXPORT void hr_ff_set_gpu_capture(void *h, int enable, int output_idx,
                                       int off_x, int off_y, int w, int h2, int draw_mouse) {
     if (!h) return;
