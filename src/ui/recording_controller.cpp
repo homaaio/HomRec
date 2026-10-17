@@ -122,6 +122,7 @@ extern "C" {
     void hr_ff_set_video_params(void *h, int w, int h2, int fps);
     void hr_ff_set_output_size(void *h, int out_w, int out_h);
     void hr_ff_set_pipe_input(void *h, int enable);
+    void hr_ff_set_normal_priority(void *h, int enable);
     void hr_ff_set_gpu_capture(void *h, int enable, int output_idx, int off_x, int off_y,
                                 int w, int h2, int draw_mouse);
     int hr_ff_start(void *handle);
@@ -319,7 +320,15 @@ std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
     hr_build_codec_args_ex(codec.c_str(), state_.quality, state_.target_fps,
                             (int)si.dwNumberOfProcessors, output_w_, output_h_,
                             buf, 512, preset.c_str());
-    return buf;
+    std::wstring args = buf;
+    // Opt-in (AppState::qsv_low_power): fixed-function VDENC encoding for Intel QSV. Only touches
+    // the auto-built args - custom_ffmpeg_args (returned above) is used verbatim.
+    if (state_.qsv_low_power && codec.find(L"qsv") != std::wstring::npos &&
+        args.find(L"-low_power") == std::wstring::npos) {
+        args += L" -low_power 1";
+        HrLog::Info("Recording: Intel QSV low-power (VDENC) encoding requested (-low_power 1).");
+    }
+    return args;
 }
 
 bool RecordingController::WindowTargetDefined() const {
@@ -952,6 +961,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     hr_ff_set_ffmpeg_path(ff, NarrowFromWide(ffmpeg_path_).c_str());
     hr_ff_set_output_path(ff, NarrowFromWide(current_output_path_).c_str());
     hr_ff_set_codec_args(ff, NarrowFromWide(codec_args).c_str());
+    hr_ff_set_normal_priority(ff, state_.game_friendly_priority ? 1 : 0);
     hr_ff_set_video_params(ff, src_w, src_h, state_.target_fps);
     hr_ff_set_gpu_capture(ff, /*enable=*/1, capture_output_idx_,
                           crop_x_, crop_y_, crop_w_, crop_h_,
@@ -1120,6 +1130,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_ff_set_ffmpeg_path(ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
         hr_ff_set_output_path(ffproc_, NarrowFromWide(current_output_path_).c_str());
         hr_ff_set_codec_args(ffproc_, NarrowFromWide(codec_args).c_str());
+        hr_ff_set_normal_priority(ffproc_, state_.game_friendly_priority ? 1 : 0);
         // Video params tell ffmpeg's rawvideo demuxer the size of the frames
         // that will actually arrive on the pipe - that's the CROPPED size in
         // window-capture mode (crop_w_/crop_h_ > 0), not the monitor's native
@@ -1259,7 +1270,12 @@ bool RecordingController::Start(std::wstring &error_out) {
         // hr_pl_set_recording() above but should stay at ordinary priority -
         // see boost_priority's comment in pipeline.cpp / bug #5) - this is
         // the one place that's actually true, so bump the capture thread.
-        hr_pl_set_priority_boost(pipeline_, 1);
+        // game_friendly_priority: keep the threads at their ordinary ABOVE_NORMAL instead of
+        // HIGHEST so a game on a weak CPU isn't preempted by the recorder's own threads.
+        hr_pl_set_priority_boost(pipeline_, state_.game_friendly_priority ? 0 : 1);
+        if (state_.game_friendly_priority)
+            HrLog::Info("Recording: game-friendly priority is on (encoder at normal priority, "
+                        "capture threads not boosted).");
     }
 
     if (state_.audio_out_channels > 0) {
