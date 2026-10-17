@@ -480,7 +480,8 @@ def extract_release_notes(version):
 
     start = None
     for i, line in enumerate(lines):
-        if line.strip().startswith("[Version") or line.strip().startswith("[Unreleased"):
+        s = line.strip()
+        if s.startswith(f"[Version {version}]") or s.startswith(f"[Version {version} "):
             start = i
             break
     if start is None:
