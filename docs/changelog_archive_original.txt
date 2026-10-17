@@ -1,0 +1,2712 @@
+welcome to archive changelog :D (v2.4)
+
+Crash while recording a game (Garry's Mod) + FPS readout in the preview header (2026-10-16)
+- Reported: a recording started while Garry's Mod was loading died after ~1 s ("ffmpeg process ended unexpectedly"); the FPS
+    value next to the Preview ON/OFF button was never visible.
+- Log facts (crashw.zip, homrec.log 2026-10-15 19:49): "full-GPU capture + encode via ffmpeg ddagrab" -> 1 s later "the ffmpeg
+    process ended unexpectedly mid-recording". The ddagrab path (gpu_capture_ddagrab=1) hands desktop-duplication textures straight
+    to the encoder with a FIXED size; a game that switches the display mode (its own fullscreen resolution) changes that size /
+    loses the duplication, ffmpeg exits and the recording was simply stopped. The normal pipeline survives this (it stretches every
+    frame to the size it started with - see the comment above hr_dx_set_output_size() in dxgi_capture.cpp). ffmpeg's stderr went
+    nowhere (GUI process, no console), so the exact message was never logged.
+- Fixed (src/ui/recording_controller.cpp/.h, src/ui/main_frame.cpp/.h): when the ddagrab ffmpeg dies mid-recording HomRec no longer just
+    stops with a modal box (which also popped up over the game). The part captured so far is finalized and saved, ddagrab is switched
+    off for the rest of the session (RecordingController::ddagrab_blocked_, the setting itself is NOT changed) and a NEW recording is
+    started at once with the normal capture pipeline; the status line says so. A crash of the normal pipeline's ffmpeg keeps the old
+    behaviour (stop + message).
+- Fixed (src/ui/recording_controller.cpp): after an ffmpeg death the finalize step used the wall-clock time up to the Stop, so the short
+    video was "stretched back to real speed" (slow motion). It now uses the recording time at the moment ffmpeg died.
+- Added (ffmpeg/ffmpeg_runner.cpp): ddagrab mode writes ffmpeg's stderr to logs\ffmpeg_ddagrab.log (-hide_banner -nostats -loglevel info)
+    and a -progress file (logs\ffmpeg_ddagrab_progress.txt). New exports hr_ff_set_diag_paths(), hr_ff_progress_frames(),
+    hr_ff_read_log_tail(), hr_ff_exit_code(). homrec.log now contains the exit code and the last ffmpeg lines whenever it dies.
+- Fixed (src/ui/main_frame.cpp/.h): FPS readout in the preview header. It was created empty, filled only while recording and auto-sized:
+    the sizer had given the empty label zero width at the right edge, the text then grew outside the header and the header was never
+    re-laid out. Now: fixed-width label (wxST_NO_AUTORESIZE, room for "FPS: 000.0"), updated every stats tick by the new
+    UpdatePreviewFpsLabel(): recording = real fps, idle with preview on = capture rate of the preview pipeline, otherwise a dash.
+- Fixed (src/ui/recording_controller.cpp): during a ddagrab recording the fps was always 0.0 (HomRec's pipeline sees no frames); it is now
+    computed from ffmpeg's own frame counter (the -progress file), so the left "FPS:" readout and pc.log are correct too.
+- Added (src/ui/recording_controller.h/.cpp): preview_pipeline_fps().
+- Note: only reviewed / syntax-checked in the sandbox (no Windows toolchain) - please build and test on the real PC.
+
+Layers panel, capture source window, window matching, smart capture (2026-10-13, seventh pass)
+- Reported (test on the real PC): recording a selected window (the PrintWindow backend) = ~30% CPU, ~100 MB RAM, 0.5 MB/s disk;
+    other windows dragged over the recorded one looked choppy and the PC got loud; ONE changed letter in the window title (switching a
+    Chrome tab) and HomRec lost the window; overlays could crawl under the preview when the preview was resized by the UI.
+- Added (src/ui/capture_source_dialog.h/.cpp): "Capture source" window. Replaces File > Select Window / Select Region / Full Desktop.
+    What is recorded: the whole desktop (and WHICH monitor), one window, or a region. For a window: how it is found again - by program
+    (exe), by window class and/or by title (exactly / starts with / contains - each switchable), "keep following the same window while its
+    title changes" (browser tabs), a "Test: find it now" button, how it is recorded (the window itself / a part of the screen; whole window
+    / content area only), the smart mode and the fps limit for the exact capture, and an explicit "try native Windows capture
+    again" button. Works on a copy: nothing changes until OK. Opens from the first row of the Layers panel (double-click / context menu).
+- Changed (src/ui/overlays_dock_panel.h/.cpp): the "Overlays" panel is now "Layers". Its FIRST row is the capture source (pinned, cannot be
+    moved / deleted; shows desktop+monitor / program+title / region and a tag with the current capture mode). Overlays follow; rows lower
+    in the list are drawn over the ones above. Every overlay row has an eye on the right edge (one click hides / shows the overlay) and a
+    lock icon; double-click a row opens that overlay's settings. Context menu: Hide/Show, Rename, Edit, Duplicate, Move up / Move down,
+    Center, Lock position and size, Keep proportions, Delete. Keyboard: Enter = settings (source row: Capture source), F2 = rename, Space = hide / show. List is rebuilt without
+    losing selection and scroll position.
+- Added (src/ui/overlay_geometry.h, header-only, covered by a native unit test): ResizeBottomRight / ResizeTopLeft / ClampMove /
+    SnapToCenter / KeepAspect. One implementation for the preview and the overlay editor, so both behave identically.
+- Added (src/ui/main_frame.cpp PreviewPanel, src/ui/overlay_editor_dialog.cpp): Shift while resizing keeps the overlay's proportions
+    (500x500 can no longer become 1000x200; the whole-desktop layer is proportional by default). Center snap: moving an overlay close to the
+    middle of the picture (horizontally / vertically, each on its own) puts it exactly on the middle, with a guide line; Alt disables the
+    snap for one drag. New per-overlay "Lock position and size" and "Keep proportions" (OverlayDef::locked / lock_aspect, saved in .hrc).
+- Fixed (src/ui/main_frame.cpp PreviewPanel::OverlayScreenRect and drag/resize): overlays could end up UNDER the preview when it was
+    resized by UI elements. Causes: the handle rectangle was inflated by 20 px past the picture and never clipped to it; resizing was not
+    clamped to the picture, so an overlay could be dragged out of the canvas and become unreachable. Now the rectangle is clipped to the
+    picture, resizing/moving is clamped, and an overlay that is outside a smaller canvas is shown as a small stub at the edge (it is never
+    moved on its own).
+- Added (src/core/wgc_capture.cpp): SMART mode of the window source. While the recorded window is not covered by other windows the frame is
+    a cheap crop of the desktop duplication; when something is on top of it the exact PrintWindow picture is used. A static picture is
+    detected by a cheap hash and reported as "no new frame", so the pipeline repeats the previous frame instead of re-encoding / re-sending
+    the same pixels. Pacing and an optional fps cap (window_capture_fps_cap) for the exact capture. No per-frame memset of the canvas.
+    HrWgcOptions{smart, fps_cap}; HrWgcSetTarget(); HrWgcMode() (0 unknown, 1 native, 2 exact, 3 smart).
+- Changed (src/core/wgc_capture.cpp): an odd / mismatching canvas size is detected before the first frame; a failed duplication frame
+    falls back without losing the source (internal kFallbackKeep); the "input reset" hack is only applied while the recorded window is
+    the foreground window.
+- Changed (src/core/pipeline.cpp): hr_pl_create_window() takes smart + fps_cap; new hr_pl_window_retarget() (re-aims a RUNNING window
+    source at another window without restarting the recording) and hr_pl_window_mode().
+- Fixed (src/ui/recording_controller.cpp): the window is no longer lost when its title changes. A target is now described by program +
+    class + title + a "follow the same HWND" flag (learned automatically on first match). ResolveWindowTarget() uses the switches the person
+    chose; RetargetWindowCapture() rewritten - a lost window is searched again (all enabled criteria) and the running source is re-aimed.
+    PreviewCaptureSettings / RefreshPreviewSettings carry the new settings; messages point to Layers > Capture source.
+- Added (src/ui/window_picker_dialog.h/.cpp): matching API and HrListMonitors() / HrMonitorInfo (monitor list with names / sizes / primary).
+- Added (src/utils/wgc_log.h/.cpp): logs\wgc.log - what the window source does, step by step (chosen backend, target resolution and every
+    re-find, mode switches smart<->exact, static-picture detection, fps / pacing, native WGC guard state, errors). Warn / Error are also
+    mirrored to homrec.log. Switch: Settings > Security > "Window capture logging (logs/wgc.log)" (wgc_logging_enabled, default on).
+- Changed (src/ui/settings_dialog.cpp): the monitor choice and the "Window capture" section are removed from Settings - they live in the
+    Capture source window now (a short note says where). Added the wgc.log checkbox.
+- Changed (src/ui/main_frame.cpp / .h): File menu no longer has Select Window / Select Region / Full Desktop (enum ids kept so the menu
+    id range stays valid). OpenCaptureSourceDialog(), RunSourceAction(); the dialog is refused while recording (a clear message);
+    after OK the preview pipeline is refreshed (OnCaptureTargetChanged). The Layers source row is refreshed from the stats timer.
+- Changed (src/core/settings_registry.cpp, src/ui/hrc_config.cpp, src/ui/app_state.h): new saved fields - capture_window_exe,
+    capture_window_class, window_match_exe/class/title, window_title_mode, window_follow_hwnd, window_capture_smart,
+    window_capture_fps_cap, wgc_logging_enabled; per overlay: locked, lock_aspect. Old .hrc files load unchanged (all new fields have
+    defaults). window_capture_method "crop"/"auto" (2.4.0) are still read as "screen".
+- Added (src/ui/language.cpp): ~70 new keys (layers_*, src_*, ctx_*, settings_source_moved, ...). They are NOT in kLangRequiredKeys, so old
+    .hrl language files keep loading; English is built in for all of them and a built-in Russian table is used for ru* languages
+    (values present in the .hrl still win).
+- Changed (Makefile, CMakeLists.txt): + src/ui/capture_source_dialog, src/utils/wgc_log. (overlay_geometry.h is header-only.)
+- Known limits: native WGC still faults at CreateForWindow on the tested PC (exact cause not found, native is not auto re-armed - only by
+    the button in the Capture source window). Only syntax-compiled (MinGW cross) in the dev sandbox: nothing here was run - see
+    TEST_CHECKLIST.txt in the project root for what has to be checked on a real Windows PC.
+
+Window capture without WinRT, lower CPU (2026-10-11, sixth pass)
+- Log facts (homrec.log 2026-10-11): the contained fault is identical on every start - "jumped to an invalid address ... in step
+    'CreateForWindow'" (return address hr.exe+0x12C844). It happens with and without compatibility shims loaded, so the shims are not
+    the cause. Native WGC is simply unusable on this PC, and after the fault window recording used the SCREEN CROP: for a maximized
+    Chrome that is 1600x860 of a 1600x900 screen = "the whole screen is recorded". (The 10:47 recording at 1600x900 had no window
+    selected at all - capture_mode=desktop was saved by the picker.)
+- Added (src/core/wgc_capture.cpp): PrintWindow backend. Same API as the WGC source (HrWgcCreate/Capture/Reset/Destroy), so the pipeline,
+    encoder, overlays and pause logic need no change. It records ONE window through PrintWindow(PW_RENDERFULLCONTENT) - other windows on
+    top of it, the taskbar and HomRec itself are not in the picture. Plain Win32/GDI, no hand-written COM. Cursor is drawn by us.
+- Changed (src/core/wgc_capture.cpp): HrWgcCreate() tries native WGC first (contained); if it faults / times out / is refused it writes
+    logs\wgc_native_bad.flag and returns a PrintWindow source in the same call, so the recording does NOT fall back to the screen crop.
+    Next starts skip the native attempt. HrWgcSupported() is now true whenever PrintWindow is available (Windows 8.1+).
+- Changed (src/core/wgc_capture.cpp): HrWgcResetCrashGuard() (Settings > General > Window capture > re-select) also clears
+    wgc_native_bad.flag and the in-process "WGC disabled" state, so native WGC gets another chance.
+- Note: PrintWindow has no GPU zero-copy path, so a window recording costs more CPU than a desktop recording (desktop recording can use
+    the full-GPU ddagrab path, window recording cannot).
+- Config (homrec.hrc): gpu_capture_ddagrab=1 - desktop recordings are captured, converted and encoded by ffmpeg on the GPU (no readback,
+    no HomRec capture pipeline, no frame queue in RAM). Falls back automatically if this ffmpeg has no ddagrab (see homrec.log).
+
+[Version 2.4.0] - (2026-10-05)
+Window capture, MKV, dockable panels, a new Audio Mixer.
+
+Crash fix (2026-10-10, fifth pass) - recording a separate window still crashed (dump crash_20261010_174951.dmp)
+- Dump facts: execute (DEP) fault at "hr.exe base - 0x40000000" again (base 0x7FF72F4C0000, target 0x7FF6EF4C0000), GUI
+    thread, return address hr.exe+0x12EE4D inside WGC Init() (its caller hr.exe+0x12F2B7 is HrWgcCreate), last log line
+    "WGC init: CreateForWindow". The fourth-pass device thread worked ("D3D11 device created on adapter 'Intel(R) UHD
+    Graphics'"), so the crash did not go away - it moved on to the next native call made from the GUI thread. AcLayers.dll +
+    apphelp.dll (Windows compatibility shims) are loaded in the process, as in every earlier dump. hr.exe+0x34A740 in the dump
+    is the static WGC API table (all five pointers valid), so the late-bound entry points are fine.
+- NOT proven (still no symbols, hr.exe is not in the dump): which single call jumps to the bad address. What the five dumps
+    do prove is that fixing one call at a time does not work - the same bad jump follows the GUI thread to the next call.
+- Fixed (src/core/wgc_capture.cpp): the WHOLE of Init() (device, WinRT device, GraphicsCaptureItem, CreateForWindow, frame pool,
+    session, StartCapture) now runs on its own short-lived MTA thread (InitContained / InitImpl) instead of the GUI thread. The
+    GUI thread only waits (20 s timeout). The vectored exception handler from the fourth pass now guards that thread: an
+    EXECUTE access violation parks the thread, wakes the caller, WGC reports "unusable" and the recording uses the screen crop -
+    the process no longer dies. A contained fault or timeout switches WGC off until HomRec is restarted (HrWgcSupported()).
+- Fixed (src/core/wgc_capture.cpp): after a contained fault / timeout the half-built WinRT objects and the context are
+    abandoned on purpose (never Release()d / freed) - touching them again is what could crash a second time.
+- Added (src/core/wgc_capture.cpp): step breadcrumbs. A contained fault / hang is logged with the exact step ("CreateForWindow",
+    "CreateFreeThreaded", ...), the bad address and the return address as module+offset (resolve hr.exe+0x... with hr.map).
+- Added (src/core/wgc_capture.cpp): the log now says when compatibility shims are active (AcLayers/AcGenral DLLs loaded,
+    __COMPAT_LAYER, HKCU/HKLM AppCompatFlags\Layers entry for hr.exe) - check hr.exe > Properties > Compatibility and untick
+    everything ("Disable fullscreen optimizations", compatibility mode, DPI override) if that line appears.
+- Added (src/core/wgc_capture.cpp): CoIncrementMTAUsage() once, so the MTA the WGC objects live in outlives the init thread.
+- Changed (src/core/wgc_capture.cpp): CreateWgcDevice() is synchronous again (it already runs on the init thread); the separate
+    DeviceJob thread of the fourth pass is gone. wgc_guard.flag generation bumped to WGC-GUARD-GEN-5, so the GEN-4 flag left by
+    this crash is deleted at the next start and WGC is tried again.
+- If the log shows "jumped to an invalid address ... in step '<x>'": send homrec.log (and hr.map of that build) - the step and the
+    return address name the call.
+
+Crash fix (2026-10-10, fourth pass) - recording a separate Chrome window crashed again (dump crash_20261010_114742.dmp)
+- The third-pass build still died at the log line "WGC init: D3D11CreateDevice" (execute (DEP) fault at "hr.exe base -
+    0x40000000", GUI thread, return address inside WGC Init()), so changing the shape of the D3D11CreateDevice call
+    (passes 2 and 3) was not the fix. Re-reading the dump: the 10 "call arguments" the earlier passes found on the stack
+    are only the STALE outgoing-argument area of a D3D11CreateDevice call that had already returned - the Intel
+    user-mode driver (igd10iumd64 / igdgmm64 / igc64 / DXCore) is loaded in the process, i.e. the device was created
+    - and the crash call sits at the same stack depth, after it. The next breadcrumb ("D3D11 device ready") was never
+    written, so the fault is in the code between the two breadcrumbs that runs AFTER the device exists. The only code
+    there that the working capture path (dxgi_capture.cpp / hr_dx_create) never executes is the ID3D11Multithread
+    QueryInterface + SetMultithreadProtected(TRUE) block.
+    NOT proven: there are no symbols and hr.exe is not in the dump, the exact instruction cannot be named.
+- Fixed (src/core/wgc_capture.cpp, Init()): removed the ID3D11Multithread block. It is not needed: the immediate context
+    is only used by HrWgcCapture()/Teardown() under the per-context mutex on one thread at a time, and the frame pool is
+    polled with TryGetNextFrame() (no FrameArrived handler, so WGC never runs code on our context from its own thread).
+- Fixed (src/core/wgc_capture.cpp, CreateWgcDevice()): device creation (CreateDXGIFactory1, adapter pick, D3D11CreateDevice,
+    release of adapter/factory) now runs on its own short-lived thread, same call sequence as hr_dx_create(). A vectored
+    exception handler watches that thread for exactly one signature - an EXECUTE access violation (jump to a
+    non-executable address) - parks the thread forever (no unwinding / DLL_THREAD_DETACH through driver frames) and wakes
+    the caller, which reports "WGC unusable" so the recording uses the screen crop instead of killing the process. Other
+    exceptions (e.g. first-chance AVs that drivers handle internally) are not touched. A hang is cut off after 30 s.
+- New log lines: "WGC init: D3D11 device created on adapter '<name>', feature level 0x..." on success; on a contained
+    fault "the D3D11 device creation jumped to an invalid address (0x..., stack 0x...) in step '<step>' ...".
+- wgc_guard.flag generation bumped to WGC-GUARD-GEN-4: the GEN-3 flag left by this crash is deleted at the next start
+    ("cleared a crash flag left by an older HomRec build"), so WGC is tried again without touching Settings.
+- If the log shows the "contained" line: send homrec.log - the step name says where it jumped; window recording then
+    keeps working through the screen crop.
+
+Crash fix (2026-10-09, third pass) - WGC still crashed in D3D11CreateDevice (dump crash_20261009_141144.dmp)
+- The second-pass build still died at the log line "WGC init: D3D11CreateDevice": execute (DEP) fault at
+    "hr.exe base - 0x40000000", GUI thread, return address inside WGC Init(). The 10 call arguments are still on the
+    stack and match D3D11CreateDevice(nullptr, HARDWARE, ..., &c->dev, nullptr, &c->dc), so the call itself is the
+    culprit - and resolving it from d3d11.dll's export table (second pass) changed nothing, so the import table
+    was not the reason. apphelp/AcLayers/AcGenral shims are loaded in the process again.
+- The capture device in dxgi_capture.cpp is created on the same machine with the same d3d11.dll without any problem.
+    The only difference is the call shape: that one passes an explicit adapter + D3D_DRIVER_TYPE_UNKNOWN + a non-null
+    feature-level out-pointer; WGC passed a null adapter + D3D_DRIVER_TYPE_HARDWARE + null out-pointer.
+    (The exact mechanism inside d3d11/shim is NOT proven - no symbols - this is the one measurable difference.)
+- Fixed (src/core/wgc_capture.cpp): new CreateWgcDevice() creates the device like hr_dx_create() does: plain
+    D3D11CreateDevice import, adapter from CreateDXGIFactory1()/EnumAdapters1() (the adapter that drives the window's
+    monitor, adapter 0 as fallback), D3D_DRIVER_TYPE_UNKNOWN, feature level out-pointer given. The null-adapter form is
+    no longer used at all. Removed the late-bound CreateDevice pointer and RawExport() from the second pass.
+- wgc_guard.flag generation bumped to WGC-GUARD-GEN-3: the flag left by this crash is deleted at the next start
+    instead of keeping WGC switched off, so WGC is tried again without touching Settings.
+- If it STILL crashes at "WGC init: D3D11CreateDevice" the shim is the cause: check hr.exe > Properties > Compatibility
+    (no compatibility mode, no "Disable fullscreen optimizations") and send the new dump.
+
+Crash fix (2026-10-09, second pass) - "select a window, press Start" crashes / then records the whole screen
+- Cause found in the two crash dumps (crash_20261009_125455.dmp, crash_20261009_125637.dmp, both identical): the
+    process died inside WGC's Init() on the call to D3D11CreateDevice() - the 10 arguments of that call are still
+    on the stack - with an execute (DEP) violation at "hr.exe base - 0x40000000". The WinRT function table next to
+    it was intact. apphelp.dll / AcLayers.dll / AcGenral.dll (Windows compatibility shims) were loaded in the
+    process and the registers show other code ran between the call and the bad jump (a hook in between).
+    Most likely: a shim hook for D3D11CreateDevice with a garbage way back. Not provable without symbols.
+- Why "sometimes it crashes, sometimes it records the whole screen": the first Start with WGC crashes and leaves
+    logs\wgc_guard.flag; from then on the crash guard keeps WGC off and the screen crop is used. The crop of a
+    maximized window (log: 1600x860 on a 1600x900 monitor) is practically the whole screen and includes whatever
+    lies on top of it (HomRec's own window too). Hidden overlays play no part in this.
+- Fixed (src/core/wgc_capture.cpp): D3D11CreateDevice is no longer called through hr.exe's import table; its address
+    is read from d3d11.dll's export table (RawExport(), falls back to GetProcAddress). The feature-level list is no
+    longer passed (WGC needs Windows 10 1903+, the default list already has 11_1); explicit list only as a retry.
+    New log breadcrumb "WGC init: D3D11CreateDevice".
+- Fixed (src/core/wgc_capture.cpp): wgc_guard.flag now carries a generation marker. A flag written by an older
+    build (the one with this bug) is deleted at start instead of switching WGC off for good, so WGC gets a fresh
+    chance without re-selecting it in Settings. A crash of THIS build still trips the guard as before.
+- Tip if "everything on top of the window" is still recorded in screen-crop mode: File > Hide Window... (excludes a
+    window, e.g. HomRec itself, from the recording), or use WGC (Settings > General > Window capture).
+
+Crash fixes (2026-10-09) - window selection and Audio Mixer "add program"
+- Third dump (2026-10-08 20:35:35, WGC already switched off by the guard, no GraphicsCapture.dll loaded): same
+    wxbase event-chain access violation as dump 1 (identical RIP offset 0x143A38 and call chain), GUI thread in
+    the main loop, no hr.exe frame, 23 s after a recording was stopped. So there are two distinct crash families:
+    (A) WGC native crash (dump 2), (B) wx use-after-free (dumps 1 and 3). (B) is NOT proven to be one of the
+    fixes below - the heap isn't in the dumps - see "UI: ..." breadcrumbs in homrec.log to catch the trigger.
+- Fixed (src/core/wgc_capture.cpp): HrWgcProbeWindow() no longer activates WinRT / calls CreateForWindow on the
+    UI thread while a window is being picked; it only does Win32 checks (HrWgcCreate still reports a refused
+    window and the caller falls back to the screen crop).
+- Fixed (src/core/wgc_capture.cpp): contexts are now shared_ptr + per-context mutex; HrWgcSetCursor() (UI thread)
+    could call into session2 while HrWgcReset()'s Teardown() (capture thread) had just released it; Destroy
+    could race with a capture in flight. Added "WGC init: <step>" log breadcrumbs.
+- Fixed (src/ui/audio_panel.cpp, audio_panel.h): BuildLayout() deleted the card list synchronously from inside
+    the click handler of a button that lives in it (Remove source) -> use-after-free in wx's event dispatch.
+    The old list is now hidden and destroyed from the event loop; keyboard focus is moved out first.
+    ShowChannelMenu() re-looks the channel up after its nested message loops (new IndexOfId());
+    ShowAddMenu() is re-entrancy-guarded and validates the picked program index.
+- Fixed (src/core/audio_extra.inc): hr_audio_extra_add() could let a C++ exception (thread creation failure,
+    bad_alloc) cross the extern "C" boundary into the UI = instant crash; it is caught and reported as "device
+    unavailable". The per-process-capture activation no longer reads the handler's result after a timeout.
+- Fixed (src/ui/window_picker_dialog.cpp): null-ctx guards + ctx cleared at WM_NCDESTROY; a WM_QUIT received while
+    the picker is modal no longer leaves the window alive pointing at a dead stack frame; no PrintWindow()
+    thumbnails of HomRec's own windows.
+- Changed (new src/ui/modal_util.h; advanced_settings_dialog, custom_messagebox, hide_window_dialog,
+    log_viewer_dialog, overlay_add_dialogs, pc_analytics_dialog, welcome_dialog, window_picker_dialog):
+    hand-rolled Win32 modal dialogs now re-enable their owner BEFORE destroying themselves.
+- Added (src/ui/main_frame.cpp, audio_panel.cpp): "UI: ..." / "Audio Mixer: ..." log lines around the window
+    picker, the recording summary box and add/remove source.
+
+Crash analysis (2026-10-08) - two crash dumps from one test session (2026-10-07 15:48)
+- Dump 1 (no recording running, 18 s after launch): access violation (read at 0xFFFFFFFFFFFFFFFF) inside
+    wxbase while wxWidgets was searching an event handler for a window message; the call stack holds no
+    hr.exe frame at all and the heap register shows a freed block -> a wx object was used after it was
+    deleted. Windows.Graphics.Capture was not even loaded in that run. The exact object can't be named from
+    the dump (no symbols for hr.exe/wx). Not fixed yet - see "Diagnostics" below for how the next one is caught.
+- Dump 2 (pressing Start, window capture): execute (DEP) violation at a non-code address, called directly from
+    hr.exe on the GUI thread, wgc_guard.flag left behind. The WGC API table in hr.exe's data was filled with
+    valid pointers (combase / d3d11) and WGC's registry mutex was never touched, i.e. it died inside
+    HrWgcProbeWindow() (activation / CreateForWindow), before any capture object existed - and no log line
+    was written because nothing is logged inside it. Same area as the 2.4.0 crash the sentinel was added for.
+- Changed (src/ui/app_state.h, src/ui/recording_controller.cpp, src/ui/settings_dialog.cpp): Windows.Graphics.Capture
+    is OPT-IN again. window_capture_method defaults to "screen" (the screen crop); only the value "wgc" enables WGC;
+    legacy "crop"/"auto" mean "screen". Settings > General > Window capture labels WGC "(experimental)".
+    Reason: a native crash can't be caught, and the 2026-10-07 default-to-WGC change made the first Start crash.
+    The crash sentinel stays: after a crash, WGC stays off until it is re-selected in Settings.
+- Added (src/core/wgc_capture.cpp): HrWgcProbeWindow() writes a "WGC probe: <step>" line to homrec.log before every
+    native call (RoInitialize / factory activation / CreateForWindow / result). HrLog flushes every line, so if
+    it dies there again the last line names the step.
+Diagnostics
+- Changed (src/utils/crash_handler.cpp): after the "[CRASH] ..." line the log now gets "[CRASH]   fault:" (code,
+    read/write/execute, target address, module+offset of RIP, thread id) and up to 24 "[CRASH]   stack[+0x..]
+    module+0x..." lines (every stack word that points into a loaded module = a poor man's call stack, no symbols
+    needed). A call through a garbage pointer shows the caller's address first.
+- Changed (Makefile, .gitignore): hr.exe is linked with -Wl,-Map=hr.map (git-ignored). Keep the map next to every
+    released hr.exe: it turns "hr.exe+0x12a79b" from a crash log/dump into a function name.
+
+Fixed (2026-10-07 pass) - "recording one window records the whole screen" and "the icons never show up"
+- src/ui/app_state.h: window_capture_method now defaults to "wgc" (Windows.Graphics.Capture). New value "screen" =
+    the old screen crop, only when the user picks it. Legacy "crop"/"auto" (written into every 2.4.0 settings
+    file because "crop" used to be the default) now mean "wgc". New helper AppState::WindowCaptureWantsWgc().
+    Why: the crop cuts a rectangle out of a whole-MONITOR duplication, so a maximized window (e.g. Chrome,
+    1920x1040 on a 1920x1080 screen) was practically the whole screen, and everything on top of the window -
+    HomRec's own window included - was recorded too.
+- src/ui/recording_controller.cpp: ResolveCaptureSize() uses WGC by default; falls back to the crop (with a WARN
+    log line saying that overlapping windows will now be recorded) when Windows refuses the window, the crash
+    guard is tripped, or the user chose "screen". Start(): if WGC can't start for the window after ffmpeg was
+    already launched, HomRec now cleans up and retries the recording once with the crop instead of asking the
+    user to press Start again.
+- src/ui/settings_dialog.cpp: capture-method choice re-labelled/reordered (0 = WGC "recommended", 1 = screen crop).
+    While the crash guard is tripped the dialog shows "screen crop" (what really happens), so picking WGC again
+    is a real change that re-arms it. Saving with the entry untouched changes nothing (keeps a legacy "crop"
+    value = default WGC, and does not clear the crash guard).
+- src/win_main.cpp: wxInitAllImageHandlers() at startup. wxImage only knows BMP by default, so every PNG load
+    failed SILENTLY (icons.cpp wraps the load in wxLogNull) - the icons/overlays and icons/audio PNGs were valid
+    and in the right place but could never be decoded. Also fixes anything else that loads PNG/JPEG/GIF via wxImage.
+- src/ui/icons.cpp: registers the PNG handler itself as a safety net; searches next to the exe, up to 3 parent
+    folders of it and the current directory (so build/hr.exe finds <repo>/icons); writes "Icons:" lines to the
+    log (INFO = no PNG found + every folder searched, WARN = file found but not decodable), once per icon.
+- src/ui/icons.h, icons/README.md: documented the above. Only .png files are loaded; the .svg copies are source art.
+- Not changed: DXGI Desktop Duplication is still the capture method for full-screen / region recording and the
+    fallback for windows. WGC is used only for a selected window. WGC runs on the CPU conversion path (the GPU
+    NV12 / dirty-rect optimisations are DXGI-only).
+
+Source tree (files only, no behaviour change - code identifiers like hr_* C exports, HrLog, hr.exe are untouched)
+- src/hr_*.{cpp,h,c,inc} moved into folders and the "hr_" prefix dropped:
+    src/core/   app_audio_enum, app_logic, audio (+audio_extra.inc), capture_ctl, display_info, dxgi_capture,
+                encoder_helpers.c, hotkey, input_overlay, input_overlay_registry, mic_enum, overlay_render,
+                pipeline, profile_io, settings, settings_registry, tools, webcam_capture, webcam_enum, wgc_capture
+    src/utils/  archive, crash_handler, log, log_paths, pc_log, plugin_log, stopwatch, str_convert.h,
+                system_integration, ui_utils, update
+    src/ui/hr_icons.{cpp,h} -> src/ui/icons.{cpp,h}
+    ffmpeg/hr_ffmpeg_runner.cpp -> ffmpeg/ffmpeg_runner.cpp
+  src/plugins, src/platform and src/win_main.cpp stay where they were.
+- Every #include was rewritten to the new relative path; Makefile / CMakeLists.txt object lists updated;
+  file-name mentions in comments, installer/ and scripts/ follow the new names. (Older entries below keep
+  the old file names - they describe the tree as it was then.)
+
+New command: ls (src/commands/ls.h + ls.cpp)
+- ls .                      lists the HomRec folder (the one hr.exe lives in)
+- ls plugins                any folder, relative to it (absolute paths work too)
+- ls plugins/bter.hrp       lists the CONTENTS of a .hrp plugin package like a folder; ls plugins/bter.hrp/lua
+                            lists a folder inside it. Reads only the zip's central directory - nothing is extracted.
+- ls -a <path>              also shows hidden entries (.installed, hidden/system files)
+- A bare `ls`, `ls --aliases` and `ls --env` keep the old meaning (console aliases / session env vars).
+- Folders first, then files, size + modified date per row, summary line; capped at 2000 rows / 20000 scanned
+  entries so a huge folder can't freeze the console. Rows go to the control in one update per run, not per row.
+- Fixed (src/ui/console_window.cpp): the console output control kept the default ~32K-character limit and
+  silently stopped printing once it was reached (long listings made that easy to hit). The limit is raised and
+  Print() now trims the oldest quarter of the scrollback once it passes 1M characters.
+
+Bugs
+- Fixed (src/ui/hrc_config.cpp): overlay opacity and font were never saved or loaded. An overlay faded to
+  opacity 0 (invisible) came back at 100 after every restart, and a text overlay's font went back to Segoe UI.
+  overlay_N_opacity / overlay_N_font_family are now written and read (older files without the keys load with
+  the old defaults, as before).
+- Fixed (src/core/pipeline.cpp, overlay_render.*): an overlay at opacity 0 still counted as "something to
+  draw" - it kept the capture loop off the GPU colour-conversion path and was rendered every frame just to be
+  discarded (an input overlay rebuilt its whole layer 30x a second, a hidden-by-opacity webcam overlay kept the
+  camera open). HrOverlayDrawsAnything() (visible, size > 0, opacity > 0) is now the one definition used by
+  both the pipeline and the compositor.
+- Fixed (src/utils/stopwatch.cpp): timeEndPeriod() was always called with 1 while timeBeginPeriod() got the
+  device's minimum period; the two now use the same value.
+
+Optimization (1920x1080@30, QSV, GPU colour conversion - the config in homrec.hrc)
+- Overlays no longer push the whole recording onto the CPU path. Before: any visible overlay disabled the GPU
+  path, so EVERY tick did a full 8 MB BGRA readback, an 8 MB work-buffer copy, CPU compositing, a full-frame
+  CPU BGRA->NV12 conversion, and lost the static-desktop / dirty-rows shortcuts. Now (src/core/pipeline.cpp):
+  the GPU path stays on and OverlayCompositor::ApplyNv12() blends only the overlay rectangles straight into the
+  finished NV12 frame (same BT.601 matrix as hr_bgra_to_nv12_band and the NV12 cursor blend, so colours match
+  the CPU path; checked against the real converter: <= 2 luma / 1 chroma levels apart in all but one hard-edged
+  test case). The preview gets a copy with the overlays baked in, only while a preview is shown. A scaled
+  output (Resolution != native) with overlays still uses the classic CPU path, as before.
+- Input overlays (src/core/overlay_render.cpp): virtual-keys resolved once per load instead of one
+  MapVirtualKeyW per element per frame, and when no key changed (and the box wasn't resized) last frame's
+  finished layer is reused instead of clearing, re-blitting every element, re-scaling and copying it again.
+  Idle cost per frame went from (elements x blit + fill + scale + copy) to (elements x GetAsyncKeyState).
+
+- Analysis of the dump: 0xC0000005 on the GUI thread, access type 8 = EXECUTE (DEP), at a page-aligned
+  address that is not code -> the program CALLED through a dangling / garbage pointer; the log shows
+  the app was idle (no recording) and the previous pc.log line is 10 s older, i.e. a teardown path,
+  not a capture path. No symbols for his hr.exe, so the exact frame can't be named; the one
+  confirmed dangling-pointer-in-a-window-proc bug found in the code is fixed below.
+- Fixed (src/ui/overlays_dock_panel.cpp/.h): OverlaysDockPanel had no destructor, but its LISTBOX is
+  subclassed with GWLP_USERDATA = this and is destroyed LATER than the panel (the frame's members go
+  first, the wx host panel and its native children afterwards). Every message the list received during
+  teardown (WM_DESTROY/WM_NCDESTROY...) went through ListSubclassProc with a freed `this` and called
+  CallWindowProc() on whatever was left in that memory. Added ~OverlaysDockPanel() that restores the
+  original window proc and clears USERDATA; ListSubclassProc is null-safe and unhooks itself on
+  WM_NCDESTROY.
+
+Load / optimisation (QSV 1080p30 config from the friend's homrec.hrc, 8 GB machine at 85-89 % RAM)
+- Fixed (src/hr_audio.cpp): hr_audio_mix_wav() - used at every Stop with mic + system audio - read both
+  WAVs completely and built a third buffer: ~3x the track size in RAM (about 1 GB for 30 min, 2 GB for
+  1 h). On a machine with ~1 GB free that means paging and the 20-30 s of 30 % system CPU seen after
+  each stop in pc.log, then ffmpeg finalization timeouts. It now goes through the streaming mixer
+  (hr_audio_mix_wav_list, a few KB of RAM) when both files are 16-bit stereo; the old in-memory
+  version is kept as mix_wav_inmemory() for anything else.
+- Changed (src/hr_tools.cpp): when the encoded video comes out shorter than real time (dropped frames
+  on an overloaded PC), hr_merge_av() re-timed it by RE-ENCODING THE WHOLE VIDEO with libx264 - heaviest
+  possible work on the machine that was already overloaded. Now the video is stream-copied and its
+  timestamps are rescaled with the setts bitstream filter (no decode/encode, seconds instead of
+  minutes). If ffmpeg refuses that, it falls back to the old libx264 command automatically. Timeout
+  for the normal path is now video length x 0.5 (fallback keeps x 2).
+- Changed (src/hr_dxgi_capture.cpp): nv_deliver() copies the mapped NV12 readback with two memcpy()
+  calls when RowPitch == width (1920/1280 wide frames) instead of ~1620 row copies per frame.
+- Changed (src/hr_ui_utils.cpp): the cursor bitmap cache re-rasterized the pointer every 100 ms for
+  nothing (same HCURSOR => same bitmap, DrawIconEx always draws an animated cursor's first step); the
+  safety refresh is now 2 s.
+
+Bug fixes
+- Fixed (src/ui/overlays_dock_panel.cpp): the "+" button was invisible until the mouse touched its corner.
+  The full-size sunken STATIC frame, the "+" button and the list are SIBLINGS, and none had
+  WS_CLIPSIBLINGS: whenever the STATIC repainted (pane resize/move, ForceRepaint(), theme change) it
+  painted over the button and list; the button only came back when it repainted itself on hover. All
+  three now have WS_CLIPSIBLINGS and the STATIC is explicitly the bottom-most sibling. The button also
+  uses a plain "+" (the fullwidth U+FF0B is missing from the UI font) in a larger bold UI font
+  (it used to inherit the tiny system bitmap font).
+- Fixed (src/hr_ui_utils.cpp): small purple/pink pixels around the cursor in recordings. The pointer was
+  rasterized by DrawIconEx onto a MAGENTA chroma-key background and only exact-magenta pixels counted
+  as transparent; every anti-aliased / drop-shadow pixel of a modern (32-bit ARGB) cursor was blended
+  with the magenta by GDI, no longer matched the key and stayed in the video as an opaque purple fringe.
+  The cursor is now rendered twice (on black and on white), which gives the exact per-pixel alpha and
+  colour: black = c*a, white = c*a + 255*(1-a). Both compositors (BGRA and the NV12/GPU one) now do a real
+  straight-alpha blend. As a side effect, XOR "invert" cursors (I-beam of mask cursors, which used to be
+  drawn GREEN because of the magenta background) are detected and drawn as a real inversion.
+  NOTE for the "white elements all over the screen" part of the report: a 4:2:0 recording (NV12 / yuv420p)
+  stores colour at half resolution, so very small coloured artefacts on white UI can also come from the
+  codec itself; if purple pixels remain AFTER this fix on elements far from the pointer, send a PNG
+  crop of a single frame (not the player's screenshot) - that would point at the GPU video processor
+  colour-space setup in hr_dxgi_capture.cpp instead.
+
+Optimisation (first priority)
+- Changed (src/hr_pipeline.cpp, src/ui/recording_controller.cpp/.h, src/ui/main_frame.cpp/.h):
+  the live-preview thumbnail is now produced by the pipeline at the size the preview PANE
+  actually has (capped by Settings > preview size/quality) via the new
+  RecordingController::SetPreviewViewSize(). PreviewPanel::OnPaint no longer runs a bilinear
+  wxImage::Scale() on the UI thread for every new frame (it was ~10-15 ms per frame at 15 fps
+  with the docked, smaller preview); it just wraps the thumbnail in a bitmap. Fallback scaling,
+  when sizes differ, uses the cheaper NORMAL quality. Re-applied when a pipeline is recreated.
+- Fixed (src/hr_pipeline.cpp): hr_pl_set_preview_size() cleared pv_ready, so every resize of the
+  preview pane flashed the "Preview loading..." placeholder; update_preview() also read pv_w/pv_h
+  without the lock. Both fixed.
+- Changed (src/ui/main_frame.cpp, src/ui/themed_widgets.cpp): OnStatsTimer only SetLabel()s texts
+  that really changed and only re-lays-out the Controls pane when one did; SetStatusState() and
+  StatusDot::SetColor() are no-ops for unchanged values (they ran every 500 ms while the overload
+  warning was on).
+
+Bug fixes
+- Fixed (src/ui/audio_panel.cpp): wxWidgets debug alert "wxEXPAND overrides alignment flags in box
+  sizers" at startup - two Add() calls combined wxEXPAND with wxALIGN_CENTRE_*. (All other
+  wxEXPAND|wxALIGN_* uses in the code base are in grid sizers, which is fine.)
+- Changed (src/ui/audio_panel.cpp): "Add source" is now a small 104x22 button under the cards instead
+  of a full-width bar that took a third of a short dock pane; mixer cards are compact (~70 px:
+  name / % / mute on one row, meter, fader) and the pane minimum height dropped, so both built-in
+  channels are visible in a small pane.
+- Fixed (src/ui/overlays_dock_panel.cpp/.h, src/ui/main_frame.cpp): the Overlays pane had two
+  close buttons (the dock caption's and its own "x") - its own is gone. The pane stayed blank
+  after being moved/floated/docked because the raw Win32 children were never invalidated after AUI
+  re-parented the host: OverlaysDockPanel::ForceRepaint(), requested (coalesced) on host size/show.
+
+Window capture ("Select Window" records the WHOLE window)
+- Added (src/hr_wgc_capture.h/.cpp): Windows.Graphics.Capture window source
+  (Windows 10 1903+). The selected window is recorded itself - other windows on
+  top of it, being partly off-screen or on another monitor no longer matter.
+  Window resized while recording -> the picture is fitted into the recording's
+  fixed size (aspect kept, black bars) so the whole window is always visible.
+  Raw COM/WinRT vtables, loaded late: the app still starts on older Windows.
+- Changed (src/hr_pipeline.cpp): new hr_pl_create_window(); dx_* call sites go
+  through small dispatch wrappers (PlDx*) so DXGI and the window source share one
+  pipeline. In window mode the GPU-NV12 path, dirty-rect conversion and the
+  pipeline's own cursor compositor are off (WGC draws the cursor itself).
+- Changed (src/ui/recording_controller.cpp/.h): ResolveCaptureSize() picks WGC or
+  the old screen crop; CreatePipelineForTarget(); a preview pipeline is only
+  reused if it matches the current target. RetargetWindowCapture() is skipped in
+  WGC mode (nothing to retarget).
+- Changed (src/ui/window_picker_dialog.cpp/.h): HR_ResolveCaptureWindow(...,
+  client_only) can return the content area instead of the whole frame.
+- Added settings (src/ui/app_state.h, src/hr_settings_registry.cpp -> .hrc, console,
+  cfg, Lua all get them automatically): window_capture_method = auto | crop,
+  window_capture_area = window | client. UI: Settings > General > Window capture.
+
+MKV output
+- Changed (src/ui/app_state.h, src/hr_str_convert.h): VideoFormat is now
+  Mp4 | Mkv | Both; HrVideoFormatExt().
+- Changed (src/hr_ui_utils.cpp): hr_filename_from_template_ex() takes the extension
+  (old hr_filename_from_template() kept, still ".mp4").
+- Changed (src/ui/recording_controller.cpp): BuildOutputPath() uses the chosen
+  container and avoids clobbering an existing .mp4 in "both" mode.
+- Added (src/hr_tools.cpp): hr_remux_copy() - stream-copy .mkv -> .mp4 (+faststart),
+  no re-encode; used for "Both" after the audio merge and after Save Replay.
+- Added: Settings > Video > Container (MP4 / MKV / Both); key: video_format.
+
+Dockable panels (like OBS)
+- Changed (src/ui/main_frame.cpp/.h, Makefile, CMakeLists.txt): Controls
+  (Start/Pause/status/time), Audio Mixer and Overlays are wxAUI panes around the
+  preview. Drag a title bar to dock on any side, drop outside the window to make
+  it a floating window, drag the sashes to resize. View > Move panel to > Left |
+  Right | Top | Bottom | Floating window, View > Reset layout. The layout is saved
+  (ui_layout, hex-encoded) and restored; off-screen floating panels are pulled back.
+- Added: View > Lock layout and Settings > System > Interface (key ui_locked,
+  alias lock_ui) freeze every panel (no move / float / dock / resize / close).
+- Changed: the Controls pane re-flows - stacked when tall (left/right dock), in
+  one row when wide (top/bottom dock). Hysteresis so it can't flicker.
+- Changed (src/ui/overlays_dock_panel.cpp/.h): Resize() so the list follows the
+  pane; owner-drawn rows with the overlay type icon.
+- Optimisation: rectangle drag hints, no live-resize (the preview is not re-scaled
+  on every mouse-move), no new timers.
+
+Audio Mixer
+- Fixed (src/ui/themed_widgets.cpp): the white frames around every slider -
+  LabeledSlider's wrapper panel was never given a colour (default white) and the
+  slider cleared itself with its parent's colour. It now takes the parent's colour
+  on creation and on every theme change.
+- Added (src/ui/themed_widgets.h/.cpp): FlatFader - own-background horizontal /
+  vertical fader (wheel +-5, double-click = 100%).
+- Changed (src/ui/audio_panel.h/.cpp): rebuilt as channel cards, scrollable,
+  no title row (the pane caption has it). Meter repaints only when it changed;
+  nothing is polled while the pane is hidden.
+- Added: Settings > Audio > Mixer layout: horizontal (bar above the fader) or
+  vertical (OBS-style strips); key audio_meter_style.
+- Added: "+ Add source": another microphone, a browser, a program's / window's sound
+  (WASAPI per-process loopback, Windows 10 2004+), an audio file (decoded by ffmpeg).
+  Each has mute / volume / rename / reconnect / remove. Offline sources reconnect
+  by themselves (checked every 3 s, never while recording).
+- Added (src/hr_audio_extra.inc, included by src/hr_audio.cpp): the backend.
+  Streams to disk like the built-in tracks, so RAM stays flat.
+- Added (src/hr_audio.cpp): hr_audio_mix_wav_list() - streaming N-way mixer, a few
+  KB of RAM at any length (the old mixer reads both files whole).
+- Added (src/hr_app_audio_enum.h/.cpp): lists browsers / windows for the above.
+- Added (src/ui/hrc_config.cpp): [audio_sources] section in .hrc.
+
+Icons (src/ui/hr_icons.h/.cpp)
+- Added: PNG loader (cached, scaled once per size). Missing file = text glyph, never
+  an error. Overlays: icons/overlays/text.png, gif.png, image.png, webcam.png.
+  Mixer: icons/audio/microphone.png, desktop_audio.png (optional browser.png,
+  window.png, file.png). Several alternative names are accepted - see hr_icons.cpp.
+  installer/HomRec.iss ships them.
+
+Build: new sources hr_wgc_capture, hr_app_audio_enum, ui/hr_icons; new link flag
+-lwx_mswu_aui-3.2 (Makefile + CMakeLists.txt).
+
+Known limits: extra mixer sources are not in Instant Replay (the replay buffer
+has no audio mixer); an elevated (admin) window can't be captured by a non-elevated
+HomRec - the screen crop is used then; a minimised window produces no new frames.
+
+[Version 2.3.3] - 2026-10-01
+
+Game FPS while recording. 2.3.3 cut HomRec's CPU use, but the in-game FPS did
+not move: a GPU-bound game does not care how idle the CPU is, it cares how much
+GPU time and how many scheduler pre-emptions the recorder costs it. This
+release goes after those. (Not measurable from the source alone - please compare
+FPS before/after on your machine; see the notes at the end of this entry.)
+
+- Changed (src/hr_dxgi_capture.cpp): the D3D11 video processor used for the
+  GPU colour conversion is now created with D3D11_VIDEO_USAGE_OPTIMAL_SPEED
+  instead of PLAYBACK_NORMAL, i.e. the driver's cheapest crop/scale/convert
+  mode. This blit runs on the same GPU as the game. If a driver rejects the
+  hint the enumerator is rebuilt with the old value, so nothing can stop
+  working because of it.
+
+- Fixed (src/hr_dxgi_capture.cpp): the capture device forced its GPU scheduling
+  priority to 7 (maximum). Without admin rights Windows ignores that, but when
+  HomRec ran elevated every capture copy/blit pre-empted the game's own GPU
+  work - lower game FPS with perfectly healthy-looking CPU graphs. It is now
+  the normal priority (kCaptureGpuPriority = 0). The constant is documented in
+  the file if you ever want the old behaviour back (fewer dropped capture
+  frames on a 100%-busy GPU, at the cost of game FPS).
+
+- Changed (src/hr_pipeline.cpp): new Pipeline::light_cpu_path flag, set by
+  capture_loop() every tick. While the GPU colour-conversion path is active the
+  capture thread and the pipe writer thread run at ABOVE_NORMAL instead of
+  HIGHEST. On that path the CPU only copies a finished NV12 frame, so the boost
+  bought nothing - but a HIGHEST thread waking 30-60 times a second still
+  pre-empts a game's worker threads and migrates them between cores, which
+  costs FPS without showing up as CPU load. The CPU (BGRA) path keeps the
+  HIGHEST boost it needs. Priorities switch automatically when an overlay makes
+  the pipeline change paths.
+
+- Fixed (src/ui/recording_controller.cpp, src/ui/recording_controller.h):
+  while a recording (or Instant Replay) was running with HomRec minimized or
+  hidden in the tray, the pipeline kept downscaling a live-preview thumbnail
+  15 times a second for a window nobody could see, because
+  SetPreviewVisible() returned early whenever state_.recording was set. It now
+  only switches the thumbnail generation off/on (the pipeline itself is
+  untouched). New RecordingController::preview_window_visible_ and
+  PreviewNeededFlag() (0 when the preview is disabled in Settings OR the window
+  is hidden) replace the four copies of "state_.disable_preview ? 0 : 1";
+  restoring the window re-enables the thumbnails even when the pipeline was
+  kept alive by Instant Replay or left over from a finished recording.
+
+- Changed (src/ui/version.h): version bumped to 2.3.3.
+
+  Notes (what this release can NOT fix):
+    * DXGI Desktop Duplication itself forces Windows to composite the game's
+      frames through the DWM instead of presenting them directly (no
+      "Independent Flip"). That costs some FPS in borderless/windowed games
+      for every recorder built on Desktop Duplication, including OBS's
+      "Display Capture", and cannot be removed from inside HomRec. Only a
+      game-hook or Windows.Graphics.Capture backend avoids it.
+    * With a hardware encoder the encoder load itself is mostly off the 3D
+      engine (NVENC/VCN), but QSV shares the iGPU/memory with the CPU.
+    * If FPS is still unchanged, the log's "Capture stats" line at the end of a
+      recording (GPU NV12 frames vs full readbacks) tells whether the GPU path
+      was really used; if "GPU NV12 frames" is 0, an overlay or a software
+      encoder forced the CPU path and these changes do not apply.
+
+Capture performance: less CPU while recording, especially on mostly-static
+desktops (tutorials, talking-head + slides, coding sessions).
+
+- Added (src/hr_dxgi_capture.cpp): unchanged frames are skipped. DXGI's
+  AcquireNextFrame() also returns when only the mouse pointer moved
+  (LastPresentTime == 0 and AccumulatedFrames == 0 - the desktop image itself
+  is identical). Those frames used to be copied GPU->staging->RAM (~8MB at
+  1080p) and re-converted by the pipeline on every tick; they are now released
+  immediately and reported as "nothing new", which capture_loop() already
+  turns into a cheap "repeat the last picture". Requires BOTH counters to be
+  zero, so a driver that reports only one can never cause a lost update.
+
+- Added (src/hr_dxgi_capture.cpp): dirty-rectangle readback. The frame's
+  dirty/move rectangles are folded into one bounding box; only that region is
+  copied GPU->staging and memcpy'd into the caller's BGRA buffer (a blinking
+  caret or a clock now costs a few KB, not 8MB). Per-staging-texture "stale"
+  regions keep the double-buffered ring exactly correct, and one full copy is
+  forced every 120 changed frames as a safety net against a driver that
+  under-reports dirty rects. Rotated outputs and stretched output sizes always
+  copy everything.
+
+- Added (src/hr_pipeline.cpp, src/hr_encoder_helpers.c API reuse): partial
+  YUV re-conversion. When DXGI says only rows [y0,y1) changed and nothing is
+  composited on the CPU (no crop/scale/overlay/cursor), the previous converted
+  picture is kept and only those rows are re-converted (NV12 and I420).
+  New native tests in scripts/tests/test_encoder_helpers.cpp prove the result
+  is byte-identical to a full conversion.
+
+- Changed (src/hr_pipeline.cpp): "Cursor" no longer defeats the static-screen
+  shortcut. The pipeline now samples the pointer (visibility, position,
+  handle, 100ms bucket for animated cursors) and keeps re-sending the cached
+  picture while it looks exactly the same. Previously any recording with the
+  cursor enabled converted every single tick even on a frozen screen.
+  Overlays that exist but are hidden (visible == false / zero size) no longer
+  force the CPU path or the 8MB working copy either.
+
+- Added (src/hr_dxgi_capture.cpp, src/hr_pipeline.cpp, src/hr_ui_utils.cpp,
+  Settings > Video > "GPU colour conversion", default ON): GPU scaling and
+  BGRA->NV12 conversion through the D3D11 Video Processor. With a hardware
+  encoder (NV12 output) and no visible overlay, the desktop is cropped,
+  scaled and converted to BT.601 limited-range NV12 on the GPU (same maths as
+  the CPU converter) and only 1.5 bytes/pixel are read back instead of 4; the
+  CPU does no colour conversion at all. Works on integrated GPUs. The pointer
+  is drawn straight into the NV12 frame (hr_composite_cursor_nv12), the live
+  preview is rebuilt from the NV12 frame, window-tracking crop rectangles are
+  honoured per frame. Overlays are composited on the CPU, so the moment one
+  becomes visible the pipeline falls back to the CPU converter by itself (and
+  back again when it goes away) - a persistent GPU-side copy of the desktop
+  makes that switch glitch-free even on a completely static screen. If the
+  adapter/driver can't do it, or it fails at runtime, the pipeline logs one
+  warning and stays on the CPU path.
+
+- Added (ffmpeg/hr_ffmpeg_runner.cpp, src/hr_tools.cpp, src/ui/
+  recording_controller.cpp, Settings > Video > "Full-GPU capture via ffmpeg
+  ddagrab", default OFF): ffmpeg 6.0+ "ddagrab" fast path. ffmpeg captures
+  AND encodes on the GPU (nvenc/amf directly, qsv via hwmap), no pipe, no
+  readback - the lowest possible CPU use. It cannot use HomRec overlays or
+  plugins, so it is only used when the recording needs none of what the
+  pipeline provides: hardware encoder, no visible overlay, not window-capture,
+  no auto-pause-on-silence, output size == capture size, no custom -vf/-filter.
+  Otherwise (or if this ffmpeg has no ddagrab, or ffmpeg dies during the first
+  seconds) the normal pipeline is used automatically and the reason is logged.
+  Region capture maps to ddagrab's offset/video_size. Pause is unavailable in
+  this mode (logged once instead of desynchronizing the audio).
+
+- Fixed (src/hr_dxgi_capture.cpp): the LAST change before the screen went
+  quiet was never delivered. Frame delivery is deliberately one call behind
+  (so Map() never stalls), but a DXGI timeout just returned "nothing new", so
+  the newest picture - the dialog that just opened, the final typed character -
+  stayed in the second staging texture and was missing from the recording
+  until something else changed on screen. A timeout / pointer-only update now
+  flushes it.
+
+- Fixed (src/hr_pipeline.cpp): a frame queued while overlays were active could
+  be "re-sent" as the static picture once the overlays were gone (the cached
+  picture was only invalidated on the OK path). The cache is now dropped
+  whenever a conversion includes overlays.
+
+- Fixed (src/hr_dxgi_capture.cpp): hr_dx_set_output_size() now forgets what it
+  knew about the caller's buffer, so a re-allocated buffer that happens to land
+  at the same address is never patched incrementally.
+
+- Added: capture statistics line in the log when the pipeline ends
+  (DXGI frames, pointer-only skipped, partial/full readbacks, GPU NV12 frames,
+  partial YUV conversions).
+
+- Added: two settings (gpu_convert, gpu_capture_ddagrab) in the registry and
+  Settings > Video; version bumped to 2.3.3 (src/ui/version.h).
+
+[Version 2.3.2] - 2026-09-28
+
+- Fixed: manual recordings kept the whole mic/system PCM track in RAM until Stop() (RAM climbing ~20MB/min). 
+  Added incremental WAV streaming (wav_stream_open/append/close)
+
+- Changed: hr_audio_reset_buffers(mic_path, sys_path) now opens streams; nullptr keeps Instant Replay's in-RAM ring buffer.
+
+- Added: hr_audio_flush_buffered() drains buffers to disk.
+
+- Fixed: RefreshPreviewSettings() marked settings "applied" even when a running recording 
+  prevented rebuild, so the change was lost; now only when not recording. Also live-applies Target FPS to an idle pipeline.
+  
+[Version 2.3.1] - 2026-09-27
+
+- Fixed (src/hr_dxgi_capture.cpp, src/hr_pipeline.cpp): a null-pointer read
+  access violation (0xC0000005) that crashed the app a few seconds after
+  "DXGI capture lost (display mode change, UAC prompt, or GPU reset) --
+  resetting" was logged, with nothing else in between - confirmed against
+  a user-supplied crash dump (exception in hr.exe itself, read at address
+  0x0, right where the log cuts off). DxCapCtx::reset() (hr_dx_reset(),
+  called from capture_loop()'s HR_DX_LOST branch) always tears down the
+  old IDXGIOutputDuplication up front before trying to acquire a new one -
+  if that re-acquire then fails (routine right after a real mode change,
+  e.g. a game briefly holding exclusive fullscreen - DuplicateOutput()
+  itself already retries this for a bit), reset() returns failure and
+  leaves `duplication` null, but capture_loop() was never checking that
+  return value and just called back into hr_dx_capture() on the very next
+  tick anyway, which unconditionally called AcquireNextFrame() through
+  the now-null COM pointer. hr_dx_capture() now returns HR_DX_LOST
+  instead of dereferencing a null `duplication` (capture_loop() already
+  knows how to handle that - falls back to re-encoding the last good
+  frame and retries the reset a second later, same as every other "can't
+  capture right now" case); capture_loop() also now logs once when a
+  reset attempt itself fails, instead of the silent retry loop that made
+  this so hard to tell apart from a hang.
+
+- Fixed (src/hr_pipeline.cpp): Stop routinely took ~30 seconds to actually
+  finish and produced a corrupt/incomplete video with the audio left as a
+  separate .wav next to it instead of merged in - every time, not just
+  under heavy load, matching the reported log exactly ("Pipeline: writer
+  thread didn't close the previous recording's pipe in time" -> "ffmpeg is
+  still finalizing... waiting longer" -> "didn't finish on its own after
+  30s total -- force-stopping" -> "merging the captured audio into the
+  video failed"). hr_pl_end_recording_segment() asks the writer thread to
+  close ffmpeg's stdin once its queue drains, but only waited 3 seconds
+  before giving up - and, on that timeout, cleared the pending-close flag
+  itself with the comment "don't leave it armed for the next recording".
+  That clear was redundant (hr_pl_set_recording()'s active=1 path already
+  clears the same flag when a genuinely new recording starts, specifically
+  to guard against this) and, far more often, actively harmful: the writer
+  thread hadn't actually failed, just hadn't finished draining whatever
+  backlog piled up under load (the exact "Recording overloaded: dropping
+  frames" condition already seen earlier in every affected session) - and
+  clearing the flag out from under it permanently canceled the only close
+  that pipe's ffmpeg was ever going to get, guaranteeing the later 10s/20s
+  waits in StopFinalizeTail() timed out and force-killed ffmpeg mid-write.
+  The flag is now left armed on a timeout (just logged as "still waiting
+  in the background" rather than treated as failed) - the writer thread
+  honors it whenever it does catch up, however many seconds later, so
+  StopFinalizeTail()'s waits see a real EOF and the file finalizes and
+  merges normally instead of always being force-killed.
+
+- Fixed (src/hr_pipeline.cpp): the live "capture fps" stat could read the
+  idle/preview pacing rate (preview_fps, 15 by default) for up to a second
+  right after starting a recording on a pipeline kept alive from the
+  previous one's preview (the normal case), even though real capture had
+  already sped back up to the recording's target fps - the 1-second
+  averaging window wasn't reset on the idle<->recording pacing switch, so
+  it could straddle both rates. Now reset exactly on that switch.
+
+[Version 2.3] - 2026-09-26
+
+- Changed (overlays): the row context menu's "Edit Parameters..." (a
+  sequence of raw text-entry popups - one for text/image path/webcam
+  device, then opacity, then a font picker for text overlays) and
+  "Position Overlays..." (a separate full-screen window that dragged
+  every overlay at once against a screenshot, no per-overlay settings)
+  are now a single "Edit Overlay..." window per overlay: a screenshot-
+  backed canvas at top shows that one overlay - rendered with an actual
+  preview of its content (text/image/gif/webcam label/input-overlay
+  spritesheet), not a bare rectangle - and can be dragged/resized right
+  there, with all of that overlay's own settings (name, visibility,
+  opacity, and whatever its type needs: text/font/color, image/gif file,
+  webcam device, or layout+spritesheet files) laid out below using the
+  same themed controls (LabeledSlider, wxColourPickerCtrl, etc.)
+  settings_dialog.cpp's tabs use, instead of a chain of plain message-box
+  prompts. Nothing is written to state.overlays or disk until Save is
+  clicked; Cancel/[X] discards the whole edit, same contract the old
+  "Position Overlays..." window had. New src/ui/overlay_editor_dialog.h/
+  .cpp; the now-fully-replaced overlay_placement_dialog.h/.cpp were
+  deleted; overlays_dock_panel.h/.cpp, main_frame.cpp updated to match.
+
+- Fixed: File > Select Window... capture recorded a dead, frozen crop of
+  the DESKTOP at wherever the window happened to be sitting when you
+  pressed Start, for the entire rest of the recording - drag the window, or
+  switch away to something else entirely, and the exact same screen-space
+  rectangle kept getting recorded regardless (in effect, an unlabeled
+  region capture, not a window capture). Caused by the target window's
+  rect only ever being resolved once, at Start()/EnsurePreview() time - a
+  known, documented limitation in hr_pipeline.cpp, never actually
+  implemented. RecordingController now re-resolves the picked window's live
+  HWND + rect on every SyncOverlays() tick (~20/s, same cadence overlays and
+  the cursor setting already sync at) and re-applies the crop via the
+  existing hr_pl_set_capture_rect() whenever it moved or was resized,
+  instead of only once. Output pipe dimensions are left untouched (already
+  locked in with ffmpeg at Start()), so a resized window keeps recording -
+  just stretched/squashed to fit if its aspect ratio changed - rather than
+  breaking the pipe. If the window closes/minimizes or gets dragged onto a
+  different monitor than the one actually being duplicated, the last good
+  crop is kept and a single warning is logged instead of blanking the
+  recording or spamming the log. Region capture is intentionally untouched
+  - a fixed area is the whole point of that mode. recording_controller.cpp/.h.
+
+- Fixed: window/region capture could still record the whole screen on multi-
+  monitor setups. ResolveCaptureSize() passed the monitor's index in
+  hr_display_info's list (EnumDisplayMonitors, primary first) straight to DXGI
+  as an output index, but DXGI numbers outputs differently - so DXGI could
+  duplicate a different monitor than the one the crop was computed for. The
+  crop then didn't fit the frame, capture_loop() silently turned cropping off,
+  and the whole desktop was scaled into the window-sized output. The DXGI
+  output is now found by matching desktop coordinates (this also fixes
+  Settings > Monitor picking the wrong display), the pipeline clamps an
+  out-of-range crop instead of dropping it (logged once as a warning), and
+  Start() logs "Capture target (...)" with the resolved rect/monitor/crop.
+  EnableInstantReplay() also re-applies crop/output size to a reused pipeline.
+  recording_controller.cpp, hr_pipeline.cpp.
+
+- Fixed: picking a window in File > Select Window... could still record the whole
+  desktop. The window was re-found at Start() by exact title only, so any title
+  change since picking it (browser tab, "*Untitled", unread counters) silently fell
+  back to full-desktop capture. AppState now remembers the picked HWND
+  (capture_window_hwnd, runtime-only) and HR_ResolveCaptureWindow() tries it first,
+  then exact title, then case-insensitive title. A minimized picked window is now
+  treated as unavailable. Start()/EnableInstantReplay() now REFUSE to start with a
+  clear message (RecordingController::CheckCaptureTarget()) when the chosen window
+  or region is gone/minimized/off-screen, instead of quietly recording everything.
+  File > Select Window.../Select Region... now also refresh the live preview
+  (PreviewCaptureSettings tracks the HWND + region rect) and persist the choice.
+  window_picker_dialog.cpp/.h, recording_controller.cpp/.h, main_frame.cpp/.h,
+  app_state.h.
+
+- Added (settings/commands, todo2.3.md section 3): filename-template tokens
+  extended - {hh}/{min}/{sec} (zero-padded), {preset} (active preset name),
+  and a flexible {date:FMT} strftime-style token (e.g. "{date:%d.%m.%Y}"),
+  resolving the open syntax question in favor of the flexible single-token
+  form. hr_ui_utils.cpp/recording_controller.cpp.
+
+- Added: console command `preset <name>` (and bare `preset` to list what's
+  available) - switches presets the same way File > Set Preset... does,
+  without opening that dialog; gated behind "inwid" like any other settings
+  write. AppState::active_preset_name tracks the currently active one (also
+  updated by the dialog itself) for both this and the new {preset} filename
+  token above. console_window.cpp/.h, preset_dialog.cpp.
+
+- Added: Audio Mixer level meter now shows OBS-style color zones (green /
+  yellow ~-20..-9 dBFS / red - the clipping zone) instead of a smooth
+  gradient with no fixed meaning to any given shade, plus a static marker
+  at the clipping-zone boundary that's visible even while quiet. Thresholds
+  derived from hr_audio_rms_int16's level<->dBFS mapping. audio_panel.cpp.
+
+- Added: arbitrary screen-region capture (File > Select Region... - a
+  full-screen click-drag overlay), alongside the existing Desktop/Window
+  modes. Generalized RecordingController::ResolveCaptureSize()'s
+  crop-to-target-rect logic (previously Window-only) to work the same way
+  for a region; new AppState::region_x/y/w/h. window_picker_dialog.cpp/.h,
+  recording_controller.cpp, app_state.h, hr_str_convert.h,
+  hr_settings_registry.cpp, language.cpp (new "select_region" string).
+
+- Added: scheduled recording start (a "HH:MM" local time, separate from the
+  existing auto-stop-after-N-minutes) - AppState::scheduled_start_enabled/
+  _time, checked once a second by a new HomRecMainFrame::OnScheduleTimer().
+
+- Added: auto-pause/resume recording on microphone silence -
+  AppState::auto_pause_on_silence/silence_threshold_db/silence_duration_sec,
+  checked in RecordingController::PollStats() against the same
+  level<->dBFS mapping the audio-mixer zones above use.
+
+- Added: "hook after recording" - AppState::post_record_hook_enabled/_type
+  (script / move / open_folder) /_path, run once StopFinalizeTail() has a
+  finished output file (RecordingController::RunPostRecordHook()). "script"
+  launches the configured program with the finished file's path as argv[1]
+  (fire-and-forget); "move" relocates the file (drive-crossing safe);
+  "open_folder" opens output_folder, same as the existing button.
+
+  (Scheduled start / auto-pause-on-silence / the post-record hook are all
+  wired end-to-end and persist via HrSettingsRegistry, so they're usable
+  today via console `<key> <value>` or by hand-editing homrec.hrc; none of
+  the three has a Settings-dialog UI yet - left for a follow-up pass.)
+
+- Added (plugins, todo2.3.md section 4): two more Lua lifecycle hooks,
+  on_overlay_added/on_overlay_removed (on_recording_start/_stop/
+  _replay_saved already existed) - fired from both OverlaysDockPanel's
+  own Add*/RemoveAt() methods and the new Lua overlay API below.
+  overlays_dock_panel.cpp/.h, main_frame.cpp.
+
+- Added: Lua overlay-management API - homrec.add_overlay(props),
+  remove_overlay(id), move_overlay(id, x, y[, w, h]), list_overlays() - so
+  a plugin can add/remove/reposition overlays programmatically instead of
+  only being able to react to ones a person added by hand. lua_api.cpp.
+
+- Added: plugin.json permission model - an optional "permissions" object
+  ({"network":, "filesystem":, "store":}, all default true for backward
+  compatibility with every plugin shipped before this existed) gating
+  homrec.http_get()/http_post() (network), homrec.log_to() (filesystem),
+  and homrec.store_get()/store_set() (store). Denied permissions are logged
+  at load time. lua_engine.h/.cpp (manifest parsing), lua_api.cpp
+  (enforcement).
+
+- Added (overlays, todo2.3.md section 1): dynamic tokens in text-overlay
+  content - {fps} (live measured capture rate), {time} (HH:MM:SS),
+  {date} (YYYY-MM-DD) - a live clock/counter baked into the recording
+  itself. The existing per-overlay render cache now keys off the expanded
+  text rather than the literal template, so a token overlay only actually
+  re-renders when its displayed value changes (e.g. once a second for
+  {time}), not every frame. hr_overlay_render.h/.cpp, hr_pipeline.cpp.
+
+  (Section 1's remaining items - a standalone overlay-settings window,
+  text-outline/webcam-chroma-key rendering, 4-corner resize handles, a
+  separate "hide edit borders" preview toggle, screen-corner anchors, and
+  a per-overlay show/hide hotkey - are still open for a follow-up pass.)
+
+- Fixed (perf, game FPS while recording with "Cursor" enabled):
+  hr_composite_cursor() (hr_ui_utils.cpp) runs on the capture thread for
+  every captured frame, up to the full recording fps. It used to redo the
+  entire GDI rasterization pipeline every single call - GetIconInfo(),
+  CreateCompatibleDC/CreateDIBSection, DrawIconEx, then a blocking
+  GdiFlush() (stalls the thread until the GDI batch queue drains), then
+  tore all of it back down with DeleteObject x4 and DeleteDC/ReleaseDC -
+  to redraw the same handful of pixels almost every time, since the
+  cursor's shape only actually changes when its HCURSOR handle changes
+  (or, rarely, on an animated .ani cursor's own cadence), never on every
+  frame. That's ~8 kernel-mode GDI calls plus a synchronous flush per
+  frame competing for CPU with the very game being recorded. Now caches
+  the rasterized cursor bitmap (with real per-pixel alpha, resolved once,
+  instead of a chroma key compared on every composite) keyed on the
+  cursor handle, and only re-runs the GDI pipeline when the handle has
+  changed or a 100ms refresh interval has elapsed (covers animated
+  cursors); every other frame just blits the cached bitmap - plain memory
+  access, no GDI objects created/destroyed, no GdiFlush. Also fixes a
+  smaller pre-existing waste where the old code still called
+  GetIconInfo()/DeleteObject every frame even when the cursor was
+  entirely off the captured area.
+
+- Fixed (merge with a parallel batch of fixes that had drifted out of
+  this file - re-applied and documented here): five independent bugfixes
+  that existed in one tree's code but not the other's, none previously
+  recorded in this changelog:
+    * Instant Replay leaked its entire %TEMP%\HomRec_replay\<N>\ segment
+      folder on every StartInstantReplayEncoder() call (every enable AND
+      every Save Replay) - nothing ever deleted the previous run's
+      seg_*.mp4 files. New DeleteReplayDir() now cleans up the old
+      folder from the destructor, DisableInstantReplay(), and both the
+      empty-buffer and normal-completion paths of SaveReplay() (careful
+      to skip deletion when a failed audio merge leaves a last-resort
+      .wav behind for recovery). recording_controller.cpp.
+    * WASAPI capture's Start() (hr_audio.cpp) leaked the partially-
+      acquired device/client/mix_fmt/data_event/capture handles (plus
+      device's extra AddRef()) on every early-return failure path
+      instead of releasing them - exercisable repeatedly via Settings'
+      device-preview path. Every failure branch now calls the existing
+      close() before returning.
+    * ConsoleWindow's destructor never released the HFONT it created in
+      OnCreate() and handed to its controls via WM_SETFONT - a small
+      per-process GDI handle leak. console_window.cpp.
+    * The "Select Window to Record" picker's thumbnail pass called
+      PrintWindow() on every visible top-level window with no timeout;
+      a single hung/not-responding app anywhere on the desktop froze the
+      whole picker before it even appeared. Now checks IsHungAppWindow()
+      first and falls through to the existing icon-based fallback.
+      window_picker_dialog.cpp.
+    * hr_profile_io.cpp's gzip decompression-bomb / integer-overflow cap
+      (kMaxDecompressedBytes, 64MB) on custom .hrc/.hrl loading had been
+      lost in one tree - a corrupt or hostile profile/language file could
+      once again make _gz_decompress() allocate without bound. Cap
+      reinstated.
+
+- Fixed (data corruption, profile/language JSON round-trip): hr_profile_io.cpp's
+  hand-rolled JSON reader (_jget_str()) unescaped "\\n" and "\\r" wrong - it
+  just dropped the backslash and copied the following letter as-is, so a
+  saved string containing an actual newline or carriage return (which
+  _jesc(), the writer right above it, correctly escapes to the two
+  characters "\n"/"\r") came back from disk with a literal 'n' or 'r'
+  baked into the value instead of the original line break, on every
+  load. \" and \\ happened to reconstruct correctly by the same "just
+  copy the next character" logic (both collapse to themselves), which is
+  presumably why this went unnoticed - only the two escapes that don't
+  survive a verbatim copy were broken. Reworked to actually map each
+  escape back to its real character (mirrors the equivalent parser in
+  hr_input_overlay.cpp, which already did this correctly).
+
+- Fixed (perf, game FPS while recording with a software encoder): ffmpeg
+  was always launched with ABOVE_NORMAL_PRIORITY_CLASS, including on the
+  libx264/libx265 path. hr_build_codec_args_ex() (hr_tools.cpp) sizes
+  -threads to (logical cores - 2), and Yuv420pWorkerPool (hr_pipeline.cpp)
+  separately reserves 2 cores for its own conversion workers - both do
+  this specifically to leave the game headroom, on the assumption that the
+  threads they're yielding to run at normal priority. Giving ffmpeg's
+  whole process an above-normal priority class silently broke that
+  assumption: every x264 encoder thread then outranked the game for CPU
+  time regardless of the "-threads" math, eating back exactly the
+  headroom both reservations were trying to preserve - part of the
+  remaining game-FPS gap against OBS on CPU-encode setups.
+  hr_ffmpeg_runner.cpp: _launch_win() now only requests
+  ABOVE_NORMAL_PRIORITY_CLASS for the GPU-bound encoders (nvenc/qsv/amf),
+  where it's harmless (those threads mostly wait on the GPU) and keeps
+  the encode from being starved; the CPU-bound libx264/libx265 path now
+  launches at plain NORMAL_PRIORITY_CLASS so it competes for CPU on equal
+  footing with everything else instead of ahead of it.
+
+- Fixed: pausing a recording never actually paused the audio - hr_audio_pause()
+  existed and worked (WASAPI capture keeps running and discards samples while
+  set) but nothing called it, so the mic/system audio kept recording straight
+  through a pause while the video timeline froze; everything after a pause
+  played back out of sync by however long the pause lasted. TogglePause() now
+  calls hr_audio_pause() alongside hr_pl_pause(). Resuming also resets the
+  silence-auto-pause timer, since the silence that built up while paused used
+  to make auto-pause re-trigger the instant you resumed. recording_controller.cpp.
+
+- Fixed: stopping a recording while it was paused left the kept-alive preview
+  pipeline (and audio) permanently paused - the live preview froze until the
+  next Start(), and if that reused the same pipeline (same size/monitor) it
+  captured nothing at all. FinishPipelineAfterStop() now clears both flags.
+  Also, Start()'s own pipeline-reuse branch was setting the output pixel
+  format AFTER switching recording on, so the very first frame(s) of a reused-
+  pipeline recording could go out in the wrong chroma layout (NV12 vs I420) -
+  reordered. recording_controller.cpp.
+
+- Fixed: Instant Replay could be silently killed several ways and never come
+  back on its own:
+    * Any failed Start() (ffmpeg missing, low disk, the pipeline/encoder
+      failing to start...) paused Instant Replay first and only ever resumed
+      it from Stop() - so a failed Start() left it dead until manually
+      toggled off and on. Start() now resumes it on every early-return path.
+    * Picking a window/region, or changing monitor/fps/preview settings,
+      called RefreshPreviewSettings() -> TeardownPreview(), which destroys the
+      very pipeline Instant Replay's encoder was attached to, while
+      EnableInstantReplay()'s own "already running" check still thought it
+      was active. RefreshPreviewSettings() now stops Instant Replay first and
+      restarts it against the rebuilt pipeline.
+    * Changing the replay buffer length while Instant Replay was already
+      running did nothing (the ring buffer's size is fixed at encoder start).
+      EnableInstantReplay() now restarts the encoder when the length changed.
+  recording_controller.cpp/.h.
+
+- Fixed: Save Replay's ffmpeg concat list was written with a std::wofstream in
+  the "C" locale, which can't encode non-ASCII characters - a %TEMP% path
+  under a non-ASCII Windows user name silently truncated the list and Save
+  Replay failed partway through. Written as UTF-8 now (what ffmpeg's concat
+  demuxer expects). recording_controller.cpp.
+
+- Fixed: the temp-WAV cleanup after every recording (deleting/renaming
+  mic_audio.wav/sys_audio.wav/audio.wav) used std::remove()/std::rename(),
+  which take an ANSI-codepage path on Windows - with a non-ASCII output
+  folder these silently failed to find the files, leaving stray temp WAVs
+  next to the recording. Replaced with UTF-8-correct DeleteFileW/MoveFileExW
+  wrappers everywhere in this file. recording_controller.cpp.
+
+- Fixed: Quick Test still passed the monitor LIST index straight to
+  hr_pl_create() as if it were the DXGI output index - the same
+  wrong-monitor-recorded bug already fixed for real recordings in
+  ResolveCaptureSize(), but missed here. Now matched by desktop coordinates
+  the same way. recording_controller.cpp.
+
+- Fixed: BuildOutputPath()'s filename buffer was only 256 bytes - a long
+  output folder combined with the filename template could get silently cut
+  off, taking the ".mp4" extension with it. Bumped to 1024. Also: ffmpeg
+  always runs with -y, so two recordings that resolve to the same filename
+  (a template without {time}/{sec}, or two clips started in the same second)
+  silently overwrote the earlier one with no warning; BuildOutputPath() now
+  appends _2, _3, ... when the target already exists. recording_controller.cpp.
+
+- Fixed: ComputeOutputDims()'s percentage/scale-factor resolution mode had no
+  floor, unlike the Absolute mode right next to it - a very small
+  scale_factor could compute a 0-width or 0-height output. Clamped to a
+  2px minimum like Absolute mode already was. recording_controller.cpp.
+
+- Optimized: while a tracked window (File > Select Window...) was closed or
+  minimized, RetargetWindowCapture() re-ran a full EnumWindows()+title scan
+  on every ~20Hz overlay/cursor sync tick trying to find it again. Throttled
+  to twice a second. recording_controller.cpp.
+
+- Fixed: the cursor overlay ("Cursor" setting) composited at the raw
+  crop_x/crop_y pipeline members - read without the lock that protects them
+  from the UI thread rewriting them mid-loop (window tracking above now does
+  that ~20x/s), and not the clamped c_x/c_y values the frame was actually
+  cropped with. The drawn cursor could sit a few pixels off, worst around a
+  window that's moving or partly off-screen. hr_pipeline.cpp.
+
+- Fixed (data loss): merging the separate audio WAV into the recorded video
+  (hr_merge_av) ran ffmpeg under a fixed 180-second timeout and then, if that
+  timeout was hit, replaced the finished recording with whatever ffmpeg had
+  written so far anyway - on a long recording, or the "stretch" re-encode path
+  for a dropped-frames recording, this silently swapped a complete video for a
+  truncated one. The timeout now scales with the video's length, and the
+  original file is only replaced when ffmpeg actually exited with code 0;
+  otherwise the video is left as-is (audio-less, with the separate WAV kept)
+  and an error is logged. The replace step itself now also uses a single
+  atomic MoveFileExW instead of delete-then-move, so a failed move can no
+  longer leave no video file at all. hr_export_mp3()/hr_concat_segments() were
+  given the same "don't leave a corrupt/truncated file behind on failure"
+  treatment. hr_tools.cpp.
+
+- Fixed: every file-path Win32 call in hr_ui_utils.cpp (hr_path_exists,
+  hr_make_output_dir, hr_open_folder, hr_get_free_disk_mb, hr_file_size_mb)
+  used the *A (ANSI-codepage) functions or fopen() on a UTF-8 path - with a
+  non-ASCII output folder (e.g. a Cyrillic Windows user name) these silently
+  failed: the "does it exist" check said no, a mojibake folder could get
+  created next to the real one, and free-space/size queries returned nothing.
+  Switched to the *W functions via a small UTF-8->UTF-16 helper.
+  hr_file_size_mb() is also now 64-bit (the old ftell()-based version
+  returned -1 for any file over ~2GB). hr_ui_utils.cpp.
+
+- Fixed: the filename template's {date:FMT} custom strftime formatting had no
+  allowlist - a template with an unsupported conversion (e.g. %e, %F, or a
+  trailing lone %) could hit the C runtime's invalid-parameter handler, which
+  terminates the whole process, from nothing more than a typo in Settings.
+  Only the conversions that behave consistently are accepted now; anything
+  else falls back to yyyymmdd like an empty/failed format already did. Also,
+  none of the expanded template segments ({date:...}'s output, {app},
+  {preset}, or the template's own literal text) were sanitized against
+  characters that aren't legal in a Windows filename - a custom format like
+  {date:%H:%M} or an app/preset name containing "/" or ":" produced a broken
+  path. All of it is sanitized now. hr_ui_utils.cpp.
+
+- Fixed: importing a .hrc file (Import Settings, a preset, or "hrc load"/
+  "sethrc" at the console) read overlay_count/custom_hotkey_count with a bare
+  atoi() and no bound - a corrupt or hand-edited file (or a preset shared by
+  someone else) with a huge count like "overlay_count=2000000000" made the
+  import hang doing that many map lookups. Both are now clamped to a generous
+  10,000. hrc_config.cpp.
+
+- Fixed (security): custom_ffmpeg_args is gated behind the console's "sec"
+  fuse when set through an unattended path (a cfg/autoexec.cfg-style script,
+  or an imported .hrc) since it's written straight onto ffmpeg's command
+  line - but two of the paths that can run unattended from
+  cfg/autoexec.cfg|config.cfg|startrec.cfg never actually applied that gate:
+  the console's "hrc load <path>" (CmdHrc) always imported with
+  allow_sensitive_fields defaulted to true, and "preset <name>" (CmdPreset)
+  did the same. Only "sethrc" was gating it correctly. Both now respect the
+  "sec" fuse exactly like "sethrc" does. Also added post_record_hook_path
+  (the program run after every recording when the post-record hook is set to
+  "Script") to the set of fields this gate protects - it's the same class of
+  "arbitrary command written from an unattended import" risk custom_ffmpeg_args
+  is, and had no gate on it at all before. console_window.cpp,
+  hr_settings_registry.cpp.
+
+- Fixed: Settings > Advanced > Scheduled Start (scheduled_start_time, set via
+  .hrc / the console / a plugin - it has no dedicated dialog control yet)
+  required an exact "HH:MM" match with zero-padded digits; "9:30", " 09:30 "
+  or "09:30:00" all looked like plausible times but would simply never fire,
+  with nothing telling the person their schedule was silently dead. Parsing
+  is tolerant now (leading/trailing whitespace, single-digit hour/minute),
+  and a malformed value now logs a one-time warning instead of failing
+  silently forever. main_frame.cpp/.h.
+
+- Housekeeping: the installer script (installer/HomRec.iss, its default
+  MyAppVersion and the /D example in installer/README.md), the README's
+  version badge, and a comment in hr_app_logic.cpp still said 2.2-b.4/2.2.2
+  from before src/ui/version.h (the actual single source of truth,
+  HR_APP_VERSION) was bumped to 2.3. Brought in line.
+
+- Fixed: RegisterHotKey()'s return value was never checked for any of the
+  four fixed hotkeys or the custom hotkeys list. Two bindings sharing the
+  same combo (two HomRec actions bound to the same keys, or a combo another
+  running application already registered globally) made the OS call fail for
+  whichever one registered second - that hotkey then simply never fired,
+  with absolutely nothing telling the person it was dead. Failures are now
+  logged with the combo that couldn't be registered, so it's at least
+  visible in the log instead of a silent no-op. hr_hotkey.cpp.
+
+- Noted, not changed: src/ui/advanced_settings_dialog.cpp/.h is dead code -
+  not referenced by either the Makefile or CMakeLists.txt, and not called
+  from anywhere else in the codebase. Its own header comment already flags
+  it as an incomplete port superseded by settings_dialog.cpp +
+  HrSettingsRegistry. Left in place rather than deleted, since it isn't
+  shipped either way; worth actually removing or finishing in a future pass.
+
+[Version 2.2.2] - 2026-09-19
+
+- Fixed: starting a manual recording while Instant Replay was buffering
+  could leave the recording truncated/never finalizing (log: "writer thread
+  didn't close the previous recording's pipe in time", "segment writer
+  didn't finish gracefully - killing it", "ffmpeg didn't finish on its own
+  after 30s"). recording_controller.cpp: StopInstantReplayEncoderAsync()
+  now closes the replay segment's pipe synchronously BEFORE Start() swaps
+  in the manual recording's pipe, instead of from its background thread
+  (which by then acted on the manual recording's pipe).
+- Fixed: closing the app froze for several seconds with Instant Replay on
+  (replay ffmpeg was force-killed after two 3s timeouts). main_frame.cpp:
+  OnClose() now stops Instant Replay via DisableInstantReplay() before
+  TeardownPreview() detaches the pipeline it still needs.
+
+- Fixed: RAM usage stayed at its recording-time level (reported as "still
+  ~70MB after Stop") for as long as the post-Stop finalize took to finish -
+  which can itself run up to ~30s waiting on ffmpeg alone, longer once
+  audio mixing and hr_merge_av()'s own re-encode (see its CHANGELOG entry
+  above) are added on top - even with live preview disabled. The capture
+  pipeline (its BGRA frame buffer, the YUV/NV12 conversion pool, the
+  pipe-queue frame pool, and - with preview off - the DXGI Desktop
+  Duplication handle itself) used to only get freed at the very end of
+  that finalize tail. recording_controller.h/.cpp: split the pipeline
+  teardown/resume-Instant-Replay decision out of StopFinalizeTail() into
+  its own FinishPipelineAfterStop(), now called right after the capture/
+  writer threads actually stop, before the ffmpeg-wait/audio-merge work
+  runs - frees that memory (and the DXGI handle) within about a second of
+  pressing Stop instead of only once finalize fully completes.
+- Fixed: closing the app (or stopping a recording while it does) could
+  block for a moment - hr_webcam_capture.cpp's capture thread joined
+  unconditionally in its destructor, but IMFSourceReader::ReadSample()
+  runs synchronously with no way to interrupt an in-flight call and no
+  guaranteed upper bound, so a stalled camera driver or a device unplugged
+  mid-capture could leave that join waiting indefinitely (unlike every
+  other worker thread in this codebase, which already uses a bounded
+  timeout + detach-and-hand-off fallback - see Pipeline::handed_off in
+  hr_pipeline.cpp). hr_webcam_capture.cpp: same pattern now applied here -
+  a 2s bounded wait, then detach-and-self-delete-on-actual-exit instead of
+  blocking. Also: main_frame.cpp's OnClose() now kicks off
+  RecordingController::TeardownPreview() (already existed for exactly this
+  reason, just wasn't called on the way out) as soon as the window starts
+  closing, so the live-preview pipeline's own DXGI teardown runs in the
+  background overlapping the rest of shutdown instead of happening
+  synchronously, on the UI thread, inside ~RecordingController() at the
+  very end.
+
+  Fixed / improved (audit pass):
+  - hr_pipeline.cpp: pipe_handle/recording are std::atomic (UI vs capture/writer thread data race).
+  - hr_pipeline.cpp: catch-up frames are converted once and written N times (QueuedFrame::repeat) instead of re-converted up to 90x.
+  - hr_pipeline.cpp: an evicted (dropped) frame passes its timeline slots to the next one - fixes audio lagging behind video after "Recording overloaded: dropping frames".
+  - hr_pipeline.cpp / recording_controller: bounds-checked, change-aware preview fetch (hr_pl_get_preview_ex); closes a possible heap overflow.
+  - main_frame.cpp: preview repaints only on new frames; no per-paint snapshot copy; debounced overlay autosave; stuck-drag recovery; fewer idle relayouts.
+  - hr_audio.cpp: loopback (system audio) capture pads the silence WASAPI doesn't deliver, so system audio no longer runs ahead of the video; pause now discards queued audio.
+  - hr_audio.cpp: replay ring buffer trims in 1s chunks; WAV files written outside the audio mutex.
+  - hr_update.cpp: HTTPS-only, truncated/corrupt downloads rejected, version tag sanitised.
+  - hr_archive.cpp: PowerShell fallback works with spaces in paths; 2-minute timeout.
+  - console_window.cpp: `rm @homrec` script is UTF-8, waits on our PID, refuses root-like folders.
+  - hrc_config.cpp: settings/overlays saved atomically (temp file + replace).
+  - Removed stale duplicate src/hr_ffmpeg_runner.cpp (build uses ffmpeg/hr_ffmpeg_runner.cpp).
+
+- Optimized: hardware-encoded recordings (nvenc/qsv/amf) now convert BGRA
+  captures straight to NV12 instead of planar YUV420p. Previously every
+  hardware-encoded frame was converted to YUV420p and then silently
+  re-converted to NV12 by ffmpeg's own swscale right before hitting the
+  encoder - a redundant CPU-side color-conversion pass on every single
+  frame, on top of the CPU work HomRec itself already did. Software
+  (libx264/libx265) recordings are unchanged and still use YUV420p.
+  New: hr_bgra_to_nv12 / hr_bgra_to_nv12_band (hr_encoder_helpers.c),
+  Yuv420pWorkerPool::SetUseNv12 + hr_pl_set_output_pixfmt (hr_pipeline.cpp),
+  matching "-pixel_format"/"-pix_fmt" switch in hr_ffmpeg_runner.cpp
+  (picked automatically from the selected encoder, no new setting to
+  configure).
+
+- Fixed: hardware-encoded recordings (nvenc/qsv/amf) came out dark/dull
+  with a "blackness" look and no detail in shadows, while the same scene
+  recorded with libx264/libx265 looked correct. hr_bgra_to_nv12_band was
+  reusing the software path's full/PC-range (0..255) color math, tagged
+  with "-color_range pc" - a flag NVENC/QSV/AMF don't reliably write into
+  the encoded bitstream, so ordinary players fell back to the default
+  limited-range decode on genuinely full-range samples: everything below
+  source Y=16 crushed straight to black and the rest got pulled toward
+  the extremes, hitting dark scenes hardest. hr_bgra_to_nv12_band /
+  hr_bgra_to_nv12_band_sse41 (hr_encoder_helpers.c) now encode proper
+  limited/"tv" range (16..235 luma, 16..240 chroma) instead, matching
+  what a decoder assumes with no range flag present at all; the
+  hardware-encoder branch in hr_ffmpeg_runner.cpp now says
+  "-color_range tv" to match. Software (libx264/libx265) recordings are
+  untouched - still full range, still tagged pc, still correct.
+
+- Fixed: overlays couldn't be moved/resized on the preview - no frame ever
+  showed up and clicking did nothing, leaving "Position Overlays..." as the
+  only way. The preview now draws a labelled frame (with corner handles)
+  around every overlay, a clicked overlay stays selected and highlighted
+  after releasing the mouse, the cursor changes over grabbable frames/
+  handles, and the arrow keys nudge the selected overlay (Shift = 10px).
+  Frames are now mapped through the pipeline's real composite size instead
+  of the full monitor size, so they line up in window-capture mode too.
+- Fixed: with "Disable live preview" on, clicking the preview did nothing.
+  It now takes a screenshot and lets overlays be edited on it right in the
+  preview (right-click: Refresh screenshot / Done editing, or Esc). This
+  also works while a recording or Instant Replay is running, and no longer
+  risks tearing down the pipeline Instant Replay is using when it ends.
+
+[Version 2.2.1] - 2026-09-19
+
+- Fixed: ugly black borders/box on the whole recording when a game runs
+  exclusive fullscreen at a different resolution than the desktop (e.g.
+  1366x768 on a 1600x900 desktop) - a previous fix for the same mismatch
+  (see 2.2.1's "diagonal line/pixel corruption" entry below) plugged the
+  corruption by pinning dx_capture()'s output to the size the recording
+  buffer/ffmpeg pipe expect, but did it by black-letterboxing whatever
+  didn't fit - correct for a one-tick glitch, but a permanent eyesore for
+  a game that runs its whole session at the mismatched resolution.
+  hr_dx_capture() (hr_dxgi_capture.cpp) now nearest-neighbour stretches
+  the real captured frame to fill the pinned output shape instead, so the
+  recording always uses the full frame - visually indistinguishable from
+  native capture for near-identical aspect ratios like this one.
+- Fixed: recordings had a constant ~0.5-0.8s audio lag on every session.
+  hr_merge_av() (hr_tools.cpp) muxed the finished video and the captured
+  audio WAV assuming both start at the same real-world instant, but
+  video's "frame 0" and audio's "sample 0" are set several setup steps
+  apart in RecordingController::Start() (ffmpeg process spawn, DXGI
+  device/duplication creation, etc. all happen in between) with nothing
+  measuring or compensating for that gap. Start() now measures the actual
+  gap (av_start_skew_sec_, logged) between the pipe being pointed at the
+  output file and hr_audio_reset_buffers() marking audio's zero-point, and
+  hr_merge_av() applies it as an -itsoffset (or -ss trim, if the gap runs
+  the other way) on the audio input so the two line back up.
+- Fixed: window-capture recordings (e.g. recording just the Garry's Mod
+  window) came out as skewed, streaky, garbled video. capture_loop()
+  (hr_pipeline.cpp) cropped the window rect by compacting bgra_buf IN
+  PLACE. Any tick that didn't get a fresh DXGI frame (the very first call
+  always, plus every HR_DX_TIMEOUT / HR_DX_LOST tick) deliberately
+  re-encodes "whatever is still in bgra_buf" - which was now the already
+  cropped, tightly-packed data - and cropped it AGAIN using the full-
+  monitor row stride, shearing the picture more each time. bgra_buf now
+  always stays the pristine full-desktop frame; the crop goes into a
+  separate work_buf. Overlays and the cursor are also drawn on a work
+  copy now instead of on bgra_buf itself, so repeated ticks no longer
+  stack overlays/cursor on top of themselves (ghost trails, alpha overlays
+  getting darker) either. The live preview reads the same per-tick frame.
+- Fixed: app crashed (silent std::terminate) on the SECOND Stop of a
+  session. RecordingController::StopAsync() assigned a new std::thread to
+  finalize_thread_ without joining the previous recording's (already
+  finished, but never joined - the UI uses StopAsync, only the blocking
+  Stop() joined) thread; assigning to a joinable std::thread terminates
+  the process. StopAsync() and Start() now join it first, and Start()
+  refuses (with a message) while a previous recording is still being saved.
+- Fixed: possible out-of-bounds read / crash when a running preview
+  pipeline was re-targeted at a different window (crop rect changed by
+  the UI thread while capture_loop() was mid-frame and reading the four
+  crop_* fields separately). The rect is now guarded by crop_mtx,
+  snapshotted once per frame and re-validated against the real frame size.
+- Fixed: a timed-out hr_pl_end_recording_segment() left its close request
+  armed, so the writer thread could close the NEXT recording's pipe (early
+  EOF to ffmpeg) as soon as its queue ran empty. Cleared on timeout and
+  whenever hr_pl_set_recording() (re)activates a pipe.
+- Fixed: hr_dxgi_capture.cpp's Map() wait deadline was stored in a DWORD
+  while GetTickCount64() is 64-bit, so after ~49.7 days of PC uptime every
+  read-back timed out instantly (frozen/duplicated frames). Now ULONGLONG.
+- Fixed: recorded audio ending up noticeably (often 15-20s) "behind" the
+  video on playback. RecordingController::Start() (recording_controller.cpp)
+  used to call hr_audio_reset_buffers() - the call that actually starts
+  accumulating this recording's audio - *before* the capture pipeline was
+  even created/started, i.e. before hr_pl_create()'s D3D11 device + DXGI
+  duplication setup (including its own up-to-40x50ms retry loop when the
+  desktop isn't immediately duplicable: a UAC prompt, a fullscreen game
+  holding exclusive access, a driver still waking up, etc.) and before
+  hr_pl_start() had produced a single real video frame. hr_merge_av()
+  (hr_tools.cpp) lines the resulting audio track up starting at t=0
+  against the video track's own frame 0 with no compensating offset, so
+  audio's t=0 being consistently earlier in real time than video's t=0
+  meant the audio matching any given on-screen moment played out later
+  than that moment was shown - "the sound lags the picture." Moved the
+  hr_audio_reset_buffers()/hr_audio_set_volumes() call to right after the
+  pipeline is confirmed started and flipped into recording mode instead,
+  as close as this function can get audio's start to video's actual first
+  frame.
+- Fixed: recording could measurably drop game framerate (e.g. Minecraft)
+  more than it needed to, worst on 4-6 core machines. Two contributing
+  issues in hr_pipeline.cpp:
+    1. Yuv420pWorkerPool::EnsureStarted() sized its thread pool as
+       min(hardware_concurrency() - 1, 4) bands, which only ever held back
+       a single core "for the capture thread ... and everything else" -
+       despite that same comment's own wording ("holding a couple back").
+       On a quad-core machine that put 75% of all cores into color
+       conversion alone (67% on a hexa-core), on top of the separately-
+       boosted capture/writer threads, starving the actual game of CPU for
+       the whole recording. Now reserves 2 cores before splitting into
+       bands (still capped at 4 bands total, so 8+ core machines are
+       unaffected).
+    2. writer_loop() set THREAD_PRIORITY_HIGHEST unconditionally, once, on
+       thread start - unlike capture_loop(), which already modulates
+       between HIGHEST and ABOVE_NORMAL based on boost_priority (see that
+       flag's own comment: it exists specifically so a passive feature
+       like Instant Replay's background buffer doesn't run at a
+       system-wide-contending priority indefinitely just for sitting
+       there unnoticed). Instant Replay's background segment writer keeps
+       this thread genuinely busy the entire time a game is running, so it
+       was paying that same cost the capture-thread fix was supposed to
+       have already removed. writer_loop() now checks boost_priority the
+       same way capture_loop() does, both at thread start and on every
+       loop iteration (since boost_priority can flip without the writer
+       thread restarting).
+
+[Version 2.2.0] - 2026-09-17 (stable)
+
+- Fixed: recording still ran the live-preview thumbnail generator at up
+  to "Preview FPS" (Settings > General, 60 by default) times a second
+  even with Settings > "Disable live preview (for performance)" checked
+  - the exact CPU cost that setting exists to remove, still being paid
+  in full. A manual recording always keeps a real Pipeline object alive
+  (hr_pipeline.cpp) regardless of this setting, since it's also the
+  encoder path - so the setting couldn't be implemented by simply not
+  creating one. But capture_loop() had no way to know the thumbnail it
+  was building every tick (a full box-filter downscale of the captured
+  frame, not a cheap operation) had nowhere to go: PreviewPanel::OnPaint()
+  already skips reading it whenever disable_preview is set (it just
+  draws the ":)" placeholder instead), so every one of those thumbnails
+  was pure waste. Added Pipeline::preview_needed (hr_pipeline.cpp) plus
+  hr_pl_set_preview_needed(), and wired RecordingController to push it
+  from state_.disable_preview at every point a pipeline is created *or*
+  reused (Start(), EnableInstantReplay(), EnsurePreview(), and
+  RefreshPreviewSettings() - the last one specifically covers flipping
+  the checkbox mid-recording, where the existing pipeline has to be
+  reached directly rather than only affecting the next preview-only
+  pipeline EnsurePreview() would create). capture_loop() now skips
+  update_preview() entirely when the flag is off. This is a real,
+  continuous CPU cut during every recording made with the setting on -
+  the reason it exists in the first place ("weak devices").
+  Investigated but did NOT find a memory leak to go with it: audited
+  pipe_queue/free_bufs (hr_pipeline.cpp) and the overlay compositor's
+  per-type caches (hr_overlay_render.cpp) - all are properly bounded
+  (MAX_QUEUE_SIZE/MAX_FREE_BUFS, and PruneStaleCaches() on every overlay
+  count change) and none grow unbounded. The one bug that *did* match
+  "memory climbs during recording, only partly comes back after Stop"
+  (pipe_queue bypassing its own cap during a catch-up burst) was already
+  fixed in an earlier beta - see hr_pipeline.cpp's own "BUGFIX (freeze +
+  memory growth after Stop..." comment a few lines above where this
+  round's fix landed. The ~100-150MB a recording session settles at
+  going forward looks like ordinary buffer overhead for this
+  resolution/overlay setup (capture buffer, scaled/YUV working buffers,
+  the wx UI itself) rather than a leak, and ffmpeg's own memory is a
+  separate process not even counted in that figure (see hr_pc_log.cpp -
+  it reads GetProcessMemoryInfo() on hr.exe's own process handle only).
+
+- Added: File menu now has "Open Program Files" (opens the folder hr.exe
+  itself lives in - ffmpeg/, plugins/, icons/, logs/, homrec.hrc - as
+  distinct from the existing "Open Recordings Folder," which opens
+  wherever Settings > Output folder points, often a completely different
+  place) and "Import Plugin (.hrp)..." (file picker -> copies the chosen
+  .hrp into plugins/ next to hr.exe, same as the README's documented
+  "download it and drop it into plugins/" step, then calls
+  LuaPluginEngine::LoadPluginArchive() on it immediately instead of
+  requiring a restart - LoadAll() already extracts/loads any *.hrp
+  sitting in plugins/ the same way on every future launch, so this is
+  just doing that copy-and-load through a dialog instead of a file
+  manager). main_frame.h/.cpp, language.cpp (new "open_program_files"/
+  "import_hrp" keys, English defaults + required-key list so a custom
+  .hrl without them still falls back cleanly instead of showing a blank
+  label).
+
+- Version bump only, no functional/behavior change:
+  HR_APP_VERSION 2.2-b.4 -> 2.2.0. This is the first release this round
+  actually calls "stable" rather than a numbered beta - see 2.2-b.4's
+  own changelog note below about the beta-numbering scheme this
+  supersedes.
+
+[Version 2.2-b.4] - 2026-09-17
+
+Note on the version number: HR_APP_VERSION (src/ui/version.h) had stayed at
+a flat "2.2.0" through the entire beta/beta2/.../beta5 cycle above - it was
+never actually bumped per beta despite the changelog tracking each one by
+name. This release is the first to put a real, distinct string into
+HR_APP_VERSION (previously it was always the same "2.2.0" no matter which
+beta was actually running). It lands as "2.2-b.4" per this round's
+instructions rather than continuing on from "beta5" above; whoever cuts
+the next release should decide whether that continues this "-b.N" scheme
+going forward (e.g. "2.2-b.5" next) or jumps back in line with the
+changelog's own beta numbering - just flagging that the two numbering
+tracks aren't currently in sync so it doesn't look like a version regression.
+
+- Fixed: hr_version_string() (src/hr_app_logic.cpp) always returned a
+  hardcoded "1.6.2", completely disconnected from HR_APP_VERSION and
+  stale since long before the 2.2 betas - despite version.h's own header
+  comment already claiming hr_version_string()/hr_version_gt() "build off
+  HR_APP_VERSION now". CURRENT_VERSION now is HR_APP_VERSION (added the
+  `#include "ui/version.h"`) instead of a second hand-maintained literal.
+- Fixed: hr_ff_destroy() (ffmpeg process manager) still unconditionally
+  closed ctx->hStdin when force-killing a still-running process, in both
+  pipe_input and non-pipe_input mode. In pipe_input mode that handle is
+  the same raw-video pipe the capture pipeline's writer thread owns and
+  closes itself exactly once, right after its loop ends (see
+  writer_loop() in hr_pipeline.cpp) - this is the exact same
+  handle-ownership race hr_ff_kill() and hr_ff_stop_graceful() were
+  already fixed for elsewhere in this same file, just missed here.
+  RecordingController::StopFinalizeTail()'s ~30s last-resort force-stop
+  path calls hr_ff_destroy() directly on a still-running ctx, which is
+  precisely the case where the writer thread can still be mid-WriteFile()
+  on that handle from another thread. Now only non-pipe_input mode (where
+  stdin is solely ffmpeg's own interactive channel) closes the handle
+  here directly; pipe_input mode just drops the reference, same as the
+  other two functions.
+- Reorganized: ffmpeg-related code and the ffmpeg binary itself now live
+  under a new ffmpeg/ folder at the repo root instead of being split
+  between src/ (hr_ffmpeg_runner.cpp) and the bare repo root
+  (ffmpeg.exe). ffmpeg/hr_ffmpeg_runner.cpp is unchanged apart from the
+  fix above; it's still compiled straight into hr.exe (no new DLL/build
+  target - Makefile and CMakeLists.txt both just point at the new path).
+  hr_find_ffmpeg() (src/hr_app_logic.cpp) now checks <exe_dir>/ffmpeg/
+  first, still falling back to <exe_dir> itself, cwd, then PATH, so older
+  portable installs that had ffmpeg.exe sitting loose next to hr.exe keep
+  working. installer/HomRec.iss now packages ffmpeg\ffmpeg.exe into
+  {app}\ffmpeg instead of {app} directly, and tools/homrec_build.py's
+  find_ffmpeg()/collect_files() look for and package it from ffmpeg/ the
+  same way (falling back to the old repo-root ffmpeg.exe location if
+  that's still where it's sitting locally). Did not go further and add a
+  separate ffmpeg/include/ - hr_ffmpeg_runner.cpp has never had its own
+  header (every caller just declares the handful of extern "C" hr_ff_*()
+  functions it needs inline, same as hr_pipeline.cpp already does for
+  hr_dx_*/hr_sw_*), and nothing else in this codebase keeps headers in a
+  separate include/ tree away from their .cpp, so there's nothing for an
+  include/ folder to hold yet. ffmpeg.exe itself is still not checked
+  into the repo (third-party binary) - see the new ffmpeg/README.md.
+- Fixed: installer/HomRec.iss's file-association task has referenced
+  icons\files_icons\hrc.ico / hrp.ico (and SetupIconFile has referenced
+  icons\hrsetup.ico) since the feature was added several betas ago, but
+  none of those three files actually existed anywhere in the repo -
+  icons/files_icons/ didn't even exist as a folder. Because every one of
+  those [Files]/[Icons] entries is flagged skipifsourcedoesntexist, ISCC
+  would happily build a "successful" installer that silently shipped
+  with no .hrc/.hrp file-type icons and reused hr.exe's own main.ico for
+  Setup.exe instead of a dedicated one - never an error, just quietly not
+  doing what the script (and installer/README.md) both claim it does.
+  Added icons/files_icons/hrc.ico and hrp.ico (simple flat file-badge
+  icons, blue/green, labelled HRC/HRP) and icons/hrsetup.ico (a
+  distinct install-themed icon - box + arrow - instead of another copy
+  of main.ico) so the installer actually has real assets to package.
+
+[Version 2.2 beta5] - 2026-09-16
+
+- Fixed: adding a custom hotkey (Settings > Hotkeys > "+ Add Hotkey", or
+  just opening that tab with any custom hotkeys already saved) popped a
+  "wxWidgets Debug Alert" dialog every time. Cause: AddCustomHotkeyRow()
+  (settings_dialog.cpp) added its action-text field to a
+  wxBoxSizer(wxHORIZONTAL) row with `wxEXPAND | wxALIGN_CENTRE_VERTICAL`
+  - wxBoxSizer::DoInsert() asserts (debug builds only) on wxEXPAND
+  combined with any alignment flag, since wxEXPAND already fills that
+  cell and the alignment flag is a no-op at best. Dropped the redundant
+  wxALIGN_CENTRE_VERTICAL; layout is unchanged since wxEXPAND already did
+  the job. Checked the rest of the codebase for the same pattern - this
+  was the only instance.
+- Fixed: the hotkey "Bind"/capture button (the (none)/F9/etc. box you
+  click then press a key into - HotkeyButton, themed_widgets.h/.cpp) was
+  almost invisibly small on the custom-hotkey rows, making it hard to
+  even click to start capture. Cause: HotkeyButton is a bare wxPanel that
+  draws itself (no child sizer of its own) and never overrode its best
+  size, so any sizer cell that doesn't force a size onto it directly
+  (proportion 0, no wxEXPAND - which is how AddCustomHotkeyRow() adds it,
+  unlike the four fixed hotkeys' growable-column grid) collapsed it down
+  to whatever the platform's bare-minimum panel size is. Added
+  HotkeyButton::DoGetBestSize(), sized off a realistic combo string
+  ("Control+Shift+PageDown") with a floor under both dimensions, so it's
+  a sensible clickable size everywhere it's used.
+- Hardened HomRecMainFrame::OnClose() against closing via Alt+F4
+  specifically crashing. Alt+F4 is a system accelerator Windows can
+  re-deliver as a second WM_CLOSE while the first is still unwinding
+  (Destroy() only *schedules* the real destruction, same "several
+  event-loop turns later" gap as the g_frame race fixed in beta4 below) -
+  a second entry to OnClose() would re-run every teardown step
+  (hr_hk_stop/hr_hk_destroy on an already-torn-down hotkey handle,
+  tray_icon_ cleanup, etc.) a second time. Added an IsBeingDeleted()
+  guard at the top of OnClose() - wx's own idempotency flag for this,
+  set synchronously by Destroy() before the object is actually freed -
+  so a re-entrant close bails out instead of repeating the teardown.
+  Investigated but could not fully confirm against a real crash log:
+  logs.7z couldn't be opened in this environment (no 7z/p7zip available
+  and no network access to install one), so this fix is based on static
+  review of the shutdown path, not a captured stack trace. Everything
+  else checked there (RecordingController's destructor thread-joins, the
+  update-check thread, the hotkey thunks) already looked correctly
+  guarded. If this crash recurs, a plain-text crash log/dump (not .7z)
+  would help pin down the exact stack.
+
+[Version 2.2 beta4] - 2026-09-16
+
+- Fixed: a recording almost always took ~20-30s to "save" after pressing
+  Stop, and the resulting file was frequently corrupt/unplayable -
+  reported as "a 10 second recording saves in about 20 seconds." Root
+  cause: StopAsync() deliberately keeps the capture pipeline's writer
+  thread alive after Stop() when live preview is left on (the default),
+  so the preview keeps working instead of going dark - but the writer
+  thread is also the only thing allowed to close ffmpeg's stdin pipe
+  (hr_ff_stop_graceful() doesn't, by design - see its own comment), and
+  it only ever did that as part of its own full shutdown, which this
+  path intentionally skips. So ffmpeg sat blocked reading pipe:0,
+  StopFinalizeTail()'s hr_ff_wait() (3s/10s/30s budget) could never see
+  the EOF it needed and always ran out its full timeout, and the file
+  got TerminateProcess()'d mid-write instead of finalized. This wasn't
+  occasional/under-load behavior - it happened on every single Stop with
+  preview enabled. Added hr_pl_end_recording_segment() (hr_pipeline.cpp):
+  asks the writer thread to close whatever pipe it currently holds once
+  its queue drains, without stopping the thread or the pipeline, and
+  blocks the caller briefly for confirmation. StopAsync() now calls this
+  before waiting on ffmpeg instead of skipping straight to the wait.
+- Fixed: Instant Replay's segment writer logged "didn't finish
+  gracefully in time - killing it" on essentially every handoff (pausing
+  for a manual recording, "Save Replay," turning the feature off) instead
+  of only under genuine load, and the segment being closed at that moment
+  came out truncated/corrupt. Same root cause as above - the segment
+  writer's ffmpeg shares the same pipeline_/pipe_handle as everything
+  else this class does with it, and nothing was ever closing that pipe
+  on a segment handoff either. StopInstantReplayEncoder() and
+  StopInstantReplayEncoderAsync() now both call
+  hr_pl_end_recording_segment() before stopping/waiting on that segment's
+  ffmpeg process.
+- Fixed: a crash ("unhandled C++ exception / std::terminate()") that
+  could occur about a second after the "Instant Replay: segment writer
+  didn't finish gracefully in time - killing it" warning.
+  StopInstantReplayEncoderAsync() runs its stop/wait/kill/destroy
+  sequence on a bare std::thread with no exception handler anywhere
+  above it on the call stack - every other bare-thread lambda in this
+  codebase (Pipeline::capture_loop()/writer_loop()) was already wrapped
+  in a try/catch specifically because an uncaught throw there calls
+  std::terminate() and takes the whole app down; this one thread was
+  missed. Wrapped it the same way.
+- Fixed (found while fixing the above): StopInstantReplayEncoderAsync()'s
+  background thread now also has to call hr_pl_end_recording_segment(),
+  which touches the pipeline_ pointer - but that thread used to be fully
+  detached, and Start()/EnableInstantReplay() can destroy and replace
+  pipeline_ (a fresh hr_pl_create()) almost immediately after pausing
+  Instant Replay if the capture size or monitor changed, racing the
+  detached thread's use of the now-freed pointer. Changed the thread to
+  be tracked (instant_replay_stop_thread_) instead of detached, same
+  pattern preview_teardown_thread_/JoinPendingPreviewTeardown() already
+  use for the analogous DXGI-duplication-handle race; added
+  JoinPendingInstantReplayStop(), called at every point pipeline_ is
+  about to be destroyed/replaced and in the destructor.
+
+  Investigated but NOT changed: high idle/AFK CPU and memory use (~15MB /
+  5-8%) with preview and the audio mixer both off. This traces to Instant
+  Replay's background buffer actually being on (EnableInstantReplay()) -
+  it's a real, continuous rolling recording (full capture rate + live
+  encode to disk), which is inherently more expensive than idle preview
+  regardless of the preview/audio-mixer settings; those two are unrelated
+  knobs. This isn't a discrete bug the way the three fixes above were, so
+  it wasn't touched this round - happy to look at cheaper ways to run
+  Instant Replay (e.g. a lower dedicated buffer fps/quality separate from
+  manual-recording settings) as a followup if that's wanted.
+
+[Version 2.2 beta3] - 2026-09-15
+  RecordingController::StopAsync() exists specifically so the Stop
+  button doesn't have to block the UI thread, but it still called
+  hr_pl_stop() directly - which waits (with a timeout) for the capture
+  thread and then the writer thread to each confirm they've actually
+  stopped, up to ~1s per thread by design - before ever spawning the
+  background finalize thread. Every one of those waits was still
+  happening synchronously on the UI thread. Moved hr_pl_stop() inside
+  finalize_thread_, alongside the rest of the already-async finalize
+  work.
+- Fixed: the live preview would freeze for up to 3 seconds right after
+  clicking Start, if Instant Replay's background buffer happened to be
+  running. Start() paused it by calling StopInstantReplayEncoder(),
+  which does hr_ff_wait(replay_ff_, 3000) - a synchronous wait, on the
+  UI thread, for the segment writer to finish gracefully. Added
+  StopInstantReplayEncoderAsync(), which hands the same stop/wait/kill/
+  destroy sequence off to a detached background thread instead; Start()
+  now uses that. Losing at most a fraction of a second off Instant
+  Replay's last in-progress segment is a fine trade for not freezing
+  the UI on every single recording.
+- Fixed: turning off (hiding) a webcam overlay didn't release the
+  actual camera device - the LED stayed on and other apps still saw it
+  as "in use" for as long as the app was running, however long the
+  overlay stayed hidden. OverlayCompositor::Apply() skipped hidden
+  overlays entirely, so their cache entry (and the HrWebcamCapture
+  inside it - a live background thread plus an open Media Foundation
+  device handle) never got released the way an actual device change or
+  overlay deletion already did. Hidden webcam overlays now have their
+  cache entry released immediately; it reopens lazily and cheaply if
+  the overlay is shown again.
+- Fixed: Instant Replay's "Save Replay" clips came out with no audio at
+  all, regardless of mic/system-audio settings - the segment writer
+  only ever piped raw video. From the outside this looked the same as
+  "video and audio saved separately," since the actual manual-recording
+  Stop() path (mic+sys WAV -> mix -> hr_merge_av) was already working
+  correctly and had nothing wrong with it. Added a rolling audio buffer
+  (hr_audio_set_max_buffer_sec()/hr_audio_snapshot_to_wav() in
+  hr_audio.cpp) that runs only while Instant Replay's background buffer
+  is active with no manual recording in progress, and wired SaveReplay()
+  to snapshot/mix/merge it into the saved clip via the same hr_merge_av()
+  path manual recordings use - non-destructively, so the rolling window
+  keeps accumulating for the next Save Replay instead of being reset to
+  empty. A manual Start() explicitly resets the cap back to "unlimited"
+  first, so this can't ever truncate an actual recording's audio.
+- Fixed: the capture thread ran at THREAD_PRIORITY_HIGHEST any time
+  Instant Replay's background buffer was on, even with no manual
+  recording running - because that also flips the same internal
+  `recording` flag a real recording does. A feature explicitly meant to
+  sit in the background unnoticed was, in practice, running at an
+  elevated, system-wide-contending thread priority indefinitely for as
+  long as the app was open, which is a very plausible source of "the PC
+  is loud" on anything with a small cooler (laptops especially).
+  Decoupled thread-priority boosting from the `recording` flag into its
+  own boost_priority flag (hr_pl_set_priority_boost() in
+  hr_pipeline.cpp), set only while a manual recording (or a replay
+  clip actively being saved) is genuinely in progress.
+
+[Version 2.2 beta2] - 2026-09-14
+
+- Improved: crash reports for "unhandled C++ exception / std::terminate()"
+  crashes (several users have hit these, always logged as "no dump
+  written") now actually get a minidump. hr_crash_handler.cpp only
+  wrote a dump when it had a real EXCEPTION_POINTERS record from the
+  SEH filter, which the terminate() path never has by definition -
+  every one of these crashes was previously undiagnosable from the
+  outside. MiniDumpWriteDump's exception-info argument is optional, so
+  the terminate handler now synthesizes one from its own thread's
+  current context (via RtlCaptureContext) when there's no real
+  exception record, giving a real dump with the crashing thread's call
+  stack instead of a bare log line. Still investigating the actual
+  overload-adjacent crash itself (all reported cases so far follow a
+  "Recording overloaded: dropping frames" warning within seconds) -
+  this at least makes the next occurrence debuggable.
+- In welcome_dialog.cpp, the bounding box for the text on the welcome page (msgRect) 
+  had a hardcoded height range of 168–300, which wasn't enough to fit 
+  the entire two-paragraph text—without the DT_NOCLIP flag, DrawTextW simply
+  clips whatever extends beyond the rectangle's boundaries (#5)
+- Fixed: Stop could finalize a recording to a broken ~1KB placeholder
+  file (just the ftyp/moov header, nothing playable). Root cause: the
+  raw video pipe to ffmpeg shares its OS handle with ffmpeg's stdin, and
+  the graceful-stop path (hr_ff_stop_graceful() in
+  hr_ffmpeg_runner.cpp) closed that handle itself the instant Stop was
+  pressed - including while the writer thread could still be detached
+  and mid-write, draining a queued frame backlog in the background (see
+  hr_pl_stop()'s handed-off path). That truncated the raw video stream
+  and sent ffmpeg an early EOF before more than a few frames had gone
+  out. In pipe-input mode, closing this handle is now solely the writer
+  thread's job, done exactly once right after its loop actually ends
+  (hr_pipeline.cpp); the stop path just drops its own reference instead
+  of touching the handle. Non-pipe-input mode (stdin as ffmpeg's real
+  interactive control channel) is unaffected and still gets the "q\n"
+  graceful-stop keystroke.
+- Fixed: on an overloaded machine (e.g. recording heavy screen content
+  like a video playing back), the finished recording could come out
+  drastically sped up with most of the audio missing - a 16-second
+  recording could turn into a ~1-second, tiny (~100KB) file. Root cause:
+  frames are piped to ffmpeg with a fixed nominal framerate and no real
+  per-frame timestamps, so when the writer/encoder falls behind and
+  hr_pipeline.cpp's pipe_queue backpressure drops more frames than it
+  can duplicate to compensate, the encoded video.mp4's real duration
+  silently shrinks to (frames actually written / nominal fps) - which
+  can be a small fraction of how long the recording actually ran. The
+  final merge step (hr_merge_av in hr_tools.cpp) then used a flat
+  "-shortest", which cut the accurate, wall-clock-captured audio down
+  to match that broken short video instead of fixing the real problem.
+  Now hr_merge_av() compares the video's own encoded duration against
+  the real elapsed recording time (passed in by
+  RecordingController::StopFinalizeTail()) and, if the video is
+  significantly shorter, re-encodes it with a "setpts" filter to
+  stretch it back to real speed before merging - so the output plays at
+  the correct speed with the full audio intact instead of losing audio
+  to a "-shortest" trim. A normal recording (no such gap) still takes
+  the old, fast stream-copy merge path unchanged.
+
+[Version 2.2 beta] - 2026-09-12
+
+=== Added ===
+
+- Custom action hotkeys. Settings > Hotkeys now has a "Custom Hotkeys"
+  section: add any number of rows, each binding a global hotkey to an
+  action string - exactly what you'd type into the console or put in a
+  .cfg file (a built-in command, a "setting = value" assignment like
+  "disable_preview = true", or anything a plugin registered via
+  homrec.register_command()/register_setting()). Coexists with the four
+  fixed hotkeys (Start/Stop, Pause, Fullscreen, Save Replay). Persisted
+  in homrec.hrc as a new [custom_hotkeys] section, same pattern
+  [overlays] already used.
+- 10 new Lua plugins in Hom/plugins/ (source in <id>-src/, packaged as
+  <id>.hrp, listed in plugins/index.json for `hom install <id>`):
+  watermark, rec-info, webhook-notify, soundboard, clip-organizer,
+  now-playing, profiles, diag-tools, twitch-info, backup-config. All
+  written against the existing homrec.* Lua API (register_command,
+  register_setting, settings_get/set, store_get/set, show_toast,
+  http_get/post, print/log, and the on_load/on_recording_start/
+  on_recording_stop/on_replay_saved hooks) - no new engine-side API
+  surface was added to support them.
+- Settings > Video & Codec: a "Test Recording (5s)" button. Runs a short,
+  disposable recording of the selected monitor using whatever codec/
+  encoder preset is currently picked in the tab (even if you haven't hit
+  Save yet), then deletes the file and shows the results in a popup:
+  encoder actually used (after GPU-encoder fallback), resolution,
+  average FPS, frames captured/dropped, and a plain-language verdict on
+  whether the machine kept up. Lets you sanity-check a codec/hardware
+  encoder before committing to a real recording. Uses its own capture
+  pipeline/ffmpeg process (never the real recording's), so it can't be
+  confused with an actual recording elsewhere in the app; briefly pauses
+  the live preview for the 5 seconds if it's running (DXGI only allows
+  one capture handle per monitor at a time) and restores it automatically
+  afterward.
+
+=== Fixed ===
+
+- Build: src/hr_hotkey.cpp used std::vector (for the new Custom Hotkeys
+  storage above) without including <vector>, so it failed to compile on
+  its own (everything depending on HotkeyCtx::customs cascaded into
+  further errors right behind it). Added the missing #include <vector>.
+- Recordings could finish several times shorter than the actual time
+  spent recording (e.g. a 44s take saved as an 11s file) on hardware too
+  weak to sustain the requested resolution/fps. The pipeline's rawvideo
+  pipe to ffmpeg has no per-frame timestamps - the muxed duration is
+  just frame_count/declared_fps - and the existing catch-up mechanism
+  meant to compensate for a falling-behind encoder was defeated by the
+  same MAX_QUEUE_SIZE backpressure it was supposed to work around: its
+  duplicate "catch-up" frames got evicted from the queue just as fast as
+  the live ones whenever the writer genuinely couldn't keep up, so they
+  never actually reached ffmpeg. Catch-up reps now bypass that backpressure
+  cap instead of being dropped, so a chronically overloaded recording
+  takes longer to finalize after Stop rather than silently losing
+  timeline length.
+- h264_amf recordings could come out visibly washed-out/faded compared
+  to the same recording with libx264. The app's own BGRA->YUV conversion
+  (hr_encoder_helpers.c) produces full-range (PC, 0-255) BT.601 data, but
+  nothing ever told ffmpeg/the encoder that, so decoders had to guess -
+  libx264's output happened to look right by luck of default player
+  behavior, but h264_amf's own range signaling made the mismatch visible.
+  hr_ffmpeg_runner.cpp now explicitly declares
+  "-color_range pc -colorspace smpte170m -color_primaries smpte170m
+  -color_trc smpte170m" so both encoders are told the truth instead of
+  guessing.
+- FFmpeg could fail to launch with a bare "Failed to start the ffmpeg
+  process" and no further explanation, on machines where the ffmpeg
+  path, output path, or a Windows username anywhere in those paths
+  contained non-ASCII characters. _build_cmdline() in
+  hr_ffmpeg_runner.cpp converted those std::string (UTF-8) args to
+  std::wstring with a plain std::wstring(s.begin(), s.end()), which
+  widens each byte 1:1 instead of decoding UTF-8 - correct only for
+  pure ASCII input. Any multi-byte UTF-8 sequence came out as garbled
+  wide characters, so CreateProcessW either couldn't find the exe or
+  choked on a corrupted command line and failed outright.
+  _build_cmdline() now decodes every one of these args with
+  MultiByteToWideChar(CP_UTF8, ...), matching the conversion already
+  used everywhere else in the app (see hr_app_logic.cpp's
+  WideCharToMultiByte(CP_UTF8, ...) for the mirror-image direction).
+- Webcam overlays could render as a fully transparent/blank square even
+  though the fix in 2.1.0 had frames arriving correctly.
+  hr_webcam_capture.cpp copies frames straight out of the source
+  reader's RGB32 buffer, but that format's 4th byte per pixel is
+  padding, not a real alpha channel, and consumer webcam drivers
+  routinely leave it at 0. The overlay compositor's CompositeBgra()
+  (hr_overlay_render.cpp) treats every layer's 4th byte as genuine
+  per-pixel alpha, so a 0 there made the whole webcam layer invisible
+  regardless of what the camera was actually seeing. Capture now forces
+  that byte to 0xFF (fully opaque) right after each frame is copied out
+  of the reader, before it ever reaches the compositor.
+- If the ffmpeg process ended unexpectedly mid-recording (crashed, was
+  closed externally, hit a fatal encode error, etc.), nothing ever
+  noticed: RecordingController::PollStats() never checked whether ffmpeg
+  was actually still alive, so AppState.recording just stayed true
+  forever. The bottom-left status dot, elapsed-time readout, and
+  "Recording"/"Paused" label are all driven off that flag (and off a
+  wall-clock timer that keeps ticking regardless of whether anything's
+  actually being encoded), so they'd carry on looking like a perfectly
+  normal in-progress recording indefinitely - nothing was left running
+  or being written, but the UI never said so. PollStats() now detects
+  this (hr_ff_is_running() already existed for exactly this, but nothing
+  called it) and main_frame.cpp automatically runs the same stop/
+  finalize sequence a manual Stop() would, resets the status bar back to
+  Ready, and shows a "Recording Interrupted" popup explaining what
+  happened - instead of leaving the last few seconds of recording state
+  stuck on screen until you noticed and hit Stop yourself.
+
+[Version 2.1.0] - 2026-09-10
+
+=== Fixed ===
+
+- Window capture (File > Select Window to Record / the window picker
+  dialog) silently recorded the wrong thing whenever the target window
+  lived on a different monitor than Settings > Monitor happened to be
+  set to: RecordingController::ResolveCaptureSize() (src/ui/
+  recording_controller.cpp) always captured state_.monitor_id's monitor
+  first and only tried to crop the window's rect out of *that* frame
+  afterwards, so a window on any other monitor had little/no overlap
+  with what was actually captured, tripped the "entirely off the
+  selected monitor" fallback, and quietly recorded that other monitor's
+  full desktop instead - with no error, so it looked like "record just
+  this window" simply didn't work. ResolveCaptureSize() now resolves the
+  target window first and picks whichever monitor its center point
+  falls on, so window capture works regardless of what Settings >
+  Monitor is set to; desktop-only recordings are unaffected. Also
+  reuses that one window resolve for both the monitor pick and the crop
+  rect instead of re-resolving the window a second time.
+- Webcam overlays showed as an empty box with nothing in it - even
+  though the same camera worked fine in every other app, and even in
+  the final recorded video, not just the live preview.
+  hr_webcam_capture.cpp created its IMFSourceReader with no attributes
+  and then requested RGB32 frames; almost no consumer webcam natively
+  streams RGB32 (most do YUY2/NV12/MJPG), so that SetCurrentMediaType
+  call silently failed, the capture thread gave up, and
+  GetOrRenderWebcam() (hr_overlay_render.cpp) just kept returning
+  nothing to composite, forever, with only a single one-time log
+  warning to show for it. Now creates the reader with
+  MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING enabled, which makes Media
+  Foundation insert the color-conversion MFT it needs automatically, so
+  the RGB32 request succeeds regardless of the camera's native format.
+- Audio Mixer level meters (Microphone/Desktop Audio bars) visibly
+  stepped instead of sliding, with a noticeable lag and a peak-hold dot
+  that stuck around far too long. They were being redrawn from
+  OnStatsTimer's 500ms/2Hz tick even though hr_peak_decay()
+  (hr_ui_utils.cpp) is written assuming ~50ms/20Hz calls - at 2Hz the
+  peak-hold sat for ~10s instead of ~1s and then fell off in big jumps
+  instead of a smooth slide. The meters now run on their own timer,
+  decoupled from the stats tick (main_frame.cpp's new
+  OnLevelMeterTimer()/RestartLevelMeterTimer()).
+- Closing the app (the titlebar X, or File > Exit) could crash with
+  HomRec's own "ran into a problem and needs to close" dialog,
+  especially when closing shortly after launch. Cause: g_frame
+  (main_frame.cpp) was a plain pointer only cleared in
+  ~HomRecMainFrame() - which Destroy() merely *schedules*, possibly
+  several event-loop turns later - while CheckHomUpdatesAsync()'s
+  detached background thread (the startup plugin-update check, which
+  can run for up to 15s) reads g_frame with no synchronization at all
+  and calls wxQueueEvent(g_frame, ...). Closing while that thread was
+  still in flight could queue an event onto a frame that was already
+  (or about to be) freed. g_frame is now std::atomic<HomRecMainFrame*>
+  and is cleared at the top of OnClose()'s real-close path instead of
+  only in the destructor; the hotkey thunks and the update-check
+  handler now read it once via .load() instead of check-then-use.
+- Clicking Stop froze the entire app - preview included - for up to
+  ~30 seconds (occasionally longer with a slow audio mix/merge), and
+  any clicks/drags made during that freeze only visibly landed the
+  moment it ended, which read as "it fixes itself after ~30 seconds".
+  Cause: DoStop() (main_frame.cpp) called RecordingController::Stop()
+  synchronously on the UI thread, and Stop() itself blocked on
+  hr_ff_wait()'s up-to-30s ffmpeg-finalize budget plus audio mixing/
+  merging - none of which pumped window messages in the meantime, so
+  Windows just queued input until the thread came back. That slow tail
+  now runs on a background thread (RecordingController::StopAsync(),
+  used in place of the old blocking Stop() from DoStop() only - other
+  callers like closing the app while recording still use the
+  synchronous Stop(), which now just waits for that same background
+  thread instead of duplicating the work); state_.recording stays true
+  for the whole tail so a second Stop click or a Start click issued
+  before it's done is correctly ignored instead of racing pipeline_/
+  ffproc_ teardown, and the Start/Stop button is disabled for the same
+  window. DoStop()'s post-stop UI work (button reset, the "recording
+  saved" summary popup) moved to a new OnRecordingFinalized(), invoked
+  via CallAfter once the background thread finishes.
+
+=== Added ===
+
+- File > "Set Preset..." - a small profile manager for .hrc config
+  files (src/ui/preset_dialog.h/.cpp), built on the existing HrcConfig
+  Save()/Load() Export/Import Settings already used. Presets live in a
+  new "presets\" folder next to the exe; the app's own auto-managed
+  config is always listed first as the "main config" and can't be
+  removed, matching the previous default of just having homrec.hrc.
+  From the dialog you can: switch to a preset (loads it and re-saves it
+  as the active config, so the switch survives a restart); save the
+  current in-session settings as a new named preset; add an existing
+  .hrc file (copies it into presets\); or remove one. Overlay-only .hrc
+  files (e.g. a copy of the auto-saved homrec_overlays.hrc) work fine as
+  presets too - HrcConfig::Load() only touches whichever fields are
+  actually present in a file, so one of those just layers its overlay
+  list on top of whatever else is currently loaded instead of
+  overwriting every other setting; the dialog labels these "Overlays
+  only" vs "Full config" in its list.
+- Settings > Audio > "Level meter refresh rate (Hz)" (AppState::
+  level_meter_fps, 10-60, default 30) - controls the new VU-meter timer
+  above; takes effect immediately on Save, and round-trips through
+  .hrc profiles and homrec_settings.json like the rest of the Audio
+  tab's fields (hr_settings_registry.cpp).
+
+[Version 2.0.3] - 2026-09-04
+
+=== Added ===
+
+- Webcam overlays are now actually baked into recordings, not just shown
+  positioned in the live preview. New src/hr_webcam_capture.h/.cpp opens
+  the configured device via Media Foundation (IMFSourceReader -- chosen
+  over DirectShow's ISampleGrabber/qedit.dll, which Microsoft deprecated
+  and which isn't reliably registered on modern 64-bit Windows) and reads
+  frames on a dedicated background thread; hr_overlay_render.cpp's new
+  GetOrRenderWebcam() composites whatever's most recent every frame, the
+  same "always latest, never queued" contract hr_dxgi_capture.cpp already
+  uses for screen capture. Previously this overlay type only logged a
+  one-time "not baked into recordings yet" warning and produced nothing.
+- "Add overlay..." now offers a GIF option alongside Text/Image/Webcam/
+  External Overlay. Unlike a static Image overlay, a GIF overlay is
+  actually animated in both the live preview and the recording: every
+  frame is decoded up front (WIC), each frame's disposal method/position/
+  delay from the file's own metadata is resolved once at load time, and
+  playback picks whichever frame is due based on wall-clock time - so a
+  looping GIF plays at its authored speed regardless of how often the
+  capture pipeline composites a frame (src/hr_overlay_render.h/.cpp,
+  src/ui/overlays_dock_panel.cpp/.h, src/ui/app_state.h). Adding one works
+  the same way Image does - pick a .gif, drag/resize it on the preview
+  like any other overlay.
+- Installer: an opt-in "Associate .hrc and .hrp files with HomRec" task
+  (off by default, alongside the existing desktop-shortcut/autostart
+  toggles) that registers both extensions (as ProgIDs HomRec.Profile /
+  HomRec.Plugin - same names src/hr_app_logic.cpp's own
+  hr_register_file_types() uses, so the two mechanisms can't disagree
+  about what a given extension is registered as) and gives them their own
+  icons (icons\files_icons\hrc.ico / hrp.ico) instead of Explorer's
+  generic file icon (installer/HomRec.iss). hr_register_file_types() also
+  gained a .hrp entry (it previously only covered .hrc/.hrl) for the same
+  reason.
+- Installer: its own icon (icons\hrsetup.ico) instead of reusing hr.exe's
+  main.ico, so HomRec-Setup-*.exe doesn't look like a second copy of the
+  app itself in Explorer/Downloads while it's running.
+
+=== Fixed ===
+
+- Console: running a command whose output overflowed the visible area
+  left the terminal scrolled wherever it happened to be instead of
+  following the new output, unlike every other terminal. ConsoleWindow::
+  Print() now explicitly scrolls to the caret after inserting text
+  (EM_SCROLLCARET) - ES_AUTOVSCROLL alone only covers text typed directly
+  into the control, not text inserted programmatically the way every
+  command echo/response is (src/ui/console_window.cpp).
+
+=== Changed ===
+
+- Version bumped to 2.0.3 (src/ui/version.h, installer/HomRec.iss).
+- Makefile: links -lmfplat -lmfreadwrite -lmf -lmfuuid (Media Foundation,
+  for the webcam capture above) and builds src/hr_webcam_capture.cpp.
+
+[Version 2.0.2] - 2026-08-31
+
+Cleanup + small performance/quality-of-life release: no behavior change
+for anything that was actually reachable before, aside from the console
+prompt and two new console commands.
+
+=== Removed ===
+
+- Eight source files that were never part of either build (Makefile's
+  OBJS or CMakeLists.txt's HR_SOURCES) and weren't loaded dynamically by
+  anything either - leftovers from the 1.x Python/ctypes-DLL era and one
+  never-finished staging design, all confirmed dead via a full grep for
+  their exported symbols across the tree before deletion:
+    - src/hr_version.cpp - duplicated the version banner as its own
+      dllexport'd constants; superseded by src/ui/version.h +
+      hr_app_logic.cpp's hr_version_string()/hr_version_gt().
+    - src/hr_console.cpp / src/hr_console_pipe_server.cpp - the old
+      Python-bridge console DLL design (forward_to_python() and a
+      Named Pipe IPC server for it), both explicitly marked
+      "NOT CURRENTLY BUILT"; superseded by src/ui/console_window.cpp,
+      the console actually compiled into hr.exe today.
+    - src/hr_framequeue.cpp, src/hr_ringbuf.cpp, src/hr_preview.cpp,
+      src/homrec_core.c - native ctypes extensions from 1.5.0/1.6.0's
+      Python UI (see that entry below). 2.0's C++ rewrite ported the
+      pieces still needed (hr_stopwatch, hr_display_info, hr_dxgi_capture,
+      hr_pipeline, hr_encoder_helpers - all still compiled today) but
+      these four never got a native call site and were left behind.
+  No header files existed for any of these (none were `#include`d
+  anywhere), so nothing else needed touching.
+
+=== Performance ===
+
+- BGRA->YUV420p (hr_bgra_to_yuv420p_band in hr_encoder_helpers.c) - the
+  function actually called every captured frame during recording, on
+  every worker thread in hr_pipeline.cpp's Yuv420pWorkerPool - along with
+  RGB->YUV420p and YUV420p->RGB (used for the live preview thumbnail),
+  used to recompute `y*width`, `y1*width`, and `(y/2)*(width/2)` as a
+  fresh multiply for every single pixel just to find the row it was
+  writing/reading. Hoisted into per-row base pointers computed once per
+  row instead, so the inner per-pixel loop is now pure pointer indexing.
+  Pixel math and output are bit-for-bit identical - this only removes
+  redundant address arithmetic.
+- Same hoist applied to bgra_to_thumb()/bgra_downscale() in
+  hr_pipeline.cpp (the preview-thumbnail box filter and the
+  Settings > Resolution downscale step), both also on the per-frame hot
+  path during recording.
+
+=== Changed ===
+
+- Version bumped to 2.0.2 (src/ui/version.h).
+- tools/homrec_build.py: fully translated to English (prompts, comments,
+  error messages - it was previously a mix of English comments and
+  Russian-language interactive prompts). .7z is now a normal, always-
+  offered archive format in the build menu instead of only appearing
+  when a 7z/7za binary already happened to be on PATH at the time the
+  script started; picking it on a machine without 7-Zip installed now
+  prints a clear "install 7-Zip and try again" message and skips just
+  that one archive instead of the option being invisible.
+- The in-app developer console's prompt is now styled after a Unix
+  user@host:path# prompt - "homrec@1920x1080:60fps# " instead of the
+  previous "1920x1080@60fps # " - while keeping the same at-a-glance
+  resolution/fps info and the root-style trailing "#" (fitting, since
+  this console can run rm/hom update/etc.). Not a literal copy of a real
+  shell prompt, just shaped like one.
+- welcome_dialog.cpp/.h - removed the first-run wizard's "system options"
+  page (desktop shortcut / launch at startup / tray icon toggles). The
+  wizard is back to its originally-documented three pages (greeting ->
+  basic settings -> finish); those three toggles are still available
+  in Settings > System, and now also as install-time Tasks in the new
+  Windows installer.
+
+=== Added ===
+
+- Two new console built-ins, in the same spirit as the existing
+  Linux-shell-style command set (ls/rm/env/alias/history/echo/clear):
+  `pwd` (prints the folder HomRec resolves its cfg/plugins/log/settings
+  paths from) and `whoami` (prints the console/build version string).
+  Neither reads or writes anything sensitive, so neither needs the
+  "inwid" confirmation gate.
+- Windows installer (installer/HomRec.iss, Inno Setup) - per-user install
+  (no admin/UAC needed, matches HomRec's next-to-the-exe settings/logs),
+  Start Menu + optional desktop shortcut, optional "launch at Windows
+  startup" task, and a real uninstaller that asks once before deleting
+  homrec.hrc/logs (recordings are never touched). See installer/README.md.
+- src/hr_update.cpp / hr_update.h - a real, buildable GitHub-releases
+  update checker + self-updater, replacing the old "NOT CURRENTLY BUILT"
+  staging file of the same name (which also had a stale hardcoded "1.6.1"
+  instead of reading version.h). Wired up to Help > Check for Updates
+  (main_frame.cpp's new OnCheckForUpdates()), which - it turns out - had
+  a menu item and a translated label ("check_updates") but no handler at
+  all; clicking it silently did nothing. Finding an update now offers to
+  download and silently launch the new installer, closing the app for it.
+- tools/homrec_build.py: optional "build the installer" step (finds
+  ISCC.exe, builds installer/HomRec.iss with the release version, drops
+  the result in dist\ alongside the archives) and a reminder to attach
+  the installer exe - not just the archives - to the GitHub release, or
+  auto-update has nothing to find.
+
+[Version 2.0.1] - 2026-08-30
+
+Bug fixes and hardening, no feature changes.
+
+=== Fixed ===
+
+- Pipeline shutdown ("did not stop in time" in the log on basically every
+  close/Stop(), plus preview-off-then-Start-Recording intermittently
+  failing with "capture pipeline didn't start" until the app was
+  restarted): hr_pl_destroy()/hr_pl_stop() detected whether the writer/
+  capture threads had actually finished via
+  WaitForSingleObject(HANDLE(std::thread::native_handle()), 1000) - only
+  correct if std::thread is backed by real Win32 threads. This project
+  links -lpthread (the Makefile's posix-threads MinGW model), where
+  native_handle() returns a pthread_t rather than a HANDLE, so that check
+  never worked: every shutdown "timed out" and detached even though the
+  real thread had already exited, which meant finish_thread()'s actual
+  cleanup (dx_destroy() releasing the DXGI desktop-duplication interface,
+  freeing the Pipeline) silently never ran. Since DXGI only allows one
+  duplication interface per output per process, that leaked interface is
+  what made a later capture pipeline in the same process fail to start.
+  Replaced with a portable std::condition_variable-based completion
+  signal each thread sets right before returning (hr_pipeline.cpp).
+- hom.exe had no crash handler at all - an unhandled exception surfaced
+  only as a bare NT status code (e.g. "hom: exited with code
+  3221225477"/0xC0000005) with no way to tell where or why. Added a
+  minidump-writing SEH filter (writes to crashes\ next to hom.exe, same
+  folder hr.exe already uses) so a future crash is diagnosable instead of
+  silent (tools/hom/hom.cpp).
+- hom.exe was linked dynamically against libstdc++/libgcc, unlike hr.exe
+  - on a machine without the matching MinGW runtime DLLs in PATH,
+  hom.exe could fail to run at all. Now built with
+  -static-libgcc -static-libstdc++, same as hr.exe (Makefile).
+- `hom install`/`hom remove` didn't validate the plugin name at all - a
+  crafted name containing "..", a path separator, or a drive letter
+  could resolve outside .\plugins\. Rejected up front now
+  (tools/hom/hom.cpp).
+- The in-app console's `hom` command ran hom.exe synchronously on the
+  same thread the whole app's UI is pumped on, so any slow/stalled
+  network request (hom does real HTTPS installs/updates) froze all of
+  HomRec, not just the console, for up to its own 30s timeout. hom.exe
+  now runs on a background thread; the console prints its output once
+  it's done (src/ui/console_window.cpp/.h).
+- Console output printed one line at a time with no redraw batching, so
+  a command producing many lines at once (a `hom` run with a lot of
+  output, in particular) was visibly choppy. Batched with
+  WM_SETREDRAW around the whole burst (src/ui/console_window.cpp).
+- Audio Mixer volume sliders changed the mic/system-audio gain as one
+  flat multiplier for the whole ~10ms buffer chunk being processed when
+  the slider moved, heard as a choppy, stepped volume change rather than
+  a smooth one. Now ramped linearly across the samples in that chunk
+  instead - same per-sample cost as before (hr_audio.cpp), no extra CPU
+  to speak of.
+
+=== Changed ===
+
+- Version bumped to 2.0.1 (src/ui/version.h).
+
+---
+
+The block below was originally a second, separate patch set sent over
+afterward as a zip (not authored in the same session as the fixes
+above) - it has now been merged into this same tree by hand, on top of
+the fixes above (both independently touched hr_pipeline.cpp and
+console_window.cpp/.h - hr_pipeline.cpp's overlap was the same fix
+twice, reconciled to one copy; console_window.cpp/.h's "inwid" gate and
+the async-hom/redraw-batching fixes above are additive to each other
+and both are in this tree now). Kept here for the record.
+
+=== Added ===
+
+Settings -> General -> Add language (choice .hrl file) for more languages
+
+[Version 2.0] - 2026-08-08
+
+This release rewrites the app from the ground up: HomRec 1.7.2 was a
+Python/wxPython UI (src/homrec_app/*) driving a small C++ helper DLL for
+capture/encode. 2.0 replaces that entire UI layer with a native C++17 +
+wxWidgets app (src/win_main.cpp, src/ui/*) - there is no Python left in
+the shipped app, and the old Python-side files (homrec.py, homrec_app/,
+homrec_native.py, hr_console_bridge.py, hr_plugin_engine.py,
+requirements.txt) are gone. Because of that, this entry summarizes the
+rewrite by subsystem instead of as a commit-by-commit diff - a lot of
+1.7.2 logic was ported and restructured rather than "changed" in the
+usual sense.
+
+=== Added ===
+
+- New native UI (src/ui/): main_frame, settings_dialog,
+  advanced_settings_dialog, audio_panel, overlays_dock_panel,
+  overlay_placement_dialog, overlay_add_dialogs, welcome_dialog,
+  window_picker_dialog, hide_window_dialog, log_viewer_dialog,
+  pc_analytics_dialog, console_window, custom_messagebox, theme/
+  themed_widgets/win32_theme, language, hrc_config, recording_controller
+  - all new, replacing the old wxPython dialogs of the same names.
+- Lua plugin system (src/plugins/lua_engine.cpp, lua_api.cpp): plugins
+  are loaded from plugin.json + Lua scripts, with a homrec.* API
+  (toasts/storage/HTTP/theme colors/input-overlay registration,
+  homrec.register_command()/homrec.print() for adding console commands,
+  homrec.plugin_info() exposing id/name/version/author). plugin.json
+  supports an optional "author" field.
+- `hom` plugin package manager (tools/hom/hom.cpp, built separately as
+  hom.exe): installs/updates .hrp plugin packages from the Hom/ repo
+  folder over HTTPS, with `hom ping` (repo connectivity check) and
+  `hom install update-hrp` (reinstalls every already-installed .hrp in
+  .\plugins).
+- Input overlay system (hr_input_overlay.cpp/.h,
+  hr_input_overlay_registry.cpp/.h) with bundled presets
+  (plugins/input_overlay_presets/: keyboard qwerty/wasd, mouse, gamepad)
+  for showing live key/button presses in recordings.
+- New live overlay renderer (hr_overlay_render.cpp/.h) for text/webcam/
+  image overlays with position/size/opacity, replacing the old
+  Python-side overlay handling.
+- Crash handler (hr_crash_handler.cpp/.h), structured logging
+  (hr_log.cpp/.h, hr_log_paths.cpp/.h), plugin-specific logging
+  (hr_plugin_log.cpp/.h), and basic usage/PC analytics logging
+  (hr_pc_log.cpp/.h, surfaced via the new PC analytics dialog).
+- hr_system_integration.cpp/.h and hr_archive.cpp/.h (new support
+  utilities for OS integration and file archiving respectively).
+- Dedicated mic/webcam device enumeration (hr_mic_enum, hr_webcam_enum),
+  split out of the old combined device-handling code.
+- cfg/ example config files (autoexec.cfg.example, startrec.cfg.example)
+  and a project Makefile (the Python version didn't need one).
+- Countdown (3s), cursor compositing, and "show summary" popup are now
+  actually wired to the UI (previously loaded/saved in settings but not
+  read at Start/Stop time): HomRecMainFrame::RequestStart() runs a
+  cancellable 3-2-1 before starting; hr_composite_cursor()
+  (hr_ui_utils.cpp) draws the live system cursor into captured frames;
+  DoStop() shows a "recording saved, open folder?" summary with the
+  actual filename/duration/resolution/size, and its "Don't show again"
+  checkbox now persists to homrec_settings.json instead of resetting
+  every relaunch.
+- Idle/AFK CPU fix: the preview capture pipeline no longer runs
+  continuously while the window is minimized -
+  RecordingController::SetPreviewVisible(), driven by a new
+  OnShowEvent()/extended OnIconize(), pauses it and resumes on restore
+  (never while actually recording).
+- Idle/AFK memory fix: mic/sys audio buffers in hr_audio.cpp were
+  appended to continuously from app launch (for the live level meters),
+  even while idle, growing unbounded the longer the app sat open. A new
+  AudioState::buffering flag now gates the buffer *writes* only (meters
+  still update every frame); Start() turns it on, Stop() turns it off.
+- New project-facing docs: docs/documentation.html + a small docs site
+  (down-win.html, down-deb.html, support.html), SUPPORT.md, FREE.txt,
+  cfg/README.md, scripts/README.md, plugins/READMEplugins.md, and
+  GitHub issue templates (.github/ISSUE_TEMPLATE/).
+
+=== Changed ===
+
+- Version bumped to 2.0 (src/ui/version.h is now the single
+  HR_APP_VERSION/HR_APP_VERSION_W source of truth for the app title,
+  replacing scattered hardcoded version strings).
+
+=== Known issues / not yet finished ===
+
+- src/hr_console.cpp and src/hr_console_pipe_server.cpp (the old
+  `!start --terminal as @terminal` command and its Named Pipe server for
+  a standalone hr_terminal.exe) are present in src/ but are **not** in
+  the Makefile's OBJS list, so they aren't compiled into hr.exe at all
+  right now. They also still reference the removed Python bridge
+  (forward_to_python / hr_console_bridge.py). The live, currently-built
+  console is src/ui/console_window.cpp, which is a separate
+  implementation and does not currently have any terminal-launching
+  command. hr_terminal.exe itself does not exist anywhere in the repo.
+- hr_pipeline.cpp's capture always hardcodes hr_dx_create(0, 0) - the
+  "monitor" setting is persisted and shown in the UI but not yet used to
+  pick which display gets captured.
+- plugins/input_overlay_presets/assets/mouse/mouse.json: the smb1/smb2
+  (side mouse button) sprite mapping rectangles are within 1px of each
+  other - possibly a copy-paste bug, possibly intentional shared
+  iconography; left untouched without visual confirmation either way.
+
+=== Fixed ===
+
+- Version string was inconsistent between files (hr_version.cpp/
+  README/version.h all disagreed); consolidated onto version.h.
+- src/ui/language.cpp no longer hardcodes the title-bar version string;
+  it's built from HR_APP_VERSION.
+- hr_pipeline.cpp: hr_pl_destroy() could delete the Pipeline object while
+  a writer/capture thread that failed to stop in time was still running
+  detached against it (heap-use-after-free risk). It now hands cleanup
+  off to whichever thread finishes last (via a handed_off flag) instead
+  of deleting out from under a live thread or leaking the Pipeline
+  forever.
+- hr_overlay_render.cpp: GetOrRenderText()/GetOrRenderImage() no longer
+  rebuild a cache-key string (heap allocation) on every captured frame
+  for every overlay just to check "did anything change" - a cheap
+  field-by-field comparison short-circuits first for the common
+  nothing-changed case.
+- hr_ffmpeg_runner.cpp: corrected a stale comment claiming raw BGRA
+  frames are piped to ffmpeg's stdin - frames are actually converted to
+  planar YUV420P first, matching the "-pixel_format yuv420p" flag
+  already in use (docs-only fix, not a functional bug).
+
+[Version 1.7.2] - 2026-07-09
+
+=== Changed ===
+
+- UI Console
+- homrec.py divided into modules
+- minor bugs has been fixed
+
+=== Fixed ===
+
+- Path bugs (in src\homrec_app)
+
+[Version 1.7.1] - 2026-07-07
+
+=== Added ===
+- `rm --vid` terminal commands - delete recordings straight from the console:
+  - `rm --vid #name="..."` - delete one recording by name (extension optional; its companion separate-audio `.mp3` export, if any, is deleted too)
+  - `rm --vid @all` - delete every recording in the output folder
+  - `rm --vid @last` - delete only the most recently recorded file
+  - All support `-q` / `-y` to skip the confirmation prompt. The file currently being recorded is never deleted, even by `@all`.
+- `rm @homrec` (uninstall HomRec) now asks "are you sure?" before doing anything - pass `-q` / `-y` to skip the prompt for scripted use. Previously it ran with no confirmation at all.
+- The `!` and `$` command prefixes are now **optional** everywhere in the console. `rm --vid @last` works exactly like `$rm --vid @last`; `create --window ...` works exactly like `!create --window ...`. Old prefixed commands, aliases, rules, and hotkeys keep working unchanged - the prefix is just no longer required.
+
+=== Fixed ===
+- Bug 9 (continued) - found the actual remaining source of the CMD flash after confirming it still happened even with `--windowed` set at the PyInstaller level (which rules out the app's own subsystem console - that part was already correct). The real cause: `hr_app_logic.cpp`'s GPU-encoder probe (`hr_probe_gpu_encoder`, run automatically ~3s after every launch to detect NVENC/AMF/QSV support) and its audio/video merge helper (`merge_audio_video`) both used plain `system()` to run ffmpeg. On Windows, `system()` always spawns via a new `cmd.exe`, and unlike `CreateProcess` it has no way to pass `CREATE_NO_WINDOW`/`SW_HIDE` - redirecting the command's own output (`>nul 2>&1`) does nothing to hide the window `system()` itself creates. Replaced both call sites with a hidden `CreateProcess`-based helper (matching the pattern already used correctly elsewhere in the same file, e.g. `hr_launch_ffmpeg`). Requires rebuilding `hr_app_logic.dll`.
+- Version number was inconsistent across the app: `homrec.py` still reported `v1.7.0` in five places (title bar, About label, startup log line, taskbar app ID, `CURRENT_VERSION`) despite this actually being `1.7.1`, and the README badge still said `1.6.4`. All bumped to `1.7.1`.
+- Removed dead code: `homrec.py`'s preview capture loop tried to import a `CppPipeline` class from `homrec_native.py` for a DXGI fast-path that was never actually implemented there - the import always failed and it silently fell back to the normal path every time anyway. Removed the broken import/init code and the now-fully-unreachable `_capture_loop_cpp` method rather than leave code referencing a class that doesn't exist.
+- `$do --ui@homrec 1` (re-download/reinstall `homrec.py` from GitHub) used to write the downloaded file straight over the running app's source with no integrity check at all. It now verifies the download's SHA-256 against a `homrec.py.sha256` published alongside it before writing anything, and aborts (nothing on disk touched) if that checksum is missing or doesn't match - pass `--force` to skip verification if you understand the risk.
+- Bug 9 - a CMD/console window could flash up when launching HomRec (double-clicking the .exe, a shortcut, `python homrec.py` with no parent terminal, etc). This was the app's own auto-created console, not one of the ffmpeg/helper subprocesses (those were already silenced - see Bug 2 in 1.7.0). HomRec now detects and hides that auto-created console on startup, while leaving a developer's own already-open terminal alone if they're running it from source to watch log output. Set `HOMREC_SHOW_CONSOLE=1` to opt out.
+  - Follow-up fix: the first version of this checked how many processes were attached to the console and only hid it if exactly one was - which broke for PyInstaller builds of `hr.exe`, since a PyInstaller onefile .exe's bootloader stub and the actual unpacked program both attach to the *same* auto-created console, so the count was always 2+ and it never got hidden (this is what people were still seeing after building with PyInstaller). Now checks the actual name of the immediate parent process instead, and only leaves the console alone if it's a real interactive shell (cmd.exe / powershell.exe / pwsh.exe / Windows Terminal).
+- Bug 6 - webcam overlay never showed up, in Settings or in the recorded video: the DirectShow device-name probe filtered for the text `(video)`, which never actually appears in FFmpeg's real device listing, so it always fell back to the fake name `"Integrated Webcam"` - a name that doesn't match most people's actual camera, so FFmpeg silently failed to grab it. The probe now correctly parses FFmpeg's `-list_devices` output.
+- Bug 7 - webcam overlay preview was always a static placeholder box, both in the Overlays settings editor and in the live preview while recording: it never actually grabbed a frame from the camera. It now shows a real, live feed from the selected camera (falling back to a "no signal" placeholder only if the camera can't be opened).
+- Bug 8 - screen preview freezes while recording: the recording-preview path called `resize_nearest_np`, a method that didn't exist anywhere in `homrec_native.py` (only `resize_bilinear_np` did). Every throttled preview update during recording silently threw `AttributeError`, so the preview queue never refilled and the on-screen preview froze on the last frame for the rest of the recording. Added the missing method.
+- `requirements.txt` had a leftover, unresolved merge-conflict marker (`=======`) that broke `pip install -r requirements.txt`; cleaned up and de-duplicated (also added `opencv-python` / `numpy`, which the code already depends on but which were missing from the top of the file).
+
+[Version 1.7.0] - 2026-07-04
+
+=== Added ===
+- Video format selector - choose .mp4 or .mkv in Settings → Video
+- Separate audio export - Advanced Settings → Audio → "Save audio as separate .mp3"
+- Overlays system - Advanced Settings → Overlays tab:
+  - Text overlays (rendered live via FFmpeg drawtext filter)
+  - Webcam overlay (cam index selector)
+  - Image overlay (browse for .png/.jpg/.bmp)
+  - Per-overlay: opacity slider, X/Y position (%), W/H size (%)
+  - **Preview window** - OBS-style drag-to-position: live screen grab + draggable handles
+- `!check.er` terminal command - interactive integrity scanner:
+  - `!check.er 1` - scan most recent video file
+  - `!check.er 2` - scan all videos in output folder
+  - `!check.er 3` - HomRec self-diagnostics (FFmpeg, DLL, ddagrab, audio, overlays)
+  - `!check.er scan #file="path"` - scan a specific file
+
+=== Fixed ===
+- Bug 1 - Minecraft/game capture single frame: Added DXGI Desktop Duplication (ddagrab) support. HomRec now auto-detects if your FFmpeg supports ddagrab and uses it instead of GDI. Works with fullscreen D3D11/D3D12/Vulkan games.
+- Bug 2 - CMD windows on startup: All subprocess calls now use CREATE_NO_WINDOW on Windows. No more flashing black console windows.
+- Bug 3 - terminal.exe freezes on connect: Added pipe keepalive heartbeat thread (2s NUL ping). Terminal's ReadFile no longer blocks indefinitely.
+- Bug 4 - `-ret` incorrect behavior: `-ret` / `-return` now wraps execution and prints `(1)` on success or `(0)` on failure in the console.
+- Bug 5 - ddagrab + scaling filter conflict: Fixed FFmpeg error "Simple and complex filtering cannot be used together" when recording with ddagrab at non-standard resolutions (e.g., 1200x674). The -vf filter is no longer applied when -filter_complex (scaling) is active, preventing the incompatible filter mix.
+
+=== Changed ===
+- All UI strings and terminal output translated to English (Russian locale strings preserved in the `"ru"` language dict)
+- Welcome dialog simplified - no more redundant tips block
+- `.mkv` output fully supported: filenames, audio merge temp files all use correct extension
+- Overlay VF chain merges cleanly with existing scale/crop filters
+- Removed RU language, only EN now (but you still can add your language from .hrl)
+
+[Version 1.6.4] - 2026-06-09
+
+=== Added ===
+
+!start --terminal as @terminal command - launches hr_terminal.exe as an
+  external terminal window directly from the console. The command is handled
+  natively in hr_console.cpp (ShellExecuteExW next to the DLL) and mirrored
+  in hr_console_bridge.py (subprocess.Popen next to the script).
+  Appears in !help output under the !start group.
+
+=== Fixed ===
+
+Version bumped to 1.6.4
+Console version bumped to 1.2.2
+Minor bugs has been fixed (Tray bugs, icons bugs etc.)
+
+
+[Version 1.6.4] - 2026-06-09
+
+=== Added ===
+
+!start --terminal as @terminal command - launches hr_terminal.exe as an
+  external terminal window directly from the console. The command is handled
+  natively in hr_console.cpp (ShellExecuteExW next to the DLL) and mirrored
+  in hr_console_bridge.py (subprocess.Popen next to the script).
+  Appears in !help output under the !start group.
+
+=== Fixed ===
+
+Version bumped to 1.6.4
+Console version bumped to 1.2.2
+Minor bugs has been fixed (Tray bugs, icons bugs etc.)
+
+
+[Version 1.6.3] - 2026-06-07
+
+=== Added ===
+
+hr_terminal.exe - standalone external terminal window for HomRec console.
+  Runs as a separate process with its own Win32 window (Rich Edit output,
+  Unicode input field, Catppuccin Mocha color scheme matching the DLL console).
+  Multiple instances supported simultaneously (up to 8 concurrent connections).
+
+=== Fixed ===
+
+Minor bugs has been fixed
+Version bumped to 1.6.3
+
+
+[Version 1.6.2] - 2026-06-06
+
+=== Added ===
+
+In the View menu, there is a new item Show Log (appears before the Theme submenu)
+
+=== Fixed ====
+
+Version bumped to 1.6.2
+
+
+[Version 1.6.1] - 2026-06-05
+
+=== Added ===
+
+More C++ scripts
+Command "!homrec --version"
+
+=== Fixed ===
+
+Version bumped to 1.6.1
+Console version bumped to 1.2.0
+Core version bumped to 1.4.3
+
+[Version 1.6.0] - 2026-06-04
+
+=== Added ===
+
+Console. You can check https://github.com/homaaio/HomRec/blob/main/commands.md for more about it
+
+[Version 1.5.0] - 2026-05-29
+
+=== Added ===
+
+Native C/C++ performance extensions (homrec_core, hr_encoder_helpers,
+hr_preview, hr_ringbuf, hr_framequeue, hr_stopwatch, hr_display_info,
+hr_dxgi_capture, hr_pipeline) - compiled as .dll/.so, loaded at runtime
+via ctypes. Auto-discovered next to homrec.py - no config needed.
+Graceful fallback to pure Python if any module is missing.
+
+hr_pipeline: unified C++ capture thread - DXGI Desktop Duplication →
+BGRA→YUV420p → named pipe (FFmpeg reads) + preview thumbnail.
+Eliminates Python-side mss.grab() loop entirely on Windows.
+
+hr_stopwatch: sub-millisecond frame-pacing timer using
+QueryPerformanceCounter (Windows) / clock_gettime CLOCK_MONOTONIC (POSIX).
+Fixes the 15 ms sleep granularity jitter on Windows that caused frame drops.
+
+hr_dxgi_capture: GPU-accelerated screen capture via DXGI Desktop
+Duplication API. Captures frames the moment the compositor presents them
+(~1 display cycle latency vs 1-2 frame lag with GDI/BitBlt).
+
+hr_display_info: fast monitor enumeration with per-monitor DPI via
+GetDpiForMonitor (Windows) / xrandr (Linux).
+
+homrec_native.py: Python ctypes wrapper for all native libraries with
+full Python fallbacks for every function.
+
+"Disable Preview" option in Settings → Advanced → Performance.
+Shows a placeholder screen instead of live preview - saves CPU during
+recording on low-end hardware.
+
+"Update" button appears in corner when new version is detected
+Welcome window shown on first launch
+
+=== Changed ===
+
+Capture loop: preview thread now skips mss.grab() entirely during
+recording - no GDI bandwidth competition with FFmpeg.
+
+Codec pipeline: QP range clamped (min qp=23) to prevent near-lossless
+encoding (~150 Mbit/s) that saturated weak GPU encoders.
+
+QSV encoder: removed -async_depth 1 which blocked the capture thread
+waiting for GPU acknowledgement on each frame, halving FPS on i3/i5.
+
+QSV encoder on UHD Graphics: added -low_power 1 (VDENC fixed-function
+path, 2-3× faster than shader PAK) and -look_ahead 0 (removes CPU-side
+lookahead overhead).
+
+CPU encoder (libx264): thread count now set to 1 on systems with ≤4
+logical cores, avoiding competition with FFmpeg for CPU time.
+
+GIL switch interval raised from 5 ms to 20 ms - reduces GIL contention
+between capture, audio and UI threads on weak CPUs. One GIL switch per
+frame at 60 FPS instead of three.
+
+OpenCV thread count set to 1 on systems with ≤4 logical cores - preview
+resize does not need multiple threads.
+
+gdigrab input: thread_queue_size reduced from 512 to 128, added
+-rtbufsize 16M to limit memory pressure on systems with shared CPU+GPU RAM.
+
+Preview update interval during recording raised from 1000 ms to 2000 ms -
+capture thread sleeps 500 ms anyway so polling faster was pointless.
+
+Audio recording stop: non-blocking teardown - streams closed before
+joining threads so read() unblocks immediately. Eliminates the previous
+30-second hang on stop.
+
+=== Fixed ===
+
+hr_audio_rms: int32_t accumulator replaced with int64_t - prevented
+integer overflow on buffers larger than ~2M samples.
+
+hr_blend_rgba: alpha compositing rounding bias corrected from +127 to
++128, fixing a systematic 1-LSB error in badge/watermark blending.
+
+hr_framequeue: push() race condition - slot is now written before head
+is advanced so the consumer can never observe a null pointer.
+
+hr_framequeue: size() used mismatched memory orders (acquire/relaxed),
+now both acquire for correct cross-thread visibility.
+
+hr_ringbuf: wrap-around memcpy off-by-one at exact power-of-2 boundaries
+fixed by computing `first` from mask(h) rather than raw cursor.
+
+hr_ringbuf: reset() now zeroes buffer contents - prevents stale PCM data
+from a previous recording being read after reset.
+
+hr_display_info: missing #include <algorithm> caused std::stable_sort
+to be invisible under MinGW, producing a build error.
+
+hr_encoder_helpers: hr_memcpy_nt now uses _mm_stream_si128 (real NT
+stores) instead of _mm_storeu_si128 (cached stores) - the function
+previously claimed to be non-temporal but was not.
+
+hr_encoder_helpers: BGRA→YUV420p and RGB→YUV420p chroma now averages
+all four luma pixels in each 2×2 block instead of sampling only the
+top-left pixel - visibly reduces chroma blur on fine detail.
+
+hr_preview: `restrict` keyword replaced with HR_RESTRICT macro - `restrict`
+is C99-only and caused a cascade of "not declared in this scope" errors
+when compiled as C++ under MinGW g++.
+
+homrec_native.py: duplicate _DxgiCaptureAPI singleton at module level
+removed - dxcap was created twice, second instance silently overwrote
+the first.
+
+homrec_native.py: preview thumbnail now uses ctypes data_as() instead
+of .tobytes() - eliminates a full buffer copy on every preview frame.
+
+Quality loaded from old settings.json is now clamped to 50–100% to
+prevent a saved value of 95–100 (quality=100 → qp=18 → ~150 Mbit/s)
+from saturating the encoder on first launch after upgrade.
+
+Application freeze after stopping recording
+General optimization improvements
+Tray icon logo visibility improved on dark/light taskbars
+
+=== Performance ===
+
+BGRX→RGB (1080p):       ~6 ms  →  ~1.2 ms   (5× faster)
+Bilinear preview resize: ~4 ms  →  ~0.8 ms   (5× faster)
+Audio RMS per chunk:    ~0.15 ms → ~0.04 ms  (3.5× faster)
+Badge blend (RGBA):     ~1.2 ms  → ~0.25 ms  (5× faster)
+Capture loop latency:   ~30 ms  →  ~12 ms    (2.5× faster)
+UI thread block time:   ~20 ms  →   ~3 ms    (7× faster)
+Preview thumbnail:      no intermediate RGB copy (BGRA→thumb direct)
+
+
+[Version 1.4.4] - 2026-05-15
+
+=== Changed ===
+
+Added new application icons
+
+[Version 1.4.3] - 2026-05-04
+
+=== Fixed ===
+
+Minor interface errors corrected
+Version bumped to 1.4.3
+
+[Version 1.4.2] - 2026-05-03
+
+=== Fixed ===
+
+Duplicate tray icon on second launch - added Windows single-instance
+mutex (CreateMutexW). If HomRec is already running, second launch exits
+immediately instead of creating another tray icon.
+
+Microphone [Errno -9999] Unanticipated host error - now retries with
+multiple channel/sample rate combinations (stereo/mono × 44100/48000/22050)
+before giving up. Handles devices that only support specific configurations.
+
+System audio [Errno -9999] - same retry logic applied to Stereo Mix device
+open attempts.
+
+Settings window not closing after Save - messagebox was shown after
+dialog.destroy(), causing the window to become unresponsive. Fixed order:
+show message first, then destroy.
+
+Advanced Settings window blocking Settings from closing - added
+grab_release() before destroy() so the parent window regains focus.
+
+Version bumped to 1.4.2
+
+[Version 1.4.0] - 2026-04-30
+
+=== Added ===
+
+Help menu in the top menu bar:
+- Check for Updates - checks GitHub and shows result in a dialog
+- Report Issue - opens GitHub Issues page in the browser
+
+Desktop audio (system sound) capture. Capture chain tries in order:
+1. WASAPI loopback (requires pyaudio-wasapi)
+2. PyAudio direct open of Stereo Mix device
+3. ffmpeg dshow as last resort
+
+Option to disable "minimize to tray on close" in Settings menu
+
+Advanced Settings window (Settings → ⚙ Advanced → Open Advanced Settings)
+for power users - codec, HW accel, CRF, preset, pixel format, audio
+bitrate, theme, UI scale, font, file template, auto-stop, replay buffer
+
+Custom hotkeys - reassign F9/F10/F11 to any key in Advanced Settings
+
+Auto-save settings profile on exit
+
+Notifications - sound and flash on recording start/stop
+
+Drag-and-drop support - drop .hrc, .hrl or .hrt onto the app window
+to instantly import a profile, language or theme
+
+Binary file formats with magic headers and gzip compression:
+  .hrc (HRC + 0x01) - settings profile
+  .hrl (HRL + 0x01) - custom language
+  .hrt (HRT + 0x01) - custom theme
+
+Built-in Language Editor (Advanced Settings → Interface → Language Editor)
+
+Built-in Theme Editor with live color pickers (Advanced Settings → Interface → Theme Editor)
+
+Delete theme/language buttons in Advanced Settings
+
+App icon on all dialog windows
+
+=== Changed ===
+
+PC Analytics is now a single combined window (CPU + RAM + Disk + Refresh)
+
+Start/Stop merged into one toggle button
+
+Codec and HW Accel moved from Video tab to Advanced Settings
+
+System audio capture now uses PyAudio directly (same path as microphone)
+instead of spawning a separate ffmpeg process
+
+=== Fixed ===
+
+Stereo Mix not detected on Russian Windows - UTF-8/cp1251 encoding fix
+
+System audio WAV not closed - ffmpeg dshow missing newline after stop signal
+
+WAV written with wrong channel count for mono devices
+
+Fallback to devices[0] removed - was recording mic twice
+
+check_updates missing from English language dict - KeyError on startup
+
+Volume condition vol != 2.0 → vol != 1.0
+
+stop_audio_recording returned None in mic-only mode - merge was skipped
+
+merge_audio_video swallowed all exceptions silently
+
+Codec duplicated in Video tab and Advanced Settings
+
+PC Analytics missing app icon
+
+[Version 1.3.2] - 2026-04-23
+
+=== Added ===
+
+System tray - minimises to tray on close
+Start/stop from tray menu
+Window capture (Settings → Capture Source → Select Window)
+Auto update check on startup
+
+=== Fixed ===
+
+Microphone stops after first recording
+2nd+ recordings corrupted
+Video faster than real time
+Audio desync on long recordings and after pause
+FFmpeg not found when running as .exe
+
+=== Performance ===
+
+~30% less CPU during capture
+Preview uses fast resampling while recording
+
+[Version 1.3.1] - 2026-04-23
+
+=== Changed ===
+
+Updated app icons
+Reduced .exe size by ~2x
+
+[Version 1.3.0] - 2026-04-22
+
+=== Added ===
+
+Logging system - events written to homrec.log
+
+=== Fixed ===
+
+FFmpeg not found in .exe builds
+
+[Version 1.2.0] - 2026-03-21
+
+=== Added ===
+
+Separate volume controls for mic and desktop audio
+PC Analytics (requires psutil)
+Multi-language support (English + Russian)
+Always on top, Fullscreen F11
+Monitor selection, custom output folder
+Hotkeys F9 / F10 / F11
+
+=== Changed ===
+
+Complete UI redesign (Catppuccin-inspired)
+Tabbed settings dialog
+Rewritten audio recording system
+
+=== Fixed ===
+
+Audio desync, frame drops, settings not saving, crash without mic,
+memory leaks, pause issues, thread safety
+
+=== Performance ===
+
+~30% less CPU, stable FPS, throttled preview, precise timing
