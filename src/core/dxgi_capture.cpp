@@ -168,6 +168,11 @@ struct DxCapCtx {
     int  out_w = 0;
     int  out_h = 0;
 
+    /* Column lookup table for the CPU stretch in cpu_deliver() (rebuilt only
+     * when the source/destination widths change). */
+    std::vector<int> xmap;
+    int  xmap_src_w = 0, xmap_dst_w = 0;
+
     DxCapCtx() : adapter_idx(0), output_idx(0), width(0), height(0), acquired(false) {
         nv_last_rect = RECT{0, 0, 0, 0};
     }
@@ -763,18 +768,31 @@ static int cpu_deliver(DxCapCtx *c, int slot, uint8_t *out, bool wait, int timeo
         c->out_valid = true;
         c->last_out  = out;
     } else {
-        uint8_t *dst = out;
-        const float rx = (float)W / (float)tgt_w;
+    
+        if (c->xmap_src_w != W || c->xmap_dst_w != tgt_w) {
+            c->xmap.resize((size_t)tgt_w);
+            const float rx = (float)W / (float)tgt_w;
+            for (int x = 0; x < tgt_w; ++x) {
+                int sx = (int)(x * rx);
+                c->xmap[(size_t)x] = sx >= W ? W - 1 : sx;
+            }
+            c->xmap_src_w = W;
+            c->xmap_dst_w = tgt_w;
+        }
+        const int *xm = c->xmap.data();
         const float ry = (float)H / (float)tgt_h;
+        uint8_t *dst = out;
+        int prev_sy = -1;
         for (int y = 0; y < tgt_h; ++y) {
             int sy = (int)(y * ry);
             if (sy >= H) sy = H - 1;
-            const uint8_t *srow = src + (size_t)sy * mapped.RowPitch;
-            uint32_t *drow = reinterpret_cast<uint32_t *>(dst);
-            for (int x = 0; x < tgt_w; ++x) {
-                int sx = (int)(x * rx);
-                if (sx >= W) sx = W - 1;
-                drow[x] = reinterpret_cast<const uint32_t *>(srow)[sx];
+            if (sy == prev_sy) {
+                memcpy(dst, dst - dst_row_bytes, (size_t)dst_row_bytes);
+            } else {
+                const uint32_t *srow = reinterpret_cast<const uint32_t *>(src + (size_t)sy * mapped.RowPitch);
+                uint32_t *drow = reinterpret_cast<uint32_t *>(dst);
+                for (int x = 0; x < tgt_w; ++x) drow[x] = srow[xm[x]];
+                prev_sy = sy;
             }
             dst += dst_row_bytes;
         }
