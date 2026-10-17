@@ -167,6 +167,9 @@ const std::vector<SettingDef> &All() {
         v.push_back(StrField("pix_fmt", "video", &AppState::pix_fmt));
         v.push_back(BoolField("gpu_convert", "video", &AppState::gpu_convert));
         v.push_back(BoolField("gpu_capture_ddagrab", "video", &AppState::gpu_capture_ddagrab));
+        v.push_back(BoolField("game_friendly_priority", "video", &AppState::game_friendly_priority,
+                              {"game_priority"}));
+        v.push_back(BoolField("qsv_low_power", "video", &AppState::qsv_low_power, {"low_power"}));
         {
             Def d;
             d.key = "video_format"; d.section = "video";
