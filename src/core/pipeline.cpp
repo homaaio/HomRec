@@ -866,6 +866,10 @@ struct Pipeline {
     // straight into the NV12 frame (hr_composite_cursor_nv12).
     std::atomic<bool> gpu_convert{false};
     bool gpu_failed = false;                  // capture thread only: give up for this pipeline
+    bool gpu_fail_transient = false;          // gpu_failed came from a runtime error that is worth retrying
+    int  gpu_fail_count = 0;                  // runtime GPU errors so far (retry limit 3)
+    std::chrono::steady_clock::time_point gpu_retry_at{};
+    bool logged_gpu_scale_ = false;           // "desktop size changed, GPU path scales" logged once
     bool nv12_valid = false;                  // nv12_buf holds a complete GPU-converted frame
     std::vector<uint8_t> nv12_buf;            // latest clean GPU-converted frame
     const uint8_t* frame_nv12 = nullptr;      // set on GPU ticks so update_preview() can use it
@@ -1383,6 +1387,8 @@ struct Pipeline {
                 if (is_recording_now != was_recording) {
                     was_recording = is_recording_now;
                     last_yuv_valid = false;   // pixel format / size may differ next recording
+                    gpu_fail_count = 0;       // a new recording gets a fresh GPU-path retry budget
+                    if (gpu_fail_transient) { gpu_failed = false; gpu_fail_transient = false; }
                     if (!is_recording_now) frame_ns_idle = compute_frame_ns_idle();
                     frame_ns = is_recording_now ? frame_ns_recording : frame_ns_idle;
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
@@ -1505,7 +1511,18 @@ struct Pipeline {
             // buffers were sized for. Anything else -> classic path.
             bool gpu_tick = false;
             int  gpu_enc_w = 0, gpu_enc_h = 0;
+            // Source rectangle in the DESKTOP's CURRENT pixel space (see the mode-change
+            // note below) and the size of the region it covers - used for the capture
+            // call and for placing the mouse pointer.
+            int  gpu_sl = 0, gpu_st = 0, gpu_sr = 0, gpu_sb = 0;
 #ifdef _WIN32
+            // A GPU error that may be transient (display mode switch, driver hiccup) is
+            // retried a few times instead of giving up for the whole recording.
+            if (gpu_failed && gpu_fail_transient && gpu_fail_count < 3 &&
+                std::chrono::steady_clock::now() >= gpu_retry_at) {
+                gpu_failed = false;
+                gpu_fail_transient = false;
+            }
             if (!gpu_failed && !wgc_mode && !overlays_need_base && gpu_convert.load(std::memory_order_relaxed) &&
                 recording.load(std::memory_order_acquire) && yuv_pool.IsNv12() &&
                 g_libs.dx_get_size) {
@@ -1523,9 +1540,44 @@ struct Pipeline {
                 // live in (no GPU downscale). A scaled output with overlays
                 // still takes the classic CPU path, exactly as before.
                 const bool ov_blocks_gpu = overlays_active && (gpu_enc_w != src_rw || gpu_enc_h != src_rh);
+                // DISPLAY MODE CHANGED MID-RECORDING (typical: a game switches the
+                // desktop to its own resolution right after Start): the buffers and the
+                // encoder were sized for src_w x src_h, but DXGI now delivers real_w x
+                // real_h. This used to switch the GPU path OFF for the rest of the
+                // recording, so every frame went through the CPU instead - full BGRA
+                // readback + nearest-neighbour stretch + BGRA->NV12 conversion, exactly
+                // while the game needs the CPU (logs: "full readbacks 2289, GPU NV12
+                // frames 57", -35% game FPS). The D3D11 video processor scales for
+                // free, so keep the GPU path and let it stretch the new desktop onto
+                // the unchanged encoder frame; the crop rectangle (kept in src space)
+                // is mapped into the new desktop space proportionally.
+                const bool size_changed = (real_w != src_w || real_h != src_h);
                 if (!ov_blocks_gpu &&
-                    real_w == src_w && real_h == src_h && src_rw > 0 && src_rh > 0 &&
+                    real_w > 0 && real_h > 0 && src_w > 0 && src_h > 0 &&
+                    src_rw > 0 && src_rh > 0 &&
                     gpu_enc_w >= 2 && gpu_enc_h >= 2 && !(gpu_enc_w & 1) && !(gpu_enc_h & 1)) {
+                    if (!size_changed) {
+                        gpu_sl = do_crop ? c_x : 0;           gpu_st = do_crop ? c_y : 0;
+                        gpu_sr = do_crop ? c_x + c_w : src_w; gpu_sb = do_crop ? c_y + c_h : src_h;
+                    } else {
+                        auto mx = [&](int v) { return (int)(((long long)v * real_w) / src_w); };
+                        auto my = [&](int v) { return (int)(((long long)v * real_h) / src_h); };
+                        gpu_sl = do_crop ? mx(c_x) : 0;           gpu_st = do_crop ? my(c_y) : 0;
+                        gpu_sr = do_crop ? mx(c_x + c_w) : real_w; gpu_sb = do_crop ? my(c_y + c_h) : real_h;
+                        if (gpu_sr > real_w) gpu_sr = real_w;
+                        if (gpu_sb > real_h) gpu_sb = real_h;
+                        if (gpu_sr - gpu_sl < 2 || gpu_sb - gpu_st < 2) {
+                            gpu_sl = 0; gpu_st = 0; gpu_sr = real_w; gpu_sb = real_h;
+                        }
+                        if (!logged_gpu_scale_) {
+                            logged_gpu_scale_ = true;
+                            HrLog::Info("GPU path: desktop is now " + std::to_string(real_w) + "x" + std::to_string(real_h) +
+                                        " (recording was started at " + std::to_string(src_w) + "x" + std::to_string(src_h) +
+                                        ") - the video processor scales it to " + std::to_string(gpu_enc_w) + "x" +
+                                        std::to_string(gpu_enc_h) + " on the GPU (no CPU fallback).");
+                        }
+                    }
+                    if (!size_changed) logged_gpu_scale_ = false;
                     if (!hr_dx_gpu_enable(dx_ctx, gpu_enc_w, gpu_enc_h, bgra_buf.data())) {
                         gpu_failed = true;
                         HrLog::Warn("GPU colour conversion unavailable on this adapter (D3D11 video "
@@ -1551,15 +1603,18 @@ struct Pipeline {
             }
             int ret;
             if (gpu_tick) {
-                const int sl = do_crop ? c_x : 0,           st = do_crop ? c_y : 0;
-                const int sr = do_crop ? c_x + c_w : src_w, sb = do_crop ? c_y + c_h : src_h;
-                ret = hr_dx_capture_nv12(dx_ctx, nv12_buf.data(), timeout_ms, sl, st, sr, sb);
+                ret = hr_dx_capture_nv12(dx_ctx, nv12_buf.data(), timeout_ms, gpu_sl, gpu_st, gpu_sr, gpu_sb);
                 if (ret == HR_DX_ERROR) {
                     // Not fatal for the pipeline: stop using the GPU path and let
                     // the classic one (which resyncs from the GPU-side desktop copy)
-                    // take over on the next tick.
-                    HrLog::Warn("GPU colour conversion failed at runtime -- falling back to the CPU converter.");
+                    // take over on the next tick. Retried up to 3 times (3 s apart) -
+                    // the cause is often a momentary display-mode/driver hiccup.
+                    ++gpu_fail_count;
                     gpu_failed = true;
+                    gpu_fail_transient = true;
+                    gpu_retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                    HrLog::Warn(std::string("GPU colour conversion failed at runtime -- falling back to the CPU converter") +
+                                (gpu_fail_count < 3 ? " (will retry the GPU path in 3 s)." : " for the rest of this recording."));
                     continue;
                 }
             } else {
@@ -1729,11 +1784,13 @@ struct Pipeline {
                         }
                     }
                     if (cur_on) {
+                        // gpu_s* is the captured rectangle in the desktop's CURRENT pixel space
+                        // (equals the old c_x / eff_w values unless the display mode changed).
                         hr_composite_cursor_nv12(yuv_frame.data(), gpu_enc_w, gpu_enc_h,
-                                                  cap_origin_x + (do_crop ? c_x : 0),
-                                                  cap_origin_y + (do_crop ? c_y : 0),
-                                                  (float)gpu_enc_w / (float)eff_w,
-                                                  (float)gpu_enc_h / (float)eff_h);
+                                                  cap_origin_x + gpu_sl,
+                                                  cap_origin_y + gpu_st,
+                                                  (float)gpu_enc_w / (float)std::max(1, gpu_sr - gpu_sl),
+                                                  (float)gpu_enc_h / (float)std::max(1, gpu_sb - gpu_st));
                     }
 #endif
                     enqueue_frame(yuv_frame, extra_slots);
