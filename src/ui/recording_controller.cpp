@@ -1518,27 +1518,13 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         }
     }
 
-    // This used to fire-and-forget hr_merge_av() and never look at
-    // its result, and on a *successful* native merge deliberately left the
-    // leftover audio_wav file sitting right next to the finished video
-    // forever (per the old comment above, that was on purpose -- but it's
-    // exactly what "the video and audio come out as separate files" looks
-    // like from the outside: a working muxed .mp4 plus a same-named .wav
-    // next to it that nothing ever cleaned up). Now: check the result, and
-    // only keep a separate audio file around when there's a real reason to
-    // (the merge failed/was skipped, so it's the only copy of the audio
-    // that exists -- or the user asked for one, see below).
     bool merged = false;
     if (have_audio_file && state_.audio_out_channels > 0 && ffmpeg_found_ &&
         hr_path_exists(base.c_str())) {
-        // real_elapsed_sec is the actual wall-clock recording time (still
-        // live here - hr_ctl_stop() below is what zeroes it), used by
-        // hr_merge_av() to detect and correct a video that came out much
-        // shorter than the recording actually ran (dropped-frame
-        // overload) instead of cutting the accurate audio down to match.
+        const double merge_elapsed = (crash_video_elapsed_sec_ > 0.0) ? 0.0 : elapsed_seconds();
         merged = hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
                               WideFromNarrow(audio_wav).c_str(),
-                              (crash_video_elapsed_sec_ > 0.0 ? crash_video_elapsed_sec_ : elapsed_seconds()),
+                              merge_elapsed,
                               av_start_skew_sec_) != 0;
         if (!merged) {
             HrLog::Error("Recording: merging the captured audio into the video failed -- "
