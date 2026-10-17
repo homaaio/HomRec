@@ -157,6 +157,8 @@ struct AppState {
     // downscaling are unavailable, so it is opt-in and used only when a
     // recording doesn't need any of them.
     bool        gpu_capture_ddagrab = false;
+    bool        game_friendly_priority = false;
+    bool        qsv_low_power          = false;
 
     int         audio_sample_rate   = 44100;
     std::string audio_aac_bitrate   = "192k";
