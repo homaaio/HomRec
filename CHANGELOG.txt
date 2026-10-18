@@ -1,5 +1,39 @@
 welcome to changelog :D
 
+[Version 2.4.1]
+
+### Fixed
+- Game FPS dropped ~35% when a game changed the display mode after
+  Start: the GPU colour-conversion path was switched off for the rest of the recording because the new
+  desktop size no longer matched the size recording started at, so every frame took the CPU path (full
+  BGRA readback + CPU stretch + CPU BGRA->NV12; log: "full readbacks 2289, GPU NV12 frames 57"). The
+  D3D11 video processor now scales the new desktop onto the unchanged encoder frame (crop rectangle and
+  mouse pointer are mapped to the new desktop space). (src/core/pipeline.cpp)
+- A runtime GPU-path error no longer disables the GPU path for the whole recording: it is retried up to
+  3 times, 3 s apart. (src/core/pipeline.cpp)
+- CPU fallback stretch (display mode differs from recording size): column lookup table + row reuse
+  instead of per-pixel float math. (src/core/dxgi_capture.cpp)
+
+### Added
+- Two opt-in settings for recording games on weak PCs (.hrc [video] or console `inwid <key> <0|1>`;
+  both default OFF, so nothing changes unless you turn them on). Meant to be A/B tested with the new
+  pc.log cpu_ffmpeg field and your in-game FPS:
+    * game_friendly_priority (alias game_priority): ffmpeg starts at NORMAL instead of ABOVE_NORMAL
+      priority and the capture/writer threads are not boosted to HIGHEST, so a game on a 2-core CPU
+      keeps its CPU time slices. (ffmpeg_runner.cpp hr_ff_set_normal_priority(), recording_controller.cpp)
+    * qsv_low_power (alias low_power): adds "-low_power 1" to the auto-built Intel QSV arguments
+      (fixed-function VDENC encoder instead of the iGPU shader units the game is using; Gen9+).
+      Ignored when custom_ffmpeg_args is set.
+    * Both are now also check boxes in Settings > Video (section "Recording games on weak PCs"), off by default,
+      included in "Reset to defaults". (src/ui/settings_dialog.cpp)
+
+### Changed
+- logs\pc.log now shows what the child ffmpeg.exe processes cost: new field
+  cpu_ffmpeg=<cpu%>(<N>proc,<MB>MB) ("none" when no ffmpeg runs, "n/a" on the first sample).
+  Before, cpu_proc/mem_proc only covered hr.exe, so the encoder - the real cost of a recording -
+  was invisible. Same 0-100 whole-CPU scale as cpu_proc and cpu_sys. Direct children of hr.exe
+  whose exe name contains "ffmpeg" are summed (recording, preview, replay buffer). (src/utils/pc_log.cpp)
+
 [Version 2.4.0] - 2026-10-16
 Window capture, MKV, dockable panels, Audio Mixer, Layers panel, Capture source window.
 (First built 2026-10-05; this entry also contains everything done up to 2026-10-16.)
