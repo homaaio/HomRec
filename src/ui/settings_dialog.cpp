@@ -512,6 +512,23 @@ private:
             "window tracking or a reduced output resolution - in those cases HomRec silently uses\n"
             "its normal pipeline. If ffmpeg can't start it, the normal pipeline is used as well.");
 
+        AddSectionHeading(page, pageRoot, accent, bg, "Recording games on weak PCs");
+        game_friendly_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Game-friendly priority (ffmpeg and capture threads don't take CPU time from the game)",
+            state_.game_friendly_priority);
+        game_friendly_chk_->SetToolTip(
+            "ffmpeg starts at NORMAL instead of ABOVE_NORMAL priority and HomRec's capture/writer\n"
+            "threads are not boosted to HIGHEST, so a game on a CPU with few cores keeps its time slices.\n"
+            "Off by default (nothing changes). Takes effect the next time a recording starts.");
+        qsv_low_power_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Intel QSV low-power mode (-low_power 1, fixed-function VDENC encoder)",
+            state_.qsv_low_power);
+        qsv_low_power_chk_->SetToolTip(
+            "Adds \"-low_power 1\" to the automatically built Intel QSV arguments, so encoding runs on the\n"
+            "fixed-function encoder instead of the iGPU shader units the game is using (Gen9+ hardware).\n"
+            "Ignored when Custom FFmpeg args are set. If the encoder refuses to start, turn it off again.\n"
+            "Off by default (nothing changes).");
+
         auto *note = new wxStaticText(page, wxID_ANY,
             "Note: only Video codec (above) is written to the settings file -\n"
             "the rest of this tab applies for this session, and round-trips\n"
@@ -995,6 +1012,8 @@ private:
         custom_args_edit_->SetValue("");
         gpu_convert_chk_->SetValue(true);
         gpu_ddagrab_chk_->SetValue(false);
+        game_friendly_chk_->SetValue(false);
+        qsv_low_power_chk_->SetValue(false);
 
         mic_choice_->SetSelection(0);
         sample_rate_spin_->SetValue(44100);
@@ -1086,6 +1105,8 @@ private:
         }
         state_.gpu_convert = gpu_convert_chk_->GetValue();
         state_.gpu_capture_ddagrab = gpu_ddagrab_chk_->GetValue();
+        state_.game_friendly_priority = game_friendly_chk_->GetValue();
+        state_.qsv_low_power = qsv_low_power_chk_->GetValue();
 
         // -- Audio -------------------------------------------------------
         {
@@ -1223,6 +1244,7 @@ private:
                *pixfmt_combo_ = nullptr;
     wxTextCtrl *custom_args_edit_ = nullptr;
     wxCheckBox *gpu_convert_chk_ = nullptr, *gpu_ddagrab_chk_ = nullptr;
+    wxCheckBox *game_friendly_chk_ = nullptr, *qsv_low_power_chk_ = nullptr;   // 2.4.1 weak-PC game recording
     wxSpinCtrl *crf_spin_ = nullptr;
     wxButton *test_btn_ = nullptr;
     wxStaticText *test_status_lbl_ = nullptr;
