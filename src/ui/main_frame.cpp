@@ -29,6 +29,7 @@
 #include <atomic>
 #include <sstream>
 #include <wx/msgdlg.h>
+#include <wx/progdlg.h>
 #include <functional>
 #include <algorithm>
 #include <string>
@@ -2794,19 +2795,69 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
     }
 }
 
+// Downloads the update installer on a worker thread while this (UI) thread
+// keeps the window alive through a wxProgressDialog: progress bar + Cancel.
+// The download used to run directly on the UI thread, so for the whole
+// download (the installer is tens of MB) the window showed "Not responding"
+// and on a slow connection looked permanently hung.
+// Returns true with *installer_path set only for a complete download;
+// *cancelled tells "user pressed Cancel" apart from a real failure.
+static bool DownloadUpdateWithProgress(wxWindow *parent, const HrUpdate::UpdateInfo &info,
+                                       std::wstring *installer_path, bool *cancelled) {
+    HrUpdate::DownloadState st;
+    std::wstring path;
+    bool ok = false;
+    // `st`, `path` and `ok` live on this stack frame; the worker is always
+    // joined below before any of them goes out of scope.
+    std::thread worker([&]() { ok = HrUpdate::DownloadInstaller(info, st, &path); });
+
+    {
+        wxProgressDialog dlg("Updating HomRec",
+                             wxString::Format("Downloading HomRec %s...", wxString::FromUTF8(info.latest_version)),
+                             100, parent, wxPD_APP_MODAL | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
+        while (!st.finished.load()) {
+            unsigned long long got = st.received.load(), tot = st.total.load();
+            bool keep_going;
+            if (tot > 0) {
+                int pct = (int)std::min<unsigned long long>(99, got * 100ULL / tot);
+                keep_going = dlg.Update(pct, wxString::Format("Downloading HomRec %s...\n%.1f of %.1f MB",
+                                         wxString::FromUTF8(info.latest_version), got / 1048576.0, tot / 1048576.0));
+            } else {
+                // Server didn't send a Content-Length - no percentage to show.
+                keep_going = dlg.Pulse(wxString::Format("Downloading HomRec %s...\n%.1f MB",
+                                         wxString::FromUTF8(info.latest_version), got / 1048576.0));
+            }
+            if (!keep_going) st.cancel = true;   // worker notices on its next 8 KB chunk
+            wxMilliSleep(50);
+        }
+    }   // dialog closes here, before the worker is joined / any follow-up message box
+    worker.join();
+
+    if (cancelled) *cancelled = st.cancelled.load();
+    if (ok && installer_path) *installer_path = path;
+    return ok;
+}
+
 // Help > Check for Updates. Hits GitHub on a background thread (see
 // update.cpp) so the UI never blocks on the network call, then hops
 // back to the UI thread via CallAfter before touching any widgets or
 // showing a message box.
 void HomRecMainFrame::OnCheckForUpdates() {
+    static std::atomic<bool> check_running{false};
+    if (check_running.exchange(true)) return;
+
+    HrLog::Info("Update: checking for updates");
     HrUpdate::CheckForUpdateAsync([this](HrUpdate::UpdateInfo info) {
         CallAfter([this, info]() {
+            check_running = false;
             if (!info.checked_ok) {
+                HrLog::Warn("Update: check failed (network or GitHub response)");
                 wxMessageBox("Couldn't check for updates - check your internet connection and try again.",
                              "Check for Updates", wxOK | wxICON_WARNING, this);
                 return;
             }
             if (!info.available) {
+                HrLog::Info("Update: already on the latest version");
                 wxMessageBox("You're on the latest version (" HR_APP_VERSION ").",
                              "Check for Updates", wxOK | wxICON_INFORMATION, this);
                 return;
@@ -2819,9 +2870,24 @@ void HomRecMainFrame::OnCheckForUpdates() {
                 msg += "Download and install it now? HomRec will close to finish updating.";
                 int choice = wxMessageBox(msg, "Update Available", wxYES_NO | wxICON_INFORMATION, this);
                 if (choice != wxYES) return;
-                if (HrUpdate::DownloadAndLaunchInstaller(info)) {
-                    Close(true);
+
+                HrLog::Info("Update: downloading " + info.latest_version);
+                std::wstring installer;
+                bool cancelled = false;
+                if (DownloadUpdateWithProgress(this, info, &installer, &cancelled)) {
+                    if (HrUpdate::LaunchInstaller(installer)) {
+                        HrLog::Info("Update: installer started, closing HomRec");
+                        Close(true);
+                    } else {
+                        HrLog::Error("Update: downloaded, but couldn't start the installer");
+                        wxMessageBox("The update was downloaded but the installer couldn't be started. "
+                                     "Try again, or grab it from the release page.",
+                                     "Update Available", wxOK | wxICON_ERROR, this);
+                    }
+                } else if (cancelled) {
+                    HrLog::Info("Update: download cancelled by user");
                 } else {
+                    HrLog::Warn("Update: download failed");
                     wxMessageBox("Couldn't download the update. Try again later, or grab it from the "
                                  "release page.", "Update Available", wxOK | wxICON_ERROR, this);
                 }
