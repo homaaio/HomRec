@@ -27,6 +27,14 @@ constexpr wchar_t kApiHost[] = L"api.github.com";
 constexpr wchar_t kApiPath[] = L"/repos/homaaio/HomREC/releases/latest";
 constexpr wchar_t kUserAgent[] = L"HomRec-UpdateCheck/" HR_APP_VERSION_W;
 
+// WinHTTP's default DNS-resolve timeout is "infinite", so on a PC with a flaky
+// network/DNS the request could sit there forever. Bound every phase:
+// resolve 10s, connect 15s, send 30s, and 30s of silence between received
+// chunks (a slow-but-moving download is fine, a stalled one fails cleanly).
+void SetSessionTimeouts(HINTERNET hSession) {
+    WinHttpSetTimeouts(hSession, 10000, 15000, 30000, 30000);
+}
+
 // Plain substring search for `"key":"value"` (or `"key": "value"` - one
 // optional space after the colon is all GitHub's API ever emits). Returns
 // true and fills `out` on success; leaves `out` untouched on failure.
@@ -53,6 +61,7 @@ std::string HttpsGetText(const wchar_t *host, const wchar_t *path) {
     HINTERNET hSession = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return result;
+    SetSessionTimeouts(hSession);
     HINTERNET hConnect = WinHttpConnect(hSession, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return result; }
     HINTERNET hReq = WinHttpOpenRequest(hConnect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
@@ -93,7 +102,7 @@ static std::wstring SafeFileTag(const std::string &tag) {
     return out;
 }
 
-bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path) {
+bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path, DownloadState *st) {
     URL_COMPONENTS uc = {};
     uc.dwStructSize = sizeof(uc);
     wchar_t host[256] = {}, path[2048] = {}, extra[1024] = {};
@@ -110,6 +119,7 @@ bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path) {
     HINTERNET hSession = WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return false;
+    SetSessionTimeouts(hSession);
     HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
     HINTERNET hReq = WinHttpOpenRequest(hConnect, L"GET", request_path.c_str(), nullptr, WINHTTP_NO_REFERER,
@@ -130,27 +140,31 @@ bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path) {
                                  WINHTTP_HEADER_NAME_BY_INDEX, &expected, &expectedLen,
                                  WINHTTP_NO_HEADER_INDEX))
             expected = 0; // unknown (chunked) - can't verify the length
+        if (st) st->total = expected;
         if (status == 200) {
             std::ofstream out(std::filesystem::path(dest_path), std::ios::binary | std::ios::trunc);
             if (out.is_open()) {
                 char buf[8192];
                 DWORD read = 0;
                 size_t total = 0;
-                bool read_ok = true, write_ok = true, looks_like_exe = false;
+                bool read_ok = true, write_ok = true, looks_like_exe = false, was_cancelled = false;
                 for (;;) {
+                    if (st && st->cancel.load()) { was_cancelled = true; break; }
                     if (!WinHttpReadData(hReq, buf, sizeof(buf), &read)) { read_ok = false; break; }
                     if (read == 0) break; // clean end of stream
                     if (total == 0) looks_like_exe = read >= 2 && buf[0] == 'M' && buf[1] == 'Z';
                     out.write(buf, read);
                     if (!out) { write_ok = false; break; }
                     total += read;
+                    if (st) st->received = total;
                 }
                 out.close();
+                if (was_cancelled && st) st->cancelled = true;
                 // A read error / short download used to count as success
                 // (any total > 0), and the half-downloaded installer was then
                 // launched. Require a clean end of stream, a matching
                 // Content-Length when the server sent one, and a PE header.
-                ok = read_ok && write_ok && !out.fail() && total > 0 && looks_like_exe &&
+                ok = !was_cancelled && read_ok && write_ok && !out.fail() && total > 0 && looks_like_exe &&
                      (expected == 0 || total == (size_t)expected);
                 if (!ok) {
                     std::error_code ec;
@@ -245,7 +259,11 @@ void CheckForUpdateAsync(std::function<void(UpdateInfo)> on_done) {
     std::thread([on_done]() { on_done(CheckForUpdate()); }).detach();
 }
 
-bool DownloadAndLaunchInstaller(const UpdateInfo &info) {
+bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstring *out_path) {
+    // finished must be the very last thing set, whichever way we leave: the UI
+    // thread stops polling on it and then joins this thread.
+    struct Finish { DownloadState &s; ~Finish() { s.finished = true; } } finish{state};
+
     if (info.download_url.empty()) return false;
 
     int wlen = MultiByteToWideChar(CP_UTF8, 0, info.download_url.c_str(), -1, nullptr, 0);
@@ -257,18 +275,30 @@ bool DownloadAndLaunchInstaller(const UpdateInfo &info) {
     if (!GetTempPathW(MAX_PATH, tempDir)) return false;
     std::wstring destPath = std::wstring(tempDir) + L"HomRec-Update-" + SafeFileTag(info.latest_version) + L".exe";
 
-    if (!DownloadToFile(url, destPath)) return false;
+    if (!DownloadToFile(url, destPath, &state)) return false;
+    if (out_path) *out_path = destPath;
+    return true;
+}
 
+bool LaunchInstaller(const std::wstring &installer_path) {
+    if (installer_path.empty()) return false;
     // Inno Setup silent-upgrade flags: /VERYSILENT suppresses all UI,
     // /SUPPRESSMSGBOXES avoids any "are you sure" prompts, /NORESTART
     // stops it rebooting the machine on our behalf, and /CLOSEAPPLICATIONS
     // (paired with AppMutex/CloseApplications in installer/HomRec.iss)
     // lets it close this very process mid-launch instead of failing to
     // overwrite hr.exe because it's in use.
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", destPath.c_str(),
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", installer_path.c_str(),
                                       L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS",
                                       nullptr, SW_SHOWNORMAL);
     return (INT_PTR)result > 32;
+}
+
+bool DownloadAndLaunchInstaller(const UpdateInfo &info) {
+    DownloadState state;
+    std::wstring path;
+    if (!DownloadInstaller(info, state, &path)) return false;
+    return LaunchInstaller(path);
 }
 
 } // namespace HrUpdate

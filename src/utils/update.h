@@ -16,6 +16,7 @@
 //      new installer closes the running app itself and overwrites in
 //      place - this is "auto-update" without any separate updater binary).
 #pragma once
+#include <atomic>
 #include <functional>
 #include <string>
 
@@ -43,13 +44,35 @@ UpdateInfo CheckForUpdate();
 // back themselves (e.g. wxWindow::CallAfter) before touching any widgets.
 void CheckForUpdateAsync(std::function<void(UpdateInfo)> on_done);
 
-// Downloads `info.download_url` to a temp file and launches it with
-// Inno Setup's silent-upgrade flags, then returns. Callers should close
-// the app shortly after a successful call (the new installer can't
-// overwrite hr.exe while it's still running, even with AppMutex set -
-// AppMutex just stops the user launching a *second* copy mid-update).
-// Returns false (nothing launched) if download_url is empty or the
-// download/launch itself fails.
+// Shared between the thread running DownloadInstaller() and the UI thread
+// that shows the progress dialog - hence atomics. The UI thread only reads
+// received/total/finished and writes cancel.
+struct DownloadState {
+    std::atomic<unsigned long long> received{0}; // bytes written to disk so far
+    std::atomic<unsigned long long> total{0};    // Content-Length, 0 = server didn't say
+    std::atomic<bool> cancel{false};             // UI sets this to abort the download
+    std::atomic<bool> cancelled{false};          // download thread: stopped because of `cancel`
+    std::atomic<bool> finished{false};           // download thread: DownloadInstaller() is done
+};
+
+// BLOCKS until the installer is fully downloaded (or failed / cancelled), so
+// it must NOT be called on the UI thread - a multi-MB download there is what
+// made the whole window "Not responding" during Help > Check for Updates.
+// Run it on a worker thread and poll `state` for progress. On success returns
+// true and sets *out_path to the finished temp file; on failure/cancel returns
+// false and leaves no partial file behind. Always sets state.finished last.
+bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstring *out_path);
+
+// Starts a downloaded installer (from DownloadInstaller) with Inno Setup's
+// silent-upgrade flags and returns immediately. Callers should close the app
+// shortly after a successful call (the new installer can't overwrite hr.exe
+// while it's still running, even with AppMutex set - AppMutex just stops the
+// user launching a *second* copy mid-update). False = nothing was launched.
+bool LaunchInstaller(const std::wstring &installer_path);
+
+// Convenience wrapper: DownloadInstaller() + LaunchInstaller() in one
+// blocking call with no progress or cancel. Kept for callers that are already
+// on a worker thread; the UI uses the two functions above directly.
 bool DownloadAndLaunchInstaller(const UpdateInfo &info);
 
 } // namespace HrUpdate
