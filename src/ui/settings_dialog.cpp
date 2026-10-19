@@ -510,7 +510,10 @@ private:
             "ffmpeg captures and encodes entirely on the GPU: the lowest possible CPU use.\n"
             "Cannot be used together with HomRec overlays or plugins, pause / silence auto-pause,\n"
             "window tracking or a reduced output resolution - in those cases HomRec silently uses\n"
-            "its normal pipeline. If ffmpeg can't start it, the normal pipeline is used as well.");
+            "its normal pipeline. If ffmpeg can't start it, the normal pipeline is used as well.\n"
+            "ddagrab cannot follow a display mode change: if a game switches the resolution while it\n"
+            "records, ffmpeg dies, the recording continues in a new file and HomRec UNTICKS this option\n"
+            "for you (so it doesn't fail again on every game). Tick it again to retry.");
 
         AddSectionHeading(page, pageRoot, accent, bg, "Recording games on weak PCs");
         game_friendly_chk_ = AddCheck(page, pageRoot, text, bg,
@@ -528,6 +531,15 @@ private:
             "fixed-function encoder instead of the iGPU shader units the game is using (Gen9+ hardware).\n"
             "Ignored when Custom FFmpeg args are set. If the encoder refuses to start, turn it off again.\n"
             "Off by default (nothing changes).");
+        gpu_low_priority_chk_ = AddCheck(page, pageRoot, text, bg,
+            "Lower GPU priority of the recorder (the game gets the GPU first)",
+            state_.gpu_low_priority);
+        gpu_low_priority_chk_->SetToolTip(
+            "Puts HomRec's capture and the ffmpeg encoder one GPU scheduling class below normal, so on an\n"
+            "integrated GPU (shared with the game) the game's frames are scheduled first.\n"
+            "Needs no administrator rights. Trade-off: when the GPU is 100% busy the recording can drop\n"
+            "frames - if the log says \"Recording overloaded\", turn it off again.\n"
+            "Off by default (nothing changes). Takes effect the next time a recording starts.");
 
         auto *note = new wxStaticText(page, wxID_ANY,
             "Note: only Video codec (above) is written to the settings file -\n"
@@ -1014,6 +1026,7 @@ private:
         gpu_ddagrab_chk_->SetValue(false);
         game_friendly_chk_->SetValue(false);
         qsv_low_power_chk_->SetValue(false);
+        gpu_low_priority_chk_->SetValue(false);
 
         mic_choice_->SetSelection(0);
         sample_rate_spin_->SetValue(44100);
@@ -1107,6 +1120,7 @@ private:
         state_.gpu_capture_ddagrab = gpu_ddagrab_chk_->GetValue();
         state_.game_friendly_priority = game_friendly_chk_->GetValue();
         state_.qsv_low_power = qsv_low_power_chk_->GetValue();
+        state_.gpu_low_priority = gpu_low_priority_chk_->GetValue();
 
         // -- Audio -------------------------------------------------------
         {
@@ -1245,6 +1259,7 @@ private:
     wxTextCtrl *custom_args_edit_ = nullptr;
     wxCheckBox *gpu_convert_chk_ = nullptr, *gpu_ddagrab_chk_ = nullptr;
     wxCheckBox *game_friendly_chk_ = nullptr, *qsv_low_power_chk_ = nullptr;   // 2.4.1 weak-PC game recording
+    wxCheckBox *gpu_low_priority_chk_ = nullptr;                               // post-2.4.1: recorder yields the GPU to the game
     wxSpinCtrl *crf_spin_ = nullptr;
     wxButton *test_btn_ = nullptr;
     wxStaticText *test_status_lbl_ = nullptr;
