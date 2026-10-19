@@ -170,6 +170,7 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("game_friendly_priority", "video", &AppState::game_friendly_priority,
                               {"game_priority"}));
         v.push_back(BoolField("qsv_low_power", "video", &AppState::qsv_low_power, {"low_power"}));
+        v.push_back(BoolField("gpu_low_priority", "video", &AppState::gpu_low_priority, {"low_gpu_priority"}));
         {
             Def d;
             d.key = "video_format"; d.section = "video";
