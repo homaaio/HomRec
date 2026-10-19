@@ -1352,9 +1352,22 @@ struct Pipeline {
             }
         };
 
+        // ---- stall diagnostics -------------------------------------------------
+        // A benchmark of a game with the recorder running showed a 0.1 FPS minimum that the logs could not
+        // attribute to anything. This watches the gap between two consecutive capture ticks while
+        // recording; a gap of >= max(250 ms, 6 frames) is a "hitch" (display-mode switch, GPU reset,
+        // driver stall, a blocked Map()...). The first 15 are logged with the duration of the capture call
+        // that preceded them, and a one-line summary is written when the recording (or pipeline) ends.
+        using hitch_clock = std::chrono::steady_clock;
+        hitch_clock::time_point hitch_last_tick{};
+        bool   hitch_last_valid = false;
+        int    hitch_count = 0, hitch_logged = 0;
+        double hitch_worst_ms = 0.0, last_cap_ms = 0.0;
+
         try {
         while (running.load(std::memory_order_relaxed)) {
             if (paused.load(std::memory_order_relaxed)) {
+                hitch_last_valid = false;   // a pause is not a stall
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
 #ifdef _WIN32
                 if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
@@ -1386,6 +1399,11 @@ struct Pipeline {
                 }
                 if (is_recording_now != was_recording) {
                     was_recording = is_recording_now;
+                    if (!is_recording_now && hitch_count > 0) {
+                        HrLog::Info("Capture hitches this recording: " + std::to_string(hitch_count) +
+                                    " (worst " + std::to_string((long long)hitch_worst_ms) + " ms between two capture ticks)");
+                    }
+                    hitch_count = 0; hitch_logged = 0; hitch_worst_ms = 0.0; hitch_last_valid = false;
                     last_yuv_valid = false;   // pixel format / size may differ next recording
                     gpu_fail_count = 0;       // a new recording gets a fresh GPU-path retry budget
                     if (gpu_fail_transient) { gpu_failed = false; gpu_fail_transient = false; }
@@ -1413,6 +1431,29 @@ struct Pipeline {
                     if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
 #endif
                 }
+            }
+
+            {
+                const auto t_now = hitch_clock::now();
+                if (hitch_last_valid && was_recording) {
+                    const double gap_ms = std::chrono::duration<double, std::milli>(t_now - hitch_last_tick).count();
+                    const double limit_ms = std::max(250.0, (double)frame_ns / 1e6 * 6.0);
+                    if (gap_ms > limit_ms) {
+                        ++hitch_count;
+                        if (gap_ms > hitch_worst_ms) hitch_worst_ms = gap_ms;
+                        if (hitch_logged < 15) {
+                            ++hitch_logged;
+                            HrLog::Warn("Capture hitch: " + std::to_string((long long)gap_ms) +
+                                        " ms between two capture ticks (expected ~" +
+                                        std::to_string((long long)(frame_ns / 1000000)) + " ms); the capture call before it took " +
+                                        std::to_string((long long)last_cap_ms) + " ms" +
+                                        (logged_lost_ ? ", DXGI capture was lost at that time" : "") +
+                                        (hitch_logged == 15 ? " (further hitches are only counted)" : ""));
+                        }
+                    }
+                }
+                hitch_last_tick = t_now;
+                hitch_last_valid = true;
             }
 
 #ifdef _WIN32
@@ -1602,6 +1643,7 @@ struct Pipeline {
                 continue;
             }
             int ret;
+            const auto t_cap0 = hitch_clock::now();
             if (gpu_tick) {
                 ret = hr_dx_capture_nv12(dx_ctx, nv12_buf.data(), timeout_ms, gpu_sl, gpu_st, gpu_sr, gpu_sb);
                 if (ret == HR_DX_ERROR) {
@@ -1622,6 +1664,9 @@ struct Pipeline {
             }
 #else
             int ret = HR_DX_ERROR;
+#endif
+#ifdef _WIN32
+            last_cap_ms = std::chrono::duration<double, std::milli>(hitch_clock::now() - t_cap0).count();
 #endif
             if (ret == HR_DX_TIMEOUT) {
                 // A timeout here does NOT
@@ -1674,7 +1719,12 @@ struct Pipeline {
                     // keeps failing is visible instead of silently
                     // retrying forever with only the original "resetting"
                     // line to go on.
+                    const auto t_reset0 = hitch_clock::now();
                     int reset_ok = g_libs.dx_reset(dx_ctx);
+                    const double reset_ms = std::chrono::duration<double, std::milli>(hitch_clock::now() - t_reset0).count();
+                    if (reset_ms >= 100.0)
+                        HrLog::Warn("DXGI reset took " + std::to_string((long long)reset_ms) + " ms (" +
+                                    (reset_ok ? "ok" : "failed") + ") - the capture thread was busy that long.");
                     if (!reset_ok) {
                         if (!logged_reset_fail_) {
                             HrLog::Warn("DXGI reset failed (capture surface still unavailable - "
@@ -2110,6 +2160,9 @@ struct Pipeline {
             }
         }
 #endif
+        if (hitch_count > 0)
+            HrLog::Info("Capture hitches before this pipeline stopped: " + std::to_string(hitch_count) +
+                        " (worst " + std::to_string((long long)hitch_worst_ms) + " ms between two capture ticks)");
         // Signal writer thread to stop
         writer_running.store(false, std::memory_order_relaxed);
         pipe_queue_cv.notify_all();
