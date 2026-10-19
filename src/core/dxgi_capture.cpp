@@ -1181,6 +1181,18 @@ HR_EXPORT int hr_dx_reset(void *handle) {
 #endif
 }
 
+#ifdef _WIN32
+static volatile LONG g_gpu_sched_last_status = 0;
+#endif
+
+HR_EXPORT long hr_gpu_sched_last_status() {
+#ifdef _WIN32
+    return (long)g_gpu_sched_last_status;
+#else
+    return 0;
+#endif
+}
+
 HR_EXPORT int hr_gpu_sched_set_process(void *hProcess, int level) {
 #ifdef _WIN32
     typedef LONG (WINAPI *PFN_SetProcPrioClass)(HANDLE, int);
@@ -1191,11 +1203,13 @@ HR_EXPORT int hr_gpu_sched_set_process(void *hProcess, int level) {
                        reinterpret_cast<void *>(GetProcAddress(g, "D3DKMTSetProcessSchedulingPriorityClass")))
                  : nullptr;
     }();
-    if (!fn) return 0;
+    if (!fn) { InterlockedExchange(&g_gpu_sched_last_status, (LONG)0xC0000002L /* STATUS_NOT_IMPLEMENTED */); return 0; }
     if (level < 0) level = 0;
     if (level > 2) level = 2;   /* never RAISE above normal from here (needs admin, and not the point) */
     HANDLE h = hProcess ? static_cast<HANDLE>(hProcess) : GetCurrentProcess();
-    return fn(h, level) >= 0 ? 1 : 0;   /* NTSTATUS: >= 0 is success */
+    const LONG st = fn(h, level);
+    InterlockedExchange(&g_gpu_sched_last_status, st);
+    return st >= 0 ? 1 : 0;   /* NTSTATUS: >= 0 is success */
 #else
     (void)hProcess; (void)level;
     return 0;
