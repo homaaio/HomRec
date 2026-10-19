@@ -38,6 +38,11 @@
 #include <vector>
 #include <sstream>
 #include <mutex>
+#include <thread>
+#include <chrono>
+#ifdef _WIN32
+  #include "../src/utils/log.h"
+#endif
 
 /* -- Return codes ---------------------------------------------------------- */
 static constexpr int HR_FF_OK       =  0;
@@ -124,6 +129,7 @@ static int64_t _file_size(const char *path) {
 static bool _wants_hw_pixfmt(const std::string &codec_args);
 static std::wstring _utf8_to_wide(const std::string &s);
 extern "C" int hr_gpu_sched_set_process(void *hProcess, int level);
+extern "C" long hr_gpu_sched_last_status();
 
 #ifdef _WIN32
 // Plain CreatePipe() (used here previously) hands back an anonymous
@@ -235,6 +241,43 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
         OutputDebugStringA(ok_prio ? "HomRec: ffmpeg GPU scheduling class lowered (below normal)\n"
                                    : "HomRec: ffmpeg GPU scheduling class could not be lowered\n");
         ctx->gpu_priority_applied = ok_prio != 0;
+        if (!ok_prio) {
+            const long first_status = hr_gpu_sched_last_status();
+            HANDLE hDup = nullptr;
+            if (DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &hDup, 0, FALSE,
+                                DUPLICATE_SAME_ACCESS) && hDup) {
+                try {
+                    std::thread([hDup, first_status]() {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        long last_status = first_status;
+                        bool applied = false, exited = false;
+                        long long waited_ms = 0;
+                        for (;;) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                            waited_ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - t0).count();
+                            if (WaitForSingleObject(hDup, 0) == WAIT_OBJECT_0) { exited = true; break; }
+                            if (hr_gpu_sched_set_process(static_cast<void *>(hDup), 1)) { applied = true; break; }
+                            last_status = hr_gpu_sched_last_status();
+                            if (waited_ms >= 8000) break;
+                        }
+                        CloseHandle(hDup);
+                        char st_hex[16];
+                        std::snprintf(st_hex, sizeof(st_hex), "0x%08lX", (unsigned long)last_status);
+                        if (applied)
+                            HrLog::Info("Recording: ffmpeg GPU priority lowered (below normal) " + std::to_string(waited_ms) +
+                                        " ms after launch (the first try was refused with NTSTATUS " +
+                                        std::string(st_hex) + ": ffmpeg had not opened the GPU yet) - the game gets the GPU first.");
+                        else if (!exited)
+                            HrLog::Warn("Recording: ffmpeg GPU priority could NOT be lowered even after " +
+                                        std::to_string(waited_ms) + " ms of retries (NTSTATUS " + std::string(st_hex) +
+                                        ") - recording as usual.");
+                    }).detach();
+                } catch (...) {
+                    CloseHandle(hDup);   /* no thread available: keep the one-shot result, nothing else to undo */
+                }
+            }
+        }
     }
     return true;
 }
