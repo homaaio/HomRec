@@ -90,6 +90,11 @@ struct FfmpegCtx {
     int  grab_w{0}, grab_h{0};   /* 0x0 = the whole output */
     bool grab_cursor{true};
     bool normal_priority{false};
+    /* Opt-in: put the ffmpeg child one GPU scheduling class below normal (see
+     * hr_gpu_sched_set_process() in dxgi_capture.cpp) so a game on a shared iGPU
+     * gets the GPU first. Applied right after CreateProcess. */
+    bool gpu_low_priority{false};
+    bool gpu_priority_applied{false};   /* result of the call above, for hr_ff_gpu_priority_applied() */
 
     /* Diagnostics for the ddagrab path (stderr of a GUI-launched ffmpeg used to go
      * nowhere, so a mid-recording death left no trace of the reason):
@@ -118,6 +123,7 @@ static int64_t _file_size(const char *path) {
 
 static bool _wants_hw_pixfmt(const std::string &codec_args);
 static std::wstring _utf8_to_wide(const std::string &s);
+extern "C" int hr_gpu_sched_set_process(void *hProcess, int level);
 
 #ifdef _WIN32
 // Plain CreatePipe() (used here previously) hands back an anonymous
@@ -224,6 +230,12 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
     ctx->hThread  = pi.hThread;
     if (want_stdin) ctx->hStdin = hWriteStdin;
     ctx->running = true;
+    if (ctx->gpu_low_priority) {
+        const int ok_prio = hr_gpu_sched_set_process(pi.hProcess, 1);
+        OutputDebugStringA(ok_prio ? "HomRec: ffmpeg GPU scheduling class lowered (below normal)\n"
+                                   : "HomRec: ffmpeg GPU scheduling class could not be lowered\n");
+        ctx->gpu_priority_applied = ok_prio != 0;
+    }
     return true;
 }
 #endif
@@ -508,6 +520,20 @@ HR_EXPORT void hr_ff_set_output_size(void *h, int out_w, int out_h) {
 HR_EXPORT void hr_ff_set_normal_priority(void *h, int enable) {
     if (!h) return;
     static_cast<FfmpegCtx *>(h)->normal_priority = (enable != 0);
+}
+
+// hr_ff_set_gpu_low_priority:
+// enable != 0: lower the ffmpeg child's GPU scheduling class (below normal) right after it is
+// launched. Must be called before hr_ff_start(). hr_ff_gpu_priority_applied() tells afterwards
+// whether the driver stack accepted it (1) or not (0), so the caller can log the outcome.
+HR_EXPORT void hr_ff_set_gpu_low_priority(void *h, int enable) {
+    if (!h) return;
+    static_cast<FfmpegCtx *>(h)->gpu_low_priority = (enable != 0);
+}
+
+HR_EXPORT int hr_ff_gpu_priority_applied(const void *h) {
+    if (!h) return 0;
+    return static_cast<const FfmpegCtx *>(h)->gpu_priority_applied ? 1 : 0;
 }
 
 HR_EXPORT void hr_ff_set_gpu_capture(void *h, int enable, int output_idx,
