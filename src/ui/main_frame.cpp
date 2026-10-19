@@ -2131,6 +2131,12 @@ void HomRecMainFrame::OnRecordingFinalized() {
             recording_restart_after_crash_ = false;
             HrLog::Warn("Recording: full-GPU capture stopped (display mode change?) - the part captured so far "
                         "was saved; continuing in a NEW file with the normal capture pipeline.");
+            if (state_.gpu_capture_ddagrab) {
+                state_.gpu_capture_ddagrab = false;
+                PersistSettings();
+                HrLog::Warn("Settings: 'Full-GPU capture via ffmpeg ddagrab' was switched OFF and saved, because it "
+                            "cannot follow a display mode change (games). Tick it again in Settings > Video to retry.");
+            }
             CallAfter([this]() {
                 if (state_.recording) return;
                 DoStart();
