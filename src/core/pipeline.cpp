@@ -1363,6 +1363,9 @@ struct Pipeline {
         bool   hitch_last_valid = false;
         int    hitch_count = 0, hitch_logged = 0;
         double hitch_worst_ms = 0.0, last_cap_ms = 0.0;
+        // Where the previous tick spent its time (benchmark logs: a 6 s hitch of which the DXGI reset was only 2.5 s):
+        // everything before the capture call (GPU path size/enable checks), the DXGI reset, and - by subtraction - the rest.
+        double last_prep_ms = 0.0, last_reset_ms = 0.0;
 
         try {
         while (running.load(std::memory_order_relaxed)) {
@@ -1448,6 +1451,10 @@ struct Pipeline {
                                         std::to_string((long long)(frame_ns / 1000000)) + " ms); the capture call before it took " +
                                         std::to_string((long long)last_cap_ms) + " ms" +
                                         (logged_lost_ ? ", DXGI capture was lost at that time" : "") +
+                                        " [that tick: " + std::to_string((long long)last_prep_ms) + " ms before the capture call, " +
+                                        std::to_string((long long)last_reset_ms) + " ms DXGI reset, " +
+                                        std::to_string((long long)std::max(0.0, gap_ms - last_prep_ms - last_cap_ms - last_reset_ms)) +
+                                        " ms after it (convert/queue/pacing)]" +
                                         (hitch_logged == 15 ? " (further hitches are only counted)" : ""));
                         }
                     }
@@ -1644,6 +1651,8 @@ struct Pipeline {
             }
             int ret;
             const auto t_cap0 = hitch_clock::now();
+            last_prep_ms  = std::chrono::duration<double, std::milli>(t_cap0 - hitch_last_tick).count();
+            last_reset_ms = 0.0;
             if (gpu_tick) {
                 ret = hr_dx_capture_nv12(dx_ctx, nv12_buf.data(), timeout_ms, gpu_sl, gpu_st, gpu_sr, gpu_sb);
                 if (ret == HR_DX_ERROR) {
@@ -1722,6 +1731,7 @@ struct Pipeline {
                     const auto t_reset0 = hitch_clock::now();
                     int reset_ok = g_libs.dx_reset(dx_ctx);
                     const double reset_ms = std::chrono::duration<double, std::milli>(hitch_clock::now() - t_reset0).count();
+                    last_reset_ms = reset_ms;
                     if (reset_ms >= 100.0)
                         HrLog::Warn("DXGI reset took " + std::to_string((long long)reset_ms) + " ms (" +
                                     (reset_ok ? "ok" : "failed") + ") - the capture thread was busy that long.");
