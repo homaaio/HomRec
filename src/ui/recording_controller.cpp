@@ -123,6 +123,11 @@ extern "C" {
     void hr_ff_set_output_size(void *h, int out_w, int out_h);
     void hr_ff_set_pipe_input(void *h, int enable);
     void hr_ff_set_normal_priority(void *h, int enable);
+    // Opt-in (AppState::gpu_low_priority): ffmpeg child one GPU scheduling class below normal
+    void hr_ff_set_gpu_low_priority(void *h, int enable);
+    int  hr_ff_gpu_priority_applied(const void *h);
+    // dxgi_capture.cpp: GPU scheduling class of a process (nullptr = HomRec itself), 0 idle / 1 below normal / 2 normal
+    int  hr_gpu_sched_set_process(void *hProcess, int level);
     void hr_ff_set_gpu_capture(void *h, int enable, int output_idx, int off_x, int off_y,
                                 int w, int h2, int draw_mouse);
     int hr_ff_start(void *handle);
@@ -962,6 +967,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     hr_ff_set_output_path(ff, NarrowFromWide(current_output_path_).c_str());
     hr_ff_set_codec_args(ff, NarrowFromWide(codec_args).c_str());
     hr_ff_set_normal_priority(ff, state_.game_friendly_priority ? 1 : 0);
+    hr_ff_set_gpu_low_priority(ff, state_.gpu_low_priority ? 1 : 0);
     hr_ff_set_video_params(ff, src_w, src_h, state_.target_fps);
     hr_ff_set_gpu_capture(ff, /*enable=*/1, capture_output_idx_,
                           crop_x_, crop_y_, crop_w_, crop_h_,
@@ -978,6 +984,10 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
         hr_ff_destroy(ff);
         return false;
     }
+    if (state_.gpu_low_priority)
+        HrLog::Info(hr_ff_gpu_priority_applied(ff)
+                        ? "Recording: ffmpeg GPU priority lowered (below normal) - the game gets the GPU first."
+                        : "Recording: ffmpeg GPU priority could NOT be lowered (driver/Windows refused) - recording as usual.");
 
     // ffmpeg writes the container header only once the first captured frame has
     // gone through the filter graph and the encoder is initialised, so "the
@@ -1131,6 +1141,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_ff_set_output_path(ffproc_, NarrowFromWide(current_output_path_).c_str());
         hr_ff_set_codec_args(ffproc_, NarrowFromWide(codec_args).c_str());
         hr_ff_set_normal_priority(ffproc_, state_.game_friendly_priority ? 1 : 0);
+        hr_ff_set_gpu_low_priority(ffproc_, state_.gpu_low_priority ? 1 : 0);
         // Video params tell ffmpeg's rawvideo demuxer the size of the frames
         // that will actually arrive on the pipe - that's the CROPPED size in
         // window-capture mode (crop_w_/crop_h_ > 0), not the monitor's native
@@ -1152,6 +1163,10 @@ bool RecordingController::Start(std::wstring &error_out) {
             ffproc_ = nullptr;
             return false;
         }
+        if (state_.gpu_low_priority)
+            HrLog::Info(hr_ff_gpu_priority_applied(ffproc_)
+                            ? "Recording: ffmpeg GPU priority lowered (below normal) - the game gets the GPU first."
+                            : "Recording: ffmpeg GPU priority could NOT be lowered (driver/Windows refused) - recording as usual.");
 
         // The pipeline writes captured frames straight into ffmpeg's stdin
         // pipe, so it needs the real write-end HANDLE ffmpeg was launched
@@ -1276,6 +1291,14 @@ bool RecordingController::Start(std::wstring &error_out) {
         if (state_.game_friendly_priority)
             HrLog::Info("Recording: game-friendly priority is on (encoder at normal priority, "
                         "capture threads not boosted).");
+        // Opt-in: the capture thread's D3D11 work (desktop copy, video-processor blit, NV12 readback copy)
+        // runs in THIS process, so lower its GPU class too. Restored in FinishPipelineAfterStop().
+        if (state_.gpu_low_priority && !gpu_self_lowered_) {
+            gpu_self_lowered_ = hr_gpu_sched_set_process(nullptr, 1) != 0;
+            HrLog::Info(gpu_self_lowered_
+                            ? "Recording: HomRec capture GPU priority lowered (below normal)."
+                            : "Recording: HomRec capture GPU priority could NOT be lowered (driver/Windows refused).");
+        }
     }
 
     if (state_.audio_out_channels > 0) {
@@ -1398,6 +1421,11 @@ void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
     if (pipeline_) hr_pl_pause(pipeline_, 0);
     hr_audio_pause(0);
     if (pipeline_) hr_pl_set_priority_boost(pipeline_, 0);
+    // Back to the normal GPU class once the recording is over (live preview / idle capture are cheap).
+    if (gpu_self_lowered_) {
+        hr_gpu_sched_set_process(nullptr, 2);
+        gpu_self_lowered_ = false;
+    }
 
     if (instant_replay_enabled_) {
         std::wstring resume_err;

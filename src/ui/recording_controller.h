@@ -516,6 +516,7 @@ private:
     bool ddagrab_pause_warned_ = false;
     bool ddagrab_blocked_ = false;        // ddagrab died mid-recording once: not used again this session
     bool crash_was_ddagrab_ = false;      // see crash_was_ddagrab()
+    bool gpu_self_lowered_ = false;       // HomRec's own GPU scheduling class is lowered (AppState::gpu_low_priority)
     double crash_video_elapsed_sec_ = 0.0; // recording time at the moment ffmpeg died (0 = no crash)
     long long ddagrab_last_frames_ = -1;   // -progress frame count at the last FPS sample
     std::chrono::steady_clock::time_point ddagrab_last_frames_t_{};
