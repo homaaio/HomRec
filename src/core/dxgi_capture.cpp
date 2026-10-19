@@ -1181,6 +1181,27 @@ HR_EXPORT int hr_dx_reset(void *handle) {
 #endif
 }
 
+HR_EXPORT int hr_gpu_sched_set_process(void *hProcess, int level) {
+#ifdef _WIN32
+    typedef LONG (WINAPI *PFN_SetProcPrioClass)(HANDLE, int);
+    static PFN_SetProcPrioClass fn = []() -> PFN_SetProcPrioClass {
+        HMODULE g = GetModuleHandleW(L"gdi32.dll");
+        if (!g) g = LoadLibraryW(L"gdi32.dll");
+        return g ? reinterpret_cast<PFN_SetProcPrioClass>(
+                       reinterpret_cast<void *>(GetProcAddress(g, "D3DKMTSetProcessSchedulingPriorityClass")))
+                 : nullptr;
+    }();
+    if (!fn) return 0;
+    if (level < 0) level = 0;
+    if (level > 2) level = 2;   /* never RAISE above normal from here (needs admin, and not the point) */
+    HANDLE h = hProcess ? static_cast<HANDLE>(hProcess) : GetCurrentProcess();
+    return fn(h, level) >= 0 ? 1 : 0;   /* NTSTATUS: >= 0 is success */
+#else
+    (void)hProcess; (void)level;
+    return 0;
+#endif
+}
+
 /* -------------------------------------------------------------------------
  * hr_dx_adapter_count
  * ---------------------------------------------------------------------- */
