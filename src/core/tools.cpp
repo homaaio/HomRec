@@ -50,7 +50,11 @@ static std::wstring run_cmd_ex(const std::wstring& cmd, DWORD timeout_ms, RunRes
     std::wstring mut_cmd = cmd;
     if (!CreateProcessW(nullptr, mut_cmd.data(),
                         nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+                        // BELOW_NORMAL: everything started through here (audio+video merge, the .mkv -> .mp4
+                        // copy, probes) is post-processing that nobody waits for in real time, and it very often
+                        // runs right after Stop while the game is still on screen - it must not take CPU time
+                        // from the game on a 2-core CPU.
+                        CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr, nullptr, &si, &pi))
     {
         CloseHandle(hRead); CloseHandle(hWrite);
         return {};
