@@ -542,9 +542,8 @@ private:
             "Off by default (nothing changes). Takes effect the next time a recording starts.");
 
         auto *note = new wxStaticText(page, wxID_ANY,
-            "Note: only Video codec (above) is written to the settings file -\n"
-            "the rest of this tab applies for this session, and round-trips\n"
-            "through .hrc profiles, but resets to defaults on the next launch.");
+            "Note: these switches are saved in the settings file (.hrc, [video])\n"
+            "and in profiles, and are kept on the next launch.");
         note->SetForegroundColour(textDim);
         note->SetBackgroundColour(bg);
         pageRoot->Add(note, 0, wxALL, 16);
