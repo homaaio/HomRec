@@ -128,7 +128,7 @@ extern "C" {
     int  hr_ff_gpu_priority_applied(const void *h);
     // dxgi_capture.cpp: GPU scheduling class of a process (nullptr = HomRec itself), 0 idle / 1 below normal / 2 normal
     int  hr_gpu_sched_set_process(void *hProcess, int level);
-    long hr_gpu_sched_last_status();
+    long hr_gpu_sched_last_status();   // NTSTATUS of the last hr_gpu_sched_set_process() call
     void hr_ff_set_gpu_capture(void *h, int enable, int output_idx, int off_x, int off_y,
                                 int w, int h2, int draw_mouse);
     int hr_ff_start(void *handle);
@@ -299,6 +299,10 @@ void RecordingController::Initialize() {
     hr_audio_start(1.0f, 1.0f, 0, 0, WideFromNarrow(state_.mic_device_id).c_str());
     applied_mic_device_id_ = state_.mic_device_id;
 }
+
+// One line with the "weak PC" switches that are really in effect for THIS recording. The benchmark run "(c) with
+// gpu_low_priority=0" still logged "GPU priority lowered", i.e. it ran with the setting ON and the A/B test compared
+// two identical runs - this line makes such a mix-up visible in homrec.log at a glance.
 static std::string HrLowImpactFlagsLine(const AppState &st) {
     auto onoff = [](bool v) { return v ? "ON" : "off"; };
     return std::string("Recording: weak-PC switches in effect: gpu_low_priority=") + onoff(st.gpu_low_priority) +
@@ -1409,6 +1413,9 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     hr_ff_stop_graceful(ffproc_);
 
     finalize_thread_ = std::thread([this, keep_for_preview, on_done]() {
+    // Everything below (stopping the pipeline, mixing/merging audio, the mkv->mp4 copy) is not time-critical, and the
+    // user is usually back in the game by now: keep this thread out of the game's way.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     if (ddagrab_active_) {
         // ffmpeg captured by itself (no pipe was ever attached to this recording),
         // so there is no recording segment to close; the graceful "q" sent above
