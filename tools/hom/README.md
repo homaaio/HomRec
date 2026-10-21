@@ -35,7 +35,51 @@ hom install <plugin-name> [-y] [-f]    Download and install a plugin
                                           (-y/-f: skip the disk-space prompt)
 hom remove  <plugin-name> -r           Remove an installed plugin
                                           (-r is required to confirm)
+hom repo [list]                        Show download repositories ('*' = in use)
+hom repo add <name> <url|owner/repo[@branch]>
+                                       Remember a fork or a mirror (https only)
+hom repo set <name>                    Download from that repo from now on
+hom repo remove <name>                 Forget a repo
+--progress=bar|lines|none              (any command) how downloads report progress
 ```
+
+### Forks and mirrors (`hom repo`)
+
+By default hom downloads from the official repo. To use a fork or a mirror:
+
+```
+hom repo add myfork someone/HomRec          # GitHub fork -> raw.githubusercontent.com/someone/HomRec/main/Hom/
+hom repo add beta   someone/HomRec@dev      # same, another branch
+hom repo add mirror https://example.org/homrec/Hom/   # any https folder with version.txt, hom.exe, plugins/
+hom repo set myfork                         # use it
+hom repo set official                       # go back
+```
+
+The list is stored in `hom_repos.cfg` next to `hom.exe` (plain text, hand-editable;
+`official` is built in). The chosen repo is used for `install`, `upgrade`, `search`,
+`show`, `list --upgradable`, `ping` and `update` (which downloads `hom.exe` from there).
+Only `https://` is accepted, because hom downloads an executable from that place.
+Whenever a non-official repo is in use, hom says so on the first line of its output.
+
+### Download progress
+
+`install`, `upgrade` and `update` show a bar with percent, sizes and an estimate:
+
+```
+  [#########-----------]  45%  1.5 / 3.4 MB  ~4s
+```
+
+In a real terminal hom redraws the line itself. HomRec's console starts hom with
+`--progress=lines` (hom then prints `@progress <percent> <received> <total> <eta_sec>`
+lines, which the console draws as one live bar). When the output is piped into
+another program the default is `none`.
+
+### If hom.exe was deleted
+
+From HomRec's console just type any `hom` command: when `hom.exe` is missing,
+HomRec downloads it again from the active repo (with a progress bar) and then runs
+your command. `inwid hom restore` does the same on purpose (and replaces a broken
+`hom.exe`). No need to dig it out of the portable archive.
 
 ```
 > hom install input-overlay
