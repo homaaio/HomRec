@@ -238,8 +238,8 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("notify_sound", "ui_toggles", &AppState::notify_sound));
         v.push_back(BoolField("notify_flash", "ui_toggles", &AppState::notify_flash));
         v.push_back(BoolField("hint_no_overlay", "ui_toggles", &AppState::hint_no_overlay));
-        // 2.4: dockable panels. ui_locked freezes the layout; ui_layout is the
-        // hex-encoded wxAuiManager perspective (written by the app, not meant to be hand-edited).
+        v.push_back(BoolField("console_hom_log", "ui_toggles", &AppState::console_hom_log, {"hom_log"}));
+        v.push_back(BoolField("console_history_save", "ui_toggles", &AppState::console_history_save, {"history_save"}));
         v.push_back(BoolField("ui_locked", "ui_toggles", &AppState::ui_locked, {"lock_ui", "ui_lock"}));
         v.push_back(StrField("ui_layout", "ui_toggles", &AppState::ui_layout));
 
