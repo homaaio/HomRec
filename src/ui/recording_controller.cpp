@@ -1054,6 +1054,30 @@ bool RecordingController::Start(std::wstring &error_out) {
     if (finalizing_) { error_out = L"The previous recording is still being saved - try again in a moment."; return false; }
     if (finalize_thread_.joinable()) finalize_thread_.join();
 
+    // Start() runs on the UI thread, so every millisecond spent in here is a frozen window.
+    // Per-phase timing, written to homrec.log as ONE line when Start() returns (any way it returns),
+    // so a "the UI freezes for 10-20 s when I press Record" report shows exactly which step it was.
+    struct StartPhaseTimer {
+        using Clock = std::chrono::steady_clock;
+        Clock::time_point t0 = Clock::now(), last = t0;
+        std::string line;
+        bool preview_off = false;
+        void mark(const char *name) {
+            const auto now = Clock::now();
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
+            last = now;
+            if (ms >= 5) line += std::string(" ") + name + "=" + std::to_string(ms) + "ms";
+        }
+        ~StartPhaseTimer() {
+            const long long total = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+            const std::string msg = std::string("Recording: Start() took ") + std::to_string(total) +
+                                    " ms on the UI thread (preview " + (preview_off ? "off" : "on") + ")" +
+                                    (line.empty() ? std::string() : std::string(" -") + line);
+            if (total >= 1000) HrLog::Warn(msg); else HrLog::Info(msg);
+        }
+    } start_timer;
+    start_timer.preview_off = state_.disable_preview;
+
     // Refuse up front (before Instant Replay gets paused or anything else
     // is touched) if the chosen window/region can't be recorded - the old
     // behavior of quietly recording the whole desktop instead is exactly
@@ -1122,10 +1146,12 @@ bool RecordingController::Start(std::wstring &error_out) {
         return false;
     }
 
+    start_timer.mark("checks+disk");
     current_output_path_ = BuildOutputPath();
 
     int prev_w = capture_w_, prev_h = capture_h_;
     ResolveCaptureSize();
+    start_timer.mark("resolve_size");
 
     // Prefer the probed GPU encoder; fall back to libx264 if none/if the
     // caller already forced a specific codec in settings.
@@ -1149,7 +1175,9 @@ bool RecordingController::Start(std::wstring &error_out) {
     ddagrab_last_frames_ = -1;
     current_fps_ = 0.0;
     std::chrono::steady_clock::time_point t_video_go{};
-    if (TryStartDdagrab(codec_args, codec_is_hw, t_video_go)) {
+    const bool ddagrab_started = TryStartDdagrab(codec_args, codec_is_hw, t_video_go);
+    start_timer.mark("ddagrab_probe/start");
+    if (ddagrab_started) {
         ddagrab_active_ = true;
         // A preview-only pipeline may keep running for the live preview, but it
         // must not be attached to a recording (nothing to pipe into).
@@ -1188,6 +1216,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             ffproc_ = nullptr;
             return false;
         }
+        start_timer.mark("ffmpeg_launch");
         HrLog::Info(HrLowImpactFlagsLine(state_));
         if (state_.gpu_low_priority)
             HrLogFfmpegGpuPriorityStart(hr_ff_gpu_priority_applied(ffproc_) != 0);
@@ -1239,7 +1268,9 @@ bool RecordingController::Start(std::wstring &error_out) {
             reused_preview_pipeline = true;
         } else {
             JoinPendingInstantReplayStop();
+            start_timer.mark("join_replay_stop");
             if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+            start_timer.mark("destroy_old_pipeline");
             // See JoinPendingPreviewTeardown()'s comment
             // (recording_controller.h) - without this, starting a recording
             // shortly after preview was torn down (e.g. "Disable live preview"
@@ -1249,9 +1280,11 @@ bool RecordingController::Start(std::wstring &error_out) {
             // recording just can't start with preview off until the app is
             // restarted.
             JoinPendingPreviewTeardown();
+            start_timer.mark("join_preview_teardown");
             int pvw = 0, pvh = 0;
             ScaledPreviewSize(pvw, pvh);
             pipeline_ = CreatePipelineForTarget(ff_stdin, pvw, pvh);
+            start_timer.mark("create_pipeline");
             pipeline_output_idx_ = capture_output_idx_;
             last_overlays_sent_valid_ = false;
         }
@@ -1264,6 +1297,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
             hr_pl_set_output_size(pipeline_, output_w_, output_h_);
             pipeline_started = hr_pl_start(pipeline_) != 0;
+            start_timer.mark("pipeline_start");
         }
         if (pipeline_) {
             hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
@@ -1356,6 +1390,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         av_start_skew_sec_ = 0.0;
     }
 
+    start_timer.mark("audio_begin");
     hr_ctl_set_output_path(ctl_, NarrowFromWide(current_output_path_).c_str());
     hr_ctl_start(ctl_);
 
