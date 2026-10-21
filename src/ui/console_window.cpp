@@ -285,7 +285,7 @@ bool RunCapturedProcess(const std::wstring &cmdline, const std::wstring &cwd,
     return true;
 }
 
-// Downloads hom.exe again from the active hom repo (hom_repos.cfg - the same
+// Downloads hom.exe again from the active hom repo (cfg\hom_repos.cfg - the same
 // file `hom repo set` writes; "official" when there is none) to
 // <hom_path>.new and moves it into place. This is the answer to "I deleted
 // hom.exe by accident": hom.exe can't repair itself, but hr.exe already knows
@@ -297,7 +297,7 @@ bool RestoreHomExe(const std::wstring &hom_path, const std::wstring &base_dir,
                    const std::atomic<bool> &cancel,
                    const std::function<void(int, std::wstring)> &push) {
     homcommon::RepoConfig cfg =
-        homcommon::LoadRepoConfig(std::filesystem::path(base_dir) / homcommon::kRepoCfgName);
+        homcommon::LoadRepoConfig(homcommon::RepoCfgFile(std::filesystem::path(base_dir)));
     homcommon::Repo repo = homcommon::ActiveRepo(cfg);
     const std::wstring url = WideFromNarrow(repo.url + "hom.exe");
     const std::wstring tmp = hom_path + L".new";
@@ -420,7 +420,7 @@ ConsoleWindow::ConsoleWindow(AppState &state, RecordingController *rec, HWND mai
     : state_(state), rec_(rec), main_window_(main_window), plugins_(plugins) {}
 
 ConsoleWindow::~ConsoleWindow() {
-    hom_cancel_ = true;
+    hom_cancel_ = true; // abort a running download/hom.exe instead of waiting for it
     JoinPendingHomThread();
     if (hwnd_) DestroyWindow(hwnd_);
     if (mono_font_) { DeleteObject(mono_font_); mono_font_ = nullptr; }
@@ -660,7 +660,7 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
     SetWindowLongPtrW(input_, GWLP_USERDATA, (LONG_PTR)this);
     static WNDPROC origInputProc = nullptr;
     origInputProc = (WNDPROC)GetWindowLongPtrW(input_, GWLP_WNDPROC);
-    LoadHistory();   // commands typed in earlier sessions (console_history.txt) - Up/Down and `history` see them
+    LoadHistory();
     SetWindowLongPtrW(input_, GWLP_WNDPROC, (LONG_PTR)(+[](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
         auto *self = reinterpret_cast<ConsoleWindow *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         // The console window is created as a child/owned window of
@@ -770,6 +770,11 @@ void ConsoleWindow::Print(const std::wstring &line, COLORREF color) {
     ScrollToBottom();
 }
 
+// EM_SCROLLCARET alone was not enough: the output box is read-only and never
+// has the keyboard focus (you type in the input box), and a box without focus
+// does not reliably follow its caret - so some commands (hom's output, which
+// is printed in a burst with redrawing switched off) left the view stuck in
+// the middle. WM_VSCROLL/SB_BOTTOM doesn't care about focus.
 void ConsoleWindow::ScrollToBottom() {
     if (!output_) return;
     SendMessageW(output_, EM_SCROLLCARET, 0, 0);
@@ -800,7 +805,19 @@ void ConsoleWindow::SetProgressLine(const std::wstring &text) {
 // --- command history ----------------------------------------------------------
 
 std::wstring ConsoleWindow::HistoryFilePath() const {
-    return GetBaseDir() + L"\\console_history.txt";
+    // cfg\console_history.txt. Older builds kept it next to hr.exe: if only that
+    // copy exists, move it into cfg/ (best effort; a failed move just means the
+    // old history isn't picked up).
+    const std::wstring base = GetBaseDir();
+    const std::wstring dir  = base + L"\\cfg";
+    const std::wstring neu  = dir + L"\\console_history.txt";
+    const std::wstring old  = base + L"\\console_history.txt";
+    if (GetFileAttributesW(neu.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        GetFileAttributesW(old.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        CreateDirectoryW(dir.c_str(), nullptr);
+        MoveFileW(old.c_str(), neu.c_str());
+    }
+    return neu;
 }
 
 void ConsoleWindow::LoadHistory() {
@@ -827,7 +844,8 @@ void ConsoleWindow::LoadHistory() {
         history_.erase(history_.begin(), history_.begin() + (history_.size() - kHistoryMax));
     history_pos_ = (int)history_.size();
 
-
+    // RememberCommand() only ever appends, so the file grows; compact it
+    // (rewrite with just what's kept) once it holds noticeably more than that.
     if (lines_in_file > history_.size() + 100) {
         std::ofstream out(std::filesystem::path(HistoryFilePath()), std::ios::binary | std::ios::trunc);
         for (const auto &h : history_) out << NarrowFromWide(h) << "\n";
@@ -835,11 +853,13 @@ void ConsoleWindow::LoadHistory() {
 }
 
 void ConsoleWindow::RememberCommand(const std::wstring &cmd) {
+    // Same command twice in a row is stored once (like bash's ignoredups).
     if (history_.empty() || history_.back() != cmd) {
         history_.push_back(cmd);
         if (history_.size() > kHistoryMax)
             history_.erase(history_.begin(), history_.begin() + (history_.size() - kHistoryMax));
         if (state_.console_history_save) {
+            CreateDirectoryW((GetBaseDir() + L"\\cfg").c_str(), nullptr);   // cfg/ may not exist yet
             std::ofstream out(std::filesystem::path(HistoryFilePath()), std::ios::binary | std::ios::app);
             if (out) out << NarrowFromWide(cmd) << "\n";   // best effort: a read-only folder just means no persistence
         }
@@ -1601,6 +1621,10 @@ void ConsoleWindow::JoinPendingHomThread() {
     if (hom_thread_.joinable()) hom_thread_.join();
 }
 
+// Called from hom_thread_ (and RestoreHomExe()): hands one line to the UI
+// thread. At most one kWmHomLines message is posted until the UI thread has
+// drained the queue - the flag is flipped under the same lock as the push, so
+// a line can never be left behind without a message that will pick it up.
 void ConsoleWindow::QueueHomLine(HWND target, HomLineKind kind, std::wstring text) {
     bool need_post = false;
     {

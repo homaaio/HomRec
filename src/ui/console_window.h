@@ -231,7 +231,7 @@ private:
     // are printed back verbatim (it already formats its own success/error
     // text), not re-wrapped in PrintOk/PrintErr.
     //   hom restore  - (re)downloads hom.exe itself from the active hom repo
-    //                  (hom_repos.cfg, `hom repo set`). It also happens on its
+    //                  (cfg\hom_repos.cfg, `hom repo set`). It also happens on its
     //                  own whenever you type `hom ...` and hom.exe is missing.
     void CmdHom(const std::wstring &raw);
     // hom.exe does real network I/O - running it straight from CmdHom() (i.e.
@@ -290,7 +290,7 @@ private:
     bool progress_active_ = false;
 
     // --- command history (Up/Down, `history`, `history clear`) ---
-    // Persisted to console_history.txt next to hr.exe (UTF-8, one command per
+    // Persisted to cfg\console_history.txt next to hr.exe (UTF-8, one command per
     // line, newest last, at most kHistoryMax kept) unless the setting
     // console_history_save is off. Only lines typed in the console are kept -
     // cfg files and hotkey commands don't go through here.
