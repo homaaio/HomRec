@@ -55,7 +55,7 @@ hom repo set myfork                         # use it
 hom repo set official                       # go back
 ```
 
-The list is stored in `hom_repos.cfg` next to `hom.exe` (plain text, hand-editable;
+The list is stored in `cfg\hom_repos.cfg` next to `hom.exe` (plain text, hand-editable;
 `official` is built in). The chosen repo is used for `install`, `upgrade`, `search`,
 `show`, `list --upgradable`, `ping` and `update` (which downloads `hom.exe` from there).
 Only `https://` is accepted, because hom downloads an executable from that place.
