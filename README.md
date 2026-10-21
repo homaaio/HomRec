@@ -1,6 +1,6 @@
 # HomRec (Hardware Optimized Mechanism Recorder)
 
-[![Version](https://img.shields.io/badge/version-2.4.0-blue?style=flat-square)](https://github.com/homaaio/HomRec/releases)
+[![Version](https://img.shields.io/badge/version-2.4.1-blue?style=flat-square)](https://github.com/homaaio/HomRec/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2B%20(64--bit)-0078d4?style=flat-square&logo=windows)](#system-requirements)
 [![License](https://img.shields.io/badge/license-GPLv3-green?style=flat-square)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-0047ab?style=flat-square&logo=discord)](https://discord.gg/Gv4t6Xhy7E)
@@ -12,7 +12,6 @@ A native C/C++ screen recorder for low-spec Windows machines. FFmpeg for encodin
 ## Contents
 
 - [Overview](#overview)
-- [What's new in 2.4.0](#whats-new-in-240)
 - [Features](#features)
 - [System requirements](#system-requirements)
 - [Installation](#installation)
@@ -45,18 +44,6 @@ HomRec targets a specific problem: general-purpose screen recorders (OBS, Bandic
 The application is 100% native C/C++: UI (wxWidgets), capture pipeline, audio, plugin host (Lua 5.4), and console all compile into `hr.exe`. At runtime it needs FFmpeg for encoding and the runtime `.dll` files that ship beside it (wxWidgets and the MinGW runtime); the installer and the portable archive include both. Note that this refers to the *application* - a small number of Python scripts exist under `tools/` for maintainer use (build packaging, environment checking, language file conversion) and are not part of `hr.exe` or required to run it.
 
 HomRec is currently **Windows-only**: the capture engine uses DXGI/D3D11/Win32. Linux (X11 and Wayland) is planned but there is no Linux build yet - see [`src/platform/linux/`](src/platform/linux/x11/README.md) for the intended design.
-
-## What's new in 2.4.0
-
-- **Whole-window capture** - "Select Window" now records the window itself via Windows Graphics Capture (Windows 10 1903+), so windows on top of it, or parts that are off-screen or on another monitor, no longer matter.
-- **MKV output** - choose MP4, MKV, or both; MKV is stream-copied to MP4 with no re-encode.
-- **Dockable panels** - Controls, Audio Mixer and Overlays can be docked on any side, floated, resized, locked and reset (View menu).
-- **Audio Mixer** - per-channel faders and meters, plus extra sources: more microphones, a browser, a single program's or window's sound, or an audio file.
-- **`ls` console command** - list the HomRec folder, any subfolder, or the contents of a `.hrp` plugin package.
-- **Lighter overlays** - overlays no longer push recording onto the CPU path: with a hardware encoder they are blended straight into the GPU-converted frame. Overlay opacity and font are now saved correctly.
-- **Source tree reorganised** into `src/core`, `src/ui`, `src/utils`, `src/plugins`, `src/commands`.
-
-Full history: [`CHANGELOG.txt`](CHANGELOG.txt).
 
 ## Features
 
