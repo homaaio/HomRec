@@ -28,3 +28,10 @@ Copy `autoexec.cfg.example` / `startrec.cfg.example` in this folder to
 `autoexec.cfg` / `startrec.cfg` to try it - those two `*.cfg` names are the
 only ones ever read automatically, and (per `.gitignore`) are the only files
 here git won't track, since they're meant to be a per-machine/per-dev thing.
+
+## Other files kept here
+
+- `hom_repos.cfg` - download repositories for `hom` (`hom repo add/set/remove`; plain text, hand-editable).
+- `console_history.txt` - console command history (`history clear` empties it; setting `console_history_save 0` turns it off).
+
+Both are created automatically. Older builds kept them next to the exe; they're moved here on first use.
