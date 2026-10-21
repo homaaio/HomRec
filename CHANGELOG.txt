@@ -1,38 +1,86 @@
 welcome to changelog :D
 
-[Version 2.4.1]
+[Version 2.4.1] - 2026-10-21
+Games record smoother on weak PCs, `hom` learns to use forks and mirrors, and the in-app console
+finally answers back.
 
-### Fixed
-- Game FPS dropped ~35% when a game changed the display mode after
-  Start: the GPU colour-conversion path was switched off for the rest of the recording because the new
-  desktop size no longer matched the size recording started at, so every frame took the CPU path (full
-  BGRA readback + CPU stretch + CPU BGRA->NV12; log: "full readbacks 2289, GPU NV12 frames 57"). The
-  D3D11 video processor now scales the new desktop onto the unchanged encoder frame (crop rectangle and
-  mouse pointer are mapped to the new desktop space). (src/core/pipeline.cpp)
-- A runtime GPU-path error no longer disables the GPU path for the whole recording: it is retried up to
-  3 times, 3 s apart. (src/core/pipeline.cpp)
-- CPU fallback stretch (display mode differs from recording size): column lookup table + row reuse
-  instead of per-pixel float math. (src/core/dxgi_capture.cpp)
+### In short
+- Recording a game that changes its display mode no longer costs you ~35% of your FPS.
+- Three opt-in "weak PC" switches (Settings > Video) let the recorder step out of the game's way.
+- `hom` in the in-app console prints its answers again - `hom --version` used to be dead silent.
+- `hom` can download from forks and mirrors (`hom repo ...`) and shows a real progress bar.
+- pc.log now shows what ffmpeg costs, not only what HomRec itself costs.
 
 ### Added
-- Two opt-in settings for recording games on weak PCs (.hrc [video] or console `inwid <key> <0|1>`;
-  both default OFF, so nothing changes unless you turn them on). Meant to be A/B tested with the new
-  pc.log cpu_ffmpeg field and your in-game FPS:
+- Recording games on weak PCs: three opt-in switches, all OFF by default, so nothing changes unless
+  you turn them on. Find them in Settings > Video ("Recording games on weak PCs"), in the .hrc
+  [video] section, or from the console with `inwid <key> <0|1>`. They are saved in profiles and
+  included in "Reset to defaults". Made to be A/B tested with the pc.log cpu_ffmpeg field and your
+  in-game FPS:
     * game_friendly_priority (alias game_priority): ffmpeg starts at NORMAL instead of ABOVE_NORMAL
       priority and the capture/writer threads are not boosted to HIGHEST, so a game on a 2-core CPU
-      keeps its CPU time slices. (ffmpeg_runner.cpp hr_ff_set_normal_priority(), recording_controller.cpp)
+      keeps its CPU time slices. (ffmpeg_runner.cpp hr_ff_set_normal_priority(),
+      recording_controller.cpp)
     * qsv_low_power (alias low_power): adds "-low_power 1" to the auto-built Intel QSV arguments
       (fixed-function VDENC encoder instead of the iGPU shader units the game is using; Gen9+).
       Ignored when custom_ffmpeg_args is set.
-    * Both are now also check boxes in Settings > Video (section "Recording games on weak PCs"), off by default,
-      included in "Reset to defaults". (src/ui/settings_dialog.cpp)
+    * gpu_low_priority (alias low_gpu_priority): HomRec's capture and the ffmpeg encoder run one GPU
+      scheduling class below normal, so on an integrated GPU shared with the game, the game's frames
+      are scheduled first. No administrator rights needed. Trade-off: when the GPU is 100% busy the
+      recording can drop frames - if homrec.log says "Recording overloaded", switch it off again.
+      A freshly started ffmpeg often refuses the change for a moment (it has not opened the GPU yet),
+      so it is retried in the background for up to 8 s and the outcome is written to the log.
+      HomRec's own priority goes back to normal when the recording stops.
+      (dxgi_capture.cpp, ffmpeg_runner.cpp, recording_controller.cpp, settings_dialog.cpp)
+- homrec.log: every recording start now writes one line, "Recording: weak-PC switches in effect:
+  ...", listing which of those switches (plus gpu_convert and ddagrab) are really on - so a log can
+  never be mistaken for a run with different settings. (src/ui/recording_controller.cpp)
+- hom 0.5.3 - forks and mirrors: `hom repo [list]`, `hom repo add <name> <url|owner/repo[@branch]>`,
+  `hom repo set <name>`, `hom repo remove <name>`. The list lives in cfg\hom_repos.cfg (plain text,
+  hand-editable; "official" is built in and can't be removed). Only https:// is accepted, because hom
+  downloads an executable from that place. Used by install, upgrade, search, show, list --upgradable,
+  ping and update, and whenever a non-official repo is in use the first line of output says so.
+  (tools/hom/hom.cpp, tools/hom/hom_common.h)
+- hom: download progress bar for install / upgrade / update, e.g.
+  `[#########-----------]  45%  1.5 / 3.4 MB  ~4s`. Redrawn in place in a terminal; choose with
+  `--progress=bar|lines|none` (any command); piped output gets none. In the in-app console it is
+  one live line.
+- In-app console: a deleted hom.exe repairs itself - any `hom` command downloads it again from the
+  active repo first (with the progress bar) and then runs your command. `inwid hom restore` (alias
+  repair) does the same on purpose and replaces a broken hom.exe. `hom repo add/set/remove` and
+  `hom restore` need the `inwid` prefix, like `hom update`.
+- New setting console_hom_log (alias hom_log, off by default): prints "hom: running ..." before
+  every `hom` command. Off because hom now draws its own progress bar. (console_window.cpp)
+
+### Fixed
+- In-app console: `hom --version` (and every other `hom` command) printed nothing. hom's output
+  reaches HomRec through a pipe, where each line ends in "\r\n"; the line splitter cut at that last
+  "\r" and kept what came after it - an empty string - so every line was thrown away and only the
+  console's own messages (like "hom: exited with code 1") got through. It now removes the "\r\n"
+  ending first and only then handles "\r"-redrawn progress lines. Blank lines are kept too, so the
+  usage text keeps its layout. (src/ui/console_window.cpp RunCapturedProcess())
+- `hom --help` / `-h` / `help` wrote the usage text to the error stream. It now goes to normal
+  output (so `hom --help | more` works); usage shown because of a typo still goes to the error
+  stream. (tools/hom/hom.cpp PrintUsage())
+- The console view could stop in the middle of hom's output after a burst of lines; it now always
+  scrolls to the bottom. (src/ui/console_window.cpp ScrollToBottom())
+- Game FPS dropped ~35% when a game changed the display mode after Start: the GPU colour-conversion
+  path was switched off for the rest of the recording because the new desktop size no longer matched
+  the size recording started at, so every frame took the CPU path (full BGRA readback + CPU stretch
+  + CPU BGRA->NV12; log: "full readbacks 2289, GPU NV12 frames 57"). The D3D11 video processor now
+  scales the new desktop onto the unchanged encoder frame (crop rectangle and mouse pointer are
+  mapped to the new desktop space). (src/core/pipeline.cpp)
+- A runtime GPU-path error no longer disables the GPU path for the whole recording: it is retried up
+  to 3 times, 3 s apart. (src/core/pipeline.cpp)
 
 ### Changed
 - logs\pc.log now shows what the child ffmpeg.exe processes cost: new field
   cpu_ffmpeg=<cpu%>(<N>proc,<MB>MB) ("none" when no ffmpeg runs, "n/a" on the first sample).
-  Before, cpu_proc/mem_proc only covered hr.exe, so the encoder - the real cost of a recording -
-  was invisible. Same 0-100 whole-CPU scale as cpu_proc and cpu_sys. Direct children of hr.exe
-  whose exe name contains "ffmpeg" are summed (recording, preview, replay buffer). (src/utils/pc_log.cpp)
+  Before, cpu_proc/mem_proc only covered hr.exe, so the encoder - the real cost of a recording - was
+  invisible. Same 0-100 whole-CPU scale as cpu_proc and cpu_sys. Direct children of hr.exe whose exe
+  name contains "ffmpeg" are summed (recording, preview, replay buffer). (src/utils/pc_log.cpp)
+- CPU fallback stretch (display mode differs from recording size) is faster: column lookup table +
+  row reuse instead of per-pixel float math. (src/core/dxgi_capture.cpp)
 
 [Version 2.4.0] - 2026-10-16
 Window capture, MKV, dockable panels, Audio Mixer, Layers panel, Capture source window.
