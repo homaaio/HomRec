@@ -11,7 +11,7 @@
  *   hom --version            Print the hom version and exit.
  *   hom repo [list]          Show the known download repositories; the one
  *                              in use is marked with '*'. "official" is built
- *                              in; others come from hom_repos.cfg (next to
+ *                              in; others come from cfg\hom_repos.cfg (next to
  *                              hom.exe) - for forks and mirrors.
  *   hom repo add <name> <url|owner/repo[@branch]>
  *                              Remember another repo (https only). Doesn't
@@ -195,7 +195,7 @@ static constexpr long long kDiskSpaceWarnBytes = 1LL * 1024 * 1024;
 
 // The repo hom's own files and plugin packages are served from. Since 0.5.3
 // this is no longer hardcoded: main() fills these in from the active repo
-// (`hom repo set <name>`, stored in hom_repos.cfg next to hom.exe; falls back
+// (`hom repo set <name>`, stored in cfg\hom_repos.cfg next to hom.exe; falls back
 // to homcommon::kOfficialUrl, i.e. the same GitHub repo as before). Every
 // network call below goes through FetchFromRepo(), which reads them.
 static std::wstring       g_repo_host   = L"raw.githubusercontent.com";
@@ -1269,15 +1269,16 @@ int CmdList(bool upgradable_only) {
 // Repositories (`hom repo ...`)
 // -----------------------------------------------------------------------
 
-// hom_repos.cfg lives next to hom.exe (not in the cwd): hr.exe's console runs
+// cfg/hom_repos.cfg lives in the cfg folder next to hom.exe (not in the cwd): hr.exe's console runs
 // hom with cwd = HomRec's folder, but a hom.exe run from somewhere else must
 // still find the same repo list. hr.exe's console reads the very same file
 // to know where to re-download hom.exe from (see hom_common.h).
 static std::filesystem::path RepoCfgPath() {
     wchar_t p[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, p, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return std::filesystem::path(homcommon::kRepoCfgName);
-    return std::filesystem::path(std::wstring(p, n)).parent_path() / homcommon::kRepoCfgName;
+    if (n == 0 || n >= MAX_PATH)
+        return std::filesystem::path(homcommon::kCfgDirName) / homcommon::kRepoCfgName;
+    return homcommon::RepoCfgFile(std::filesystem::path(std::wstring(p, n)).parent_path());
 }
 
 // Points every FetchFromRepo() at `url` (already normalized https URL).
@@ -1353,7 +1354,7 @@ int CmdRepoAdd(const std::string &name, const std::string &url_in) {
     }
     cfg.repos.push_back({name, url});
     if (!homcommon::SaveRepoConfig(RepoCfgPath(), cfg)) {
-        std::fprintf(stderr, "hom: couldn't write %s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
+        std::fprintf(stderr, "hom: couldn't write cfg\\%s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
         return 1;
     }
     std::printf("Added repo '%s' -> %s\n", name.c_str(), url.c_str());
@@ -1381,7 +1382,7 @@ int CmdRepoSet(const std::string &name) {
     }
     cfg.active = target;
     if (!homcommon::SaveRepoConfig(RepoCfgPath(), cfg)) {
-        std::fprintf(stderr, "hom: couldn't write %s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
+        std::fprintf(stderr, "hom: couldn't write cfg\\%s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
         return 1;
     }
     std::printf("Now using repo '%s' (%s)\n", target.c_str(), url.c_str());
@@ -1410,7 +1411,7 @@ int CmdRepoRemove(const std::string &name) {
     bool was_active = homcommon::EqualsNoCase(cfg.active, removed);
     if (was_active) cfg.active = homcommon::kOfficialName;
     if (!homcommon::SaveRepoConfig(RepoCfgPath(), cfg)) {
-        std::fprintf(stderr, "hom: couldn't write %s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
+        std::fprintf(stderr, "hom: couldn't write cfg\\%s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
         return 1;
     }
     std::printf("Removed repo '%s'.\n", removed.c_str());
