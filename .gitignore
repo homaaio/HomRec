@@ -311,6 +311,7 @@ Hom/plugins/*
 !Hom/plugins/*.hrp
 !Hom/plugins/index.json
 *.png
+!Assets/for_repo/*.png
 *.jpg
 *.webp
 *.svg
