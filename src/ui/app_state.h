@@ -271,6 +271,14 @@ struct AppState {
     bool disable_preview     = false; // skip capturing/rendering the live preview, for lower-end machines
     bool hint_no_overlay     = true;  // show the "don't see your overlay?" hint under the disabled-preview ':)' -
                                        // togglable from the bter plugin console ("edit settings hint-no-overlay false")
+    // In-app console (console_window.cpp):
+    //   console_hom_log      - echo "hom: running hom install x..." before every `hom` command. Off by
+    //                          default: hom now draws its own progress bar, the extra line is just noise.
+    //   console_history_save - keep the typed-command history in console_history.txt (next to hr.exe) so
+    //                          Up/Down and `history` survive a restart. `history clear` empties it;
+    //                          turn this off if you type secrets into the console.
+    bool console_hom_log      = false;
+    bool console_history_save = true;
     // Live-preview panel (not the recording itself): how big and how often
     // it's redrawn. Lower values cost real CPU/GPU time on weak machines
     // even though they never end up in the actual recording.
