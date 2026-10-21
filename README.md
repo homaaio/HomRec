@@ -7,6 +7,8 @@
 [![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
 [![Boosty](https://img.shields.io/badge/support-boosty-orange?style=flat-square)](https://boosty.to/homa4ella/donate)
 
+![homrec_screenshot](Assets/for_repo/homrec_screenshot.png)
+
 A native C/C++ screen recorder for low-spec Windows machines. FFmpeg for encoding, no GPU requirement, no background services. Free and open source (GPLv3) - no activation, no license keys, no paid features.
 
 ## Contents
