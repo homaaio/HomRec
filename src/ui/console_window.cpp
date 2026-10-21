@@ -232,13 +232,15 @@ bool RunCapturedProcess(const std::wstring &cmdline, const std::wstring &cwd,
                     line = pending.substr(0, nl);
                     pending.erase(0, nl + 1);
                 } else if (at_eof || pending.size() > 65536) {
-                    line.swap(pending);   // unterminated tail / runaway line without '\n'
+                    if (pending.empty()) return;   // nothing left at EOF - don't invent a blank line
+                    line.swap(pending);            // unterminated tail / runaway line without '\n'
                 } else {
                     return;
                 }
-                size_t cr = line.rfind('\r');            // "\r\n" ending, or a '\r'-redrawn progress line
+                while (!line.empty() && line.back() == '\r') line.pop_back();
+                size_t cr = line.rfind('\r');
                 if (cr != std::string::npos) line = line.substr(cr + 1);
-                if (!line.empty()) on_line(WideFromNarrow(line));
+                on_line(WideFromNarrow(line));
                 if (nl == std::string::npos) return;
             }
         };
