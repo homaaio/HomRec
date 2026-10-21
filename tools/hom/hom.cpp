@@ -218,8 +218,8 @@ static ProgressMode g_progress_mode = ProgressMode::None;
 
 namespace {
 
-void PrintUsage() {
-    std::fprintf(stderr,
+void PrintUsage(FILE *out = stderr) {
+    std::fprintf(out,
         "hom %s -- the HomRec plugin package manager\n\n"
         "Usage:\n"
         "  hom --version                    Show the hom version\n"
@@ -1610,7 +1610,7 @@ int main(int argc_in, char **argv_in) {
         return CmdList(upgradable);
     }
 
-    if (cmd == "--help" || cmd == "-h" || cmd == "help") { PrintUsage(); return 0; }
+    if (cmd == "--help" || cmd == "-h" || cmd == "help") { PrintUsage(stdout); return 0; }
 
     std::fprintf(stderr, "hom: unknown command '%s'\n\n", cmd.c_str());
     PrintUsage();
