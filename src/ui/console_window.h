@@ -47,6 +47,8 @@
 #include <set>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <deque>
 #include "app_state.h"
 
 class RecordingController;
@@ -175,6 +177,7 @@ private:
     void CmdClear(const std::wstring &raw);
     void CmdEnv(const std::wstring &raw);
     void CmdAlias(const std::wstring &raw);
+    // `history` lists, `history clear` (or -c) empties it - in memory and the file.
     void CmdHistory(const std::wstring &raw);
     void CmdInfo(const std::wstring &raw);
     void CmdStatus(const std::wstring &raw);
@@ -227,33 +230,75 @@ private:
     // just without having to leave the app. hom.exe's own stdout/stderr
     // are printed back verbatim (it already formats its own success/error
     // text), not re-wrapped in PrintOk/PrintErr.
+    //   hom restore  - (re)downloads hom.exe itself from the active hom repo
+    //                  (hom_repos.cfg, `hom repo set`). It also happens on its
+    //                  own whenever you type `hom ...` and hom.exe is missing.
     void CmdHom(const std::wstring &raw);
-    // hom.exe does real network I/O (up to CmdHom()'s own 30s timeout) -
-    // running RunCapturedProcess() straight from CmdHom() (i.e. on this
-    // window's own message-loop thread, the same one wx/win32 pumps the
-    // whole app's UI on - see the .cpp for why there's no separate thread
-    // for this window) used to freeze all of HomRec, not just the
-    // console, for as long as hom.exe's network request took. Fixed by
-    // running the actual process on hom_thread_ and posting kWmHomDone
-    // back to this window once it's done (HandleMessage() picks that up
-    // and prints the result) - RunCommand() itself now just kicks the
-    // thread off and returns immediately. hom_result_mtx_ guards the one
-    // in-flight HomResult handed from that thread back to the UI thread;
-    // hom_thread_ is joined (near-instant, since kWmHomDone only fires
-    // after the thread's already done its work and is about to return)
-    // before starting a new one and in the destructor, so a hom command
-    // and app shutdown/exit can never race a still-detached thread.
-    static constexpr UINT kWmHomDone = WM_APP + 1;
+    // hom.exe does real network I/O - running it straight from CmdHom() (i.e.
+    // on this window's own message-loop thread, the same one wx/win32 pumps the
+    // whole app's UI on) would freeze all of HomRec, not just the console, for
+    // as long as a download takes. So the work runs on hom_thread_ and talks
+    // back to the UI thread through a line queue:
+    //   * every line hom.exe prints is pushed on hom_lines_ as it arrives (hom
+    //     runs unbuffered and is started with --progress=lines, so a download
+    //     shows up live as "@progress <pct> <received> <total> <eta>" lines,
+    //     which DrainHomLines() turns into ONE redrawn "[####----] 37% ..." line),
+    //   * kWmHomLines tells the UI thread "the queue has something" (at most
+    //     one such message is in flight at a time, hom_lines_pending_),
+    //   * kWmHomDone is posted last, with the exit code in hom_result_.
+    // If hom.exe is missing the same thread first downloads it again from the
+    // active hom repo (see RestoreHomExe() in the .cpp) - the bar for that
+    // goes through the very same queue. hom_busy_ stops a second `hom` command
+    // from starting while one is still running (the UI thread never blocks
+    // waiting for it); hom_cancel_ lets ~ConsoleWindow() abort a running
+    // download instead of waiting for it.
+    static constexpr UINT kWmHomDone  = WM_APP + 1;
+    static constexpr UINT kWmHomLines = WM_APP + 2;
     struct HomResult {
         std::wstring hom_path;   // for the "couldn't start" message
-        std::wstring output;
         DWORD        code = 0;
-        bool         started = false; // false -> RunCapturedProcess() itself failed
+        bool         started = false;       // false -> hom.exe couldn't be started at all
+        bool         restore_failed = false; // true -> hom.exe was missing and couldn't be downloaded
+        bool         idle_timeout = false;   // killed: no output for too long
     };
+    // kind of one queued output line (see DrainHomLines())
+    enum HomLineKind { kHomPlain = 0, kHomInfo, kHomOk, kHomWarn, kHomErr, kHomProgress };
+    struct HomLine { HomLineKind kind; std::wstring text; };
     void JoinPendingHomThread();
+    void QueueHomLine(HWND target, HomLineKind kind, std::wstring text);
+    void DrainHomLines();
     std::thread hom_thread_;
     std::mutex  hom_result_mtx_;
     HomResult   hom_result_;
+    std::mutex             hom_lines_mtx_;
+    std::deque<HomLine>    hom_lines_;
+    bool                   hom_lines_pending_ = false; // guarded by hom_lines_mtx_
+    std::atomic<bool>      hom_busy_{false};
+    std::atomic<bool>      hom_cancel_{false};
+
+    // --- output helpers ---
+    // Scrolls the output box to its last line whatever has the keyboard focus
+    // (EM_SCROLLCARET alone does nothing for an unfocused read-only box, which
+    // is exactly the state the output box is in while you type in the input
+    // box) and also after WM_SETREDRAW was switched back on.
+    void ScrollToBottom();
+    // One line that is rewritten in place (download progress). The first call
+    // appends a line; the following calls replace that line's text until
+    // anything else is printed (Print() ends it) or EndProgressLine().
+    void SetProgressLine(const std::wstring &text);
+    void EndProgressLine() { progress_active_ = false; }
+    bool progress_active_ = false;
+
+    // --- command history (Up/Down, `history`, `history clear`) ---
+    // Persisted to console_history.txt next to hr.exe (UTF-8, one command per
+    // line, newest last, at most kHistoryMax kept) unless the setting
+    // console_history_save is off. Only lines typed in the console are kept -
+    // cfg files and hotkey commands don't go through here.
+    static constexpr size_t kHistoryMax = 500;
+    std::wstring HistoryFilePath() const;
+    void LoadHistory();
+    void RememberCommand(const std::wstring &cmd);
+    void ClearHistory();
     // Prints the standard "blocked, prefix with inwid" refusal for a
     // gated command - see CommandNeedsInwid() in the .cpp and the class
     // comment above.
