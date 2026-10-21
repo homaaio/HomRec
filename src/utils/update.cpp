@@ -259,6 +259,10 @@ void CheckForUpdateAsync(std::function<void(UpdateInfo)> on_done) {
     std::thread([on_done]() { on_done(CheckForUpdate()); }).detach();
 }
 
+bool DownloadExeFile(const std::wstring &url, const std::wstring &dest_path, DownloadState *state) {
+    return DownloadToFile(url, dest_path, state);
+}
+
 bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstring *out_path) {
     // finished must be the very last thing set, whichever way we leave: the UI
     // thread stops polling on it and then joins this thread.
