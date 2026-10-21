@@ -320,3 +320,4 @@ crashes/*.dmp
 *.orig
 # linker map from `make` (hr.map) - keep next to each released hr.exe, it resolves crash offsets
 hr.map
+cfg/console_history.*
