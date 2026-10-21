@@ -4,7 +4,7 @@
  * hom.exe is a standalone binary that deliberately doesn't link anything
  * from src/, but two things have to behave identically on both sides:
  *
- *   1. The repo list (hom_repos.cfg, next to hom.exe). hom.exe reads it to
+ *   1. The repo list (cfg/hom_repos.cfg, in the cfg/ folder next to hom.exe). hom.exe reads it to
  *      know where to download from; hr.exe's console reads the very same
  *      file to know where to re-download hom.exe from when it has been
  *      deleted (hom.exe can't help with that - it's the thing that's gone).
@@ -14,7 +14,7 @@
  * both hom.cpp and src/ui/console_window.cpp without touching either
  * Makefile target.
  *
- * hom_repos.cfg format (plain text, hand-editable):
+ * cfg/hom_repos.cfg format (plain text, hand-editable):
  *
  *     # comment
  *     active myfork
@@ -41,6 +41,7 @@ namespace homcommon {
 
 constexpr char kOfficialName[] = "official";
 constexpr char kOfficialUrl[]  = "https://raw.githubusercontent.com/homaaio/HomRec/main/Hom/";
+constexpr char kCfgDirName[]   = "cfg";
 constexpr char kRepoCfgName[]  = "hom_repos.cfg";
 
 struct Repo {
@@ -155,6 +156,19 @@ inline bool NormalizeRepoUrl(const std::string &input, std::string *out, std::st
     return true;
 }
 
+inline std::filesystem::path RepoCfgFile(const std::filesystem::path &exe_dir) {
+    namespace fs = std::filesystem;
+    fs::path neu = exe_dir / kCfgDirName / kRepoCfgName;
+    fs::path old = exe_dir / kRepoCfgName;
+    std::error_code ec;
+    if (!fs::exists(neu, ec) && fs::exists(old, ec)) {
+        fs::create_directories(neu.parent_path(), ec);
+        fs::rename(old, neu, ec);
+        if (ec) { ec.clear(); fs::copy_file(old, neu, ec); if (!ec) fs::remove(old, ec); }
+    }
+    return neu;
+}
+
 inline RepoConfig LoadRepoConfig(const std::filesystem::path &path) {
     RepoConfig cfg;
     std::ifstream f(path);
@@ -186,6 +200,8 @@ inline RepoConfig LoadRepoConfig(const std::filesystem::path &path) {
 }
 
 inline bool SaveRepoConfig(const std::filesystem::path &path, const RepoConfig &cfg) {
+    std::error_code ec;
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec); // cfg/ may not exist yet
     std::ofstream f(path, std::ios::trunc);
     if (!f) return false;
     f << "# hom repositories - edit with `hom repo add/set/remove`, or by hand.\n";
