@@ -7,6 +7,8 @@
 #include "../commands/ls.h"
 #include "../utils/log_paths.h"
 #include "../core/settings_registry.h"
+#include "../utils/update.h"
+#include "../../tools/hom/hom_common.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -15,6 +17,9 @@
 #include <vector>
 #include <cmath>
 #include <cwchar>
+#include <atomic>
+#include <chrono>
+#include <functional>
 #include <thread>       // reader thread in RunCapturedProcess() (CmdHom)
 #include <richedit.h>   // CHARFORMAT2W / EM_SETCHARFORMAT / EM_SETBKGNDCOLOR
 #include <uxtheme.h>    // SetWindowTheme (dark scrollbars, Win10 1809+)
@@ -92,8 +97,9 @@ std::wstring ExtractSettingValue(const std::wstring &raw) {
 // Deliberately NOT gated: version/ping/echo/clear/env/alias/history/
 // info/status/log/hide/sec*/hrc/clip/repeat/batch/ls, "hom install"/
 // "hom upgrade"/"hom full-upgrade"/"hom search"/"hom show"/"hom list"/
-// "hom --version"/"hom ping"/bare "hom", and querying a setting (no
-// value). None of those write anything persistent or delete anything
+// "hom --version"/"hom ping"/"hom repo list"/bare "hom", and querying a
+// setting (no value). Gated: hom update/restore/remove/purge/autoremove and
+// hom repo add/set/remove. None of those write anything persistent or delete anything
 // the person didn't just ask to add/refresh.
 bool CommandNeedsInwid(const std::wstring &cmd, const std::wstring &raw) {
     if (cmd == L"rm") return true;
@@ -108,9 +114,19 @@ bool CommandNeedsInwid(const std::wstring &cmd, const std::wstring &raw) {
         std::wstring first, sub;
         iss >> first >> sub;
         std::transform(sub.begin(), sub.end(), sub.begin(), ::towlower);
-        // "update" re-downloads and swaps hom.exe itself; "remove"/
+        std::wstring sub2;
+        iss >> sub2;
+        std::transform(sub2.begin(), sub2.end(), sub2.begin(), ::towlower);
+        // "hom repo add/set/remove" decides where plugins AND hom.exe itself
+        // are downloaded from, so it's gated; "hom repo" / "hom repo list" only reads.
+        if (sub == L"repo") {
+            return sub2 == L"add" || sub2 == L"set" || sub2 == L"use" ||
+                   sub2 == L"remove" || sub2 == L"rm" || sub2 == L"delete";
+        }
+        // "update" re-downloads and swaps hom.exe itself, "restore" overwrites it;
+        // "remove"/"purge"/"autoremove" delete plugins.
         return sub == L"update" || sub == L"remove" || sub == L"uninstall" ||
-               sub == L"purge" || sub == L"autoremove";
+               sub == L"purge" || sub == L"autoremove" || sub == L"restore" || sub == L"repair";
     }
     return false;
 }
@@ -153,23 +169,31 @@ bool FileExists(const std::wstring &p) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// Runs `cmdline` as a child process with working directory `cwd`,
-// capturing its combined stdout+stderr. Used by CmdHom() to run hom.exe
-// in-process instead of requiring a separate PowerShell/cmd window.
+// Runs `cmdline` as a child process with working directory `cwd` and hands
+// every line of its combined stdout+stderr to `on_line` AS IT ARRIVES (on a
+// reader thread - `on_line` must be thread-safe). Used by CmdHom() to run
+// hom.exe in-process instead of requiring a separate PowerShell/cmd window.
 //
-// The reader thread (draining the pipe while we wait, not after) exists
-// for the same reason tools.cpp's run_cmd() has one: CreatePipe()'s
-// default buffer is small, and a child that writes more than that before
-// anyone reads it will block on WriteFile() forever if we only start
-// reading after WaitForSingleObject() returns - see that file's comment
-// for the full story.
+// Reading while the process runs (not after it exits) is what makes a live
+// download bar possible, and it's also needed for the same reason tools.cpp's
+// run_cmd() has a reader thread: CreatePipe()'s default buffer is small, and a
+// child that writes more than that before anyone reads it would block on
+// WriteFile() forever.
 //
-// Returns false only if the process couldn't be started at all (missing
-// exe, etc.) - a timeout or non-zero exit still returns true, with
-// *out_code set to (DWORD)-2 for "killed after timing out" so the caller
-// can tell that apart from a real exit code.
+// The process is killed when it prints nothing for `idle_timeout_ms` (a stalled
+// network request - a slow-but-moving download keeps resetting this), when it
+// runs longer than `max_total_ms`, or when `cancel` becomes true (the console is
+// closing).
+//
+// Returns false only if the process couldn't be started at all (missing exe,
+// etc.) - an idle timeout or non-zero exit still returns true, with
+// *out_idle_timeout set for the former.
 bool RunCapturedProcess(const std::wstring &cmdline, const std::wstring &cwd,
-                         DWORD timeout_ms, std::wstring *out_text, DWORD *out_code) {
+                         DWORD idle_timeout_ms, DWORD max_total_ms,
+                         const std::atomic<bool> &cancel,
+                         const std::function<void(const std::wstring &)> &on_line,
+                         DWORD *out_code, bool *out_idle_timeout) {
+    *out_idle_timeout = false;
     SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE hRead = nullptr, hWrite = nullptr;
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return false;
@@ -194,19 +218,56 @@ bool RunCapturedProcess(const std::wstring &cmdline, const std::wstring &cwd,
     }
     CloseHandle(hWrite);
 
-    std::string raw;
+    std::atomic<ULONGLONG> last_activity{GetTickCount64()};
     std::thread reader([&]() {
+        std::string pending;
+        // Cuts complete lines off the front of `pending` (the split is done on
+        // raw bytes BEFORE UTF-8 decoding, so a multi-byte character cut in half
+        // by a read boundary is never decoded in two pieces).
+        auto emit_lines = [&](bool at_eof) {
+            for (;;) {
+                size_t nl = pending.find('\n');
+                std::string line;
+                if (nl != std::string::npos) {
+                    line = pending.substr(0, nl);
+                    pending.erase(0, nl + 1);
+                } else if (at_eof || pending.size() > 65536) {
+                    line.swap(pending);   // unterminated tail / runaway line without '\n'
+                } else {
+                    return;
+                }
+                size_t cr = line.rfind('\r');            // "\r\n" ending, or a '\r'-redrawn progress line
+                if (cr != std::string::npos) line = line.substr(cr + 1);
+                if (!line.empty()) on_line(WideFromNarrow(line));
+                if (nl == std::string::npos) return;
+            }
+        };
         char buf[4096];
         DWORD br = 0;
-        while (ReadFile(hRead, buf, sizeof(buf) - 1, &br, nullptr) && br) {
-            buf[br] = '\0';
-            raw += buf;
+        while (ReadFile(hRead, buf, sizeof(buf), &br, nullptr) && br) {
+            last_activity = GetTickCount64();
+            pending.append(buf, br);
+            emit_lines(false);
         }
+        emit_lines(true);
     });
 
-    DWORD wait = WaitForSingleObject(pi.hProcess, timeout_ms);
-    bool timed_out = (wait == WAIT_TIMEOUT);
-    if (timed_out) TerminateProcess(pi.hProcess, 1);
+    const ULONGLONG started_at = GetTickCount64();
+    bool timed_out = false, killed = false;
+    for (;;) {
+        if (WaitForSingleObject(pi.hProcess, 200) != WAIT_TIMEOUT) break;
+        ULONGLONG now = GetTickCount64();
+        if (cancel.load()) {
+            killed = true;
+        } else if (now - last_activity.load() > idle_timeout_ms || now - started_at > max_total_ms) {
+            timed_out = true;
+        }
+        if (killed || timed_out) {
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 2000);
+            break;
+        }
+    }
 
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
@@ -219,15 +280,75 @@ bool RunCapturedProcess(const std::wstring &cmdline, const std::wstring &cwd,
     reader.join();
     CloseHandle(hRead);
 
-    if (!raw.empty()) {
-        int wl = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, nullptr, 0);
-        std::wstring w(wl > 0 ? wl - 1 : 0, L'\0');
-        if (wl > 1) MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), -1, w.data(), wl);
-        *out_text = w;
-    } else {
-        *out_text = L"";
+    *out_idle_timeout = timed_out;
+    *out_code = code;
+    return true;
+}
+
+// Downloads hom.exe again from the active hom repo (hom_repos.cfg - the same
+// file `hom repo set` writes; "official" when there is none) to
+// <hom_path>.new and moves it into place. This is the answer to "I deleted
+// hom.exe by accident": hom.exe can't repair itself, but hr.exe already knows
+// how to download over HTTPS, so the console does it. Runs on hom_thread_;
+// everything user-visible goes through `push` (kind numbers are
+// ConsoleWindow::HomLineKind: 1 info, 2 ok, 4 err, 5 progress) so the bar is
+// drawn by the same code path as hom's own download bar.
+bool RestoreHomExe(const std::wstring &hom_path, const std::wstring &base_dir,
+                   const std::atomic<bool> &cancel,
+                   const std::function<void(int, std::wstring)> &push) {
+    homcommon::RepoConfig cfg =
+        homcommon::LoadRepoConfig(std::filesystem::path(base_dir) / homcommon::kRepoCfgName);
+    homcommon::Repo repo = homcommon::ActiveRepo(cfg);
+    const std::wstring url = WideFromNarrow(repo.url + "hom.exe");
+    const std::wstring tmp = hom_path + L".new";
+
+    push(1, L"hom: downloading hom.exe from repo '" + WideFromNarrow(repo.name) + L"' (" +
+            WideFromNarrow(repo.url) + L")");
+
+    HrUpdate::DownloadState st;
+    std::atomic<bool> done{false};
+    bool ok = false;
+    std::thread dl([&]() {
+        ok = HrUpdate::DownloadExeFile(url, tmp, &st);
+        done = true;
+    });
+
+    const auto t0 = std::chrono::steady_clock::now();
+    auto emit = [&](unsigned long long got, unsigned long long total, bool final) {
+        double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        int pct = total > 0 ? (int)std::min<unsigned long long>(100, got * 100 / total) : -1;
+        int eta = -1;
+        if (!final && total > 0 && got > 0 && elapsed >= 0.5)
+            eta = (int)((double)(total - got) / ((double)got / elapsed) + 0.5);
+        std::wostringstream os;
+        os << L"@progress " << pct << L" " << got << L" " << total << L" " << eta;
+        push(5, os.str());
+    };
+    while (!done.load()) {
+        if (cancel.load()) st.cancel = true;
+        Sleep(120);
+        emit(st.received.load(), st.total.load(), false);
     }
-    *out_code = timed_out ? (DWORD)-2 : code;
+    dl.join();
+
+    if (!ok) {
+        DeleteFileW(tmp.c_str());
+        if (!cancel.load()) {
+            push(4, L"hom: couldn't download " + url);
+            push(1, L"  check your connection and `hom repo list`, or copy hom.exe next to hr.exe by hand "
+                    L"(it is in the portable archive and in the repo's Hom\\ folder).");
+        }
+        return false;
+    }
+    emit(st.received.load(), st.total.load(), true);
+    if (!MoveFileExW(tmp.c_str(), hom_path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DWORD err = GetLastError();
+        DeleteFileW(tmp.c_str());
+        push(4, L"hom: downloaded hom.exe but couldn't put it in place (error " + std::to_wstring(err) +
+                L") - is hom.exe running or is the folder read-only?");
+        return false;
+    }
+    push(2, L"hom.exe restored (" + WideFromNarrow(homcommon::FormatBytes((long long)st.received.load())) + L")");
     return true;
 }
 
@@ -299,6 +420,7 @@ ConsoleWindow::ConsoleWindow(AppState &state, RecordingController *rec, HWND mai
     : state_(state), rec_(rec), main_window_(main_window), plugins_(plugins) {}
 
 ConsoleWindow::~ConsoleWindow() {
+    hom_cancel_ = true;
     JoinPendingHomThread();
     if (hwnd_) DestroyWindow(hwnd_);
     if (mono_font_) { DeleteObject(mono_font_); mono_font_ = nullptr; }
@@ -345,41 +467,31 @@ LRESULT ConsoleWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             SetTextColor(hdc, kColOk);
             return (LRESULT)blackBrush;
         }
+        case kWmHomLines:
+            DrainHomLines();
+            return 0;
         case kWmHomDone: {
-            // Posted by CmdHom()'s background thread right before it
-            // returns - see hom_thread_'s declaration. The thread has
-            // already finished all its work by the time this message is
-            // even queued, so hom_thread_.join() below is effectively
-            // instant, never a real wait.
+            // Posted by CmdHom()'s background thread as its very last action -
+            // see hom_thread_'s declaration. Lines queued before it are
+            // printed first; the thread itself is already finished, so the
+            // join below is effectively instant, never a real wait.
+            DrainHomLines();
             HomResult res;
             { std::lock_guard<std::mutex> lk(hom_result_mtx_); res = hom_result_; }
             if (hom_thread_.joinable()) hom_thread_.join();
+            hom_busy_ = false;
+            EndProgressLine();
 
-            if (!res.started) {
+            if (res.restore_failed) {
+                // RestoreHomExe() already printed why.
+            } else if (!res.started) {
                 PrintErr(L"hom: couldn't start " + res.hom_path);
-                return 0;
-            }
-            // Batch the redraw across every output line instead of one
-            // reflow per SendMessageW(EM_REPLACESEL) - `hom install
-            // update-hrp` (or any command producing many lines) was
-            // visibly choppy printing them one at a time, each forcing
-            // its own RichEdit layout pass.
-            if (rich_edit_) SendMessageW(output_, WM_SETREDRAW, FALSE, 0);
-            std::wistringstream oss(res.output);
-            std::wstring line;
-            while (std::getline(oss, line)) {
-                if (!line.empty() && line.back() == L'\r') line.pop_back();
-                if (!line.empty()) Print(line, kColText);
-            }
-            if (res.code == static_cast<DWORD>(-2)) {
-                PrintErr(L"hom: timed out after 30s and was killed (network hang?)");
+            } else if (res.idle_timeout) {
+                PrintErr(L"hom: no output for 30s - killed (network hang?)");
             } else if (res.code != 0) {
                 PrintWarn(L"hom: exited with code " + std::to_wstring(res.code));
             }
-            if (rich_edit_) {
-                SendMessageW(output_, WM_SETREDRAW, TRUE, 0);
-                InvalidateRect(output_, nullptr, FALSE);
-            }
+            ScrollToBottom();
             return 0;
         }
         default:
@@ -548,6 +660,7 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
     SetWindowLongPtrW(input_, GWLP_USERDATA, (LONG_PTR)this);
     static WNDPROC origInputProc = nullptr;
     origInputProc = (WNDPROC)GetWindowLongPtrW(input_, GWLP_WNDPROC);
+    LoadHistory();   // commands typed in earlier sessions (console_history.txt) - Up/Down and `history` see them
     SetWindowLongPtrW(input_, GWLP_WNDPROC, (LONG_PTR)(+[](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
         auto *self = reinterpret_cast<ConsoleWindow *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         // The console window is created as a child/owned window of
@@ -571,8 +684,7 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
                 GetWindowTextW(hwnd, buf, 1024);
                 std::wstring cmd = Trim(buf);
                 if (!cmd.empty()) {
-                    self->history_.push_back(cmd);
-                    self->history_pos_ = (int)self->history_.size();
+                    self->RememberCommand(cmd);
                     wchar_t promptBuf[64] = {};
                     GetWindowTextW(self->prompt_, promptBuf, 64);
                     self->Print(std::wstring(promptBuf) + cmd);
@@ -617,6 +729,7 @@ void ConsoleWindow::OnSize(int w, int h) {
 void ConsoleWindow::OnCommand(int, int, HWND) {}
 
 void ConsoleWindow::Print(const std::wstring &line, COLORREF color) {
+    progress_active_ = false;   // anything printed ends a rewritten progress line
     int len = GetWindowTextLengthW(output_);
     if (len > kOutputKeepChars) {
         // Scrollback cap: drop the oldest quarter (cut on a line boundary) so
@@ -654,7 +767,90 @@ void ConsoleWindow::Print(const std::wstring &line, COLORREF color) {
     // running a command whose output overflows the visible area left the
     // view sitting wherever it was, instead of following along like a
     // normal terminal.
+    ScrollToBottom();
+}
+
+void ConsoleWindow::ScrollToBottom() {
+    if (!output_) return;
     SendMessageW(output_, EM_SCROLLCARET, 0, 0);
+    SendMessageW(output_, WM_VSCROLL, SB_BOTTOM, 0);
+}
+
+void ConsoleWindow::SetProgressLine(const std::wstring &text) {
+    if (!progress_active_) {
+        Print(text, kColInfo);
+        progress_active_ = true; // after Print(), which resets it
+        return;
+    }
+    LRESULT lines = SendMessageW(output_, EM_GETLINECOUNT, 0, 0);
+    LRESULT start = SendMessageW(output_, EM_LINEINDEX, (WPARAM)(lines > 0 ? lines - 1 : 0), 0);
+    if (start < 0) { progress_active_ = false; Print(text, kColInfo); progress_active_ = true; return; }
+    SendMessageW(output_, EM_SETSEL, (WPARAM)start, (LPARAM)-1);
+    if (rich_edit_) {
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof(cf);
+        cf.dwMask = CFM_COLOR;
+        cf.crTextColor = kColInfo;
+        SendMessageW(output_, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    }
+    SendMessageW(output_, EM_REPLACESEL, FALSE, (LPARAM)text.c_str());
+    ScrollToBottom();
+}
+
+// --- command history ----------------------------------------------------------
+
+std::wstring ConsoleWindow::HistoryFilePath() const {
+    return GetBaseDir() + L"\\console_history.txt";
+}
+
+void ConsoleWindow::LoadHistory() {
+    history_.clear();
+    history_pos_ = 0;
+    if (!state_.console_history_save) return;
+
+    std::ifstream f(std::filesystem::path(HistoryFilePath()), std::ios::binary);
+    if (!f) return;
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    size_t lines_in_file = 0;
+    std::istringstream is(text);
+    std::string line;
+    while (std::getline(is, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        ++lines_in_file;
+        std::wstring w = WideFromNarrow(line);
+        if (w.empty()) continue;
+        if (!history_.empty() && history_.back() == w) continue;
+        history_.push_back(std::move(w));
+    }
+    if (history_.size() > kHistoryMax)
+        history_.erase(history_.begin(), history_.begin() + (history_.size() - kHistoryMax));
+    history_pos_ = (int)history_.size();
+
+
+    if (lines_in_file > history_.size() + 100) {
+        std::ofstream out(std::filesystem::path(HistoryFilePath()), std::ios::binary | std::ios::trunc);
+        for (const auto &h : history_) out << NarrowFromWide(h) << "\n";
+    }
+}
+
+void ConsoleWindow::RememberCommand(const std::wstring &cmd) {
+    if (history_.empty() || history_.back() != cmd) {
+        history_.push_back(cmd);
+        if (history_.size() > kHistoryMax)
+            history_.erase(history_.begin(), history_.begin() + (history_.size() - kHistoryMax));
+        if (state_.console_history_save) {
+            std::ofstream out(std::filesystem::path(HistoryFilePath()), std::ios::binary | std::ios::app);
+            if (out) out << NarrowFromWide(cmd) << "\n";   // best effort: a read-only folder just means no persistence
+        }
+    }
+    history_pos_ = (int)history_.size();
+}
+
+void ConsoleWindow::ClearHistory() {
+    history_.clear();
+    history_pos_ = 0;
+    DeleteFileW(HistoryFilePath().c_str());
 }
 
 void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
@@ -997,7 +1193,18 @@ void ConsoleWindow::CmdAlias(const std::wstring &raw) {
     PrintOk(L"alias " + name + L" -> " + target);
 }
 
-void ConsoleWindow::CmdHistory(const std::wstring &) {
+void ConsoleWindow::CmdHistory(const std::wstring &raw) {
+    std::wistringstream iss(raw);
+    std::wstring cmd, arg;
+    iss >> cmd >> arg;
+    std::transform(arg.begin(), arg.end(), arg.begin(), ::towlower);
+    if (arg == L"clear" || arg == L"-c" || arg == L"--clear") {
+        size_t n = history_.size();
+        ClearHistory();
+        PrintOk(L"history cleared (" + std::to_wstring(n) + (n == 1 ? L" entry)" : L" entries)"));
+        return;
+    }
+    if (!arg.empty()) { PrintWarn(L"usage: history   |   history clear"); return; }
     if (history_.empty()) { PrintInfo(L"(no history yet)"); return; }
     for (size_t i = 0; i < history_.size(); ++i) {
         Print(std::to_wstring(i + 1) + L"  " + history_[i]);
@@ -1394,6 +1601,53 @@ void ConsoleWindow::JoinPendingHomThread() {
     if (hom_thread_.joinable()) hom_thread_.join();
 }
 
+void ConsoleWindow::QueueHomLine(HWND target, HomLineKind kind, std::wstring text) {
+    bool need_post = false;
+    {
+        std::lock_guard<std::mutex> lk(hom_lines_mtx_);
+        hom_lines_.push_back({kind, std::move(text)});
+        need_post = !hom_lines_pending_;
+        hom_lines_pending_ = true;
+    }
+    if (need_post && target) PostMessageW(target, kWmHomLines, 0, 0);
+}
+
+void ConsoleWindow::DrainHomLines() {
+    std::deque<HomLine> lines;
+    {
+        std::lock_guard<std::mutex> lk(hom_lines_mtx_);
+        lines.swap(hom_lines_);
+        hom_lines_pending_ = false;
+    }
+    if (lines.empty()) return;
+
+    if (rich_edit_) SendMessageW(output_, WM_SETREDRAW, FALSE, 0);
+    for (const HomLine &l : lines) {
+        switch (l.kind) {
+            case kHomProgress: {
+                // "@progress <pct> <received> <total> <eta_sec>" (pct/eta -1 = unknown)
+                std::wistringstream is(l.text.substr(9));
+                int pct = -1, eta = -1;
+                long long got = 0, total = 0;
+                is >> pct >> got >> total >> eta;
+                SetProgressLine(L"  " + WideFromNarrow(homcommon::FormatProgress(pct, got, total, eta)));
+                if (total > 0 && got >= total) EndProgressLine();   // finished - whatever comes next is a new line
+                break;
+            }
+            case kHomInfo: PrintInfo(l.text); break;
+            case kHomOk:   PrintOk(l.text);   break;
+            case kHomWarn: PrintWarn(l.text); break;
+            case kHomErr:  PrintErr(l.text);  break;
+            default:       Print(l.text, kColText); break;
+        }
+    }
+    if (rich_edit_) {
+        SendMessageW(output_, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(output_, nullptr, FALSE);
+    }
+    ScrollToBottom();   // after redraw is back on - scrolling while it is off is lost
+}
+
 void ConsoleWindow::CmdHom(const std::wstring &raw) {
     // Strip the leading "hom" token itself; everything after it is
     // forwarded to hom.exe verbatim ("hom install input-overlay" ->
@@ -1402,52 +1656,84 @@ void ConsoleWindow::CmdHom(const std::wstring &raw) {
     size_t sp = raw.find(L' ');
     if (sp != std::wstring::npos) args = Trim(raw.substr(sp + 1));
 
-    std::wstring base_dir = GetBaseDir();
-    std::wstring hom_path = base_dir + L"\\hom.exe";
-    if (!FileExists(hom_path)) {
-        PrintErr(L"hom: hom.exe not found in " + base_dir);
-        PrintInfo(L"  build it with `make hom` from the repo root, or copy hom.exe "
-                  L"from the Hom\\ folder, then place it next to hr.exe.");
-        return;
+    std::wstring sub;
+    {
+        std::wistringstream is(args);
+        is >> sub;
+        std::transform(sub.begin(), sub.end(), sub.begin(), ::towlower);
     }
 
-    std::wstring cmdline = L"\"" + hom_path + L"\"" + (args.empty() ? L"" : L" " + args);
-
-    // A previous hom_thread_ is only still joinable() here if its
-    // kWmHomDone message hasn't been pumped yet (it's already finished
-    // running by the time it posts that message) - join is a formality,
-    // not a real wait, and guards against starting a second thread while
-    // one is (nominally) still attached.
+    // The UI thread never waits for hom: a second command while one is still
+    // running is simply refused.
+    if (hom_busy_.load()) {
+        PrintWarn(L"hom: the previous hom command is still running - wait for it to finish.");
+        return;
+    }
     JoinPendingHomThread();
 
-    PrintInfo(L"hom: running " + (args.empty() ? std::wstring(L"hom") : L"hom " + args) + L"...");
+    std::wstring base_dir = GetBaseDir();
+    std::wstring hom_path = base_dir + L"\\hom.exe";
 
+    // `hom restore` is handled here, not by hom.exe (which may not exist):
+    // it downloads hom.exe again. The same download also happens by itself
+    // when hom.exe is missing and any other hom command is typed.
+    const bool restore_only = (sub == L"restore" || sub == L"repair");
+    const bool need_restore = restore_only || !FileExists(hom_path);
+
+    if (need_restore && !restore_only)
+        PrintWarn(L"hom: hom.exe not found in " + base_dir + L" - downloading it again.");
+
+    // --progress=lines: hom reports downloads as "@progress ..." lines which
+    // DrainHomLines() draws as one live bar (hom itself would draw '\r' bars
+    // only on a real terminal).
+    std::wstring cmdline = L"\"" + hom_path + L"\" --progress=lines" + (args.empty() ? L"" : L" " + args);
+
+    // Off by default (console_hom_log): the bar and hom's own first line
+    // already say what is happening.
+    if (state_.console_hom_log && !restore_only)
+        PrintInfo(L"hom: running " + (args.empty() ? std::wstring(L"hom") : L"hom " + args) + L"...");
+
+    hom_busy_ = true;
+    hom_cancel_ = false;
     HWND self_hwnd = hwnd_;
-    hom_thread_ = std::thread([this, self_hwnd, cmdline, base_dir, hom_path]() {
-        // hom does real network I/O for update/ping/install/remove (all
-        // of hom's own commands hit raw.githubusercontent.com), so give
-        // it much more room than the few-second timeouts used elsewhere
-        // in this file for local, non-networked work - 30s is generous
-        // for a single plugin download without hanging forever if the
-        // repo is unreachable.
-        //
-        // Run with cwd = base_dir so "hom install <name>" writes to
-        // <base_dir>\plugins\, the same folder HomRec's own plugin
-        // loader reads from - matching "run hom from the same folder as
-        // hr.exe" in tools/hom/README.md, regardless of what HomRec's
-        // own process cwd happens to be.
+    hom_thread_ = std::thread([this, self_hwnd, cmdline, base_dir, hom_path, need_restore, restore_only]() {
         HomResult res;
         res.hom_path = hom_path;
-        res.started  = RunCapturedProcess(cmdline, base_dir, 30000, &res.output, &res.code);
+        // self_hwnd, not hwnd_ - hwnd_ itself is only ever touched on the UI
+        // thread; reading it from here right as the window might be closing
+        // would be a race. The value was captured up front instead.
+        auto push = [this, self_hwnd](int kind, std::wstring text) {
+            QueueHomLine(self_hwnd, static_cast<HomLineKind>(kind), std::move(text));
+        };
+
+        bool ok = true;
+        if (need_restore) {
+            ok = RestoreHomExe(hom_path, base_dir, hom_cancel_, push);
+            res.restore_failed = !ok;
+        }
+        if (ok && restore_only) {
+            res.started = true;
+        } else if (ok) {
+            // Run with cwd = base_dir so "hom install <name>" writes to
+            // <base_dir>\plugins\, the same folder HomRec's own plugin
+            // loader reads from. 30s of silence = a stalled network request
+            // (a download that keeps printing progress never trips it);
+            // 15 minutes is the absolute ceiling.
+            DWORD code = 0;
+            bool idle = false;
+            res.started = RunCapturedProcess(
+                cmdline, base_dir, 30000, 15 * 60 * 1000, hom_cancel_,
+                [&push](const std::wstring &line) {
+                    push(line.rfind(L"@progress ", 0) == 0 ? kHomProgress : kHomPlain, line);
+                },
+                &code, &idle);
+            res.code = code;
+            res.idle_timeout = idle;
+        }
         {
             std::lock_guard<std::mutex> lk(hom_result_mtx_);
             hom_result_ = std::move(res);
         }
-        // self_hwnd, not hwnd_ - hwnd_ itself is only ever touched on the
-        // UI thread, but this background thread reading it directly
-        // right as the window might be closing/destroyed would still be
-        // a race. The value was captured up front instead, before
-        // JoinPendingHomThread() in the destructor can run.
         if (self_hwnd) PostMessageW(self_hwnd, kWmHomDone, 0, 0);
     });
 }
