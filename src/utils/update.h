@@ -63,6 +63,14 @@ struct DownloadState {
 // false and leaves no partial file behind. Always sets state.finished last.
 bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstring *out_path);
 
+// Downloads any https URL that is a Windows executable (starts with "MZ",
+// size matches Content-Length) to `dest_path`, reporting progress/cancel
+// through `state` exactly like DownloadInstaller(). Blocking - run it on a
+// worker thread. Used by the console to re-download a deleted hom.exe.
+// On failure/cancel no partial file is left behind. Unlike DownloadInstaller()
+// this does NOT set state->finished (the caller knows when it returns).
+bool DownloadExeFile(const std::wstring &url, const std::wstring &dest_path, DownloadState *state);
+
 // Starts a downloaded installer (from DownloadInstaller) with Inno Setup's
 // silent-upgrade flags and returns immediately. Callers should close the app
 // shortly after a successful call (the new installer can't overwrite hr.exe
