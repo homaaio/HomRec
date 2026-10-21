@@ -1,5 +1,5 @@
 /*
- * hom.cpp - "hom", the HomRec plugin package manager  (v0.4)
+ * hom.cpp - "hom", the HomRec plugin package manager  (v0.5.3)
  *
  * A small standalone command-line tool, styled the same way as the rest
  * of HomRec (native C++, WinHTTP for networking, no third-party deps).
@@ -9,6 +9,17 @@
  *
  * Commands:
  *   hom --version            Print the hom version and exit.
+ *   hom repo [list]          Show the known download repositories; the one
+ *                              in use is marked with '*'. "official" is built
+ *                              in; others come from hom_repos.cfg (next to
+ *                              hom.exe) - for forks and mirrors.
+ *   hom repo add <name> <url|owner/repo[@branch]>
+ *                              Remember another repo (https only). Doesn't
+ *                              switch to it - see `set`.
+ *   hom repo set <name>        Use that repo for every other hom command
+ *                              (install/upgrade/search/show/list/update/ping).
+ *                              `hom repo set official` goes back.
+ *   hom repo remove <name>     Forget a repo ("official" can't be removed).
  *   hom update [-f|--force]    Check the repo's Hom/ folder for a newer
  *                              hom release and, if found, download and
  *                              swap itself in place. -f/--force re-fetches
@@ -163,12 +174,16 @@
 #include <algorithm>
 #include <fstream>
 #include <regex>
+#include <chrono>
+#include <functional>
+
+#include "hom_common.h"
 
 // -----------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------
 
-static constexpr char k_hom_version[] = "0.5.2";
+static constexpr char k_hom_version[] = "0.5.3";
 
 // If an install/update would grow disk usage by at least this much,
 // CmdInstall() asks for confirmation first (Y/n) instead of just doing
@@ -178,11 +193,24 @@ static constexpr char k_hom_version[] = "0.5.2";
 // actually fire in practice.
 static constexpr long long kDiskSpaceWarnBytes = 1LL * 1024 * 1024;
 
-// The repo hom's own files and plugin packages are served from.
-// Change these if you fork the repo -- nothing else in this file
-// hardcodes the owner/name anywhere else.
-static constexpr wchar_t k_raw_host[]        = L"raw.githubusercontent.com";
-static constexpr wchar_t k_raw_path_prefix[] = L"/homaaio/HomRec/main/Hom/";
+// The repo hom's own files and plugin packages are served from. Since 0.5.3
+// this is no longer hardcoded: main() fills these in from the active repo
+// (`hom repo set <name>`, stored in hom_repos.cfg next to hom.exe; falls back
+// to homcommon::kOfficialUrl, i.e. the same GitHub repo as before). Every
+// network call below goes through FetchFromRepo(), which reads them.
+static std::wstring       g_repo_host   = L"raw.githubusercontent.com";
+static unsigned short     g_repo_port   = 443;
+static std::wstring       g_repo_prefix = L"/homaaio/HomRec/main/Hom/"; // always starts and ends with '/'
+static std::string        g_repo_name   = homcommon::kOfficialName;
+static std::string        g_repo_url    = homcommon::kOfficialUrl;
+
+// How the download progress is reported (see ProgressReporter below).
+//   bar   - a real console: one line redrawn with '\r'
+//   lines - "@progress <pct> <received> <total> <eta_sec>" lines, for HomRec's
+//           in-app console (it passes --progress=lines and draws the bar itself)
+//   none  - nothing (hom's output piped into some other tool)
+enum class ProgressMode { None, Bar, Lines };
+static ProgressMode g_progress_mode = ProgressMode::None;
 
 // -----------------------------------------------------------------------
 // Small helpers shared by every command
@@ -213,7 +241,16 @@ void PrintUsage() {
         "  hom search <query>                Search plugin names/descriptions\n"
         "  hom show <plugin-name>            Show details about a plugin\n"
         "  hom list --installed              List plugins installed here\n"
-        "  hom list --upgradable             List installed plugins with a newer version\n\n"
+        "  hom list --upgradable             List installed plugins with a newer version\n"
+        "  hom repo [list]                   Show the download repositories ('*' = in use)\n"
+        "  hom repo add <name> <url|owner/repo[@branch]>\n"
+        "                                     Remember a fork/mirror (https only)\n"
+        "  hom repo set <name>               Download from that repo from now on\n"
+        "                                      ('hom repo set official' switches back)\n"
+        "  hom repo remove <name>            Forget a repo\n\n"
+        "Options (any command):\n"
+        "  --progress=bar|lines|none         How downloads report progress\n"
+        "                                      (default: bar in a terminal, none when piped)\n\n"
         "Examples:\n"
         "  hom search overlay\n"
         "  hom show input-overlay\n"
@@ -222,7 +259,9 @@ void PrintUsage() {
         "  hom upgrade\n"
         "  hom list --upgradable\n"
         "  hom remove input-overlay -r\n"
-        "  hom purge input-overlay -r\n",
+        "  hom purge input-overlay -r\n"
+        "  hom repo add myfork someone/HomRec\n"
+        "  hom repo set myfork\n",
         k_hom_version);
 }
 
@@ -525,7 +564,7 @@ bool ConfirmYesNo(const std::string &prompt) {
 // -- Networking (WinHTTP, HTTPS GET against raw_host + full_path) ----------
 //
 // Same shape as hr_update.cpp's _fetch_release_json(), generalized to any
-// path under k_raw_host and to report the HTTP status code so callers can
+// path under the active repo's host and to report the HTTP status code so callers can
 // tell "file doesn't exist" (404) apart from "network failed" (0).
 
 struct FetchResult {
@@ -535,12 +574,69 @@ struct FetchResult {
     long long   content_length = -1; // from Content-Length header, -1 if absent
 };
 
+// -- Download progress --------------------------------------------------------
+//
+// Fed by FetchFromRepo() while a body is being read. Throttled to ~10 updates
+// a second so a fast download doesn't spend its time printing. ETA is simply
+// (bytes left) / (average speed so far) - good enough for a plugin-sized
+// file, and it doesn't jump around the way an instantaneous speed would.
+class ProgressReporter {
+public:
+    explicit ProgressReporter(ProgressMode mode)
+        : mode_(mode), start_(std::chrono::steady_clock::now()), last_emit_(start_) {}
+
+    void Update(long long received, long long total) {
+        if (mode_ == ProgressMode::None) return;
+        auto now = std::chrono::steady_clock::now();
+        bool final = total > 0 && received >= total;
+        if (emitted_ && !final && now - last_emit_ < std::chrono::milliseconds(100)) return;
+        last_emit_ = now;
+        emitted_ = true;
+
+        double elapsed = std::chrono::duration<double>(now - start_).count();
+        int pct = total > 0 ? (int)std::min<long long>(100, received * 100 / total) : -1;
+        int eta = -1;
+        if (!final && total > 0 && received > 0 && elapsed >= 0.5) {
+            double speed = (double)received / elapsed;
+            eta = (int)(((double)(total - received)) / speed + 0.5);
+        }
+
+        if (mode_ == ProgressMode::Lines) {
+            std::printf("@progress %d %lld %lld %d\n", pct, received, total, eta);
+            std::fflush(stdout);
+        } else {
+            std::string line = "  " + homcommon::FormatProgress(pct, received, total, eta);
+            size_t len = line.size();
+            if (len < last_len_) line.append(last_len_ - len, ' '); // wipe leftovers of a longer previous line
+            last_len_ = len;
+            std::printf("\r%s", line.c_str());
+            std::fflush(stdout);
+            drew_ = true;
+        }
+    }
+
+    // Ends the redrawn line (bar mode only) so the next printf starts fresh.
+    void Finish() {
+        if (mode_ == ProgressMode::Bar && drew_) { std::printf("\n"); std::fflush(stdout); }
+        drew_ = false;
+    }
+
+private:
+    ProgressMode mode_;
+    std::chrono::steady_clock::time_point start_, last_emit_;
+    bool   emitted_ = false;
+    bool   drew_ = false;
+    size_t last_len_ = 0;
+};
+
 // `method` defaults to GET (every existing caller). `hom show` passes
 // L"HEAD" to read just the Content-Length header for a plugin's download
 // size without pulling the whole .hrp over the wire - out.body stays
 // empty for a HEAD request, callers that want the size read
-// out.content_length instead.
-FetchResult FetchFromRepo(const std::wstring &full_path, const wchar_t *method = L"GET") {
+// out.content_length instead. `progress` (GET only, optional) is told how
+// many bytes have arrived so far; see ProgressReporter above.
+FetchResult FetchFromRepo(const std::wstring &full_path, const wchar_t *method = L"GET",
+                          ProgressReporter *progress = nullptr) {
     FetchResult out;
 
     HINTERNET hSession = WinHttpOpen(
@@ -549,7 +645,7 @@ FetchResult FetchFromRepo(const std::wstring &full_path, const wchar_t *method =
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return out;
 
-    HINTERNET hConnect = WinHttpConnect(hSession, k_raw_host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET hConnect = WinHttpConnect(hSession, g_repo_host.c_str(), g_repo_port, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return out; }
 
     HINTERNET hReq = WinHttpOpenRequest(
@@ -581,10 +677,14 @@ FetchResult FetchFromRepo(const std::wstring &full_path, const wchar_t *method =
     }
 
     if (wcscmp(method, L"HEAD") != 0) {
+        // Only report progress for a real download, not for a 404 page.
+        ProgressReporter *prog = (status == 200) ? progress : nullptr;
+        if (prog) prog->Update(0, out.content_length);
         char buf[8192];
         DWORD read = 0;
         while (WinHttpReadData(hReq, buf, sizeof(buf), &read) && read > 0) {
             out.body.append(buf, read);
+            if (prog) prog->Update((long long)out.body.size(), out.content_length);
             if (out.body.size() > 64 * 1024 * 1024) break; // 64MB sanity limit
         }
     }
@@ -602,7 +702,7 @@ FetchResult FetchFromRepo(const std::wstring &full_path, const wchar_t *method =
 // "couldn't reach the repo" and print the right message either way.
 std::vector<IndexEntry> FetchIndex(bool *ok) {
     *ok = false;
-    FetchResult res = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"plugins/index.json");
+    FetchResult res = FetchFromRepo(g_repo_prefix + L"plugins/index.json");
     if (!res.ok || res.status != 200 || res.body.empty()) return {};
     *ok = true;
     return ParsePluginIndex(res.body);
@@ -676,12 +776,12 @@ int CmdVersion() {
 // round-trip time + HTTP status, so "reachable but repo is having a bad
 // day" (non-200) reads differently from "no network at all" (ok=false).
 int CmdPing() {
-    std::printf("Pinging %ls...\n", k_raw_host);
+    std::printf("Pinging %ls (repo '%s')...\n", g_repo_host.c_str(), g_repo_name.c_str());
     LARGE_INTEGER freq, t0, t1;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&t0);
 
-    FetchResult res = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"version.txt");
+    FetchResult res = FetchFromRepo(g_repo_prefix + L"version.txt");
 
     QueryPerformanceCounter(&t1);
     double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
@@ -696,7 +796,7 @@ int CmdPing() {
         return 1;
     }
     std::printf("hom: OK -- %ls responded in %.0f ms (repo version.txt = %s)\n",
-                k_raw_host, ms, Trim(res.body).c_str());
+                g_repo_host.c_str(), ms, Trim(res.body).c_str());
     return 0;
 }
 
@@ -714,9 +814,9 @@ int CmdPing() {
 //      it may still be mapped by this very process) so the next
 //      invocation can clean it up
 int CmdUpdate(bool force) {
-    std::printf("Checking %ls for updates...\n", (std::wstring(k_raw_path_prefix) + L"version.txt").c_str());
+    std::printf("Checking %s%s for updates...\n", g_repo_url.c_str(), "version.txt");
 
-    FetchResult vres = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"version.txt");
+    FetchResult vres = FetchFromRepo(g_repo_prefix + L"version.txt");
     if (!vres.ok || vres.status != 200) {
         std::fprintf(stderr, "hom: couldn't reach the repo (status %d). Check your connection and try again.\n", vres.status);
         return 1;
@@ -739,7 +839,9 @@ int CmdUpdate(bool force) {
     }
     std::printf("Downloading Hom/hom.exe...\n");
 
-    FetchResult bres = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"hom.exe");
+    ProgressReporter prog(g_progress_mode);
+    FetchResult bres = FetchFromRepo(g_repo_prefix + L"hom.exe", L"GET", &prog);
+    prog.Finish();
     if (!bres.ok || bres.status != 200 || bres.body.empty()) {
         std::fprintf(stderr, "hom: download failed (status %d). Update aborted, nothing changed.\n", bres.status);
         return 1;
@@ -791,10 +893,12 @@ int CmdInstall(const std::string &name, bool yes, bool force) {
         return 1;
     }
 
-    std::wstring remote_path = std::wstring(k_raw_path_prefix) + L"plugins/" + Widen(name) + L".hrp";
+    std::wstring remote_path = g_repo_prefix + L"plugins/" + Widen(name) + L".hrp";
     std::printf("Fetching plugin '%s'...\n", name.c_str());
 
-    FetchResult res = FetchFromRepo(remote_path);
+    ProgressReporter prog(g_progress_mode);
+    FetchResult res = FetchFromRepo(remote_path, L"GET", &prog);
+    prog.Finish();
     if (!res.ok) {
         std::fprintf(stderr, "hom: network request failed -- check your connection.\n");
         return 1;
@@ -1100,7 +1204,7 @@ int CmdShow(const std::string &name) {
     std::string file = found->file.empty() ? (name + ".hrp") : found->file;
     std::printf("Package:     Hom/plugins/%s\n", file.c_str());
 
-    FetchResult head = FetchFromRepo(std::wstring(k_raw_path_prefix) + L"plugins/" + Widen(file), L"HEAD");
+    FetchResult head = FetchFromRepo(g_repo_prefix + L"plugins/" + Widen(file), L"HEAD");
     if (head.ok && head.status == 200 && head.content_length >= 0) {
         std::printf("Size:        %.1f KB\n", head.content_length / 1024.0);
     }
@@ -1158,6 +1262,159 @@ int CmdList(bool upgradable_only) {
         std::printf("hom: %d plugin(s) skipped -- local version unknown (not yet loaded by HomRec since install; "
                     "run HomRec once, or 'hom upgrade', to find out).\n", unknown);
     }
+    return 0;
+}
+
+// -----------------------------------------------------------------------
+// Repositories (`hom repo ...`)
+// -----------------------------------------------------------------------
+
+// hom_repos.cfg lives next to hom.exe (not in the cwd): hr.exe's console runs
+// hom with cwd = HomRec's folder, but a hom.exe run from somewhere else must
+// still find the same repo list. hr.exe's console reads the very same file
+// to know where to re-download hom.exe from (see hom_common.h).
+static std::filesystem::path RepoCfgPath() {
+    wchar_t p[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, p, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::filesystem::path(homcommon::kRepoCfgName);
+    return std::filesystem::path(std::wstring(p, n)).parent_path() / homcommon::kRepoCfgName;
+}
+
+// Points every FetchFromRepo() at `url` (already normalized https URL).
+static bool ApplyRepoUrl(const std::string &name, const std::string &url) {
+    std::wstring wurl = Widen(url);
+    URL_COMPONENTS uc = {};
+    uc.dwStructSize = sizeof(uc);
+    wchar_t host[256] = {}, path[2048] = {};
+    uc.lpszHostName = host; uc.dwHostNameLength = _countof(host);
+    uc.lpszUrlPath  = path; uc.dwUrlPathLength  = _countof(path);
+    if (!WinHttpCrackUrl(wurl.c_str(), (DWORD)wurl.size(), 0, &uc)) return false;
+    if (uc.nScheme != INTERNET_SCHEME_HTTPS) return false;
+    std::wstring prefix = path;
+    if (prefix.empty() || prefix.front() != L'/') prefix.insert(prefix.begin(), L'/');
+    if (prefix.back() != L'/') prefix.push_back(L'/');
+    g_repo_host   = host;
+    g_repo_port   = uc.nPort;
+    g_repo_prefix = prefix;
+    g_repo_name   = name;
+    g_repo_url    = url;
+    return true;
+}
+
+// Called once from main() before any network command.
+static void SelectActiveRepoFromConfig() {
+    homcommon::RepoConfig cfg = homcommon::LoadRepoConfig(RepoCfgPath());
+    homcommon::Repo active = homcommon::ActiveRepo(cfg);
+    if (!ApplyRepoUrl(active.name, active.url)) {
+        std::fprintf(stderr, "hom: repo '%s' has an unusable URL (%s) -- falling back to the official repo.\n",
+                     active.name.c_str(), active.url.c_str());
+        ApplyRepoUrl(homcommon::kOfficialName, homcommon::kOfficialUrl);
+    }
+}
+
+int CmdRepoList() {
+    homcommon::RepoConfig cfg = homcommon::LoadRepoConfig(RepoCfgPath());
+    homcommon::Repo active = homcommon::ActiveRepo(cfg);
+    bool official_active = homcommon::EqualsNoCase(active.name, homcommon::kOfficialName);
+
+    std::printf("%c %-14s %s\n", official_active ? '*' : ' ', homcommon::kOfficialName, homcommon::kOfficialUrl);
+    for (const auto &r : cfg.repos) {
+        bool is_active = !official_active && homcommon::EqualsNoCase(r.name, active.name);
+        std::printf("%c %-14s %s\n", is_active ? '*' : ' ', r.name.c_str(), r.url.c_str());
+    }
+    if (!homcommon::EqualsNoCase(cfg.active, homcommon::kOfficialName) && !homcommon::FindRepo(cfg, cfg.active)) {
+        std::printf("hom: the saved active repo '%s' no longer exists -- using official.\n", cfg.active.c_str());
+    }
+    return 0;
+}
+
+int CmdRepoAdd(const std::string &name, const std::string &url_in) {
+    if (name.empty() || url_in.empty()) {
+        std::fprintf(stderr, "hom: usage: hom repo add <name> <https-url | owner/repo[@branch]>\n"
+                              "     e.g.  hom repo add myfork someone/HomRec\n"
+                              "           hom repo add mirror https://example.org/homrec/Hom/\n");
+        return 1;
+    }
+    std::string why;
+    if (!homcommon::IsValidRepoName(name, &why)) {
+        std::fprintf(stderr, "hom: bad repo name '%s' (%s).\n", name.c_str(), why.c_str());
+        return 1;
+    }
+    std::string url;
+    if (!homcommon::NormalizeRepoUrl(url_in, &url, &why)) {
+        std::fprintf(stderr, "hom: bad repo URL (%s).\n", why.c_str());
+        return 1;
+    }
+    homcommon::RepoConfig cfg = homcommon::LoadRepoConfig(RepoCfgPath());
+    if (homcommon::FindRepo(cfg, name)) {
+        std::fprintf(stderr, "hom: a repo named '%s' already exists (hom repo remove %s, or pick another name).\n",
+                     name.c_str(), name.c_str());
+        return 1;
+    }
+    cfg.repos.push_back({name, url});
+    if (!homcommon::SaveRepoConfig(RepoCfgPath(), cfg)) {
+        std::fprintf(stderr, "hom: couldn't write %s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
+        return 1;
+    }
+    std::printf("Added repo '%s' -> %s\n", name.c_str(), url.c_str());
+    std::printf("Use 'hom repo set %s' to download from it.\n", name.c_str());
+    return 0;
+}
+
+int CmdRepoSet(const std::string &name) {
+    if (name.empty()) {
+        std::fprintf(stderr, "hom: usage: hom repo set <name>   (see 'hom repo list')\n");
+        return 1;
+    }
+    homcommon::RepoConfig cfg = homcommon::LoadRepoConfig(RepoCfgPath());
+    std::string target;
+    std::string url;
+    if (homcommon::EqualsNoCase(name, homcommon::kOfficialName)) {
+        target = homcommon::kOfficialName;
+        url = homcommon::kOfficialUrl;
+    } else if (const homcommon::Repo *r = homcommon::FindRepo(cfg, name)) {
+        target = r->name;
+        url = r->url;
+    } else {
+        std::fprintf(stderr, "hom: no repo named '%s' (hom repo list; add it with hom repo add).\n", name.c_str());
+        return 1;
+    }
+    cfg.active = target;
+    if (!homcommon::SaveRepoConfig(RepoCfgPath(), cfg)) {
+        std::fprintf(stderr, "hom: couldn't write %s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
+        return 1;
+    }
+    std::printf("Now using repo '%s' (%s)\n", target.c_str(), url.c_str());
+    std::printf("Installed plugins stay as they are; install/upgrade/update now download from this repo.\n");
+    return 0;
+}
+
+int CmdRepoRemove(const std::string &name) {
+    if (name.empty()) {
+        std::fprintf(stderr, "hom: usage: hom repo remove <name>\n");
+        return 1;
+    }
+    if (homcommon::EqualsNoCase(name, homcommon::kOfficialName)) {
+        std::fprintf(stderr, "hom: the official repo is built in and can't be removed.\n");
+        return 1;
+    }
+    homcommon::RepoConfig cfg = homcommon::LoadRepoConfig(RepoCfgPath());
+    auto it = std::find_if(cfg.repos.begin(), cfg.repos.end(),
+                           [&](const homcommon::Repo &r) { return homcommon::EqualsNoCase(r.name, name); });
+    if (it == cfg.repos.end()) {
+        std::fprintf(stderr, "hom: no repo named '%s'.\n", name.c_str());
+        return 1;
+    }
+    std::string removed = it->name;
+    cfg.repos.erase(it);
+    bool was_active = homcommon::EqualsNoCase(cfg.active, removed);
+    if (was_active) cfg.active = homcommon::kOfficialName;
+    if (!homcommon::SaveRepoConfig(RepoCfgPath(), cfg)) {
+        std::fprintf(stderr, "hom: couldn't write %s next to hom.exe. Check folder permissions.\n", homcommon::kRepoCfgName);
+        return 1;
+    }
+    std::printf("Removed repo '%s'.\n", removed.c_str());
+    if (was_active) std::printf("It was the one in use -- switched back to 'official'.\n");
     return 0;
 }
 
@@ -1220,15 +1477,71 @@ LONG WINAPI HomSehFilter(EXCEPTION_POINTERS *info) {
 } // namespace
 #endif // _WIN32
 
-int main(int argc, char **argv) {
+int main(int argc_in, char **argv_in) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(HomSehFilter);
+    // Unbuffered stdout: when HomRec's console runs us through a pipe, the C
+    // runtime would otherwise hold everything back until exit - and a progress
+    // bar that only appears when the download is over is not a progress bar.
+    setvbuf(stdout, nullptr, _IONBF, 0);
 #endif
+
+    // Global options, accepted anywhere on the line and removed before the
+    // command parsing below sees them: --progress=bar|lines|none
+    std::vector<char *> kept;
+    kept.push_back(argv_in[0]);
+    bool progress_given = false;
+    for (int i = 1; i < argc_in; ++i) {
+        std::string a = argv_in[i];
+        if (a.rfind("--progress=", 0) == 0) {
+            std::string v = a.substr(11);
+            if (v == "bar")        g_progress_mode = ProgressMode::Bar;
+            else if (v == "lines") g_progress_mode = ProgressMode::Lines;
+            else if (v == "none")  g_progress_mode = ProgressMode::None;
+            else { std::fprintf(stderr, "hom: --progress must be bar, lines or none.\n"); return 1; }
+            progress_given = true;
+            continue;
+        }
+        kept.push_back(argv_in[i]);
+    }
+    int argc = (int)kept.size();
+    char **argv = kept.data();
+    if (!progress_given) {
+        DWORD mode = 0;
+        g_progress_mode = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) ? ProgressMode::Bar : ProgressMode::None;
+    }
+
     if (argc < 2) { PrintUsage(); return 1; }
 
     std::string cmd = argv[1];
 
     if (cmd == "--version" || cmd == "-v" || cmd == "-V") return CmdVersion();
+
+    // `hom repo ...` only reads/writes hom_repos.cfg - no network, so it's
+    // handled before the active repo is even resolved.
+    if (cmd == "repo") {
+        std::string sub = argc >= 3 ? argv[2] : "list";
+        if (sub == "list" || sub == "ls") return CmdRepoList();
+        if (sub == "add")                 return CmdRepoAdd(argc >= 4 ? argv[3] : "", argc >= 5 ? argv[4] : "");
+        if (sub == "set" || sub == "use") return CmdRepoSet(argc >= 4 ? argv[3] : "");
+        if (sub == "remove" || sub == "rm" || sub == "delete") return CmdRepoRemove(argc >= 4 ? argv[3] : "");
+        std::fprintf(stderr, "hom: unknown repo command '%s' (list, add, set, remove).\n\n", sub.c_str());
+        PrintUsage();
+        return 1;
+    }
+
+    // Everything below may touch the network: resolve the active repo once,
+    // and say so when it isn't the official one (so nobody installs from a
+    // fork without noticing). The line starts with "hom:" on purpose - HomRec's
+    // plugin-update badge skips such lines when it parses `list --upgradable`.
+    if (cmd == "update" || cmd == "ping" || cmd == "upgrade" || cmd == "full-upgrade" ||
+        cmd == "install" || cmd == "search" || cmd == "show" || cmd == "list") {
+        SelectActiveRepoFromConfig();
+        bool needs_repo = cmd != "list";
+        for (int i = 2; i < argc; ++i) if (std::string(argv[i]) == "--upgradable") needs_repo = true;
+        if (needs_repo && !homcommon::EqualsNoCase(g_repo_name, homcommon::kOfficialName))
+            std::printf("hom: using repo '%s' (%s)\n", g_repo_name.c_str(), g_repo_url.c_str());
+    }
     if (cmd == "update") {
         std::string positional; // update takes no positional arg, just flags
         Flags f = ParseHomFlags(argc, argv, 2, &positional);
