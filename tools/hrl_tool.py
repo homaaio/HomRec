@@ -19,7 +19,6 @@ import sys
 
 MAGIC_HRL = b"HRL\x01"
 
-
 def pack(json_path: str, hrl_path: str) -> None:
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)  # validates the JSON is well-formed first
@@ -34,7 +33,6 @@ def pack(json_path: str, hrl_path: str) -> None:
         f.write(compressed)
 
     print(f"Wrote {hrl_path} ({len(compressed) + 4} bytes, {len(data)} keys)")
-
 
 def unpack(hrl_path: str, json_path: str) -> None:
     with open(hrl_path, "rb") as f:
@@ -52,7 +50,6 @@ def unpack(hrl_path: str, json_path: str) -> None:
 
     print(f"Wrote {json_path} ({len(data)} keys)")
 
-
 def main() -> None:
     if len(sys.argv) != 4 or sys.argv[1] not in ("pack", "unpack"):
         print(__doc__)
@@ -63,7 +60,6 @@ def main() -> None:
         pack(src, dst)
     else:
         unpack(src, dst)
-
 
 if __name__ == "__main__":
     main()

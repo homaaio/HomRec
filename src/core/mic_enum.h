@@ -1,20 +1,12 @@
-// mic_enum.h
-//
-// Lists the audio *capture* endpoints (microphones) currently available, so
-// Settings can offer a picker instead of always silently using whatever
-// Windows currently considers the default recording device (see
-// audio.cpp's hr_audio_start(), which previously had no way to ask for
-// anything else).
+// mic_enum.h - lists the available audio capture devices (microphones) for the Settings picker.
 #pragma once
 
 #include <string>
 #include <vector>
 
 struct HrMicDevice {
-    // WASAPI endpoint ID (IMMDevice::GetId()) -- stable across reboots/
-    // reconnects for the same physical device, unlike an array index. This
-    // is what gets stored in AppState::mic_device_id and passed back into
-    // hr_audio_start() to actually open the right device.
+    // WASAPI endpoint ID (IMMDevice::GetId()) -- stable across reboots/ reconnects for the
+    // same physical device, unlike an array index.
     std::string id;
     std::string name; // UTF-8 friendly name, e.g. "Microphone (USB Audio Device)"
 };

@@ -161,12 +161,6 @@ LRESULT CALLBACK WebcamPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     }
 }
 
-// ---------------------------------------------------------------------------
-// Generic choice picker (currently: the overlay editor's font dropdown -
-// see overlays_dock_panel.cpp) -- same listbox pattern as the two pickers
-// above, just with caller-supplied title/label/choices instead of each
-// being hardcoded to one specific list type.
-// ---------------------------------------------------------------------------
 enum { IDC_CHP_LIST = 6301, IDC_CHP_OK, IDC_CHP_CANCEL };
 
 struct ChoicePickerCtx {

@@ -19,12 +19,7 @@
   #define HR_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-// -------------------------------------------------------------
 // Internal: run a command, return combined stdout+stderr output
-// -------------------------------------------------------------
-// (2.3) How a run_cmd_ex() call ended. run_cmd() only ever returned the text
-// output, so callers couldn't tell "ffmpeg finished" from "ffmpeg was killed
-// by the timeout halfway through writing its output file".
 struct RunResult {
     bool  started   = false;  // CreateProcessW succeeded
     bool  timed_out = false;  // killed because timeout_ms elapsed
@@ -50,10 +45,6 @@ static std::wstring run_cmd_ex(const std::wstring& cmd, DWORD timeout_ms, RunRes
     std::wstring mut_cmd = cmd;
     if (!CreateProcessW(nullptr, mut_cmd.data(),
                         nullptr, nullptr, TRUE,
-                        // BELOW_NORMAL: everything started through here (audio+video merge, the .mkv -> .mp4
-                        // copy, probes) is post-processing that nobody waits for in real time, and it very often
-                        // runs right after Stop while the game is still on screen - it must not take CPU time
-                        // from the game on a 2-core CPU.
                         CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr, nullptr, &si, &pi))
     {
         CloseHandle(hRead); CloseHandle(hWrite);
@@ -62,10 +53,6 @@ static std::wstring run_cmd_ex(const std::wstring& cmd, DWORD timeout_ms, RunRes
     CloseHandle(hWrite);
     if (rr) rr->started = true;
 
-    // Drain the pipe concurrently with waiting for the process to exit -
-    // see the comment above run_cmd() for why reading only *after*
-    // WaitForSingleObject deadlocks as soon as the child's combined
-    // stdout+stderr output exceeds the pipe's small default buffer.
     std::string raw;
     std::thread reader([&]() {
         char buf[4096]; DWORD br = 0;
@@ -185,18 +172,7 @@ HR_EXPORT int hr_get_dshow_devices(const wchar_t* ffpath,
     return (int)devs.size();
 }
 
-// -------------------------------------------------------------
 // hr_probe_gpu  (run on a background thread)
-// -------------------------------------------------------------
-// The probe clip's size has to be at least as big as the smallest
-// resolution these hardware encoders will actually accept - 32x32 (the
-// previous size here) is below the minimum coded size several NVENC/QSV/
-// AMF driver versions enforce, so the probe would report "failed" even on
-// machines where the encoder works perfectly fine at real capture
-// resolutions. That false negative silently forced every recording onto
-// software libx264 (much heavier on the CPU) despite a working GPU
-// encoder sitting right there. 1280x720 is comfortably above every known
-// per-vendor minimum while still encoding a 0.1s clip near-instantly.
 struct GpuCand { const wchar_t* name; const wchar_t* extra_args; };
 static const GpuCand k_gpu[] = {
     { L"h264_nvenc", L" -f lavfi -i nullsrc=s=1280x720:d=0.1 -c:v h264_nvenc -f null -" },
@@ -226,15 +202,8 @@ HR_EXPORT int hr_probe_gpu(const wchar_t* ffpath, wchar_t* out_enc, int out_len)
     return 0;
 }
 
-// -------------------------------------------------------------
-// hr_probe_ddagrab
-// 1 if this ffmpeg build has the "ddagrab" source filter (ffmpeg 6.0+ with
-// D3D11 support): DXGI desktop capture whose frames stay on the GPU. Only
-// checks that the filter is compiled in (`ffmpeg -filters`, ~50 ms) - it
-// cannot know whether it will really initialize on this machine; the caller
-// still verifies the first seconds of a real recording and falls back to the
-// normal pipeline if ffmpeg dies.
-// -------------------------------------------------------------
+// hr_probe_ddagrab 1 if this ffmpeg build has the "ddagrab" source filter (ffmpeg 6.0+
+// with D3D11 support): DXGI desktop capture whose frames stay on the GPU.
 HR_EXPORT int hr_probe_ddagrab(const wchar_t* ffpath)
 {
     if (!ffpath || !*ffpath) return 0;
@@ -243,13 +212,8 @@ HR_EXPORT int hr_probe_ddagrab(const wchar_t* ffpath)
     return res.find(L"ddagrab") != std::wstring::npos ? 1 : 0;
 }
 
-// -------------------------------------------------------------
 // hr_build_codec_args
 // Returns space-separated ffmpeg argument string in out_buf.
-// -------------------------------------------------------------
-// hr_build_codec_args_ex - same as hr_build_codec_args() plus the real encode
-// size (w x h, 0 = unknown -> assumed 1920x1080). Needed because Intel QSV is
-// now driven by a bitrate derived from resolution*fps*quality (see below).
 HR_EXPORT int hr_build_codec_args_ex(const wchar_t* codec,
                                       int quality, int fps, int cpu_count,
                                       int enc_w, int enc_h,
@@ -276,18 +240,7 @@ HR_EXPORT int hr_build_codec_args_ex(const wchar_t* codec,
     if (is_nvenc) {
         ss << L" -preset p1 -tune ull -rc constqp -qp " << qp << L" -g " << gop;
     } else if (is_qsv) {
-        // This used to pass "-qp N". h264_qsv has NO "qp" option
-        // (ffmpeg only prints "Codec AVOption qp ... has not been used for
-        // any stream" and carries on), so the Quality slider did nothing for
-        // Intel QSV and the encoder silently ran at ffmpeg's built-in QSV
-        // default (~1 Mbps). QSV needs a bitrate (or -global_quality, which
-        // requires ICQ support = Skylake or newer and would refuse to start
-        // on older iGPUs). Use plain VBR with a cap: works on every QSV
-        // generation, gives a predictable encoder load/file size (like OBS's
-        // fixed-bitrate QSV) and no runaway bitrate spikes on busy scenes.
-        //   bits-per-pixel-per-frame: 0.04 (quality 0) .. 0.18 (quality 100)
-        //   1080p30: q=30 -> ~5.1 Mbps (the OBS setting), q=50 -> ~6.8,
-        //            q=100 -> ~11 Mbps.
+        // This used to pass "-qp N".
         int w = enc_w > 0 ? enc_w : 1920;
         int h = enc_h > 0 ? enc_h : 1080;
         int q = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
@@ -295,41 +248,18 @@ HR_EXPORT int hr_build_codec_args_ex(const wchar_t* codec,
         long long kbps = (long long)((double)w * h * (fps > 0 ? fps : 30) * bpp / 1000.0);
         if (kbps < 1500)  kbps = 1500;
         if (kbps > 60000) kbps = 60000;
-        // -low_power is deliberately NOT forced: it needs VDENC hardware that
-        // older/lower-end Intel iGPUs don't have and ffmpeg would just fail
-        // to init QSV on those; -bf 0 avoids B-frame reordering delay and
-        // work, -look_ahead 0 keeps the encoder single-pass.
         ss << L" -preset veryfast -look_ahead 0 -bf 0 -b:v " << kbps << L"k -maxrate "
            << (kbps * 3 / 2) << L"k -bufsize " << (kbps * 2) << L"k -g " << gop;
     } else if (is_amf) {
         ss << L" -quality speed -rc cqp -qp_i " << qp << L" -qp_p " << qp << L" -g " << gop;
     } else {
-        // This used to do the opposite of what you'd want here --
-        // 1 thread flat on anything with 4 cores or fewer, and only
-        // cpu_count/4 above that (so even an 8-core machine got just 2
-        // x264 threads, a 16-core one only 4). libx264's "ultrafast"
-        // preset is cheap per-thread but still needs to encode every
-        // frame in real time; forcing that through one or two threads
-        // means one or two cores end up pegged doing the whole job while
-        // the rest of the machine sits idle, which is exactly what
-        // "the fan spins up, Task Manager shows 50%+" looks like on a
-        // quad-core+ machine (100% of one core alone is 25%+ of a
-        // 4-core/8-thread CPU's total). x264 parallelizes across frames
-        // efficiently at low presets, so give it most of the cores
-        // instead, just holding a couple back for the capture thread
-        // (DXGI grab + overlay compositing + BGRA->YUV) and everything
-        // else (audio, UI) to run on without contention.
+        // This used to do the opposite of what you'd want here -- 1 thread flat on anything with 4
+        // cores or fewer, and only cpu_count/4 above that (so even an 8-core machine got just 2
+        // x264 threads, a 16-core one only 4).
         int thr = std::max(1, cpu_count - 2);
-        // The "Encoder preset" dropdown on the Video/Codec settings
-        // tab (Settings > Video > Encoder preset - ultrafast..veryslow,
-        // AppState::enc_preset) was saved, reloaded, round-tripped through
-        // every settings-persistence layer... and never actually read at
-        // recording time. This function always hardcoded "ultrafast"
-        // regardless of what the user picked, so choosing e.g. "medium"
-        // for better quality silently did nothing. Now honors the
-        // caller-supplied override (falls back to "ultrafast" if empty/
-        // null, so behavior for anyone who's never touched that dropdown
-        // is unchanged).
+        // The "Encoder preset" dropdown on the Video/Codec settings tab (Settings > Video >
+        // Encoder preset - ultrafast..veryslow, AppState::enc_preset) was saved, reloaded, round-
+        // tripped through every settings-persistence layer...
         std::wstring preset = (preset_override && preset_override[0]) ? preset_override : L"ultrafast";
         ss << L" -preset " << preset << L" -crf " << qp
            << L" -g " << gop << L" -threads " << thr;
@@ -357,16 +287,6 @@ HR_EXPORT int hr_build_codec_args(const wchar_t* codec,
                                   out_buf, buf_chars, preset_override);
 }
 
-// -------------------------------------------------------------
-// probe_duration_sec
-// Runs "ffmpeg -i <path>" with no output and reads the
-// "Duration: HH:MM:SS.xx" line ffmpeg prints for any input on
-// stderr - the standard way to get a file's duration without
-// bundling ffprobe separately (this project only ships
-// ffmpeg.exe). Returns -1.0 if the file couldn't be probed or no
-// Duration line was found (e.g. "N/A" for a still-being-written
-// or malformed file).
-// -------------------------------------------------------------
 static double probe_duration_sec(const std::wstring& ffpath, const std::wstring& path)
 {
     std::wstring out = run_cmd(L"\"" + ffpath + L"\" -i \"" + path + L"\"", 6000);
@@ -424,10 +344,8 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
                     "machine) - stretching it back to real speed before merging "
                     "audio, instead of cutting the audio down to match.");
         // 2.4 fix pass 2: the retime used to RE-ENCODE the whole video with libx264 -- on the very
-        // machine that was already too overloaded to keep up while recording (that is why the video
-        // is short in the first place), i.e. ~20-30 s of 100% CPU after every Stop and a lot of
-        // extra heat/RAM. Rescaling the timestamps with the "setts" bitstream filter gives the same
-        // result while the video stays stream-copied (no decode, no encode).
+        // machine that was already too overloaded to keep up while recording (that is why the
+        // video is short in the first place), i.e.
         cmd =
             L"\"" + std::wstring(ffpath) + L"\""
             L" -i \"" + vf + L"\""
@@ -464,11 +382,9 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
             L" \"" + tmp + L"\"";
     }
 
-    // The fixed 180 s timeout killed ffmpeg mid-write on long
-    // recordings (the stretch path re-encodes the WHOLE video), and the code
-    // below then replaced the finished recording with that truncated temp file -
-    // permanent data loss. The timeout now scales with the video length, and the
-    // original is only replaced when ffmpeg actually exited cleanly.
+    // The fixed 180 s timeout killed ffmpeg mid-write on long recordings (the stretch path re-
+    // encodes the WHOLE video), and the code below then replaced the finished recording with
+    // that truncated temp file - permanent data loss.
     double timeout_sec = 180.0;
     if (video_dur > 0.0) {
         const double want = video_dur * 0.5;   // stream copy: seconds, not minutes
@@ -513,13 +429,6 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
     return fexists(vf) ? 1 : 0;
 }
 
-// -------------------------------------------------------------
-// hr_export_mp3
-// Encodes a WAV file to MP3 (libmp3lame) -- backs the Settings > Advanced
-// "Also save audio as a separate MP3" checkbox (state_.separate_audio_mp3),
-// which was previously persisted/shown in the UI but never actually acted
-// on anywhere (see recording_controller.cpp's Stop()).
-// -------------------------------------------------------------
 HR_EXPORT int hr_export_mp3(const wchar_t* ffpath, const wchar_t* wav_path, const wchar_t* mp3_path)
 {
     if (!ffpath || !wav_path || !mp3_path) return 0;
@@ -536,13 +445,9 @@ HR_EXPORT int hr_export_mp3(const wchar_t* ffpath, const wchar_t* wav_path, cons
     return fexists(mp3_path) ? 1 : 0;
 }
 
-// -------------------------------------------------------------
 // hr_remux_copy  (2.4)
 // Stream-copies every stream of in_path into out_path (no re-encode, so it
 // costs almost nothing). Used for Settings > Video > Container "mp4 + mkv":
-// the recording is written to .mkv (survives a crash / power loss) and an
-// .mp4 copy is produced from it once the recording is finalized.
-// -------------------------------------------------------------
 HR_EXPORT int hr_remux_copy(const wchar_t* ffpath, const wchar_t* in_path, const wchar_t* out_path)
 {
     if (!ffpath || !in_path || !out_path) return 0;
@@ -569,12 +474,7 @@ HR_EXPORT int hr_remux_copy(const wchar_t* ffpath, const wchar_t* in_path, const
     return fexists(out) ? 1 : 0;
 }
 
-// -------------------------------------------------------------
 // hr_decode_audio_to_wav  (2.4)
-// Decodes any audio (or video) file ffmpeg understands into a 16-bit stereo
-// 44.1 kHz WAV - the format the Audio Mixer's "Audio file" source is mixed
-// in as. Returns 1 on success.
-// -------------------------------------------------------------
 HR_EXPORT int hr_decode_audio_to_wav(const wchar_t* ffpath, const wchar_t* in_path, const wchar_t* wav_path)
 {
     if (!ffpath || !in_path || !wav_path) return 0;

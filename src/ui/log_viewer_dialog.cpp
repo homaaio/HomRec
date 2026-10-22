@@ -12,10 +12,9 @@ namespace {
 constexpr wchar_t kClassName[] = L"HomRecLogViewer";
 enum { IDC_LOG_EDIT = 8201, IDC_LOG_REFRESH, IDC_LOG_OPENFOLDER, IDC_LOG_CLOSE, IDC_LOG_PATH_LABEL };
 
-// Reads the log file leniently: if the bytes aren't valid UTF-8
-// (console.cpp's std::wofstream writer doesn't guarantee that for
-// non-ASCII text), fall back to the system codepage rather than failing
-// outright.
+// Reads the log file leniently: if the bytes aren't valid UTF-8 (console.cpp's
+// std::wofstream writer doesn't guarantee that for non-ASCII text), fall back to the
+// system codepage rather than failing outright.
 std::wstring ReadLogFileLenient(const std::wstring &path, bool &found) {
     std::ifstream f(path.c_str(), std::ios::binary);
     if (!f) { found = false; return L"Log file not found:\n" + path; }
@@ -58,13 +57,6 @@ void LoadLogInto(HWND edit, const std::wstring &logPath) {
 LRESULT CALLBACK LogViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static std::wstring *logPath = nullptr; // set once at WM_CREATE, lives for the window's lifetime
     // The EDIT control's font (created below, WM_SETFONT'd in)
-    // was never DeleteObject()'d anywhere. WM_SETFONT doesn't transfer
-    // ownership - the OS destroying the EDIT control on WM_DESTROY
-    // doesn't free a font handle we created ourselves, so every time this
-    // dialog was opened (a brand new HWND/WM_CREATE each call, since it's
-    // not reused) leaked one more GDI font object for the life of the
-    // process. Tracked here the same way logPath already is, and cleaned
-    // up alongside it in WM_DESTROY below.
     static HFONT logFont = nullptr;
     switch (msg) {
         case WM_CREATE: {
@@ -98,11 +90,6 @@ LRESULT CALLBACK LogViewerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             if (LOWORD(wParam) == IDC_LOG_REFRESH) {
                 LoadLogInto(GetDlgItem(hwnd, IDC_LOG_EDIT), *logPath);
             } else if (LOWORD(wParam) == IDC_LOG_OPENFOLDER) {
-                // Opens the logs\ folder now (homrec.log, pc.log,
-                // plugins.log, and any custom plugin log files all live
-                // there together - see HrLogPaths) instead of the whole
-                // install directory this used to point at back when
-                // homrec.log sat loose next to the .exe.
                 ShellExecuteW(hwnd, L"open", HrLogPaths::LogsDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             } else if (LOWORD(wParam) == IDC_LOG_CLOSE) {
                 HrCloseModalWindow(hwnd);

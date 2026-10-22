@@ -46,11 +46,9 @@ constexpr uint32_t kMagic = 0x57474331u;   // 'WGC1'
 constexpr int kOk = 0, kTimeout = 1, kLost = 2, kError = -1;
 constexpr int kPixelFormatBgra8 = 87;      // DirectXPixelFormat::B8G8R8A8UIntNormalized (= DXGI_FORMAT_B8G8R8A8_UNORM)
 
-// ---------------------------------------------------------------------------------------------
 // Hand-declared WinRT ABI. Older MinGW has no <windows.graphics.capture.h>, so the handful of
 // interfaces needed are declared here with the vtable order of the Windows SDK's ABI headers.
 // (Names are prefixed so they can never clash with a toolchain header that does ship them.)
-// ---------------------------------------------------------------------------------------------
 struct SizeInt32 { INT32 Width; INT32 Height; };
 
 struct HrInspectable : public IUnknown {
@@ -121,10 +119,7 @@ using WindowsCreateStringFn     = HRESULT(WINAPI *)(PCWSTR src, UINT32 len, void
 using WindowsDeleteStringFn     = HRESULT(WINAPI *)(void *hstring);
 using CreateD3DDeviceFromDxgiFn = HRESULT(WINAPI *)(IDXGIDevice *, void **inspectable);
 
-// NOTE: D3D11CreateDevice is deliberately NOT late-bound here. It is the plain import from
-// -ld3d11, called exactly the way dxgi_capture.cpp's hr_dx_create() calls it (explicit adapter,
-// D3D_DRIVER_TYPE_UNKNOWN, non-null feature-level out-pointer) - that call is proven to work in
-// this very process, see CreateWgcDevice().
+// NOTE: D3D11CreateDevice is deliberately NOT late-bound here.
 struct Api {
     RoInitializeFn            RoInitialize = nullptr;
     RoGetActivationFactoryFn  RoGetActivationFactory = nullptr;
@@ -205,19 +200,9 @@ bool WindowRects(HWND hwnd, RECT &frame, RECT &client_screen) {
     return true;
 }
 
-// ---- crash sentinel ("circuit breaker") -------------------------------------------------------
-// Windows.Graphics.Capture is driven through hand-written COM/WinRT calls. If native code in here
-// ever takes the whole process down (the 2.4.0 crash on "select a window, then click the preview /
-// press Start"), every later launch would walk straight into the same crash again.
-//
-// So: while ANY native WGC work is in flight a small flag file (logs\wgc_guard.flag) exists. It is
-// deleted again when that work finishes. If the process dies in the middle, the flag survives, and
-// the next launch sees it, logs it once and refuses WGC (HrWgcSupported() == false) - the caller
-// then uses the screen-crop path, which does not touch any of this code. The user can give WGC
-// another chance from Settings (HrWgcResetCrashGuard()).
-//
-// Deliberately built from plain Win32 primitives (SRWLOCK, interlocked ops, CreateFileW) so the
-// sentinel itself depends on nothing that could be involved in the fault it is watching for.
+// ---- crash sentinel ("circuit breaker")
+// ------------------------------------------------------- Windows.Graphics.Capture is
+// driven through hand-written COM/WinRT calls.
 std::wstring GuardPath() { return HrLogPaths::LogFilePath(L"wgc_guard.flag"); }
 
 volatile LONG g_guard_state = 0;      // 0 = not looked yet, 1 = clean, 2 = previous run crashed in WGC
@@ -227,12 +212,6 @@ int           g_guard_depth = 0;      // number of WGC operations currently in f
 // Bump when a WGC crash cause has been fixed: a flag written by an OLDER build (no / smaller marker)
 // belongs to a bug that no longer exists, so it is deleted instead of switching WGC off for good.
 // (2 = first attempt: D3D11CreateDevice resolved from the export table - did not help.)
-// (3 = D3D11CreateDevice(nullptr adapter, DRIVER_TYPE_HARDWARE) crashed on some setups; now created on an
-//  explicit adapter exactly like dxgi_capture.cpp, see CreateWgcDevice().)
-// (4 = the crash was not in D3D11CreateDevice but right after it, in the ID3D11Multithread block, which is
-//  removed; device creation also runs contained on a helper thread now.)
-// (5 = the crash moved on to the first WinRT call on the GUI thread (CreateForWindow): the WHOLE session setup
-//  now runs on its own MTA thread, contained, see InitContained().)
 #define HR_WGC_GUARD_GEN "WGC-GUARD-GEN-5"
 constexpr char kGuardGen[] = HR_WGC_GUARD_GEN;
 
@@ -312,10 +291,6 @@ struct Ctx {
     // Serialises everything that touches the COM objects below. The capture thread (HrWgcCapture /
     // HrWgcReset), the UI thread (HrWgcSetCursor, HrWgcDestroy) and the preview-teardown thread
     // (HrWgcDestroy) used to race on session/pool/dc: HrWgcSetCursor() called session2->put_...()
-    // while the capture thread's HrWgcReset() -> Teardown() had just released it (calls through a
-    // freed COM object - the kind of bug that ends as an "execute (DEP) violation at a non-code
-    // address" like the 2026-10-07 15:48:53 dump; that dump could not be pinned to this line, so
-    // treat this as hardening of a real race, not as a proven root cause).
     std::mutex mu;
     bool  dead = false;      // HrWgcDestroy() ran - every later call is a no-op / error
     HWND  hwnd = nullptr;
@@ -324,7 +299,7 @@ struct Ctx {
     bool  cursor = false;
     bool  ok = false;
     int   frames_ok = 0;     // frames delivered so far - the first few run under the crash sentinel
-    int   guard_calls = 0;   // HrWgcCapture() calls made under the sentinel (capped, so an idle window costs nothing)
+    int   guard_calls = 0;
 
     ComPtr<ID3D11Device>        dev;
     ComPtr<ID3D11DeviceContext> dc;
@@ -430,30 +405,7 @@ void Teardown(Ctx *c) {
     c->ok = false;
 }
 
-// ---------------------------------------------------------------------------------------------
 // WGC session setup - runs on its own short-lived MTA thread, never on the GUI thread, and contained.
-//
-// Crash history (five dumps, 2026-10-09 .. 10-10): always the same signature - an EXECUTE access
-// violation (the CPU jumped to a non-executable address) at "hr.exe base - 0x40000000" on the GUI
-// thread, called directly from WGC Init(). Each earlier "fix" only moved the crash to the next call
-// after the previous log breadcrumb (D3D11CreateDevice -> ID3D11Multithread -> CreateForWindow), and
-// the pass that moved ONLY the device creation to a helper thread got through it. So the common
-// factor is "native WinRT/D3D code driven from the GUI thread" (wx STA + OLE + text-services /
-// compatibility-shim hooks - AcLayers.dll/apphelp.dll are loaded in every dump), not one API call.
-//
-// Therefore the WHOLE of Init() now runs here:
-//   * on a fresh thread that joins the MTA (the WGC objects are free-threaded/agile; the GUI thread
-//     is an OLE STA and is out of the picture);
-//   * under a vectored exception handler that recognises exactly one signature: an EXECUTE access
-//     violation on that thread. The handler parks the faulting thread forever (no unwinding through
-//     foreign frames, no DLL_THREAD_DETACH), wakes the waiting caller, and the caller reports "WGC
-//     unusable" so the recording falls back to the screen crop instead of killing the process. Every
-//     other exception (incl. first-chance AVs that drivers handle internally) is left alone;
-//   * with a step breadcrumb (g_init_step) so a contained fault / hang names the exact call;
-//   * with a timeout (a hang no longer freezes the GUI forever).
-// After a contained fault or a timeout the objects the thread was building are abandoned (leaked on
-// purpose) - releasing half-built COM objects is exactly what could crash a second time.
-// ---------------------------------------------------------------------------------------------
 constexpr DWORD kInitTimeoutMs = 20000;
 
 enum : LONG {
@@ -669,10 +621,6 @@ bool InitImpl(Ctx *c) {
         return false;
     }
 
-    // No ID3D11Multithread::SetMultithreadProtected() here: the immediate context is only touched by
-    // HrWgcCapture()/Teardown(), always under c->mu and on one thread at a time, and the frame pool is
-    // polled with TryGetNextFrame() (no FrameArrived handler, so WGC never runs code on our context
-    // from a thread of its own).
     HR_STEP(kStepWinrtDevice);
     HrWgcLog::Note("WGC init: D3D11 device ready, creating the WinRT device");
     ComPtr<IDXGIDevice> dxgi;
@@ -929,21 +877,7 @@ int ProcessFrame(Ctx *c, HrFrame *frame, uint8_t *out) {
     return kOk;
 }
 
-// ---------------------------------------------------------------------------------------------
 // PrintWindow backend (2.4.1) - "record ONE window" WITHOUT any hand-written WinRT call.
-//
-// Why it exists: on some PCs the native Windows.Graphics.Capture setup above jumps to an invalid
-// address inside CreateForWindow (six crash dumps / log lines, identical every time, see
-// CHANGELOG 2.4.0 crash passes 1-5). The fault is contained, but then window recording used to fall
-// back to the SCREEN CROP - which for a maximized window is practically the whole screen plus
-// everything that lies on top of it ("I select Chrome and the entire screen is recorded").
-//
-// PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT) (Windows 8.1+) asks DWM for the window's own
-// composited picture, so the result is that ONE window - not the desktop under its rectangle - even
-// when other windows cover it. It is plain Win32/GDI: nothing in here can take the process down the
-// way the WinRT path did. The price is CPU: the picture is read back and converted on the CPU (the
-// same path WGC frames already took), so it is the fallback, not the first choice.
-// ---------------------------------------------------------------------------------------------
 #ifndef PW_RENDERFULLCONTENT
 #define PW_RENDERFULLCONTENT 0x00000002
 #endif
@@ -980,30 +914,11 @@ void PwDrawCursor(Ctx *c, const RECT &wr) {
                ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
 }
 
-// ---------------------------------------------------------------------------------------------
 // 7th pass: smart mode + a much cheaper exact mode
-//
-// Measured on a real PC (Chrome, 1080p): the PrintWindow backend cost ~30% CPU and made every window
-// dragged over the recorded one stutter. Two reasons, both fixed here:
-//   * PrintWindow makes the target (and DWM) redraw the whole window for every single frame, even when
-//     nothing changed, and every frame went through a full colour conversion in the pipeline.
-//   * a window that is simply in front (the normal case) needs none of that: its picture is just a part
-//     of the screen.
-// So, per call:
-//   1. smart mode on and the window uncovered (and on one monitor)  ->  cut it out of the screen duplication
-//      (cheap; DXGI says "nothing changed" for free, and only the changed rows are copied);
-//   2. otherwise PrintWindow, but (a) no per-frame buffer clear, (b) paced: never more than 50% duty
-//      cycle, optional fps cap, slower polling while the picture stays identical and the user is idle,
-//      and (c) an identical picture is reported as "no new frame" so the pipeline re-sends the last
-//      converted frame (that path costs almost nothing) instead of converting the same pixels again.
-// ---------------------------------------------------------------------------------------------
 constexpr int kFallback = -100;       // internal: "leave the screen reading, use the exact capture"
-constexpr int kFallbackKeep = -101;   // internal: "exact capture for THIS frame, but stay in screen mode (it is starting up)"
+constexpr int kFallbackKeep = -101;
 
-// True when another program's window lies over `want` (the window we record). Walks the z-order ABOVE the
-// target. Windows that cannot change what the screen duplication shows are skipped: invisible /
-// minimized / cloaked ones, click-through overlays, windows hidden from capture, and the target
-// program's own popups (menus, tooltips - they belong to the picture).
+// True when another program's window lies over `want` (the window we record).
 bool CoveredByOthers(HWND target, const RECT &want) {
     DWORD tpid = 0;
     GetWindowThreadProcessId(target, &tpid);
@@ -1022,7 +937,7 @@ bool CoveredByOthers(HWND target, const RECT &want) {
         if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) continue;
         DWORD aff = 0;
         if (GetWindowDisplayAffinity(w, &aff) && aff == 0x11 /*WDA_EXCLUDEFROMCAPTURE*/) continue;
-        RECT fr{};   // visible frame, without the invisible resize border Windows adds around most windows
+        RECT fr{};
         if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, &fr, sizeof(fr))) &&
             !IntersectRect(&t, &fr, &want)) continue;
         return true;
@@ -1263,8 +1178,6 @@ int PwFrame(Ctx *c, const RECT &wr, uint8_t *out, ULONGLONG now) {
 
     // --- pacing -----------------------------------------------------------------------------------
     // The user is active -> back to the full rate; idle and the picture stays identical -> poll slower.
-    // Input only counts while the recorded window is the one in front (typing / clicking elsewhere does not
-    // change it; its own animations are caught by the identical-picture test).
     LASTINPUTINFO li{};
     li.cbSize = sizeof(li);
     if (GetLastInputInfo(&li) && li.dwTime != c->last_input_tick) {
@@ -1352,9 +1265,6 @@ int PwFrame(Ctx *c, const RECT &wr, uint8_t *out, ULONGLONG now) {
     if (rw < 2 || rh < 2) return kTimeout;
 
     // Same picture as last time (and the canvas already holds it)? Then there is nothing new to hand over:
-    // reporting "no new frame" lets the pipeline re-send the frame it already converted instead of
-    // converting identical pixels again (the pipeline does not count this as a dropped frame in the
-    // overload warning - only real stalls are).
     const uint8_t *region = c->pw_bits + ((size_t)ry * ww + rx) * 4;
     const uint64_t hsh = HashRegion(region, ww * 4, rw, rh) ^ ((uint64_t)rw << 20) ^ ((uint64_t)rh << 40);
     if (c->have_hash && !c->need_compose && hsh == c->last_hash) {
@@ -1539,11 +1449,6 @@ bool HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h) {
 bool HrWgcProbeWindow(HWND hwnd) {
     // Used to activate the GraphicsCaptureItem factory and call CreateForWindow() right here - on the
     // UI thread, in the middle of "select a window" (RefreshPreviewSettings -> ResolveCaptureSize).
-    // That is native WinRT code that can take the whole process down (2.4.0 crash; the
-    // 2026-10-07 dumps), and it only duplicated what HrWgcCreate() does a moment later anyway.
-    // HrWgcCreate() already reports a window Windows refuses (CreateForWindow failing) and the caller
-    // falls back to the screen crop, so the probe now only does the cheap Win32 checks and touches
-    // no WinRT object at all.
     if (!hwnd || !IsWindow(hwnd) || !HrWgcSupported()) return false;
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
     DWORD pid = 0;
@@ -1646,9 +1551,9 @@ int HrWgcCapture(void *handle, uint8_t *out_bgra, int timeout_ms) {
                 return r;
             }
             if (FAILED(hr)) return kLost;
-        }   // lock released while waiting, so Destroy / SetCursor / Reset never starve behind this loop
+        }
         if (timeout_ms <= 0 || (int)(GetTickCount() - t0) >= timeout_ms) return kTimeout;
-        Sleep(2);   // frames arrive at most every ~8 ms; 2 ms keeps latency low without busy-spinning
+        Sleep(2);
     }
 }
 

@@ -1,14 +1,5 @@
-// theme.h
-//
-// Port of `HomRecScreen.BUILTIN_THEMES` / `get_theme_colors()`
-// (homrec_app/mixins/ui_mixin.py). Same two built-in themes, same hex
-// values, just materialized as GDI COLORREFs instead of Tk hex strings so
-// paint code doesn't re-parse a string every frame.
-//
-// Custom .hrt themes were removed - that support is discontinued (there
-// was never any UI to install one anyway; LoadCustomTheme() used to be
-// wired up to a gzip+JSON .hrt reader in profile_io.cpp but nothing
-// called it). Only the two built-in themes below remain.
+// theme.h - Port of `HomRecScreen.BUILTIN_THEMES` / `get_theme_colors()`
+// (homrec_app/mixins/ui_mixin.py).
 #pragma once
 
 #include <windows.h>

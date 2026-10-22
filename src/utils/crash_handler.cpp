@@ -9,12 +9,6 @@
 
 namespace {
 
-// dbghelp.dll's MiniDumpWriteDump signature (DbgHelp.h declares it, but we
-// still load the DLL dynamically rather than linking against it directly -
-// dbghelp ships with Windows itself but versions vary a lot, and the whole
-// point of this handler is to not be a second way to crash on an already-
-// crashing process. A LoadLibrary/GetProcAddress that fails just skips the
-// dump and still gets the log line + message box below.
 typedef BOOL(WINAPI *MiniDumpWriteDump_t)(
     HANDLE hProcess, DWORD ProcessId, HANDLE hFile, MINIDUMP_TYPE DumpType,
     PMINIDUMP_EXCEPTION_INFORMATION ExceptionParam,
@@ -32,16 +26,6 @@ void BuildCrashDir(wchar_t *out, DWORD out_chars) {
     CreateDirectoryW(out, nullptr); // harmless no-op if it already exists
 }
 
-// Appends one line to <exe-dir>\logs\homrec.log without going through
-// log.cpp's HrLog::Write() - that takes a std::mutex and opens an
-// std::ofstream, either of which could already be mid-operation (and
-// therefore stuck/corrupt) on whatever thread just crashed. Raw
-// CreateFileW/WriteFile with FILE_APPEND_DATA is the smallest amount of
-// machinery that can still get a line into the same file. Deliberately
-// not using HrLogPaths::LogFilePath() (also just string-building plus a
-// CreateDirectoryW, no locks - would be safe here too) so this file has
-// zero dependency on anything that could change out from under a crash
-// handler; the "logs\" join is inlined instead.
 void AppendLogLine(const wchar_t *exe_dir, const char *line) {
     wchar_t logs_dir[MAX_PATH];
     wcscpy_s(logs_dir, exe_dir);
@@ -78,10 +62,6 @@ void DescribeAddress(const void *addr, char *out, size_t out_len) {
     }
 }
 
-// Appends the facts a crash report needs to homrec.log: what faulted and how (read / write /
-// execute at which address), where (module+offset), on which thread, plus every stack word that
-// looks like a return address (module+offset) - a poor man's call stack that works without
-// symbols or dbghelp. Plain Win32 calls only; it runs inside the crash handler.
 void AppendCrashDetails(const wchar_t *exe_dir, EXCEPTION_POINTERS *info) {
     if (!info || !info->ExceptionRecord) return;
     const EXCEPTION_RECORD *er = info->ExceptionRecord;
@@ -173,10 +153,9 @@ void WriteCrashArtifacts(EXCEPTION_POINTERS *dump_ctx, const wchar_t *reason) {
                     mei.ThreadId = GetCurrentThreadId();
                     mei.ExceptionPointers = ep_to_use;
                     mei.ClientPointers = FALSE;
-                    // WithDataSegs: includes global/static variable state
-                    // (helpful for AppState-style bugs) without the much
-                    // larger MiniDumpWithFullMemory - a hand-editable few
-                    // hundred KB to a few MB, not a copy of the process.
+                    // WithDataSegs: includes global/static variable state (helpful for AppState-style bugs)
+                    // without the much larger MiniDumpWithFullMemory - a hand-editable few hundred KB to a few
+                    // MB, not a copy of the process.
                     dump_written = write_dump(GetCurrentProcess(), GetCurrentProcessId(), f,
                                                (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs),
                                                &mei, nullptr, nullptr) != FALSE;
@@ -219,11 +198,8 @@ LONG WINAPI SehFilter(EXCEPTION_POINTERS *info) {
     return EXCEPTION_EXECUTE_HANDLER; // let the process die cleanly, don't re-fault into WER
 }
 
-// Covers what SEH won't reliably catch on its own - an uncaught C++
-// exception (crossing a callback boundary wx/DXGI/ffmpeg-IPC code calls
-// into) or a direct abort(). No EXCEPTION_POINTERS available here, so
-// there's no minidump context to hand dbghelp - still gets the log line
-// and message box so it isn't silent.
+// Covers what SEH won't reliably catch on its own - an uncaught C++ exception (crossing a
+// callback boundary wx/DXGI/ffmpeg-IPC code calls into) or a direct abort().
 void TerminateHandler() {
     WriteCrashArtifacts(nullptr, L"unhandled C++ exception / std::terminate()");
     abort();

@@ -10,10 +10,6 @@
 #include <cwctype>
 #include <windowsx.h> // GET_X_LPARAM/GET_Y_LPARAM - ShowRegionPickerOverlay()'s drag tracking
 
-// dwmapi.h ships with this project's MinGW-w64 toolchain (already linked
-// via -ldwmapi, see win32_theme.cpp), but a couple of the attribute
-// constants used below predate some SDK header snapshots, so they're
-// given by number with a fallback name, same convention as win32_theme.cpp.
 #include <dwmapi.h>
 #ifndef DWMWA_EXTENDED_FRAME_BOUNDS
 #define DWMWA_EXTENDED_FRAME_BOUNDS 9
@@ -56,10 +52,6 @@ std::wstring WideFromNarrow(const std::string &s) {
     return w;
 }
 
-// True for the same "actually a capturable top-level window" candidates
-// ShowWindowPickerDialog()'s list uses - kept as one shared check so
-// HR_ResolveCaptureWindow() below can't resolve a title to some window
-// the picker itself would never have shown as an option.
 bool IsCapturableWindow(HWND hwnd) {
     if (!IsWindowVisible(hwnd)) return false;
     if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
@@ -292,10 +284,6 @@ bool HR_ResolveWindowTarget(const HrWindowTarget &t, HWND &out_hwnd, RECT &out_r
     // it as "not available" rather than letting the caller compute a crop rect that lands off every monitor.
     if (IsIconic(found)) return false;
 
-    // DWMWA_EXTENDED_FRAME_BOUNDS, not GetWindowRect(): on Win10/11, GetWindowRect() includes several
-    // pixels of invisible resize-grip margin around most app windows - cropping DXGI's frame to *that*
-    // rect would capture a sliver of desktop wallpaper around three edges of the window instead of the
-    // window itself. The DWM attribute gives the actual visible bounds, matching what the user sees.
     RECT r{};
     if (FAILED(DwmGetWindowAttribute(found, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))) {
         if (!GetWindowRect(found, &r)) return false;  // last-resort fallback
@@ -390,15 +378,6 @@ struct WindowEntry {
     HBITMAP thumb = nullptr;  // always kThumbW x kThumbH once captured, or null on failure
 };
 
-// Same "is this actually a window worth showing" heuristics OBS itself
-// uses for its window-capture source list (see obs-studio's
-// get-windows.cpp): visible, not owned by another window (owned popups
-// are secondary UI, not standalone capture targets), not a tool window
-// unless it explicitly opts back in via WS_EX_APPWINDOW, and not
-// DWM-cloaked (suspended UWP apps / other-virtual-desktop windows report
-// as "visible" but are actually invisible and would just capture blank).
-// Filtering these out up front also means we don't waste time trying to
-// thumbnail windows nobody would ever pick.
 std::vector<WindowEntry> EnumCandidateWindows(HWND exclude) {
     struct Ctx {
         std::vector<WindowEntry> *entries;
@@ -437,11 +416,6 @@ std::vector<WindowEntry> EnumCandidateWindows(HWND exclude) {
     return entries;
 }
 
-// Renders a live thumbnail of hwnd's current on-screen content into a
-// kThumbW x kThumbH tile (letterboxed to preserve aspect ratio), or
-// returns nullptr if that isn't possible (minimized window, or an app
-// that doesn't support PrintWindow) -- callers fall back to the window's
-// own icon in that case rather than showing a blank/black tile.
 HBITMAP CaptureWindowThumbnail(HWND hwnd, int tileW, int tileH) {
     if (!IsWindow(hwnd)) return nullptr;
     {
@@ -454,10 +428,8 @@ HBITMAP CaptureWindowThumbnail(HWND hwnd, int tileW, int tileH) {
     }
 
     RECT rc{};
-    // Extended frame bounds excludes the invisible resize-border/drop-
-    // shadow margin DWM pads every top-level window with on Win10/11, so
-    // the thumbnail isn't mostly empty margin. Falls back to the raw
-    // window rect on anything that doesn't support the attribute.
+    // Extended frame bounds excludes the invisible resize-border/drop- shadow margin DWM pads
+    // every top-level window with on Win10/11, so the thumbnail isn't mostly empty margin.
     if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof(rc)))) {
         if (!GetWindowRect(hwnd, &rc)) return nullptr;
     }
@@ -477,27 +449,15 @@ HBITMAP CaptureWindowThumbnail(HWND hwnd, int tileW, int tileH) {
     DeleteObject(bg);
 
     bool drew = false;
-    // PrintWindow() sends WM_PRINT/WM_PAINT-family
-    // messages to hwnd's own message queue and blocks until it's
-    // processed them - it has no timeout. ShowWindowPickerDialog() calls
-    // this once per visible top-level window *before* the picker dialog
-    // is even shown, so a single hung/not-responding app anywhere on the
-    // user's desktop (a common, everyday occurrence - a stuck dialog, a
-    // frozen webpage, a long modal file-save) used to freeze the entire
-    // "Select Window to Record" picker, with no window on screen yet to
-    // even show what's wrong. IsHungAppWindow() is the cheap, documented
-    // way to check first; a hung window just falls through to the
-    // already-existing icon-based fallback below instead of risking the
-    // indefinite block.
+    // PrintWindow() sends WM_PRINT/WM_PAINT-family messages to hwnd's own message queue and
+    // blocks until it's processed them - it has no timeout.
     if (!IsIconic(hwnd) && !IsHungAppWindow(hwnd)) {
         HDC srcDC = CreateCompatibleDC(screenDC);
         HBITMAP srcBmp = CreateCompatibleBitmap(screenDC, w, h);
         HBITMAP oldSrc = static_cast<HBITMAP>(SelectObject(srcDC, srcBmp));
 
-        // PW_RENDERFULLCONTENT is needed for anything GPU-composited
-        // (browsers, games, most modern apps) -- without it PrintWindow
-        // often just yields a black/blank rectangle for those. Fall back
-        // to the plain flag for older apps that don't recognize it.
+        // PW_RENDERFULLCONTENT is needed for anything GPU-composited (browsers, games, most modern
+        // apps) -- without it PrintWindow often just yields a black/blank rectangle for those.
         BOOL ok = PrintWindow(hwnd, srcDC, PW_RENDERFULLCONTENT);
         if (!ok) ok = PrintWindow(hwnd, srcDC, 0);
         if (ok) {
@@ -756,7 +716,7 @@ void ShowWindowPickerDialog(HWND parent, HINSTANCE hInst, AppState &state) {
 namespace {
 
 constexpr wchar_t kRegionClassName[] = L"HomRecRegionPicker";
-constexpr int kMinDragPx = 8; // see the .h doc comment - anything smaller is treated as a stray click, not a drag
+constexpr int kMinDragPx = 8;
 
 struct RegionPickerCtx {
     bool dragging = false;
@@ -825,11 +785,6 @@ LRESULT CALLBACK RegionPickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             RECT client{};
             GetClientRect(hwnd, &client);
 
-            // Dim backdrop - the whole overlay window is later given
-            // uniform alpha via SetLayeredWindowAttributes() below, so
-            // this doesn't need to be very dark on its own; it just needs
-            // to read as "an overlay is active" and give the bright
-            // selection rectangle something to contrast against.
             HBRUSH bg = CreateSolidBrush(RGB(20, 20, 24));
             FillRect(dc, &client, bg);
             DeleteObject(bg);
@@ -901,16 +856,12 @@ void ShowRegionPickerOverlay(HWND parent, HINSTANCE hInst, AppState &state) {
                                  WS_POPUP, vx, vy, vw, vh,
                                  parent, nullptr, hInst, &ctx);
     if (!hwnd) return;
-    // Uniform alpha over the whole overlay (backdrop + selection UI
-    // together) - the simplest version of the usual screenshot-tool
-    // "dim everything, draw a bright box for the selection" look,
-    // without needing to composite an actual desktop screenshot first.
     SetLayeredWindowAttributes(hwnd, 0, 190, LWA_ALPHA);
 
     EnableWindow(parent, FALSE);
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
-    SetFocus(hwnd); // needed for WM_KEYDOWN (Esc) - a WS_POPUP with no WS_TABSTOP children doesn't get it automatically
+    SetFocus(hwnd);
 
     MSG msg;
     while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -929,7 +880,6 @@ void ShowRegionPickerOverlay(HWND parent, HINSTANCE hInst, AppState &state) {
         state.region_h = ctx.result.bottom - ctx.result.top;
     }
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // 8th pass: window / region layers

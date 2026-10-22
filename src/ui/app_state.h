@@ -1,12 +1,6 @@
-// app_state.h
-//
-// All of the recorder's session/UI state, collected into one flat struct.
+// app_state.h - All of the recorder's session/UI state, collected into one flat struct.
 // The recording controller, audio panel, settings dialog, and other pieces
 // read/write this struct directly.
-//
-// Deliberately not using variable-indirection/observer patterns: Win32
-// controls pull state on WM_COMMAND / WM_NOTIFY and push it back on user
-// action, so there's no need for one here.
 #pragma once
 
 #include <string>
@@ -20,64 +14,45 @@ enum class RecordingMode { Ultra, Turbo, Balanced, Eco };
 // Both = record to .mkv (crash-safe container) and remux a stream-copied .mp4
 // next to it when the recording is finalized (2.4).
 enum class VideoFormat { Mp4, Mkv, Both };
-// "Resolution:" setting in Settings > General - Percent keeps the old
-// scale_factor-of-native behavior (25/50/75/100%), Absolute lets the user
-// type an exact target width/height (e.g. 1280x720) instead. See
-// RecordingController::ComputeOutputDims().
+// "Resolution:" setting in Settings > General - Percent keeps the old scale_factor-of-
+// native behavior (25/50/75/100%), Absolute lets the user type an exact target
+// width/height (e.g.
 enum class ResolutionMode { Percent, Absolute };
 
 struct OverlayDef {
     std::string id;
     std::string type;      // "text" | "image" | "webcam" | "input_overlay"
-    // User-assigned display name (set via the overlays panel's right-click
-    // "Rename..." -- see overlays_dock_panel.cpp). Empty means "no custom
-    // name set yet", in which case the panel falls back to its old
-    // auto-generated label (truncated text/filename/cam index).
+    // User-assigned display name (set via the overlays panel's right-click "Rename..." -- see
+    // overlays_dock_panel.cpp).
     std::string name;
     int x = 0, y = 0, w = 0, h = 0;
     std::string text;
     std::string text_color = "#FFFFFF";  // "#RRGGBB", used for type == "text"
-    // Font family for type == "text" - see overlay_render.cpp's
-    // RenderTextBgra(). If the named font isn't actually installed,
-    // Windows' GDI silently substitutes its own default rather than
-    // failing, so an unavailable choice here degrades gracefully instead
-    // of breaking the overlay.
+    // Font family for type == "text" - see overlay_render.cpp's RenderTextBgra().
     std::string font_family = "Segoe UI";
     // 0-100, applies to every overlay type (text/image/gif/webcam/
     // input_overlay) on top of whatever per-pixel alpha the overlay
     // content already has - see overlay_render.cpp's CompositeBgra().
-    // 100 = fully opaque (the old, only, behavior before this existed).
     int opacity = 100;
     std::string image_path;              // for type == "image"; also reused for
                                           // type == "gif"'s .gif file path
     int webcam_index = -1;
-    // Friendly device name captured when the webcam was picked from the
-    // enumerated device list (see webcam_enum.h / overlays_dock_panel.cpp's
-    // AddWebcamOverlay) -- purely cosmetic (shown in the panel row and the
-    // "Edit Parameters" dialog instead of a bare index), never fed back into
-    // the actual capture; webcam_index above is still what's used to open
-    // the device. Empty for overlays added before this existed.
     std::string webcam_name;
     bool visible = true;
-    // 7th pass (Layers panel): "Lock" in the row's context menu - a locked overlay can't be dragged,
-    // resized or nudged on the preview by accident (the editor dialog and the numeric fields still
-    // work). "Keep proportions" makes every resize of this overlay keep its aspect ratio (holding Shift
-    // while resizing does the same for any overlay, and inverts this flag when it is on).
+    // 7th pass (Layers panel): "Lock" in the row's context menu - a locked overlay can't be
+    // dragged, resized or nudged on the preview by accident (the editor dialog and the numeric
+    // fields still work).
     bool locked = false;
     bool lock_aspect = false;
 
-    // For type == "input_overlay" (the "External Overlay" import, see
-    // overlays_dock_panel.cpp / input_overlay.h): a keyboard/mouse
-    // overlay driven by a JSON layout + PNG spritesheet, installed from a
-    // .hrp plugin package. input_json_path/input_png_path point at the
-    // extracted files under plugins/input_overlays/<name>/.
+    // For type == "input_overlay" (the "External Overlay" import, see overlays_dock_panel.cpp
+    // / input_overlay.h): a keyboard/mouse overlay driven by a JSON layout + PNG spritesheet,
+    // installed from a .hrp plugin package.
     std::string input_json_path;
     std::string input_png_path;
 
-    // 8th pass (Desktop split): "window" and "region" are LAYERS now (the Desktop layer only shows the
-    // monitor). type == "window": one program's window, found again by the rules below (same meaning as
-    // the AppState::window_* fields they were copied from); type == "region": a rectangle of the screen
-    // (rx/ry/rw/rh, virtual-desktop pixels). x/y/w/h stay "where the layer is drawn in the picture".
+    // 8th pass (Desktop split): "window" and "region" are LAYERS now (the Desktop layer only
+    // shows the monitor).
     std::string win_title, win_exe, win_class;
     bool        win_match_exe   = true;
     bool        win_match_class = true;
@@ -96,10 +71,8 @@ struct OverlayDef {
 struct AudioSourceDef {
     std::string id;            // "as_1", "as_2", ... (unique within the list)
     std::string kind;          // "mic" | "app" | "file"
-                               //   mic  = another input device (target = WASAPI endpoint id)
-                               //   app  = one program's sound (browser / a specific window);
-                               //          target = exe name, window_title = title it was picked by
-                               //   file = an audio file mixed into the recording (target = path)
+                               // mic  = another input device (target = WASAPI endpoint id)
+                               // app  = one program's sound (browser / a specific window);
     std::string name;          // label shown in the mixer
     std::string target;
     std::string window_title;
@@ -146,16 +119,12 @@ struct AppState {
     int         enc_crf            = 18;
     std::string custom_ffmpeg_args;
     std::string pix_fmt            = "yuv420p";
-    // GPU colour conversion: with a hardware encoder (NV12 output) and nothing to
-    // composite on the CPU, crop/scale/BGRA->NV12 run on the GPU via the D3D11
-    // video processor and only 1.5 bytes/pixel are read back. Any active overlay
-    // switches back to the CPU converter automatically. Works on integrated GPUs.
+    // GPU colour conversion: with a hardware encoder (NV12 output) and nothing to composite on
+    // the CPU, crop/scale/BGRA->NV12 run on the GPU via the D3D11 video processor and only 1.5
+    // bytes/pixel are read back.
     bool        gpu_convert        = true;
-    // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg
-    // captures AND encodes entirely on the GPU. Fastest option, but HomRec
-    // overlays/plugins, pause, silence auto-pause, window tracking and
-    // downscaling are unavailable, so it is opt-in and used only when a
-    // recording doesn't need any of them.
+    // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg captures AND
+    // encodes entirely on the GPU.
     bool        gpu_capture_ddagrab = false;
     bool        game_friendly_priority = false;
     bool        qsv_low_power          = false;
@@ -168,14 +137,8 @@ struct AppState {
     std::string filename_template = "HomRec_{date}_{time}";
     int         auto_stop_min      = 0;
     int         replay_buffer_sec  = 0;
-    // Name of the preset (.hrc file, see preset_dialog.cpp) currently
-    // switched to - "default" until the user ever uses File > Set
-    // Preset... or the console's `preset <name>` command (see
-    // console_window.cpp's CmdPreset). Purely descriptive: switching
-    // presets already fully applies the target file's own settings via
-    // HrcConfig::Load(); this field just remembers *which one* for the
-    // {preset} filename-template token and for `status`/`preset` to
-    // report back.
+    // Name of the preset (.hrc file, see preset_dialog.cpp) currently switched to - "default"
+    // until the user ever uses File > Set Preset...
     std::string active_preset_name = "default";
 
     bool        scheduled_start_enabled = false;
@@ -191,8 +154,6 @@ struct AppState {
     std::string        post_record_hook_path;
     // Whether Instant Replay's background buffer should be running -
     // RecordingController::EnableInstantReplay()/DisableInstantReplay()
-    // are the actual on/off switch; this is just the persisted "user
-    // wants it on" choice, applied once at startup (see main_frame.cpp).
     bool        instant_replay_enabled = false;
     VideoFormat video_format       = VideoFormat::Mp4;
     bool        separate_audio_mp3 = false;
@@ -207,17 +168,6 @@ struct AppState {
 
     // -- 2.4 window capture ----------------------------------------------
     // How a selected window is captured:
-    //   "screen" - the DEFAULT (since 2.4.0 crash analysis, see CHANGELOG): duplicate the monitor and
-    //              cut the window's rectangle out of it. Anything on top of the window - and, for a
-    //              maximized window, practically the whole screen - shows up in the recording.
-    //   "wgc"    - OPT-IN, EXPERIMENTAL: Windows.Graphics.Capture records the real window, even when
-    //              it is covered by other windows or partly off-screen. Needs Windows 10 2004+.
-    //              Falls back to the screen crop by itself if Windows refuses the window / the capture
-    //              can't start, and is switched off automatically after a crash inside it (see
-    //              wgc_capture.cpp's crash sentinel). It made two native crashes in the field
-    //              (dumps of 2026-10-07: access violation in the WGC window probe on the GUI thread),
-    //              so it is not the default until that is fixed.
-    //   "crop" / "auto" / anything else - LEGACY values written by 2.4.0 builds; they mean "screen".
     std::string window_capture_method = "screen";
     bool WindowCaptureWantsWgc() const { return window_capture_method == "wgc"; }
     // What part of the window is recorded: "window" (title bar + borders +
@@ -227,15 +177,6 @@ struct AppState {
     // -- 7th pass capture source (Layers panel > Capture source...) ------------------------------------
     // How the recorded window is FOUND again (after a restart, or when its handle is gone). Window
     // titles change constantly (every browser tab switch), so the title is only one optional criterion:
-    //   capture_window_exe / capture_window_class - learned from the window when it is picked (or the
-    //                        first time it is resolved), e.g. "chrome.exe" / "Chrome_WidgetWin_1".
-    //   window_match_exe / _class / _title - which of them must match (all enabled ones must). When none
-    //                        of the enabled criteria has a value to compare, the stored title is used
-    //                        (exactly the pre-Layers-panel behaviour).
-    //   window_title_mode  - "exact" | "prefix" | "contains" (how the title is compared when enabled;
-    //                        case is ignored after an exact attempt).
-    //   window_follow_hwnd - keep recording the very same window for as long as it exists, whatever its
-    //                        title is now (the pre-Layers-panel behaviour, now switchable).
     std::string capture_window_exe;
     std::string capture_window_class;
     bool        window_match_exe   = true;
@@ -244,9 +185,6 @@ struct AppState {
     std::string window_title_mode  = "exact";
     bool        window_follow_hwnd = true;
     // "Smart" window capture (only used with window_capture_method == "wgc", PrintWindow backend):
-    // while nothing covers the window its picture is cut out of a cheap screen duplication (like a
-    // desktop recording, nothing is recomputed while nothing changes); the moment another window
-    // overlaps it, it switches to the exact per-window capture (PrintWindow). Off = always the exact one.
     bool        window_capture_smart = true;
     // Upper limit (frames/s) for the exact per-window capture, which is expensive. 0 = Target FPS.
     int         window_capture_fps_cap = 0;
@@ -271,12 +209,7 @@ struct AppState {
     bool disable_preview     = false; // skip capturing/rendering the live preview, for lower-end machines
     bool hint_no_overlay     = true;  // show the "don't see your overlay?" hint under the disabled-preview ':)' -
                                        // togglable from the bter plugin console ("edit settings hint-no-overlay false")
-    // In-app console (console_window.cpp):
-    //   console_hom_log      - echo "hom: running hom install x..." before every `hom` command. Off by
-    //                          default: hom now draws its own progress bar, the extra line is just noise.
-    //   console_history_save - keep the typed-command history in console_history.txt (next to hr.exe) so
-    //                          Up/Down and `history` survive a restart. `history clear` empties it;
-    //                          turn this off if you type secrets into the console.
+                                       // In-app console (console_window.cpp):
     bool console_hom_log      = false;
     bool console_history_save = true;
     // Live-preview panel (not the recording itself): how big and how often
@@ -285,11 +218,6 @@ struct AppState {
     int  preview_quality_pct = 100; // 25/50/75/100 - % of preview_width/height below to actually render at
     int  preview_fps         = 15;  // how many times/sec the preview thumbnail is refreshed
 
-    // -- Settings > Security -----------------------------------------------
-    // Independent on/off switches for the two always-on-by-default log
-    // files (see pc_log.h / plugin_log.h) - homrec.log itself
-    // (log.h, events/errors) isn't covered by either of these, only
-    // the periodic hardware-sampling log and the plugin-system log.
     bool system_logging_enabled = true; // logs/pc.log
     bool plugin_logging_enabled = true; // logs/plugins.log
 
@@ -323,28 +251,11 @@ struct AppState {
     // as their source, e.g. a region layer).
     bool         desktop_visible = true;
     std::string  capture_window_title;
-    // The exact HWND the person picked in File > Select Window... Runtime-
-    // only (deliberately NOT in HrSettingsRegistry - a handle is meaningless
-    // after a restart, where capture_window_title is all that's left to go
-    // on). Window titles change constantly (browser tabs, "*Untitled" in an
-    // editor, "Recording..." in chat apps), so resolving by exact title
-    // alone used to silently miss the window between picking it and pressing
-    // Start, which quietly fell back to recording the whole desktop.
-    // HR_ResolveCaptureWindow() tries this handle first and only falls back
-    // to the title when it's null or the window is gone.
+    // The exact HWND the person picked in File > Select Window...
     HWND         capture_window_hwnd = nullptr;
-    // -- Region capture (todo2.3.md section 3, "Захват произвольной
-    // области экрана") ---------------------------------------------------
-    // Virtual-desktop pixel coordinates (same coordinate space as a
-    // window's RECT from GetWindowRect - i.e. NOT relative to any one
-    // monitor), set by the region-picker overlay (see
-    // ShowRegionPickerOverlay() in window_picker_dialog.h/.cpp) or
-    // hand-edited in homrec.hrc. Only meaningful when capture_mode is
-    // CaptureMode::Region; ResolveCaptureSize() (recording_controller.cpp)
-    // turns this into the same crop_x_/y_/w_/h_ pipeline that window
-    // capture already uses, so region capture gets monitor-resolution,
-    // hardware-encoder, and overlay support for free instead of needing
-    // a second capture path.
+    // -- Region capture (todo2.3.md section 3, "Захват произвольной области экрана")
+    // --------------------------------------------------- Virtual-desktop pixel coordinates
+    // (same coordinate space as a window's RECT from GetWindowRect - i.e.
     int          region_x = 0, region_y = 0, region_w = 0, region_h = 0;
     std::vector<HWND> hidden_capture_windows;
 
@@ -359,20 +270,12 @@ struct AppState {
     std::string ffmpeg_path;      // resolved at startup via hr_find_ffmpeg
     // WASAPI endpoint ID of the microphone to record from (see
     // mic_enum.h's HrEnumerateMics() and settings_dialog.cpp's picker).
-    // Empty (the default) keeps the previous behavior of always using
-    // whichever device Windows currently considers the default recording
-    // device.
     std::string mic_device_id;
     bool        first_launch = false;
 
     // -- Phase 1 settings-storage migration (see commands.md / hrc_config.h)
     // Empty = use HrcConfig::kDefaultSettingsPath ("homrec.hrc" next to the
     // exe). Settings dialog's Advanced tab lets this be pointed elsewhere;
-    // whichever path is here is both read at startup and written on Save.
-    // std::string (not std::wstring) to match every other free-text field
-    // .hrc already serializes (capture_window_title, desktop_shortcut_path,
-    // etc.) - converted to std::wstring only at the point of use, same as
-    // those.
     std::string settings_path;
 
     // Logical-name -> HWND registry, for looking up windows/controls by name.

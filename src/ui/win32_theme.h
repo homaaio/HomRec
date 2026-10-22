@@ -1,17 +1,6 @@
-// win32_theme.h
-//
-// Several dialogs (PC Analytics, Log Viewer, Window Picker, Overlay
-// Manager) are plain raw-Win32 windows registered with the default
-// COLOR_BTNFACE system background - light gray, regardless of the app's
-// own dark theme. Console and Welcome already hardcode a dark palette of
-// their own. This header gives all of them one shared palette/helper set
-// so every window in the app reads as the same product instead of a
-// mix of a themed main window and gray system dialogs.
-//
-// Scope note: this recolors backgrounds, static labels, edit fields, the
-// OS-drawn title bar, and (via ThemeButton() below) native pushbuttons -
-// so every window in the app reads as the same product instead of a
-// mix of a themed main window and gray system dialogs/buttons.
+// win32_theme.h - Several dialogs (PC Analytics, Log Viewer, Window Picker, Overlay
+// Manager) are plain raw-Win32 windows registered with the default COLOR_BTNFACE system
+// background - light gray, regardless of the app's own dark theme.
 #pragma once
 
 #include <windows.h>
@@ -44,23 +33,12 @@ LRESULT ColorStatic(HDC hdc);
 // Call from WM_CTLCOLOREDIT / WM_CTLCOLORLISTBOX:
 LRESULT ColorEdit(HDC hdc);
 
-// Computes an outer window x/y/w/h that will produce the given CLIENT
-// area for the given style, centered on the primary monitor. Use this
-// instead of passing a desired client size straight to CreateWindowExW
-// (which silently clips whatever control sits nearest the bottom/right --
-// worse at higher display scaling) and instead of CW_USEDEFAULT for
-// WS_POPUP windows (Windows collapses position *and* size to zero for
-// CW_USEDEFAULT on anything that isn't WS_OVERLAPPED).
+// Computes an outer window x/y/w/h that will produce the given CLIENT area for the given
+// style, centered on the primary monitor.
 void CenteredWindowRect(int clientW, int clientH, DWORD style, int &x, int &y, int &w, int &h);
 
 // Recolors a native BUTTON control (BS_PUSHBUTTON/BS_DEFPUSHBUTTON) to
 // match the app's dark theme instead of the light-gray system default.
-// Works by classic window-proc subclassing (SetWindowLongPtr/
-// CallWindowProc - no comctl32 v6 manifest / SetWindowSubclass dependency
-// needed), so it's safe to call right after CreateWindowExW for any plain
-// "BUTTON"-class push button in the app. Click behaviour (BN_CLICKED,
-// keyboard activation, focus) is left untouched - only WM_PAINT/
-// WM_ERASEBKGND/hover tracking are intercepted.
 void ThemeButton(HWND hwndButton);
 
 } // namespace HrWin32Theme

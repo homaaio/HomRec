@@ -13,10 +13,6 @@
 // Added in the Windows 10 2004 (build 19041) SDK - defined by number here
 // the same way window_picker_dialog.cpp handles DWMWA_EXTENDED_FRAME_
 // BOUNDS/DWMWA_CLOAKED, so this still builds against older SDK headers.
-// SetWindowDisplayAffinity() itself will just fail (return FALSE) at
-// runtime on pre-2004 Windows, which ApplyExclusion() below treats as
-// "not supported" rather than silently claiming success - see its
-// comment for why that distinction matters here specifically.
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 #ifndef DWMWA_CLOAKED
@@ -31,13 +27,6 @@ enum { IDC_HW_LIST = 8401, IDC_HW_CLEAR_ALL, IDC_HW_CLOSE, IDC_HW_HINT };
 constexpr int kRowHeight = 26;
 
 // Deliberately looser than window_picker_dialog.cpp's IsCapturableWindow:
-// that one is curating a "pick ONE thing to record" list (tool windows,
-// owned popups, etc. filtered out as noise); this one is "what could
-// plausibly be sitting on top of/next to your recording that you'd want
-// gone" - a notification toast or a small owned popup is exactly the
-// kind of thing someone might want to hide, so this only excludes what
-// genuinely can't be given display affinity meaningfully (invisible or
-// cloaked windows).
 bool IsHideCandidate(HWND hwnd) {
     if (!IsWindowVisible(hwnd)) return false;
     DWORD cloaked = 0;
@@ -88,10 +77,6 @@ std::vector<WindowRow> EnumRows(HWND self, AppState *state) {
 
 // Applies or clears the OS-level exclusion for one window and keeps
 // state.hidden_capture_windows in sync with what's actually applied.
-// Returns false if the OS call itself failed (e.g. pre-Windows-10-2004,
-// or the window closed between the list being built and the click) -
-// callers must treat that as "still visible in captures", not silently
-// assume it worked.
 bool ApplyExclusion(AppState &state, HWND hwnd, bool hide) {
     if (!IsWindow(hwnd)) return false;
     BOOL ok = SetWindowDisplayAffinity(hwnd, hide ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE);

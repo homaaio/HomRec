@@ -12,10 +12,9 @@
 #include <string>
 #include <algorithm>
 
-// Phase 1 (see commands.md): show_overlays_panel is now persisted via
-// HrcConfig::Save() below, same as everything else in AppState - the old
-// hr_settings_* JSON engine's fixed field whitelist is no longer touched
-// here at all.
+// Phase 1 (see commands.md): show_overlays_panel is now persisted via HrcConfig::Save()
+// below, same as everything else in AppState - the old hr_settings_* JSON engine's fixed
+// field whitelist is no longer touched here at all.
 
 namespace {
 
@@ -47,25 +46,14 @@ std::string PickOpenFile(HWND parent, const wchar_t *filter, const wchar_t *titl
     ofn.lpstrFilter = filter;
     ofn.lpstrFile   = file_buf;
     ofn.nMaxFile    = MAX_PATH;
-    // Without OFN_NOCHANGEDIR, GetOpenFileNameW() silently changes
-    // the process's current working directory to the folder the user just
-    // picked a file from. Every settings read/write in this app uses a
-    // path relative to the app root (see kSettingsPath in
-    // settings_dialog.cpp - "relative to app root"), so after picking an
-    // external overlay's .json/.png from some other folder, the next
-    // save (e.g. PersistShowOverlaysPanelFlag() below) wrote
-    // homrec_settings.json into *that* folder instead - looking exactly
-    // like a stray file appearing next to the file you just selected.
+    // Without OFN_NOCHANGEDIR, GetOpenFileNameW() silently changes the process's current
+    // working directory to the folder the user just picked a file from.
     ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
     ofn.lpstrTitle  = title;
     if (!GetOpenFileNameW(&ofn)) return {};
     return NarrowFromWide(file_buf);
 }
 
-// Mirrors OverlaysDockPanel.refresh()'s per-row label logic in
-// overlays_dock_panel.py (dot + kind icon + truncated name), adapted to
-// this port's OverlayDef field names (type/visible/image_path/
-// webcam_index instead of kind/enabled/path/cam_index).
 const wchar_t *GlyphFor(const OverlayDef &ov) {
     if (ov.type == "text")  return L"\U0001F4DD";   // 📝
     if (ov.type == "image") return L"\U0001F5BC";   // 🖼
@@ -137,12 +125,6 @@ std::wstring RowLabel(const OverlayDef &ov) {
     return name;       // the eye on the row's right edge shows visible / hidden now
 }
 
-// Persists the *entire* current AppState (not just show_overlays_panel -
-// see the header comment above on settings.cpp's old JSON whitelist
-// bug class) to whichever .hrc path is configured, mirroring the same
-// path resolution / default-location mirroring settings_dialog.cpp's
-// OnSave uses, so this auto-save and an explicit Settings > Save can't
-// disagree about where "the settings file" is.
 void PersistState(AppState &state) {
     std::wstring target = HrcConfig::ResolveSettingsPath(state);
     HrcConfig::Save(state, target);
@@ -206,9 +188,7 @@ HFONT AddButtonFont() {
 HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w, int h) {
     // WS_CLIPSIBLINGS on all three siblings is the fix for "the + button is invisible until
     // the mouse touches its corner": the sunken STATIC below covers the whole host and is a
-    // SIBLING of the button and the list (not their parent). Without WS_CLIPSIBLINGS every
-    // repaint of the STATIC (size change, ForceRepaint(), theme change) painted straight over
-    // them, and the button only came back when it repainted itself on mouse-over.
+    // SIBLING of the button and the list (not their parent).
     hwnd_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"",
                              WS_CHILD | WS_CLIPSIBLINGS | (state_.show_overlays_panel ? WS_VISIBLE : 0) | SS_SUNKEN,
                              x, y, w, h, parent, nullptr, hInst, nullptr);
@@ -224,10 +204,9 @@ HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w
     // 2.4: no "x" button of our own any more - the dock pane's caption (and the floating
     // window's title bar) already has one, and having two was confusing.
 
-    // Bottom buttons that used to live here (Show/Hide, Remove) are gone --
-    // right-clicking a row now covers both of those plus Rename/Edit
-    // Parameters (see ShowRowContextMenu()), so the list gets that
-    // reclaimed vertical space instead.
+    // Bottom buttons that used to live here (Show/Hide, Remove) are gone -- right-clicking a
+    // row now covers both of those plus Rename/Edit Parameters (see ShowRowContextMenu()), so
+    // the list gets that reclaimed vertical space instead.
     list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                              WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | LBS_NOTIFY | WS_VSCROLL |
                              LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
@@ -257,7 +236,6 @@ LRESULT CALLBACK OverlaysDockPanel::ListSubclassProc(HWND hwnd, UINT msg, WPARAM
     // Enter did nothing: the list lives inside a wx host panel, and wx runs every key through
     // IsDialogMessage() first, which treats Enter as "press the default button" and never lets a plain
     // LISTBOX see it. Telling the dialog manager that this control wants Enter itself fixes that (Tab etc.
-    // keep working because only Enter is claimed). F2 / Space reach the list normally.
     if (msg == WM_GETDLGCODE) {
         LRESULT code = self->orig_list_proc_ ? CallWindowProcW(self->orig_list_proc_, hwnd, msg, wParam, lParam)
                                               : DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -294,10 +272,9 @@ int OverlaysDockPanel::RowAtPoint(POINT client_pt, RECT *rc_out) const {
     const LRESULT hit = SendMessageW(list_, LB_ITEMFROMPOINT, 0, MAKELPARAM(client_pt.x, client_pt.y));
     if (HIWORD(hit) != 0) return -1;     // below the last row
     const int row = (int)LOWORD(hit);
-    // LB_ITEMFROMPOINT answers with the LAST item for a point in the empty space below it (the high word is
-    // 0 for anything inside the client area) - so the item's own rectangle decides whether the point is
-    // really on a row. Otherwise a click / right-click in the blank area under the list would hit the last
-    // overlay (its eye would toggle).
+    // LB_ITEMFROMPOINT answers with the LAST item for a point in the empty space below it (the
+    // high word is 0 for anything inside the client area) - so the item's own rectangle
+    // decides whether the point is really on a row.
     RECT rc{};
     if (SendMessageW(list_, LB_GETITEMRECT, (WPARAM)row, (LPARAM)&rc) == LB_ERR) return -1;
     if (!PtInRect(&rc, client_pt)) return -1;
@@ -530,17 +507,9 @@ void OverlaysDockPanel::ShowRowContextMenu(HWND owner, POINT screen_pt, size_t i
 void OverlaysDockPanel::Refresh() {
     if (!list_) return;
 
-    // state_.overlays used to only ever be written out via the
-    // manual "Export Settings (.hrc)..." menu item - anything set up here
-    // (add/remove/rename/toggle/edit) silently vanished the moment the app
-    // was closed and reopened. Refresh() runs after every single one of
-    // those mutations (see the Add*/ToggleVisibility/RemoveAt/RenameAt/
-    // EditParametersAt call sites below), including the initial one from
-    // Create() that just repopulates the list from what LoadOverlaysOnly()
-    // read at startup - so persisting here, once, covers every mutation
-    // path without needing a matching save call at each one individually
-    // (and the extra write on that initial no-op call is harmless, just a
-    // few KB written back unchanged).
+    // state_.overlays used to only ever be written out via the manual "Export Settings
+    // (.hrc)..." menu item - anything set up here (add/remove/rename/toggle/edit) silently
+    // vanished the moment the app was closed and reopened.
     HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
     RebuildList();
 }
@@ -740,10 +709,7 @@ void OverlaysDockPanel::AddWebcamOverlay(HWND parent, HINSTANCE hInst) {
 
 void OverlaysDockPanel::AddExternalOverlay(HWND parent, HINSTANCE hInst) {
     (void)hInst;
-    // Two plain files, picked directly -- NOT a .hrp plugin package. See
-    // input_overlay.h for what the JSON layout needs to contain
-    // ("elements": [...] with code/mapping/pos, same shape the bundled
-    // input_overlay_presets plugin's assets use).
+    // Two plain files, picked directly -- NOT a .hrp plugin package.
     std::string json_path = PickOpenFile(parent, L"Overlay layout (*.json)\0*.json\0", L"Choose the .json layout");
     if (json_path.empty()) return;
     std::string png_path = PickOpenFile(parent, L"Spritesheet image (*.png)\0*.png\0", L"Choose the .png spritesheet");

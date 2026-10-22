@@ -113,9 +113,6 @@ ColorSlider::ColorSlider(wxWindow *parent, wxWindowID id, int value, int minVal,
     Bind(wxEVT_ENTER_WINDOW, &ColorSlider::OnMouseEnter, this);
     Bind(wxEVT_LEAVE_WINDOW, &ColorSlider::OnMouseLeave, this);
     // See themed_widgets.h note: without this, a sizer-driven resize (e.g.
-    // closing a sibling panel and everything reflowing) only repaints the
-    // newly-exposed strip, leaving the old thumb position on screen as a
-    // ghost dot next to the real one.
     Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) { Refresh(true); evt.Skip(); });
 }
 
@@ -231,10 +228,9 @@ void ColorSlider::OnPaint(wxPaintEvent &) {
 
 LabeledSlider::LabeledSlider(wxWindow *parent, wxWindowID id, int value, int minVal, int maxVal)
     : wxPanel(parent, wxID_ANY), value_(value), cmd_id_(id) {
-    // 2.4 FIX ("white frames around every slider"): this wrapper panel was never
-    // given a colour, so it painted the system's default WHITE, and ColorSlider
-    // (which clears itself with its *parent's* colour) inherited that white
-    // rectangle. Start from the real parent's colour; SetTheme() keeps it in sync.
+    // 2.4 FIX ("white frames around every slider"): this wrapper panel was never given a
+    // colour, so it painted the system's default WHITE, and ColorSlider (which clears itself
+    // with its *parent's* colour) inherited that white rectangle.
     if (parent) SetBackgroundColour(parent->GetBackgroundColour());
     auto *sizer = new wxBoxSizer(wxHORIZONTAL);
 
@@ -246,17 +242,6 @@ LabeledSlider::LabeledSlider(wxWindow *parent, wxWindowID id, int value, int min
     sizer->Add(spin_, 0, wxALIGN_CENTRE_VERTICAL);
 
 #ifdef _WIN32
-    // Fixes a "white square" artifact next to every slider: wxSpinCtrl's
-    // buddy Edit control is drawn by Windows' visual-styles theme engine
-    // (on by default via the app's ComCtl32 v6 manifest), which -- unlike
-    // the classic/unthemed renderer -- ignores whatever background colour
-    // SetTheme() below asks for and always paints its own white client
-    // background. Opting this specific control out of themed drawing
-    // falls back to classic rendering, which does respect a custom
-    // background brush. Enumerate rather than assume
-    // spin_->GetHandle() is the Edit itself -- wxSpinCtrl on MSW is really
-    // an Edit + an UpDown control as separate sibling HWNDs, and which one
-    // GetHandle() returns isn't something worth depending on here.
     EnumChildWindows((HWND)GetHandle(), [](HWND hwnd, LPARAM) -> BOOL {
         wchar_t cls[32] = {};
         GetClassNameW(hwnd, cls, 32);
@@ -269,10 +254,9 @@ LabeledSlider::LabeledSlider(wxWindow *parent, wxWindowID id, int value, int min
 
     slider_->Bind(wxEVT_SLIDER, &LabeledSlider::OnSliderChanged, this);
     spin_->Bind(wxEVT_SPINCTRL, &LabeledSlider::OnSpinChanged, this);
-    // wxEVT_TEXT fires as the user types digits directly into the spin
-    // box, not just when using its up/down arrows - without this, typing
-    // a value and clicking away wouldn't move the slider until some other
-    // interaction happened to sync them.
+    // wxEVT_TEXT fires as the user types digits directly into the spin box, not just when
+    // using its up/down arrows - without this, typing a value and clicking away wouldn't move
+    // the slider until some other interaction happened to sync them.
     spin_->Bind(wxEVT_TEXT, &LabeledSlider::OnSpinText, this);
 }
 
@@ -466,11 +450,9 @@ void FlatFader::OnPaint(wxPaintEvent &) {
 // ---------------------------------------------------------------------------
 
 namespace {
-// Converts a wx key code (WXK_* / plain ASCII for letters+digits) into the
-// token hr_hk_parse_keystring() recognizes for the "key" part of a binding
-// (everything after the last '+'). Empty return means "don't finalize a
-// capture on this keypress" - either a bare modifier or a key we don't
-// have a mapping for.
+// Converts a wx key code (WXK_* / plain ASCII for letters+digits) into the token
+// hr_hk_parse_keystring() recognizes for the "key" part of a binding (everything after the
+// last '+').
 wxString KeyCodeToToken(int code) {
     if (code >= WXK_F1 && code <= WXK_F24) return wxString::Format("F%d", code - WXK_F1 + 1);
     switch (code) {
@@ -600,4 +582,3 @@ void HotkeyButton::OnPaint(wxPaintEvent &) {
     wxSize ext = dc.GetTextExtent(text);
     dc.DrawText(text, (cs.GetWidth() - ext.GetWidth()) / 2, (cs.GetHeight() - ext.GetHeight()) / 2);
 }
-

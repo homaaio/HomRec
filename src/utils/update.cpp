@@ -29,8 +29,6 @@ constexpr wchar_t kUserAgent[] = L"HomRec-UpdateCheck/" HR_APP_VERSION_W;
 
 // WinHTTP's default DNS-resolve timeout is "infinite", so on a PC with a flaky
 // network/DNS the request could sit there forever. Bound every phase:
-// resolve 10s, connect 15s, send 30s, and 30s of silence between received
-// chunks (a slow-but-moving download is fine, a stalled one fails cleanly).
 void SetSessionTimeouts(HINTERNET hSession) {
     WinHttpSetTimeouts(hSession, 10000, 15000, 30000, 30000);
 }
@@ -88,9 +86,6 @@ std::string HttpsGetText(const wchar_t *host, const wchar_t *path) {
 
 // Downloads a URL's raw bytes straight to disk. `url` must be https.
 // Returns true on success (status 200 and at least one byte written).
-// The version tag comes from GitHub's JSON and ends up in a file NAME under
-// %TEMP% - keep only [A-Za-z0-9._-] so a hostile/garbled tag can't contain
-// path separators or "..\" segments.
 static std::wstring SafeFileTag(const std::string &tag) {
     std::wstring out;
     for (unsigned char c : tag) {
@@ -160,10 +155,8 @@ bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path, Down
                 }
                 out.close();
                 if (was_cancelled && st) st->cancelled = true;
-                // A read error / short download used to count as success
-                // (any total > 0), and the half-downloaded installer was then
-                // launched. Require a clean end of stream, a matching
-                // Content-Length when the server sent one, and a PE header.
+                // A read error / short download used to count as success (any total > 0), and the half-
+                // downloaded installer was then launched.
                 ok = !was_cancelled && read_ok && write_ok && !out.fail() && total > 0 && looks_like_exe &&
                      (expected == 0 || total == (size_t)expected);
                 if (!ok) {
@@ -180,10 +173,8 @@ bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path, Down
     return ok;
 }
 
-// Finds the first "assets[].browser_download_url" whose "name" ends in
-// .exe (case-insensitive) - i.e. the Inno Setup installer, as opposed to
-// the auto-generated "Source code (zip/tar.gz)" links every release also
-// gets. Scans name/url pairs in whatever order the API returned them.
+// Finds the first "assets[].browser_download_url" whose "name" ends in .exe (case-
+// insensitive) - i.e.
 std::string FindInstallerAssetUrl(const std::string &json) {
     size_t pos = 0;
     for (;;) {
@@ -286,12 +277,6 @@ bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstrin
 
 bool LaunchInstaller(const std::wstring &installer_path) {
     if (installer_path.empty()) return false;
-    // Inno Setup silent-upgrade flags: /VERYSILENT suppresses all UI,
-    // /SUPPRESSMSGBOXES avoids any "are you sure" prompts, /NORESTART
-    // stops it rebooting the machine on our behalf, and /CLOSEAPPLICATIONS
-    // (paired with AppMutex/CloseApplications in installer/HomRec.iss)
-    // lets it close this very process mid-launch instead of failing to
-    // overwrite hr.exe because it's in use.
     HINSTANCE result = ShellExecuteW(nullptr, L"open", installer_path.c_str(),
                                       L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS",
                                       nullptr, SW_SHOWNORMAL);

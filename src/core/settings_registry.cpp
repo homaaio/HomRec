@@ -159,10 +159,6 @@ const std::vector<SettingDef> &All() {
         v.push_back(StrField("hw_accel", "video", &AppState::hw_accel));
         v.push_back(StrField("enc_preset", "video", &AppState::enc_preset));
         v.push_back(IntField("enc_crf", "video", &AppState::enc_crf));
-        // Sensitive: written verbatim onto ffmpeg's real command line (see
-        // ffmpeg_runner.cpp) - gated behind "sec 0" for unattended/
-        // scripted writes (console assignment, cfg files, sethrc's import),
-        // same as HrcConfig::Load()'s allow_sensitive_fields already did.
         v.push_back(StrField("custom_ffmpeg_args", "video", &AppState::custom_ffmpeg_args, {}, /*sensitive=*/true));
         v.push_back(StrField("pix_fmt", "video", &AppState::pix_fmt));
         v.push_back(BoolField("gpu_convert", "video", &AppState::gpu_convert));
@@ -216,11 +212,6 @@ const std::vector<SettingDef> &All() {
             d.set = [](AppState &s, const std::string &v) { s.post_record_hook_type = HrPostRecordHookTypeFromStr(v); return true; };
             v.push_back(d);
         }
-        // post_record_hook_path (the program HomRec runs after every
-        // recording when the hook type is "Script") could be set through an imported
-        // .hrc file, a cfg script, or a plugin's set_setting() call with no "sec" gate
-        // at all - unlike custom_ffmpeg_args, which got exactly this treatment because
-        // it's also an arbitrary-command vector. Now gated the same way.
         v.push_back(StrField("post_record_hook_path", "recording_extra", &AppState::post_record_hook_path, {}, /*sensitive=*/true));
 
         // -- [ui_toggles] ------------------------------------------------------
@@ -248,21 +239,6 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("plugin_logging_enabled", "security", &AppState::plugin_logging_enabled));
         v.push_back(BoolField("wgc_logging_enabled", "security", &AppState::wgc_logging_enabled));
 
-        // -- [system] ------------------------------------------------------------
-        // NEW section: desktop_shortcut_enabled/_path and autostart_enabled
-        // were real AppState fields with real Settings-dialog checkboxes,
-        // but were never round-tripped through .hrc at all (Save()/Load()
-        // simply never mentioned them) - so a profile export/import, or
-        // this new console/cfg mechanism, silently couldn't touch them.
-        // Persisting the flag here just records the user's last choice;
-        // it does NOT re-run the actual shortcut/registry-autostart side
-        // effect on Load() (that only happens from the Settings dialog's
-        // explicit Apply/OK and the Welcome wizard - see
-        // HrSystemIntegration's call sites in settings_dialog.cpp/
-        // welcome_dialog.cpp), so loading an .hrc with autostart_enabled=1
-        // reflects that this profile *wants* autostart, without silently
-        // reaching into the Windows registry on your behalf just because
-        // a cfg file loaded.
         v.push_back(BoolField("desktop_shortcut_enabled", "system", &AppState::desktop_shortcut_enabled));
         v.push_back(StrField("desktop_shortcut_path", "system", &AppState::desktop_shortcut_path));
         v.push_back(BoolField("autostart_enabled", "system", &AppState::autostart_enabled));

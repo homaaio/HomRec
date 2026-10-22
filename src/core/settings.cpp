@@ -1,54 +1,4 @@
-/*
- * settings.cpp - HomRec settings persistence engine
- *
- * Reads / writes a UTF-8 JSON file next to the application binary.
- *
- * Phase 1 settings-storage migration (see commands.md): this JSON engine
- * is no longer the app's primary settings store - that's now .hrc
- * (hrc_config.cpp), which covers the full AppState instead of the fixed
- * field list below. This file is kept for: (1) the one-time migration
- * read of an existing homrec_settings.json on first launch after
- * upgrading (see main_frame.cpp's ctor), and (2) the "Reset to defaults"
- * button in Settings, which reads a fresh, never-loaded instance of this
- * struct purely for its compiled-in default values (see
- * settings_dialog.cpp's OnResetDefaults()). Nothing writes through this
- * engine anymore - see this class's own get_flag()-based API for why a
- * missing field here used to silently revert to its default every launch
- * (show_summary/show_overlays_panel did exactly that).
- *
- * The JSON schema:
- *   {
- *     "output_folder":   "C:\\Users\\...\\Videos",
- *     "quality":         85,
- *     "fps":             30,
- *     "monitor":         0,
- *     "codec":           "libx264",
- *     "audio":           true,
- *     "countdown":       true,
- *     "timestamp":       true,
- *     "cursor":          true,
- *     "notification":    true,
- *     "theme":           "dark",
- *     "language":        "en",
- *     "minimize_tray":   false,
- *     "always_on_top":   false,
- *     "performance":     "turbo",
- *     "dxgi":            false,
- *     "show_summary":        true,
- *     "show_overlays_panel": true,
- *     "system_logging_enabled": true,
- *     "plugin_logging_enabled": true
- *   }
- *
- * NOTE: show_summary and show_overlays_panel were added in the feature-
- * parity pass that introduced overlays_dock_panel.cpp/pc_analytics_dialog.
- * Before that, hr_settings_get_flag()/set_flag() silently ignored any name
- * not in their strcmp whitelist - settings_dialog.cpp's "show recording
- * summary" checkbox called hr_settings_set_flag(..., "show_summary", ...)
- * and appeared to work, but the value was never actually written to the
- * struct or the JSON file, so it reset to the compiled-in default on every
- * relaunch. Fixed here by giving both flags real backing fields.
- */
+// settings.cpp - HomRec settings persistence engine
 
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -159,11 +109,11 @@ struct HrSettings {
     int   show_audio_panel;    /* bool - audio mixer strip below the preview, see audio_panel.cpp */
     int   resolution_pct;      /* 25/50/75/100 - % of native monitor resolution to capture at */
     int   disable_preview;     /* bool - skip live preview capture/render for lower-end machines */
-    int   hint_no_overlay;     /* bool - show the "don't see your overlay?" hint under the disabled-preview ':)' */
+    int   hint_no_overlay;
     int   resolution_mode;     /* 0 = percent (resolution_pct applies), 1 = absolute (resolution_w/h apply) */
     int   resolution_w;        /* target output width,  only used when resolution_mode == 1 */
     int   resolution_h;        /* target output height, only used when resolution_mode == 1 */
-    int   preview_quality_pct; /* 25/50/75/100 - % of the preview panel size to actually render the live preview at */
+    int   preview_quality_pct;
     int   preview_fps;         /* how many times/sec the live preview thumbnail is refreshed */
     int   system_logging_enabled; /* bool - logs/pc.log on/off, see pc_log.h */
     int   plugin_logging_enabled; /* bool - logs/plugins.log on/off, see plugin_log.h */
@@ -231,12 +181,9 @@ HR_EXPORT void hr_settings_destroy(void *handle) {
     delete static_cast<HrSettings *>(handle);
 }
 
-/*
- * hr_settings_load
- * path : UTF-8 path to the JSON settings file.
- * Fills *handle with values from the file; missing keys keep their defaults.
- * Returns 1 on success (file found + parsed), 0 if file not found / error.
- */
+// hr_settings_load
+// path : UTF-8 path to the JSON settings file.
+// Fills *handle with values from the file; missing keys keep their defaults.
 HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     if (!handle || !path) return 0;
     auto *s = static_cast<HrSettings *>(handle);
@@ -287,13 +234,6 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     s->resolution_h        = _json_get_int(json,  "resolution_h",        s->resolution_h);
     s->preview_quality_pct = _json_get_int(json,  "preview_quality_pct", s->preview_quality_pct);
     s->preview_fps         = _json_get_int(json,  "preview_fps",         s->preview_fps);
-    // These two flags had getters/setters (hr_settings_get_flag/
-    // hr_settings_set_flag below) and were dutifully read/written by the
-    // Settings dialog every session, but were never actually included in
-    // this load function (nor in hr_settings_save()'s format string below)
-    // - so toggling "Disable live preview" only ever lasted until the app
-    // was closed; every fresh launch silently reset both back to their
-    // compiled-in defaults regardless of what was saved.
     s->disable_preview     = _json_get_bool(json, "disable_preview",     s->disable_preview)     ? 1 : 0;
     s->hint_no_overlay     = _json_get_bool(json, "hint_no_overlay",     s->hint_no_overlay)      ? 1 : 0;
     s->system_logging_enabled = _json_get_bool(json, "system_logging_enabled", s->system_logging_enabled) ? 1 : 0;
@@ -306,11 +246,9 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     return 1;
 }
 
-/*
- * hr_settings_save
- * Serialises settings to JSON and writes to path.
- * Returns 1 on success.
- */
+// hr_settings_save
+// Serialises settings to JSON and writes to path.
+// Returns 1 on success.
 HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
     if (!handle || !path) return 0;
     const auto *s = static_cast<const HrSettings *>(handle);

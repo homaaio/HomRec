@@ -16,31 +16,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
-/* -- zlib / gzip ------------------------------------------------------------
- * hr_profile_io uses gzip to wrap JSON in .hrc/.hrl files.
- *
- * On Windows, zlib is loaded at runtime from zlib1.dll rather than linked
- * at compile time, so the build doesn't need the zlib headers/lib (no -I
- * or -lz flags). zlib1.dll ships with Git for Windows and many dev tools,
- * but is NOT guaranteed to exist on a bare end-user Windows install --
- * unlike when this was a Python script (where Python's own bundled
- * zlib1.dll made the dependency always satisfied), a plain compiled
- * hr.exe can end up on a machine with neither Python nor Git for Windows
- * installed. If zlib1.dll can't be found anywhere (including next to
- * hr.exe itself, checked below), compress/decompress calls fail cleanly
- * with Z_STREAM_ERROR rather than crashing -- see the callers' error
- * handling -- but that does mean profile save/load silently stops
- * working. Bundling an actual zlib1.dll alongside hr.exe when packaging
- * a release closes this gap completely.
- *
- * On Linux/macOS the system zlib header and library are used as normal.
- *
- * -- HOW TO RESTORE THE STATIC DEPENDENCY (if you prefer) --------------------
- * Delete everything between the dashed lines and replace with:
- *   #include <zlib.h>
- * Then add  -lz  to the linker flags in the Makefile and ensure zlib-dev
- * is installed (MinGW-w64: already bundled; Ubuntu: apt install zlib1g-dev).
- * --------------------------------------------------------------------------- */
+// -- zlib / gzip ------------------------------------------------------------
+// hr_profile_io uses gzip to wrap JSON in .hrc/.hrl files.
 #if defined(_WIN32)
 
 /* zlib type aliases - mirrors zlib.h exactly so the rest of the file compiles
@@ -315,12 +292,8 @@ static std::vector<uint8_t> _gz_decompress(const uint8_t *data, size_t sz) {
 /*  Low-level binary file I/O                                                   */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_hrc_write
- *
- * Writes magic (4 bytes) + gzip(json_body) to path.
- * Returns 1 on success.
- */
+// hr_hrc_write - Writes magic (4 bytes) + gzip(json_body) to path.
+// Returns 1 on success.
 HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
                            int file_type) {
     /* file_type: 0=hrc, 1=hrl. (2=hrt/theme was removed - .hrt support
@@ -340,18 +313,9 @@ HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
     return 1;
 }
 
-/*
- * hr_hrc_read
- *
- * Reads a HomRec binary file and returns the JSON body in out_json.
- * Caller provides a buffer; if the buffer is too small, the function
- * returns the required size (negative) so the caller can retry.
- *
- * Returns:
- *   > 0  : bytes written to out_json (including null terminator)
- *   = 0  : magic mismatch / file not found
- *   < 0  : buffer too small; abs(return) = required size
- */
+// hr_hrc_read - Reads a HomRec binary file and returns the JSON body in out_json.
+// Caller provides a buffer; if the buffer is too small, the function
+// returns the required size (negative) so the caller can retry.
 HR_EXPORT int hr_hrc_read(const char *path, int expected_type,
                           char *out_json, int out_len) {
     if (!path) return 0;
@@ -388,14 +352,7 @@ HR_EXPORT int hr_hrc_read(const char *path, int expected_type,
     return needed;
 }
 
-/*
- * hr_hrc_detect
- *
- * Reads 4 bytes from path and returns the file type:
- *   0 = HRC (profile), 1 = HRL (language), -1 = unknown
- * (Used to return 2 for HRT/theme files - .hrt support was discontinued,
- * so that magic is no longer recognized and now falls through to -1.)
- */
+// hr_hrc_detect - Reads 4 bytes from path and returns the file type:
 HR_EXPORT int hr_hrc_detect(const char *path) {
     if (!path) return -1;
     FILE *f = fopen(path, "rb");
@@ -683,12 +640,9 @@ HR_EXPORT void hr_profile_destroy(void *h) {
     delete static_cast<HrProfileFull *>(h);
 }
 
-/*
- * hr_profile_load_json
- * Parse a plain JSON settings file (homrec_settings.json) into the profile.
- * This is the plain-text format, NOT the binary .hrc format.
- * Returns 1 on success, 0 on error.
- */
+// hr_profile_load_json
+// Parse a plain JSON settings file (homrec_settings.json) into the profile.
+// This is the plain-text format, NOT the binary .hrc format.
 HR_EXPORT int hr_profile_load_json(void *h, const char *path) {
     if (!h || !path) return 0;
     FILE *f = fopen(path, "rb");
@@ -703,11 +657,9 @@ HR_EXPORT int hr_profile_load_json(void *h, const char *path) {
     return 1;
 }
 
-/*
- * hr_profile_save_json
- * Write profile to a plain JSON file (homrec_settings.json).
- * Returns 1 on success.
- */
+// hr_profile_save_json
+// Write profile to a plain JSON file (homrec_settings.json).
+// Returns 1 on success.
 HR_EXPORT int hr_profile_save_json(const void *h, const char *path) {
     if (!h || !path) return 0;
     std::string json = _profile_to_json(static_cast<const HrProfileFull *>(h));
@@ -718,11 +670,9 @@ HR_EXPORT int hr_profile_save_json(const void *h, const char *path) {
     return 1;
 }
 
-/*
- * hr_profile_load_hrc
- * Load a binary .hrc profile file into the profile.
- * Returns 1 on success.
- */
+// hr_profile_load_hrc
+// Load a binary .hrc profile file into the profile.
+// Returns 1 on success.
 HR_EXPORT int hr_profile_load_hrc(void *h, const char *path) {
     if (!h || !path) return 0;
     /* First call to find required buffer size */
@@ -736,11 +686,9 @@ HR_EXPORT int hr_profile_load_hrc(void *h, const char *path) {
     return 1;
 }
 
-/*
- * hr_profile_save_hrc
- * Save profile to binary .hrc file.
- * Returns 1 on success.
- */
+// hr_profile_save_hrc
+// Save profile to binary .hrc file.
+// Returns 1 on success.
 HR_EXPORT int hr_profile_save_hrc(const void *h, const char *path) {
     if (!h || !path) return 0;
     std::string json = _profile_to_json(static_cast<const HrProfileFull *>(h));
@@ -835,17 +783,9 @@ HR_EXPORT void hr_profile_set_double(void *h, const char *field, double val) {
 /*  Directory scanning (Languages)                                              */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_scan_dir_ext
- *
- * Lists all files in `dir_path` with the given extension (e.g. ".hrl").
- * Results are written to out_names as a null-separated, double-null-terminated list.
- * Returns the count of files found, or -1 on error.
- *
- * Used to list custom languages the user has dropped into the
- * corresponding folder. (Previously also used for custom theme (.hrt)
- * discovery - removed along with the rest of .hrt support.)
- */
+// hr_scan_dir_ext - Lists all files in `dir_path` with the given extension (e.g. ".hrl").
+// Results are written to out_names as a null-separated, double-null-terminated list.
+// Returns the count of files found, or -1 on error.
 HR_EXPORT int hr_scan_dir_ext(const char *dir_path, const char *ext,
                               char *out_names, int out_len) {
     if (!dir_path || !ext || !out_names || out_len < 2) return -1;
@@ -899,33 +839,23 @@ HR_EXPORT int hr_scan_dir_ext(const char *dir_path, const char *ext,
 /*  Language file helpers                                                       */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_lang_get_value
- *
- * Extracts a single string value from a language JSON body.
- * Used to preview / validate .hrl files.
- * Returns 1 on success.
- */
+// hr_lang_get_value - Extracts a single string value from a language JSON body.
+// Used to preview / validate .hrl files.
+// Returns 1 on success.
 HR_EXPORT int hr_lang_get_value(const char *json_body, const char *key,
                                 char *out, int out_len) {
     return _jget_str(json_body, key, out, out_len);
 }
 
-/*
- * hr_lang_schema_version
- * Returns the schema_version field from a language JSON body, or 0.
- */
+// hr_lang_schema_version
+// Returns the schema_version field from a language JSON body, or 0.
 HR_EXPORT int hr_lang_schema_version(const char *json_body) {
     return _jget_int(json_body, "schema_version", 0);
 }
 
-/*
- * hr_lang_count_missing_keys
- *
- * Counts how many of the `n_required_keys` keys are absent or empty
- * in json_body.  required_keys is a null-separated, double-null-terminated list.
- * Returns the count.
- */
+// hr_lang_count_missing_keys - Counts how many of the `n_required_keys` keys are absent or empty
+// in json_body.  required_keys is a null-separated, double-null-terminated list.
+// Returns the count.
 HR_EXPORT int hr_lang_count_missing_keys(const char *json_body,
                                          const char *required_keys) {
     if (!json_body || !required_keys) return 0;

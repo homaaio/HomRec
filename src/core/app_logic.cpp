@@ -1,20 +1,4 @@
-/*
- * app_logic.cpp - HomRec core application logic
- *
- * Core business logic for the recorder, compiled directly into hr.exe:
- *   - find_ffmpeg()               locates ffmpeg on the system
- *   - optimize_for_performance()  tunes process/thread priority
- *   - GPU encoder probe           detects the available GPU codec
- *   - build_codec_args()          builds ffmpeg's encoding arguments
- *   - launch_ffmpeg()             starts the ffmpeg capture process (gdigrab)
- *   - stop_ffmpeg()                stops it cleanly
- *   - merge_audio_video()         muxes video + WAV together via ffmpeg
- *   - monitor_info()              monitor geometry (via Win32)
- *   - enum_windows()              enumerates visible windows (Win32)
- *   - version helpers             _version_gt(), CURRENT_VERSION
- *
- * All strings are UTF-8 unless explicitly marked as Wide.
- */
+// app_logic.cpp - HomRec core application logic
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -57,19 +41,8 @@
 
 static std::string _str(const char *s) { return s ? std::string(s) : std::string(); }
 
-/*
- * Run a shell command the same way system() does (blocking, returns
- * the process exit code), but without the visible cmd.exe flash that plain
- * system() causes on Windows. system() always spawns via cmd.exe, and it has
- * no way to pass CREATE_NO_WINDOW / SW_HIDE - the window is created and
- * shown by the OS before cmd.exe even gets a chance to run, so redirecting
- * the *command's* output (e.g. "... >nul 2>&1") does nothing to hide it.
- *
- * This was firing on every launch via hr_probe_gpu_encoder() (called ~3s
- * after startup to detect NVENC/AMF/QSV support), and again after any
- * recording that needed a separate audio/video merge - each one flashing a
- * console window that had nothing to do with any of the app's own windows.
- */
+// Run a shell command the same way system() does (blocking, returns the process exit
+// code), but without the visible cmd.exe flash that plain system() causes on Windows.
 static int _run_hidden(const std::string &cmd) {
 #ifdef _WIN32
     STARTUPINFOA si = {sizeof(si)};
@@ -121,21 +94,17 @@ static void _scopy(char *dst, size_t dstlen, const char *src) {
 
 static const char CURRENT_VERSION[] = HR_APP_VERSION;
 
-/*
- * hr_version_string
- * Returns the compiled-in version string (e.g. "2.2-b.4").
- * Buffer must be at least 16 bytes.
- */
+// hr_version_string
+// Returns the compiled-in version string (e.g. "2.2-b.4").
+// Buffer must be at least 16 bytes.
 HR_EXPORT void hr_version_string(char *out, int out_len) {
     if (!out || out_len < 1) return;
     _scopy(out, (size_t)out_len, CURRENT_VERSION);
 }
 
-/*
- * hr_version_gt
- * Returns 1 if version string a is strictly greater than b.
- * Strings must be in "major.minor.patch" format.
- */
+// hr_version_gt
+// Returns 1 if version string a is strictly greater than b.
+// Strings must be in "major.minor.patch" format.
 HR_EXPORT int hr_version_gt(const char *a, const char *b) {
     if (!a || !b) return 0;
     auto va = _split(a, '.');
@@ -154,25 +123,7 @@ HR_EXPORT int hr_version_gt(const char *a, const char *b) {
 /*  find_ffmpeg                                                                 */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_find_ffmpeg
- *
- * Searches, in order:
- *   1. The ffmpeg/ subfolder next to the calling executable (exe_dir
- *      parameter) - where the app root's ffmpeg/ffmpeg.exe (dev tree) and
- *      the installer's {app}\ffmpeg\ffmpeg.exe both put it.
- *   2. Directory of the calling executable itself (exe_dir parameter) -
- *      kept for backward compatibility with older installs/archives that
- *      still drop ffmpeg.exe directly next to hr.exe.
- *   3. Current working directory.
- *   4. Directories in PATH.
- *
- * exe_dir : UTF-8 path to the directory containing homrec.exe / homrec.py.
- *           Pass nullptr to skip steps 1-2.
- * out     : receives the found path (UTF-8).
- * out_len : size of out buffer.
- * Returns 1 if found, 0 otherwise.
- */
+// hr_find_ffmpeg - Searches, in order:
 HR_EXPORT int hr_find_ffmpeg(const char *exe_dir, char *out, int out_len) {
     if (!out || out_len < 2) return 0;
     out[0] = '\0';
@@ -245,12 +196,8 @@ struct HrMonitorInfo {
     char name[32];
 };
 
-/*
- * hr_get_monitor_info
- *
- * Fills info for monitor at 1-based index `idx`.
- * Returns 1 on success, 0 if index out of range.
- */
+// hr_get_monitor_info - Fills info for monitor at 1-based index `idx`.
+// Returns 1 on success, 0 if index out of range.
 HR_EXPORT int hr_get_monitor_info(int idx, HrMonitorInfo *out) {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
@@ -295,10 +242,8 @@ HR_EXPORT int hr_get_monitor_info(int idx, HrMonitorInfo *out) {
 #endif
 }
 
-/*
- * hr_monitor_count
- * Returns the total number of connected monitors.
- */
+// hr_monitor_count
+// Returns the total number of connected monitors.
 HR_EXPORT int hr_monitor_count(void) {
 #ifdef _WIN32
     return GetSystemMetrics(SM_CMONITORS);
@@ -311,13 +256,8 @@ HR_EXPORT int hr_monitor_count(void) {
 /*  Window enumeration (Windows only)                                          */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_enum_windows
- *
- * Fills buf with null-separated window titles, double-null terminated.
- * Returns the number of titles written, or -1 on error.
- *
- */
+// hr_enum_windows - Fills buf with null-separated window titles, double-null terminated.
+// Returns the number of titles written, or -1 on error.
 HR_EXPORT int hr_enum_windows(char *buf, int buf_len) {
     if (!buf || buf_len < 2) return -1;
     memset(buf, 0, (size_t)buf_len);
@@ -359,18 +299,8 @@ HR_EXPORT int hr_enum_windows(char *buf, int buf_len) {
 /*  GPU encoder probe                                                           */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_probe_gpu_encoder
- *
- * Probes for a hardware-accelerated H.264 encoder via ffmpeg.
- * Tries h264_nvenc, h264_amf, h264_qsv in order.
- *
- * ffmpeg_path : UTF-8 path to ffmpeg binary.
- * out         : receives the encoder name (e.g. "h264_nvenc"), or empty.
- * out_len     : buffer size.
- * Returns 1 if a GPU encoder is found, 0 otherwise.
- *
- */
+// hr_probe_gpu_encoder - Probes for a hardware-accelerated H.264 encoder via ffmpeg.
+// Tries h264_nvenc, h264_amf, h264_qsv in order.
 HR_EXPORT int hr_probe_gpu_encoder(const char *ffmpeg_path,
                                    char *out, int out_len) {
     if (!ffmpeg_path || !out || out_len < 2) return 0;
@@ -405,26 +335,19 @@ HR_EXPORT int hr_probe_gpu_encoder(const char *ffmpeg_path,
     return 0;
 }
 
-/*
- * Codec argument construction lives in tools.cpp (the wide-char,
- * int-returning hr_build_codec_args), which is the version
- * recording_controller.cpp actually calls. It also has the up-to-date
- * QSV `-low_power` handling -- see the comment next to that flag there.
- */
+// Codec argument construction lives in tools.cpp (the wide-char, int-returning
+// hr_build_codec_args), which is the version recording_controller.cpp actually calls.
 
 /* --------------------------------------------------------------------------- */
 /*  FFmpeg process management                                                   */
 /* --------------------------------------------------------------------------- */
 
-
 /* --------------------------------------------------------------------------- */
 /*  Performance / timing                                                        */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_monotonic_ms
- * Returns a monotonic timestamp in milliseconds (for elapsed-time tracking).
- */
+// hr_monotonic_ms
+// Returns a monotonic timestamp in milliseconds (for elapsed-time tracking).
 HR_EXPORT int64_t hr_monotonic_ms(void) {
 #ifdef _WIN32
     return (int64_t)GetTickCount64();
@@ -435,12 +358,8 @@ HR_EXPORT int64_t hr_monotonic_ms(void) {
 #endif
 }
 
-/*
- * hr_format_elapsed
- *
- * Given elapsed seconds, formats "HH:MM:SS" into out.
- * out must be at least 9 bytes.
- */
+// hr_format_elapsed - Given elapsed seconds, formats "HH:MM:SS" into out.
+// out must be at least 9 bytes.
 HR_EXPORT void hr_format_elapsed(double elapsed_sec, char *out, int out_len) {
     if (!out || out_len < 9) return;
     int total = (int)elapsed_sec;
@@ -454,19 +373,7 @@ HR_EXPORT void hr_format_elapsed(double elapsed_sec, char *out, int out_len) {
 /*  File type registration (Windows registry)                                  */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_register_file_types
- *
- * Registers .hrc / .hrl / .hrp file associations in HKCU (no admin needed).
- *
- * exe_path : full path to the executable that opens these files (UTF-8).
- * icons_dir: directory containing hrc.ico / hrl.ico / hrp.ico (UTF-8) -
- *            in practice icons\files_icons under the app root (see
- *            installer/HomRec.iss, which registers the same two ProgIDs
- *            for .hrc/.hrp itself at install time so this function and the
- *            installer never disagree if both ever run for the same user).
- * Returns 1 on success, 0 on error.
- */
+// hr_register_file_types - Registers .hrc / .hrl / .hrp file associations in HKCU (no admin needed).
 HR_EXPORT int hr_register_file_types(const char *exe_path,
                                      const char *icons_dir) {
 #ifdef _WIN32
@@ -552,14 +459,8 @@ HR_EXPORT int hr_register_file_types(const char *exe_path,
 /*  Single-instance mutex (Windows)                                             */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_acquire_single_instance
- *
- * Creates a named Win32 mutex.  Returns 1 if this is the first instance,
- * 0 if another instance is already running.
- * Call once at startup; the mutex is released automatically when the process
- * exits (handle is intentionally leaked).
- */
+// hr_acquire_single_instance - Creates a named Win32 mutex.  Returns 1 if this is the first instance,
+// 0 if another instance is already running.
 HR_EXPORT int hr_acquire_single_instance(const char *mutex_name) {
 #ifdef _WIN32
     if (!mutex_name) return 1;
@@ -581,20 +482,8 @@ HR_EXPORT int hr_acquire_single_instance(const char *mutex_name) {
 /*  Update check (synchronous, call from a worker thread)                      */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_fetch_latest_version
- *
- * Fetches the latest release tag from GitHub API (synchronous HTTP GET).
- * Uses WinINet on Windows, libcurl-less raw sockets elsewhere.
- *
- * repo      : "owner/repo" (e.g. "homaaio/homrec")
- * out       : receives version string like "1.6.3" (without 'v' prefix)
- * out_len   : buffer size
- * Returns 1 if a version was retrieved, 0 on any error.
- *
- * NOTE: This function blocks the calling thread; call it from a worker
- *       thread rather than the UI thread.
- */
+// hr_fetch_latest_version - Fetches the latest release tag from GitHub API (synchronous HTTP GET).
+// Uses WinINet on Windows, libcurl-less raw sockets elsewhere.
 HR_EXPORT int hr_fetch_latest_version(const char *repo,
                                       char *out, int out_len) {
     if (!repo || !out || out_len < 4) return 0;

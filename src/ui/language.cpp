@@ -301,13 +301,6 @@ bool ReadLanguageJson(const std::string &path, std::string &outJson, bool *outWa
     return true;
 }
 
-// CreateDirectoryA only ever creates the *last* path component - it
-// fails outright if any parent is missing too, which "Assets" always
-// was on a fresh checkout (nothing before ImportLanguageFile below ever
-// had a reason to create it; every other reader of "Assets\L" only
-// ever read from it, never created it). Walks `dir` component by
-// component, creating each one, so "Assets\L" succeeds even when
-// neither "Assets" nor "Assets\L" exist yet.
 bool EnsureDirectoryRecursive(const std::string &dir) {
     std::string partial;
     size_t pos = 0;
@@ -400,10 +393,6 @@ std::vector<std::pair<std::string, std::string>> LanguageTable::ScanCustomLangua
 
 namespace {
 
-// Keeps only [a-z0-9_] (ASCII), lower-cased, so the result is always a
-// safe filename component and a safe .hrl "code" - matches what
-// ScanCustomLanguages()/Load() above expect (langsDir + "\" + code +
-// ".hrl", no path separators or exotic characters allowed through).
 std::string SanitizeLangCode(const std::string &raw) {
     std::string out;
     out.reserve(raw.size());
@@ -459,12 +448,6 @@ bool LanguageTable::ImportLanguageFile(const std::string &srcPath, const std::st
         // Already in the on-disk .hrl format - copy the bytes as-is.
         wrote = CopyFileA(srcPath.c_str(), destPath.c_str(), FALSE) != 0;
     } else {
-        // Plain JSON someone typed by hand - wrap it into a proper .hrl
-        // right now (file_type 1, same convention Load() expects), so
-        // what ends up on disk looks exactly like something the app
-        // itself wrote, and any future re-scan/re-import of this exact
-        // file sees a normal gzip HRL rather than needing this same
-        // plain-JSON fallback again.
         wrote = hr_hrc_write(destPath.c_str(), json.c_str(), 1) != 0;
     }
     if (!wrote) {

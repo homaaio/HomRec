@@ -1,43 +1,6 @@
-// console_window.h
-//
-// The HomRec developer console: a scrollable output log + input line with
+// console_window.h - The HomRec developer console: a scrollable output log + input line with
 // command history (Up/Down arrows), plus a small built-in command set.
 // Bare command names only (Linux-shell style) - "rm", not "$rm" or "!rm".
-// Options are passed the same way a real shell CLI would: "--flag" /
-// "--key=value" tokens, not the old "#key=value" named-parameter syntax.
-//
-// Supported commands:
-//   - Command parsing: ParseNamed ("--key=\"value\""/"--key=value"),
-//     ParseFlags (-flag tokens, excluding -return/-ret).
-//   - The three-tier security fuse (sec/secui/secp) - core/UI/plugin
-//     lock state and the associated unlock-gating logic.
-//   - version, ping, echo, clear, env, alias, history, info, status, log,
-//     hide, pwd, whoami, hom (forwards to hom.exe, the plugin package
-//     manager - see CmdHom()).
-//   - The "inwid" confirmation gate: a handful of commands that reach
-//     the network and rewrite files (hom update/remove), delete things
-//     (rm), or persist a settings change (any "<setting> <value>", not
-//     a bare query) are refused unless prefixed with "inwid" ("I Know
-//     What I'm Doing") - "disable_preview true" is blocked, "inwid
-//     disable_preview true" runs it. See CommandNeedsInwid() in the
-//     .cpp. This is intentionally separate from sec/secui/secp below -
-//     inwid is a per-line "yes I meant that", not a session-wide unlock.
-//     A cfg file (RunCfgFile()) is exempt from this gate: it's local
-//     content the person already put on disk, not a one-off typed line.
-//   - rm --system@homrec.files (clears recordings/plugins/logs/cache,
-//     gated by sec 0) and rm @homrec (schedules self-uninstall via a
-//     generated .bat, gated by sec 0 + interactive confirmation) - these
-//     two are the most consequential commands in the file, so treat any
-//     change to them carefully.
-//
-// Not yet implemented:
-//   rule, connect, disconnect, start --window, rename, create, edit, ls,
-//   watch, batch, run, repeat, timer, clip, check_er, homrec, generic
-//   rm/rm_vid/rm_ui/rm_ui_self, fs@plugins, fs@settings, do (self-update),
-//   edit_terminal.
-// Most of these depend on a "created window / rule" registry that doesn't
-// exist anywhere else yet - implementing them needs that subsystem
-// designed first, rather than guessing at it inside this file.
 #pragma once
 
 #include <windows.h>
@@ -61,40 +24,17 @@ public:
     ~ConsoleWindow();
 
     void Show(HINSTANCE hInst);
-    // Creates the underlying window (and runs OnCreate(), including the
-    // controls Print()/RunCommand() need) WITHOUT making it visible - the
-    // part of Show() before its trailing ShowWindow(SW_SHOW). Called at
-    // app startup so cfg/autoexec.cfg (see RunCfgFile()) has somewhere to
-    // print its output to, without flashing the console open every time
-    // the app launches. Show() itself now just calls this, then makes it
-    // visible - safe/idempotent to call either one first. A window
-    // created this way stays hidden until Show() (or a real toggle -
-    // Ctrl+Shift+T, the Help menu) is used for the first time.
+    // Creates the underlying window (and runs OnCreate(), including the controls
+    // Print()/RunCommand() need) WITHOUT making it visible - the part of Show() before its
+    // trailing ShowWindow(SW_SHOW).
     void EnsureCreated(HINSTANCE hInst);
     HWND hwnd() const { return hwnd_; }
 
-    // Reads cfg/<name>.cfg (relative to the app's own folder, via
-    // GetBaseDir()) and feeds each non-blank, non-comment line through
-    // RunCommand() as if typed directly - including any command a plugin
-    // (e.g. Bter, via homrec.register_command()) has registered, since
-    // this goes through the exact same dispatcher. Comment lines start
-    // with "//" or "#" (leading whitespace allowed). Missing file is not
-    // an error - this is opt-in by simply dropping the file in, matching
-    // e.g. Source engine's autoexec.cfg convention. Returns the number of
-    // commands actually run (0 if the file doesn't exist or is empty).
+    // Reads cfg/<name>.cfg (relative to the app's own folder, via GetBaseDir()) and feeds each
+    // non-blank, non-comment line through RunCommand() as if typed directly - including any
+    // command a plugin (e.g.
     int RunCfgFile(const std::wstring &name);
 
-    // Public entry point for callers outside ConsoleWindow that need to
-    // run exactly one line through the same dispatcher RunCfgFile() and
-    // the console's own input box use (built-ins, "setting = value"
-    // assignments, plugin-registered commands - see RunCommand()'s own
-    // doc comment). Used by custom action hotkeys (main_frame.cpp's
-    // OnHotkeyEvent, EVT_HOTKEY_CUSTOM case): a hotkey fires with no
-    // console window necessarily open for it to type into, so
-    // `confirmed` defaults to true here, same as RunCfgFile()'s own
-    // internal calls. RunCommand() itself stays private so the only way
-    // to run an arbitrary line from outside is through this one,
-    // deliberately narrow, entry point.
     void RunSingleCommand(const std::wstring &raw, bool confirmed = true) {
         RunCommand(raw, confirmed);
     }
@@ -106,67 +46,30 @@ private:
     void OnCreate(HINSTANCE hInst);
     void OnCommand(int id, int notifyCode, HWND ctrl);
     void OnSize(int w, int h);
-    // Rebuilds the "1920x1080@60fps # " prompt label from the currently
-    // selected monitor + resolution scale + target fps, so it stays
-    // accurate if those were changed in Settings since the console was
-    // last opened.
+    // Rebuilds the "1920x1080@60fps # " prompt label from the currently selected monitor +
+    // resolution scale + target fps, so it stays accurate if those were changed in Settings
+    // since the console was last opened.
     void RefreshPrompt();
 
-    // Parses and dispatches one line as a command, same as if it were
-    // typed directly at the prompt. `confirmed` is true only on the
-    // recursive call RunCommand() makes to itself after stripping a
-    // leading "inwid" prefix (see the "inwid gate" block at the top of
-    // the .cpp) and on every call coming from RunCfgFile() below (a cfg
-    // file already sitting on disk in this install is trusted content,
-    // the same way .bashrc doesn't re-ask for sudo on every line) -
-    // ordinary typed input always starts as false. When false, a command
-    // CommandNeedsInwid() flags as gated (hom update/remove, rm, or any
-    // settings *assignment* - see TryRunSetting()) is refused instead of
-    // run, with a message telling the person to prefix it with "inwid".
+    // Parses and dispatches one line as a command, same as if it were typed directly at the
+    // prompt.
     void RunCommand(const std::wstring &raw, bool confirmed = false);
-    // Fallback tried when `cmd` didn't match a built-in command or a
-    // plugin-registered command (homrec.register_command()): treats the
-    // line as "<setting> [=] <value>" (or a bare "<setting>" to query),
-    // against both HrSettingsRegistry's built-in .hrc-backed settings and
-    // any plugin-registered ones (homrec.register_setting()) - see
-    // commands.md's "Settings as commands" section. Returns false (line
-    // untouched, caller falls through to "Unknown command") if `cmd`
-    // isn't a known setting name either. Prints its own PrintOk/PrintWarn/
-    // PrintInfo output when it returns true, same convention every other
-    // Cmd* handler follows. A *query* (bare "<setting>", no value) never
-    // needs `confirmed`; *setting* a value does, same "inwid" gate
-    // RunCommand() applies to hom/rm - see CommandNeedsInwid() in the
-    // .cpp. Known limitation: this gate only covers built-in
-    // (HrSettingsRegistry) settings, not plugin-registered ones reached
-    // through DispatchSetting() below - see commands.md.
     bool TryRunSetting(const std::wstring &cmd, const std::wstring &raw, bool confirmed);
     // color is a COLORREF; only meaningful when the output control is a
     // RichEdit (rich_edit_ == true) -- see the color constants and the
     // OPT comment above OnCreate()'s control creation in the .cpp for why.
-    // Plain-EDIT fallback ignores it (ES_READONLY EDIT can't do per-run
-    // color at all -- everything in the box is one uniform color) and the
-    // leading glyph below is still what carries the distinction there.
     void Print(const std::wstring &line, COLORREF color = kColText);
     void PrintOk(const std::wstring &s)   { Print(L"  \u2714  " + s, kColOk); }
     void PrintInfo(const std::wstring &s) { Print(L"  \u00b7  " + s, kColInfo); }
     void PrintWarn(const std::wstring &s) { Print(L"  \u26a0  " + s, kColWarn); }
     void PrintErr(const std::wstring &s)  { Print(L"  \u2716  " + s, kColErr); }
 
-    // Terminal-style palette (roughly matching common ANSI green/yellow/
-    // red conventions, e.g. `journalctl`/`git status` coloring) so
-    // errors/warnings actually stand out from normal output instead of
-    // everything being the same green with only a leading glyph to tell
-    // them apart.
+    // Terminal-style palette (roughly matching common ANSI green/yellow/ red conventions, e.g.
     static constexpr COLORREF kColOk   = RGB(80, 220, 120);   // green  - success
     static constexpr COLORREF kColInfo = RGB(150, 200, 220);  // pale cyan - neutral log
     static constexpr COLORREF kColWarn = RGB(230, 200, 90);   // amber  - warning
     static constexpr COLORREF kColErr  = RGB(235, 100, 100);  // red    - error
     static constexpr COLORREF kColPrompt = RGB(120, 220, 255);
-    // Default for plain Print() calls with no explicit level (echoed
-    // input, echo, history listing, clipboard paste) - a neutral
-    // near-white so it reads as "plain terminal text", distinct from any
-    // of the four status colors above, and never silently reuses
-    // whatever color happened to be set by the previous line.
     static constexpr COLORREF kColText = RGB(225, 225, 225);
 
     // --- ported commands ---
@@ -189,30 +92,7 @@ private:
     void CmdRmSystemFiles(const std::wstring &raw);
     void CmdRmSelfApp(const std::wstring &raw);
     void CmdHrc(const std::wstring &raw);
-    // "preset [name]" - console equivalent of File > Set Preset...'s
-    // "Switch to Selected" (preset_dialog.cpp), so a .cfg script or a
-    // custom hotkey can flip presets without opening that dialog (see
-    // todo2.3.md section 3, "Консольная команда переключения пресета").
-    // Bare "preset" (no name) prints the currently active one plus the
-    // list of what's available in presets\ - a query, so it never needs
-    // "inwid". "preset <name>" looks up presets\<name>.hrc (extension
-    // optional), or the special names "main"/"default" for the app's own
-    // homrec.hrc, loads it via HrcConfig::Load() exactly like the dialog
-    // does, re-saves it as the active config so the switch survives a
-    // restart, and updates AppState::active_preset_name. This writes to
-    // disk, so - same as any other settings assignment - it's gated
-    // behind "inwid": CommandNeedsInwid() below.
     void CmdPreset(const std::wstring &raw);
-    // "sethrc <path> <1|true|0|false>" - cfg-only combinator (see
-    // commands.md): merges another .hrc file's fields into the *current*
-    // in-memory settings right where this line sits in a cfg script (same
-    // "only touch keys the file actually has" semantics as `hrc load`), so
-    // a hand-written cfg/config.cfg can start from "sethrc homrec.hrc 1"
-    // and then override just the handful of fields it cares about on the
-    // lines that follow - ordinary sequential command execution is what
-    // gives later lines priority, no separate exception syntax needed.
-    // custom_ffmpeg_args is only carried over while the "sec" fuse is
-    // disabled (see HrcConfig::Load's allow_sensitive_fields parameter).
     void CmdSetHrc(const std::wstring &raw);
     void CmdClip(const std::wstring &raw);
     void CmdRepeat(const std::wstring &raw);
@@ -222,36 +102,8 @@ private:
     // needed since neither reads/writes anything sensitive.
     void CmdPwd(const std::wstring &raw);
     void CmdWhoami(const std::wstring &raw);
-    // Forwards everything typed after "hom" to hom.exe (the standalone
-    // plugin package manager, tools/hom/hom.cpp) as a child process, with
-    // its working directory set to HomRec's own folder so "hom install x"
-    // writes to the same .\plugins\ HomRec itself reads from - same
-    // behaviour as running hom.exe from PowerShell/cmd in that folder,
-    // just without having to leave the app. hom.exe's own stdout/stderr
-    // are printed back verbatim (it already formats its own success/error
-    // text), not re-wrapped in PrintOk/PrintErr.
-    //   hom restore  - (re)downloads hom.exe itself from the active hom repo
-    //                  (cfg\hom_repos.cfg, `hom repo set`). It also happens on its
-    //                  own whenever you type `hom ...` and hom.exe is missing.
     void CmdHom(const std::wstring &raw);
     // hom.exe does real network I/O - running it straight from CmdHom() (i.e.
-    // on this window's own message-loop thread, the same one wx/win32 pumps the
-    // whole app's UI on) would freeze all of HomRec, not just the console, for
-    // as long as a download takes. So the work runs on hom_thread_ and talks
-    // back to the UI thread through a line queue:
-    //   * every line hom.exe prints is pushed on hom_lines_ as it arrives (hom
-    //     runs unbuffered and is started with --progress=lines, so a download
-    //     shows up live as "@progress <pct> <received> <total> <eta>" lines,
-    //     which DrainHomLines() turns into ONE redrawn "[####----] 37% ..." line),
-    //   * kWmHomLines tells the UI thread "the queue has something" (at most
-    //     one such message is in flight at a time, hom_lines_pending_),
-    //   * kWmHomDone is posted last, with the exit code in hom_result_.
-    // If hom.exe is missing the same thread first downloads it again from the
-    // active hom repo (see RestoreHomExe() in the .cpp) - the bar for that
-    // goes through the very same queue. hom_busy_ stops a second `hom` command
-    // from starting while one is still running (the UI thread never blocks
-    // waiting for it); hom_cancel_ lets ~ConsoleWindow() abort a running
-    // download instead of waiting for it.
     static constexpr UINT kWmHomDone  = WM_APP + 1;
     static constexpr UINT kWmHomLines = WM_APP + 2;
     struct HomResult {
@@ -276,11 +128,6 @@ private:
     std::atomic<bool>      hom_busy_{false};
     std::atomic<bool>      hom_cancel_{false};
 
-    // --- output helpers ---
-    // Scrolls the output box to its last line whatever has the keyboard focus
-    // (EM_SCROLLCARET alone does nothing for an unfocused read-only box, which
-    // is exactly the state the output box is in while you type in the input
-    // box) and also after WM_SETREDRAW was switched back on.
     void ScrollToBottom();
     // One line that is rewritten in place (download progress). The first call
     // appends a line; the following calls replace that line's text until
@@ -289,11 +136,9 @@ private:
     void EndProgressLine() { progress_active_ = false; }
     bool progress_active_ = false;
 
-    // --- command history (Up/Down, `history`, `history clear`) ---
-    // Persisted to cfg\console_history.txt next to hr.exe (UTF-8, one command per
-    // line, newest last, at most kHistoryMax kept) unless the setting
-    // console_history_save is off. Only lines typed in the console are kept -
-    // cfg files and hotkey commands don't go through here.
+    // --- command history (Up/Down, `history`, `history clear`) --- Persisted to
+    // cfg\console_history.txt next to hr.exe (UTF-8, one command per line, newest last, at
+    // most kHistoryMax kept) unless the setting console_history_save is off.
     static constexpr size_t kHistoryMax = 500;
     std::wstring HistoryFilePath() const;
     void LoadHistory();
@@ -318,17 +163,11 @@ private:
     HWND input_ = nullptr;
     HWND prompt_ = nullptr;
     HFONT mono_font_ = nullptr;
-    // True once output_ was successfully created as a RichEdit control
-    // (Msftedit.dll loaded OK). Falls back to a plain read-only EDIT
-    // control -- still fully usable, just single-colored -- if that load
-    // ever fails, which is why every richedit-only call below is gated on
-    // this instead of assumed.
+    // True once output_ was successfully created as a RichEdit control (Msftedit.dll loaded
+    // OK).
     bool rich_edit_ = false;
-    // Actual pixel width the prompt text needs (recomputed by
-    // RefreshPrompt() from the real string, e.g. "3840x2160@144fps # " is
-    // noticeably wider than "1920x1080@60fps # "). OnSize() uses this
-    // instead of a fixed guess so the input box never overlaps/clips the
-    // prompt at higher resolutions or frame rates.
+    // Actual pixel width the prompt text needs (recomputed by RefreshPrompt() from the real
+    // string, e.g.
     int prompt_width_ = 160;
 
     std::vector<std::wstring> history_;

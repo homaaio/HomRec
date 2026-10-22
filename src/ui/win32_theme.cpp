@@ -1,10 +1,6 @@
 #include "win32_theme.h"
 
-// dwmapi.h ships with the MinGW-w64 headers used by this project's
-// toolchain; DWMWA_USE_IMMERSIVE_DARK_MODE itself is only defined in very
-// recent SDK headers, so it's given by number here (20) with a fallback
-// name for clarity - this is the same numeric value Microsoft's own docs
-// use for older SDKs that predate the named constant.
+// DWMWA_USE_IMMERSIVE_DARK_MODE is missing from older SDK headers, so it is defined by number (20).
 #include <dwmapi.h>
 #include <unordered_map>
 #include <string>

@@ -1,28 +1,4 @@
-/*
- * hom_common.h - the small pieces hom.exe and hr.exe's in-app console share.
- *
- * hom.exe is a standalone binary that deliberately doesn't link anything
- * from src/, but two things have to behave identically on both sides:
- *
- *   1. The repo list (cfg/hom_repos.cfg, in the cfg/ folder next to hom.exe). hom.exe reads it to
- *      know where to download from; hr.exe's console reads the very same
- *      file to know where to re-download hom.exe from when it has been
- *      deleted (hom.exe can't help with that - it's the thing that's gone).
- *   2. The look of the download progress line ("[#####-----] 37% ...").
- *
- * Header-only, standard C++17 only (no <windows.h>), so it compiles into
- * both hom.cpp and src/ui/console_window.cpp without touching either
- * Makefile target.
- *
- * cfg/hom_repos.cfg format (plain text, hand-editable):
- *
- *     # comment
- *     active myfork
- *     repo myfork https://raw.githubusercontent.com/someone/something
- *     repo mirror https://example.org/homrec/Hom/
- *
- * "official" is built in, always exists, can't be redefined or removed.
- */
+// hom_common.h - the small pieces hom.exe and hr.exe's in-app console share.
 #pragma once
 
 #include <algorithm>
@@ -86,11 +62,6 @@ inline bool IsValidRepoName(const std::string &name, std::string *why) {
 // Turns what the user typed into the canonical base URL of a repo's Hom/
 // folder (the folder that holds version.txt, hom.exe and plugins/).
 // Accepts:
-//   * a full https:// URL                -> kept as is (trailing '/' added)
-//   * GitHub shorthand owner/repo        -> raw.githubusercontent.com/<owner>/<repo>/main/Hom/
-//   * GitHub shorthand owner/repo@branch -> same, with that branch
-// Plain http:// is refused on purpose: hom downloads hom.exe (code!) from
-// here, so it must never travel over an unauthenticated connection.
 inline bool NormalizeRepoUrl(const std::string &input, std::string *out, std::string *why) {
     std::string s = TrimStr(input);
     if (s.empty()) { *why = "URL is empty"; return false; }
@@ -239,9 +210,6 @@ inline std::string FormatBytes(long long b) {
 }
 
 // One line, ASCII only, no leading '\r' / trailing '\n':
-//   [#########-----------]  45%  1.5 / 3.4 MB  ~4s
-// pct < 0 = total size unknown (no bar, just the byte count); eta < 0 =
-// not known yet (first fraction of a second).
 inline std::string FormatProgress(int pct, long long received, long long total, int eta_sec) {
     std::string s;
     if (pct >= 0 && total > 0) {

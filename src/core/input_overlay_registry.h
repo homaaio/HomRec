@@ -1,15 +1,7 @@
 #pragma once
-// -----------------------------------------------------------------------------
-// input_overlay_registry.h
-//
-// A plugin (see plugins/input_overlay_presets/entry.lua for the bundled
+// input_overlay_registry.h - A plugin (see plugins/input_overlay_presets/entry.lua for the bundled
 // one) registers the input-overlay presets it ships via
 // homrec.register_input_overlay(category, label, json_rel_path, png_rel_path)
-// during its on_load() (see lua_api.cpp's L_register_input_overlay). Those
-// registrations land here, so the "+" menu's "Select Input-Overlay…" item
-// (overlays_dock_panel.cpp) can list them without knowing anything about
-// Lua or any specific plugin.
-// -----------------------------------------------------------------------------
 #include <string>
 #include <vector>
 

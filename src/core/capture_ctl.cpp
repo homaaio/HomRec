@@ -1,13 +1,4 @@
-/*
- * capture_ctl.cpp - HomRec capture session controller
- *
- * The recording state-machine:
- *   start_recording() / stop_recording() / toggle_pause() and the
- *   per-frame elapsed-time + file-size accounting.
- *
- * The UI layer calls this C API; the heavy capture/encode work is
- * delegated to pipeline.cpp.
- */
+// capture_ctl.cpp - HomRec capture session controller
 
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -114,11 +105,9 @@ HR_EXPORT void hr_ctl_set_output_path(void *handle, const char *path) {
     strncpy(s->output_path, path, sizeof(s->output_path) - 1);
 }
 
-/*
- * hr_ctl_start
- * Transitions IDLE → RECORDING.
- * Returns 1 on success, 0 if already recording / paused.
- */
+// hr_ctl_start
+// Transitions IDLE → RECORDING.
+// Returns 1 on success, 0 if already recording / paused.
 HR_EXPORT int hr_ctl_start(void *handle) {
     if (!handle) return 0;
     auto *s = static_cast<CaptureSession *>(handle);
@@ -136,11 +125,9 @@ HR_EXPORT int hr_ctl_start(void *handle) {
     return 1;
 }
 
-/*
- * hr_ctl_stop
- * Transitions RECORDING / PAUSED → IDLE.
- * Returns elapsed seconds for final summary.
- */
+// hr_ctl_stop
+// Transitions RECORDING / PAUSED → IDLE.
+// Returns elapsed seconds for final summary.
 HR_EXPORT double hr_ctl_stop(void *handle) {
     if (!handle) return 0.0;
     auto *s = static_cast<CaptureSession *>(handle);
@@ -154,11 +141,9 @@ HR_EXPORT double hr_ctl_stop(void *handle) {
     return elapsed;
 }
 
-/*
- * hr_ctl_pause_toggle
- * Toggles between RECORDING ↔ PAUSED.
- * Returns new state (HR_STATE_RECORDING or HR_STATE_PAUSED), or -1 if IDLE.
- */
+// hr_ctl_pause_toggle
+// Toggles between RECORDING ↔ PAUSED.
+// Returns new state (HR_STATE_RECORDING or HR_STATE_PAUSED), or -1 if IDLE.
 HR_EXPORT int hr_ctl_pause_toggle(void *handle) {
     if (!handle) return -1;
     auto *s = static_cast<CaptureSession *>(handle);
@@ -182,28 +167,22 @@ HR_EXPORT int hr_ctl_pause_toggle(void *handle) {
     return -1;
 }
 
-/*
- * hr_ctl_get_state
- * Returns 0=IDLE, 1=RECORDING, 2=PAUSED.
- */
+// hr_ctl_get_state
+// Returns 0=IDLE, 1=RECORDING, 2=PAUSED.
 HR_EXPORT int hr_ctl_get_state(const void *handle) {
     if (!handle) return (int)HR_STATE_IDLE;
     return (int)static_cast<const CaptureSession *>(handle)->state.load();
 }
 
-/*
- * hr_ctl_get_elapsed_sec
- * Returns wall-clock seconds of active (non-paused) recording.
- */
+// hr_ctl_get_elapsed_sec
+// Returns wall-clock seconds of active (non-paused) recording.
 HR_EXPORT double hr_ctl_get_elapsed_sec(const void *handle) {
     if (!handle) return 0.0;
     return static_cast<const CaptureSession *>(handle)->elapsed_sec();
 }
 
-/*
- * hr_ctl_inc_frame
- * Called by the capture thread after each frame is written.
- */
+// hr_ctl_inc_frame
+// Called by the capture thread after each frame is written.
 HR_EXPORT void hr_ctl_inc_frame(void *handle) {
     if (!handle) return;
     static_cast<CaptureSession *>(handle)->frame_count.fetch_add(1, std::memory_order_relaxed);
@@ -214,11 +193,9 @@ HR_EXPORT int hr_ctl_get_frame_count(const void *handle) {
     return static_cast<const CaptureSession *>(handle)->frame_count.load();
 }
 
-/*
- * hr_ctl_update_stats
- * Called with the current output file size (bytes); emits the stats_cb
- * if one is registered.
- */
+// hr_ctl_update_stats
+// Called with the current output file size (bytes); emits the stats_cb
+// if one is registered.
 HR_EXPORT void hr_ctl_update_stats(void *handle, int64_t file_bytes) {
     if (!handle) return;
     auto *s = static_cast<CaptureSession *>(handle);
@@ -230,10 +207,8 @@ HR_EXPORT void hr_ctl_update_stats(void *handle, int64_t file_bytes) {
     }
 }
 
-/*
- * hr_ctl_format_elapsed
- * Writes "HH:MM:SS" into buf.  Returns characters written.
- */
+// hr_ctl_format_elapsed
+// Writes "HH:MM:SS" into buf.  Returns characters written.
 HR_EXPORT int hr_ctl_format_elapsed(const void *handle, char *buf, int buf_len) {
     if (!handle || !buf || buf_len < 9) return 0;
     double sec = static_cast<const CaptureSession *>(handle)->elapsed_sec();

@@ -16,13 +16,6 @@
 
 namespace {
 
-// ---------------------------------------------------------------------
-// Position + live preview canvas - same screenshot/drag/resize approach
-// overlay_placement_dialog.cpp's OverlayCanvas uses, narrowed to a single
-// OverlayDef (this window only ever edits one), and actually rendering
-// the overlay's content on top of the handle/frame instead of a bare
-// dashed rectangle, so "how will this look" and "where will this sit"
-// can both be judged without leaving the window.
 class SingleOverlayCanvas : public wxPanel {
 public:
     SingleOverlayCanvas(wxWindow *parent, OverlayDef &ov)
@@ -54,11 +47,6 @@ public:
         if (w > 0 && h > 0) { native_w_ = w; native_h_ = h; }
     }
 
-    // Reloads whatever file the overlay's content preview needs (image/gif
-    // first frame, or the input-overlay spritesheet) - called once up
-    // front and again whenever the settings panel changes the path, so a
-    // freshly-picked file shows up immediately instead of only after
-    // reopening the window.
     void ReloadContentImage() {
         content_img_ = wxImage();
         std::string path = (ov_.type == "input_overlay") ? ov_.input_png_path : ov_.image_path;
@@ -94,12 +82,6 @@ private:
         return wxColour(hx(1), hx(3), hx(5));
     }
 
-    // Draws an approximation of the overlay's actual content inside
-    // `rect` - not the exact same code path the recording pipeline uses
-    // (overlay_render.cpp), but enough to judge font/color/framing/
-    // cropping before committing, which the old rectangle-only preview
-    // (and the old raw-popup edit flow, which had no preview at all)
-    // couldn't offer.
     void DrawContent(wxDC &dc, const wxRect &rect) {
         dc.SetClippingRegion(rect);
         if (ov_.type == "text") {
@@ -277,10 +259,8 @@ private:
     }
 
 public:
-    // Fired after every drag-driven change to ov_.x/y/w/h, so the settings
-    // panel's own x/y/w/h readout (if any is added later) or the dialog's
-    // title could stay in sync. Currently used to keep the "dirty" hint
-    // accurate.
+    // Fired after every drag-driven change to ov_.x/y/w/h, so the settings panel's own x/y/w/h
+    // readout (if any is added later) or the dialog's title could stay in sync.
     std::function<void()> on_moved;
 
 private:
@@ -525,10 +505,9 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
 
     dlg.SetSizer(root);
 
-    // Live-update the working copy (and therefore the canvas preview) as
-    // soon as each field changes, rather than only reading them back on
-    // Save - so what's drawn at the top always matches what's typed
-    // below while the window is still open.
+    // Live-update the working copy (and therefore the canvas preview) as soon as each field
+    // changes, rather than only reading them back on Save - so what's drawn at the top always
+    // matches what's typed below while the window is still open.
     if (textCtrl) textCtrl->Bind(wxEVT_TEXT, [&](wxCommandEvent &) {
         working.text = textCtrl->GetValue().ToUTF8().data();
         canvas->Refresh();
@@ -624,11 +603,6 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
     if (result == wxID_OK) {
         working.name = nameCtrl->GetValue().ToUTF8().data();
         state.overlays[idx] = working;
-        // Bypasses OverlaysDockPanel::Refresh() (the panel's usual
-        // auto-persist point - see its own comment), so save it here too,
-        // exactly like ShowOverlayPlacementDialog() does for the same
-        // reason: otherwise this would only stick for the rest of the
-        // session and be gone again on next launch.
         HrcConfig::SaveOverlaysOnly(state.overlays, HrcConfig::kOverlaysAutosavePath);
         return true;
     }

@@ -1,28 +1,4 @@
 // settings_dialog.cpp - tabbed rewrite.
-//
-// Was a single scrollable page: everyday fields always visible, and
-// everything a casual user wouldn't need (codec/CRF/hw-accel/custom
-// ffmpeg args/audio format/filename template/auto-stop/replay buffer)
-// hidden behind one "Advanced" toggle button. That worked for 5 tabs'
-// worth of fields squeezed into one show/hide panel, but stopped
-// scaling once Security (logging toggles, live-preview resolution/fps,
-// "reset to defaults") and System (desktop shortcut, autostart, tray
-// icon) were added on top - cramming 7 tabs' worth of fields into one
-// collapsible panel would have made "Advanced" itself need sub-sections
-// again. Back to a wxNotebook, but with a cleaner split than the old
-// 5-tab version had: General / Video & Codec / Audio / Hotkeys /
-// Advanced / Security / System.
-//
-// Persistence note (Phase 1 settings-storage migration, see commands.md):
-// this dialog used to save through settings.cpp's on-disk
-// homrec_settings.json, whose fixed field whitelist didn't cover
-// hw_accel/enc_preset/enc_crf/pix_fmt/custom_ffmpeg_args/audio_*/
-// filename_template/auto_stop_min/replay_buffer_sec/hotkeys - those
-// applied for the current run and round-tripped through .hrc profiles
-// (hrc_config.cpp) but reverted on next launch if you hadn't also
-// exported an .hrc. OnSave() now persists through HrcConfig::Save()
-// instead, which writes the *entire* AppState - every field on every
-// tab is saved for real now, and the on-page notes below reflect that.
 #include "settings_dialog.h"
 #include "themed_widgets.h"
 #include "language.h"
@@ -52,10 +28,9 @@ void HrWgcResetCrashGuard();
 bool HrWgcCrashGuardTripped();
 
 extern "C" {
-    // Only the "read pure defaults" accessors remain in use here
-    // (OnResetDefaults() below) - actual persistence now goes through
-    // HrcConfig::Save()/Load() (hrc_config.h), see this file's header
-    // comment and OnSave().
+    // Only the "read pure defaults" accessors remain in use here (OnResetDefaults() below) -
+    // actual persistence now goes through HrcConfig::Save()/Load() (hrc_config.h), see this
+    // file's header comment and OnSave().
     void *hr_settings_create();
     void hr_settings_destroy(void *handle);
     int hr_settings_get_flag(const void *h, const char *name);
@@ -127,10 +102,9 @@ wxStaticText *AddSectionHeading(wxWindow *page, wxSizer *sizer, wxColour accent,
     return lbl;
 }
 
-// Every tab is a plain scrolled page inside the notebook - some (Video &
-// Codec, Security) have enough fields to need scrolling on a small
-// screen, and using the same widget for every tab keeps them visually
-// consistent.
+// Every tab is a plain scrolled page inside the notebook - some (Video & Codec, Security)
+// have enough fields to need scrolling on a small screen, and using the same widget for
+// every tab keeps them visually consistent.
 wxScrolledWindow *NewTabPage(wxNotebook *nb, wxColour bg) {
     auto *page = new wxScrolledWindow(nb);
     page->SetBackgroundColour(bg);
@@ -224,11 +198,6 @@ public:
     }
 
     ~SettingsDialog() override {
-        // Safety net for however the dialog ends up closing mid-test
-        // (Save/Cancel are disabled while testing, but the system close
-        // box / Alt+F4 aren't) - leaving qt_pipeline_/qt_ffproc_ running
-        // and the live preview permanently torn down would otherwise
-        // outlive the dialog entirely.
         if (test_running_ && rec_) {
             test_timer_.Stop();
             rec_->FinishQuickTest();
@@ -356,14 +325,6 @@ private:
         }
     }
 
-    // Repopulates lang_choice_/lang_codes_ from the built-in "English"
-    // entry plus whatever *.hrl files ScanCustomLanguages() finds in
-    // kLangsDir right now - called on dialog build, and again after
-    // OnAddLanguage() successfully imports a new one so it shows up
-    // without having to close and reopen Settings. Tries to keep
-    // whichever code was selected before (falling back to
-    // state_.current_language the first time, then to "en" if that
-    // code isn't in the list at all, e.g. it was deleted from disk).
     void RefreshLanguageChoices() {
         std::string keep = lang_codes_.empty() ? state_.current_language
                             : (lang_choice_->GetSelection() >= 0 &&
@@ -453,12 +414,6 @@ private:
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
-        // "Test Recording" - runs a short, disposable recording with
-        // whatever's currently picked above (even if not Saved yet) so a
-        // user can tell whether a codec actually works on this machine,
-        // and at what fps, before committing to it for a real recording.
-        // See RecordingController::StartQuickTest()'s doc comment for why
-        // this is entirely separate from a real recording under the hood.
         auto *testRow = new wxBoxSizer(wxHORIZONTAL);
         test_btn_ = new wxButton(page, wxID_ANY, "Test Recording (5s)");
         test_btn_->Enable(rec_ != nullptr);
@@ -689,14 +644,6 @@ private:
             hk->SetColours(bg, text, wxColour(120, 170, 250));
         pageRoot->Add(hkGrid, 0, wxEXPAND | wxALL, 16);
 
-        // -- Custom action hotkeys ---------------------------------------
-        // Each row is "action string -> key combo", where the action is
-        // whatever you'd type into the console or put in a .cfg line -
-        // a built-in command, a "setting = value" assignment (e.g.
-        // "disable_preview = true"), or a plugin-registered command/
-        // setting. See ConfigureHotkeysFromState() (main_frame.cpp) for
-        // how this list turns into real OS hotkeys, and
-        // AppState::custom_hotkeys for the storage format.
         custom_hk_page_ = page;
         custom_hk_bg_ = bg;
         custom_hk_text_ = text;
@@ -731,11 +678,9 @@ private:
         });
     }
 
-    // One row = one custom_hotkeys entry: a free-text action field plus a
-    // HotkeyButton (same capture control the four fixed hotkeys above
-    // use) for the combo, and a small remove button. Kept as flat
-    // wxWindow children of the Hotkeys page (not a sub-panel) so they lay
-    // out with the rest of the tab via custom_hk_list_sizer_.
+    // One row = one custom_hotkeys entry: a free-text action field plus a HotkeyButton (same
+    // capture control the four fixed hotkeys above use) for the combo, and a small remove
+    // button.
     void AddCustomHotkeyRow(const wxString &action, const wxString &keys) {
         auto *row = new wxBoxSizer(wxHORIZONTAL);
 
@@ -764,10 +709,9 @@ private:
                     custom_hk_list_sizer_->Detach(row);
                     actionEdit->Destroy();
                     keysBtn->Destroy();
-                    // removeBtn destroys itself via CallAfter - wx defers a
-                    // widget's own destruction when triggered from inside
-                    // its own click handler, so we schedule rather than
-                    // Destroy() it inline here.
+                    // removeBtn destroys itself via CallAfter - wx defers a widget's own destruction when
+                    // triggered from inside its own click handler, so we schedule rather than Destroy() it
+                    // inline here.
                     removeBtn->GetEventHandler()->CallAfter([removeBtn]() { removeBtn->Destroy(); });
                     delete row;
                     custom_hk_rows_.erase(custom_hk_rows_.begin() + i);
@@ -800,13 +744,9 @@ private:
 
         pageRoot->Add(grid, 0, wxEXPAND | wxALL, 16);
 
-        // Instant Replay - a continuous background buffer of the last
-        // "Replay buffer" seconds above, saved out on demand with the
-        // Save Replay hotkey (see the Hotkeys tab) without you having had
-        // to be recording already. It can't run at the same time as a
-        // manual recording (they share the one capture pipeline) - it
-        // just pauses for the duration and picks back up, with a fresh
-        // buffer, once you stop.
+        // Instant Replay - a continuous background buffer of the last "Replay buffer" seconds
+        // above, saved out on demand with the Save Replay hotkey (see the Hotkeys tab) without you
+        // having had to be recording already.
         instant_replay_check_ = new wxCheckBox(page, wxID_ANY, "Enable Instant Replay");
         instant_replay_check_->SetForegroundColour(text);
         instant_replay_check_->SetBackgroundColour(bg);
@@ -819,13 +759,9 @@ private:
         replayNote->SetBackgroundColour(bg);
         pageRoot->Add(replayNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
 
-        // -- Settings file path (Phase 1 storage migration, see
-        // commands.md) - the app's own auto-managed settings file, an
-        // .hrc-format file (hrc_config.cpp) that replaced the old
-        // homrec_settings.json. Empty = HrcConfig::kDefaultSettingsPath
-        // ("homrec.hrc" next to the exe). A custom path here is picked up
-        // immediately on the next Save and read back from on the next
-        // launch - it does NOT move an already-existing file for you.
+        // -- Settings file path (Phase 1 storage migration, see commands.md) - the app's own auto-
+        // managed settings file, an .hrc-format file (hrc_config.cpp) that replaced the old
+        // homrec_settings.json.
         AddSectionHeading(page, pageRoot, FromColorref(theme_.accent), bg, "Settings Storage");
         auto *settingsPathLbl = new wxStaticText(page, wxID_ANY, "Settings file (.hrc):");
         settingsPathLbl->SetForegroundColour(text);
@@ -979,17 +915,9 @@ private:
         if (dlg.ShowModal() == wxID_OK) settings_path_edit_->SetValue(dlg.GetPath());
     }
 
-    // Repopulates every control across every tab with hard-coded
-    // defaults - doesn't touch state_/settings_/disk itself, so Cancel
-    // (or just not clicking Save afterward) leaves everything exactly as
-    // it was before Reset was clicked. Values that settings.cpp
-    // tracks are read from a fresh (never-loaded) HrSettings blob so
-    // this can't drift out of sync with settings.cpp's own
-    // _defaults(); the handful of AppState-only fields hr_settings
-    // doesn't cover yet (hw_accel/enc_preset/enc_crf/pix_fmt/
-    // custom_ffmpeg_args/audio_*/filename_template/auto_stop_min/
-    // replay_buffer_sec/hotkeys) are hard-coded here, matching their
-    // app_state.h member-initializer defaults.
+    // Repopulates every control across every tab with hard-coded defaults - doesn't touch
+    // state_/settings_/disk itself, so Cancel (or just not clicking Save afterward) leaves
+    // everything exactly as it was before Reset was clicked.
     void OnResetDefaults(wxCommandEvent &) {
         if (wxMessageBox(
                 "Reset every setting in this dialog to its default? "
@@ -1200,32 +1128,13 @@ private:
             state_.ui_locked = ui_lock_chk_->GetValue();
         }
 
-        // -- Settings file path (Advanced tab) -------------------------
-        // Resolve the path this session's settings actually live at
-        // *before* overwriting settings_path with the field's new value -
-        // that's the file on disk that needs to become the new name, not
-        // just get a fresh copy written next to it. See
-        // HrcConfig::RenameSettingsFile()'s comment for why this used to
-        // look like the setting "didn't do anything": only the save
-        // *destination* changed, the old file itself was never touched.
         std::wstring old_target = HrcConfig::ResolveSettingsPath(state_);
         state_.settings_path = settings_path_edit_->GetValue().ToUTF8().data();
 
-        // Phase 1 settings-storage migration (see commands.md): one save
-        // call persists the *entire* AppState, replacing the old JSON
-        // engine's fixed field whitelist (settings.cpp) - see that
-        // file's own header comment for the exact bug this whitelist
-        // caused previously (show_summary/show_overlays_panel silently
-        // not persisting because someone forgot to add them to it).
         std::wstring target = HrcConfig::ResolveSettingsPath(state_);
         HrcConfig::RenameSettingsFile(old_target, target);
         HrcConfig::Save(state_, target);
         if (target != HrcConfig::kDefaultSettingsPath) {
-            // Keep a live mirror at the default location too, so
-            // main_frame.cpp's startup bootstrap - which always checks
-            // kDefaultSettingsPath first - can find this custom path (via
-            // settings_path, saved as part of the mirror) and follow it,
-            // without needing a second file format just for that pointer.
             HrcConfig::Save(state_, HrcConfig::kDefaultSettingsPath);
         }
         EndModal(wxID_OK);

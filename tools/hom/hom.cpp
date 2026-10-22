@@ -1,151 +1,4 @@
-/*
- * hom.cpp - "hom", the HomRec plugin package manager  (v0.5.3)
- *
- * A small standalone command-line tool, styled the same way as the rest
- * of HomRec (native C++, WinHTTP for networking, no third-party deps).
- * It is NOT linked into hr.exe - it's a separate hom.exe
- * meant to sit next to hr.exe in the same folder, the same way you'd
- * run `apt` or `pacman` next to the software they manage.
- *
- * Commands:
- *   hom --version            Print the hom version and exit.
- *   hom repo [list]          Show the known download repositories; the one
- *                              in use is marked with '*'. "official" is built
- *                              in; others come from cfg\hom_repos.cfg (next to
- *                              hom.exe) - for forks and mirrors.
- *   hom repo add <name> <url|owner/repo[@branch]>
- *                              Remember another repo (https only). Doesn't
- *                              switch to it - see `set`.
- *   hom repo set <name>        Use that repo for every other hom command
- *                              (install/upgrade/search/show/list/update/ping).
- *                              `hom repo set official` goes back.
- *   hom repo remove <name>     Forget a repo ("official" can't be removed).
- *   hom update [-f|--force]    Check the repo's Hom/ folder for a newer
- *                              hom release and, if found, download and
- *                              swap itself in place. -f/--force re-fetches
- *                              and reinstalls even if already up to date.
- *                              This is "refresh hom itself", NOT a plugin
- *                              index refresh - hom has no local package
- *                              index to go stale, since install/search/show
- *                              always hit Hom/plugins/index.json live. So
- *                              there's nothing to "always run before
- *                              upgrading" the way apt-get update is; it's
- *                              accepted as a harmless, cheap no-op prefix
- *                              for anyone used to typing it anyway.
- *   hom upgrade [-y] [-f|--force]
- *                              Re-downloads every plugin already installed
- *                              under ./plugins/*.hrp to whatever's
- *                              currently in the repo, without deleting
- *                              anything. (Same operation the older
- *                              "hom install update-hrp" spelling ran -
- *                              that spelling still works, kept for
- *                              back-compat with any existing cfg scripts.)
- *   hom full-upgrade [-y] [-f|--force]
- *                              Same as `hom upgrade` today. apt's
- *                              full-upgrade differs from upgrade by being
- *                              willing to remove packages to resolve a
- *                              dependency conflict - hom has no dependency
- *                              graph between plugins to resolve in the
- *                              first place (each plugin is one independent
- *                              .hrp), so there's currently nothing for the
- *                              "allowed to remove things" half of that
- *                              definition to do. Kept as its own command
- *                              (rather than a silent alias) so it's ready
- *                              to grow real remove-to-resolve behavior if
- *                              plugin dependencies are ever introduced.
- *   hom install <name> [-y] [-f|--force]
- *                              Download Hom/plugins/<name>.hrp from the
- *                              repo into ./plugins/<name>.hrp. HomRec's
- *                              own plugin loader (see lua_engine.h /
- *                              LoadPluginArchive()) is what actually
- *                              extracts and loads a .hrp - hom's job
- *                              ends at "the file is on disk". If the
- *                              download would grow disk usage by more
- *                              than kDiskSpaceWarnBytes, asks for
- *                              confirmation first (Y/n) unless -y or
- *                              -f/--force is given.
- *   hom remove <name> -r      Deletes ./plugins/<name>.hrp (or the bare
- *                              plugins/<name>/ folder for a non-.hrp
- *                              plugin), but leaves its persistent
- *                              key/value store (the .store file
- *                              PluginStore writes - see lua_engine.cpp)
- *                              in place, same idea as `apt remove` leaving
- *                              /etc config behind. -r is required - it's
- *                              the "yes, actually delete it" confirmation
- *                              for a destructive command, same idea as
- *                              `rm -r`.
- *   hom purge <name> -r       Like `remove`, but also deletes the .store
- *                              file, i.e. nothing of the plugin is left
- *                              behind. This is what `remove` itself used
- *                              to do before it learned to keep .store.
- *   hom autoremove             Would clean up orphaned dependencies from
- *                              plugins that got removed - like `remove`/
- *                              `purge` above, currently a no-op that says
- *                              so plainly: hom installs each plugin as one
- *                              independent .hrp and doesn't record an
- *                              "auto-installed as a dependency of X" flag
- *                              anywhere, so there is nothing (yet) for it
- *                              to find. Kept as a real command rather than
- *                              silently rejected, so scripts that always
- *                              run it don't have to special-case hom.
- *   hom search <query>         Case-insensitive regex/substring match
- *                              against each entry's name + description in
- *                              Hom/plugins/index.json (fetched live - see
- *                              "Where plugins come from" below).
- *   hom show <name>            Prints what index.json knows about a
- *                              plugin (version, author, description,
- *                              package file, download size), plus whether
- *                              it's currently installed here and at what
- *                              local version if so.
- *   hom list --installed       Lists plugins found under ./plugins here
- *                              (both .hrp files and bare-folder plugins),
- *                              with their locally-known version if
- *                              lua_engine.cpp has extracted/loaded one.
- *   hom list --upgradable      Same scan, but only prints entries where
- *                              index.json's version is newer than the
- *                              local one. A plugin with no locally-known
- *                              version (never yet loaded by HomRec, so
- *                              nothing has extracted its plugin.json) is
- *                              listed separately as "can't tell" rather
- *                              than silently skipped or wrongly flagged.
- *
- * `install`/`upgrade`/`full-upgrade`/`search`/`show`/`list` don't
- * remove or overwrite anything you didn't ask for, so - like the console's
- * own gating below - only `update`, `remove`, `purge`, and `autoremove`
- * are treated as needing an "inwid" confirmation prefix when run from
- * HomRec's built-in console (see CommandNeedsInwid() in console_window.cpp).
- *
- * Every plugin name given to install/remove/purge/show is rejected
- * outright if it contains "..", a path separator, or a drive letter, so
- * this can never resolve to anything outside .\plugins\ - see
- * IsSafePluginName() below.
- *
- * Where plugins come from
- * ------------------------
- * Plugins are served straight out of this same GitHub repo, from a
- * top-level `Hom/` folder (not to be confused with `plugins/`, which is
- * where *installed* plugins live locally):
- *
- *   Hom/
- *     version.txt          <- current hom version, e.g. "1.0.1"
- *     hom.exe              <- latest prebuilt hom.exe, used by `hom update`
- *     plugins/
- *       input-overlay.hrp  <- `hom install input-overlay` downloads this
- *       <name>.hrp
- *
- * Files are fetched over plain HTTPS via raw.githubusercontent.com, so
- * publishing a new plugin or a new hom.exe is just committing a file to
- * that folder - no server, no API, no database.
- *
- * Build (MinGW-w64, same toolchain as hr.exe):
- *   g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++ \
- *       -o hom.exe hom.cpp -lwinhttp -lshlwapi -ldbghelp
- *
- * No -municode: main() below is a plain narrow int main(argc, argv), not
- * wWinMain/wmain, so -municode would make the linker look for an entry
- * point that doesn't exist here (see the HOM_CXXFLAGS comment in the
- * top-level Makefile for the full explanation).
- */
+// hom.cpp - "hom", the HomRec plugin package manager  (v0.5.3)
 
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -185,19 +38,11 @@
 
 static constexpr char k_hom_version[] = "0.5.3";
 
-// If an install/update would grow disk usage by at least this much,
-// CmdInstall() asks for confirmation first (Y/n) instead of just doing
-// it - unless -y or -f/--force was passed. 1 MiB rather than the "5MB"
-// first floated for this: most real plugins here are a Lua script plus
-// a handful of small image assets, so a 5MB bar would almost never
-// actually fire in practice.
+// If an install/update would grow disk usage by at least this much, CmdInstall() asks for
+// confirmation first (Y/n) instead of just doing it - unless -y or -f/--force was passed.
 static constexpr long long kDiskSpaceWarnBytes = 1LL * 1024 * 1024;
 
-// The repo hom's own files and plugin packages are served from. Since 0.5.3
-// this is no longer hardcoded: main() fills these in from the active repo
-// (`hom repo set <name>`, stored in cfg\hom_repos.cfg next to hom.exe; falls back
-// to homcommon::kOfficialUrl, i.e. the same GitHub repo as before). Every
-// network call below goes through FetchFromRepo(), which reads them.
+// The repo hom's own files and plugin packages are served from.
 static std::wstring       g_repo_host   = L"raw.githubusercontent.com";
 static unsigned short     g_repo_port   = 443;
 static std::wstring       g_repo_prefix = L"/homaaio/HomRec/main/Hom/"; // always starts and ends with '/'
@@ -205,10 +50,6 @@ static std::string        g_repo_name   = homcommon::kOfficialName;
 static std::string        g_repo_url    = homcommon::kOfficialUrl;
 
 // How the download progress is reported (see ProgressReporter below).
-//   bar   - a real console: one line redrawn with '\r'
-//   lines - "@progress <pct> <received> <total> <eta_sec>" lines, for HomRec's
-//           in-app console (it passes --progress=lines and draws the bar itself)
-//   none  - nothing (hom's output piped into some other tool)
 enum class ProgressMode { None, Bar, Lines };
 static ProgressMode g_progress_mode = ProgressMode::None;
 
@@ -218,6 +59,9 @@ static ProgressMode g_progress_mode = ProgressMode::None;
 
 namespace {
 
+// Usage text goes to stderr when it is shown because of a mistake (unknown command,
+// missing argument) and to stdout when it was asked for (--help), like every
+// other CLI does - so `hom --help | more` and the in-app console both see it.
 void PrintUsage(FILE *out = stderr) {
     std::fprintf(out,
         "hom %s -- the HomRec plugin package manager\n\n"
@@ -291,10 +135,7 @@ bool CreateDirRecursive(const std::string &dir_path) {
            GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-// Recursively deletes dir_path (files + subfolders + itself). Used by
-// `hom purge` to clean up plugins/.installed/<name>/ (or a bare
-// plugins/<name>/) alongside the .hrp, with nothing held back. Missing
-// directory is not an error -- there's nothing to clean up.
+// Recursively deletes dir_path (files + subfolders + itself).
 bool DeleteDirRecursive(const std::string &dir_path) {
     DWORD attrs = GetFileAttributesA(dir_path.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) return true; // nothing there, fine
@@ -320,12 +161,6 @@ bool DeleteDirRecursive(const std::string &dir_path) {
 }
 
 // Same idea as DeleteDirRecursive, but leaves one top-level file alone.
-// Used by `hom remove` to delete everything under a plugin's extracted
-// directory (or bare folder) EXCEPT its PluginStore .store file (see
-// lua_engine.cpp's PluginStore namespace) -- the "keep config" half of
-// remove-vs-purge. The directory itself is left in place afterwards
-// (since the kept file still lives there), even if that's all that's
-// left in it. Missing directory is not an error.
 bool DeleteDirContentsExcept(const std::string &dir_path, const std::string &keep_filename) {
     WIN32_FIND_DATAA fd;
     std::string pattern = dir_path + "\\*";
@@ -364,10 +199,6 @@ std::string Trim(std::string s) {
     return s.substr(a, b - a + 1);
 }
 
-// Size on disk of an existing file, or 0 if it doesn't exist - used to
-// work out how much *additional* disk space an install/update actually
-// costs (an update overwriting a same-size-ish file shouldn't trigger
-// the same warning a brand new multi-MB install does).
 long long FileSizeA(const std::string &path) {
     WIN32_FILE_ATTRIBUTE_DATA fad{};
     if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad)) return 0;
@@ -377,12 +208,6 @@ long long FileSizeA(const std::string &path) {
     return (long long)sz.QuadPart;
 }
 
-// A plugin name only ever gets joined onto "plugins\" below - reject
-// anything that could climb back out of that folder (".." anywhere,
-// any path separator, or a drive letter like "C:") up front, so a
-// crafted `hom remove ..\..\..\Windows\System32\notepad` (or the same
-// trick played on `install`) can never touch anything outside
-// .\plugins\, no matter what flags are passed.
 bool IsSafePluginName(const std::string &name, std::string *reason) {
     if (name.empty()) { *reason = "name is empty"; return false; }
     if (name.find("..") != std::string::npos)  { *reason = "contains '..'"; return false; }
@@ -393,11 +218,6 @@ bool IsSafePluginName(const std::string &name, std::string *reason) {
 }
 
 // -- Tiny JSON helpers -----------------------------------------------------
-//
-// Same "just enough for our own flat manifests" approach as
-// lua_engine.cpp's ExtractJsonString() - not a general JSON parser, and
-// deliberately not sharing that one (hom.exe is a standalone binary with
-// no dependency on src/, same reasoning as CreateDirRecursive above).
 
 std::string ExtractJsonString(const std::string &json, const std::string &key,
                                size_t from = 0) {
@@ -422,12 +242,6 @@ struct IndexEntry {
     std::string author; // may be empty - not every plugin.json sets one
 };
 
-// Splits the top-level array found after `"plugins":` in index.json into
-// per-object substrings by brace depth (handles nested {} inside a string
-// value badly, same limitation every parser here accepts in exchange for
-// staying dependency-free - index.json's shape is flat enough that this
-// never actually comes up), then pulls the known fields out of each with
-// ExtractJsonString above.
 std::vector<IndexEntry> ParsePluginIndex(const std::string &json) {
     std::vector<IndexEntry> out;
     size_t arr_key = json.find("\"plugins\"");
@@ -463,14 +277,6 @@ std::vector<IndexEntry> ParsePluginIndex(const std::string &json) {
 }
 
 // -- Local plugin scanning --------------------------------------------------
-//
-// "Locally known version" comes from plugin.json in whichever directory
-// actually holds the loaded plugin's manifest - plugins/.installed/<name>/
-// for a plugin lua_engine.cpp already extracted from a .hrp, or
-// plugins/<name>/ directly for a plugin shipped as a bare folder. If
-// neither exists yet (e.g. `hom install`ed but HomRec hasn't been run
-// since, so nothing has extracted it), there's genuinely no local version
-// to report - callers need to treat "" as "unknown", not "0".
 std::string LocalPluginVersion(const std::string &name) {
     for (const std::string &dir : { "plugins\\.installed\\" + name, "plugins\\" + name }) {
         std::string manifest_path = dir + "\\plugin.json";
@@ -490,11 +296,6 @@ struct LocalPlugin {
     std::string version; // "" if unknown (see LocalPluginVersion above)
 };
 
-// Enumerates what's actually on disk under ./plugins - every top-level
-// *.hrp file (hom's own install target) plus every bare subfolder that
-// looks like a plugin (has its own plugin.json - this is what tells a
-// real plugin folder apart from housekeeping dirs like .installed, and
-// from a stray non-plugin folder someone dropped in there).
 std::vector<LocalPlugin> ListLocalPlugins() {
     std::vector<LocalPlugin> out;
     WIN32_FIND_DATAA fd;
@@ -525,9 +326,6 @@ std::vector<LocalPlugin> ListLocalPlugins() {
 }
 
 // Collected command-line switches shared by update/install/remove.
-// Recognizes both "-f" and the long "--force" spelling for force (a
-// single-dash ParseFlags-style scan, like the console's ConsoleParse,
-// wouldn't catch "--force" since it starts with a second dash).
 struct Flags {
     bool force = false; // -f / --force
     bool yes   = false; // -y  - auto-answer "yes" to any Y/n prompt
@@ -562,10 +360,6 @@ bool ConfirmYesNo(const std::string &prompt) {
 }
 
 // -- Networking (WinHTTP, HTTPS GET against raw_host + full_path) ----------
-//
-// Same shape as hr_update.cpp's _fetch_release_json(), generalized to any
-// path under the active repo's host and to report the HTTP status code so callers can
-// tell "file doesn't exist" (404) apart from "network failed" (0).
 
 struct FetchResult {
     bool        ok = false;     // request completed, got *a* response
@@ -575,11 +369,6 @@ struct FetchResult {
 };
 
 // -- Download progress --------------------------------------------------------
-//
-// Fed by FetchFromRepo() while a body is being read. Throttled to ~10 updates
-// a second so a fast download doesn't spend its time printing. ETA is simply
-// (bytes left) / (average speed so far) - good enough for a plugin-sized
-// file, and it doesn't jump around the way an instantaneous speed would.
 class ProgressReporter {
 public:
     explicit ProgressReporter(ProgressMode mode)
@@ -629,12 +418,7 @@ private:
     size_t last_len_ = 0;
 };
 
-// `method` defaults to GET (every existing caller). `hom show` passes
-// L"HEAD" to read just the Content-Length header for a plugin's download
-// size without pulling the whole .hrp over the wire - out.body stays
-// empty for a HEAD request, callers that want the size read
-// out.content_length instead. `progress` (GET only, optional) is told how
-// many bytes have arrived so far; see ProgressReporter above.
+// `method` defaults to GET (every existing caller).
 FetchResult FetchFromRepo(const std::wstring &full_path, const wchar_t *method = L"GET",
                           ProgressReporter *progress = nullptr) {
     FetchResult out;
@@ -695,11 +479,7 @@ FetchResult FetchFromRepo(const std::wstring &full_path, const wchar_t *method =
     return out;
 }
 
-// Fetches and parses Hom/plugins/index.json. `*ok` reports whether the
-// fetch itself succeeded (network + HTTP 200) - a successful fetch that
-// parses to zero entries is a real, distinct outcome from a failed fetch,
-// so callers can tell "the repo has no plugins listed" apart from
-// "couldn't reach the repo" and print the right message either way.
+// Fetches and parses Hom/plugins/index.json.
 std::vector<IndexEntry> FetchIndex(bool *ok) {
     *ok = false;
     FetchResult res = FetchFromRepo(g_repo_prefix + L"plugins/index.json");
@@ -771,10 +551,6 @@ int CmdVersion() {
 // `hom ping` -- a quick "is the package repo reachable and responding"
 // check, the same way `ping` on a shell checks basic connectivity, but
 // against the one thing hom actually depends on (raw.githubusercontent.com)
-// rather than an arbitrary host. Reuses FetchFromRepo() against
-// version.txt (small, always present, no side effects) and reports
-// round-trip time + HTTP status, so "reachable but repo is having a bad
-// day" (non-200) reads differently from "no network at all" (ok=false).
 int CmdPing() {
     std::printf("Pinging %ls (repo '%s')...\n", g_repo_host.c_str(), g_repo_name.c_str());
     LARGE_INTEGER freq, t0, t1;
@@ -803,16 +579,6 @@ int CmdPing() {
 // `hom update` -- checks Hom/version.txt in the repo; if it's newer than
 // the version compiled into this binary, downloads Hom/hom.exe and swaps
 // it in for the currently-running one.
-//
-// Renaming or deleting the .exe you're currently running works fine on
-// Windows (the loader opens the image with FILE_SHARE_DELETE, which is
-// exactly what lets self-updating apps do this), so the swap is just:
-//   1. download the new build to hom.exe.new next to the running exe
-//   2. rename the running hom.exe -> hom.exe.old
-//   3. rename hom.exe.new -> hom.exe
-//   4. leave hom.exe.old around (best-effort delete; ignore failure --
-//      it may still be mapped by this very process) so the next
-//      invocation can clean it up
 int CmdUpdate(bool force) {
     std::printf("Checking %s%s for updates...\n", g_repo_url.c_str(), "version.txt");
 
@@ -877,10 +643,7 @@ int CmdUpdate(bool force) {
     return 0;
 }
 
-// `hom install <name>` -- downloads Hom/plugins/<name>.hrp into
-// ./plugins/<name>.hrp. HomRec's own plugin loader picks up and extracts
-// .hrp files from plugins/ the next time it starts (see lua_engine.h's
-// LoadPluginArchive()) -- hom doesn't need to unzip anything itself.
+// `hom install <name>` -- downloads Hom/plugins/<name>.hrp into ./plugins/<name>.hrp.
 int CmdInstall(const std::string &name, bool yes, bool force) {
     if (name.empty()) {
         std::fprintf(stderr, "hom: install needs a plugin name, e.g. 'hom install input-overlay'\n");
@@ -949,13 +712,6 @@ int CmdInstall(const std::string &name, bool yes, bool force) {
     return 0;
 }
 
-// `hom upgrade` -- re-downloads every plugin already installed under
-// .\plugins\*.hrp (top-level only -- .installed\ is lua_engine.cpp's own
-// extraction cache, not something to iterate here) via CmdInstall(),
-// which already overwrites+reports "Updated" vs "Installed" for a name
-// that's already on disk. This is also what the older "hom install
-// update-hrp" spelling runs (see CmdUpdateAllPlugins below) -- kept
-// under both names so existing cfg scripts don't break.
 int CmdUpgrade(bool yes, bool force) {
     std::vector<std::string> names;
     WIN32_FIND_DATAA fd;
@@ -979,10 +735,9 @@ int CmdUpgrade(bool yes, bool force) {
     std::printf("Upgrading %zu installed plugin(s)...\n", names.size());
     size_t failures = 0;
     for (const auto &name : names) {
-        // Already-installed plugins being refreshed: always pass yes=true
-        // here (this is inherently "-y" in spirit - the whole point of
-        // upgrade is to not stop and ask once per plugin) unless the
-        // caller explicitly wants force too.
+        // Already-installed plugins being refreshed: always pass yes=true here (this is inherently
+        // "-y" in spirit - the whole point of upgrade is to not stop and ask once per plugin)
+        // unless the caller explicitly wants force too.
         if (CmdInstall(name, /*yes=*/true, force) != 0) ++failures;
     }
     std::printf("Done: %zu upgraded, %zu failed.\n", names.size() - failures, failures);
@@ -994,11 +749,6 @@ int CmdUpgrade(bool yes, bool force) {
 int CmdUpdateAllPlugins() { return CmdUpgrade(/*yes=*/true, /*force=*/false); }
 
 // `hom full-upgrade` -- see the header comment at the top of this file:
-// apt's full-upgrade is allowed to remove packages to resolve a
-// dependency conflict, but hom has no dependency graph between plugins
-// (each .hrp is independent) for there to be anything to resolve. This
-// runs the exact same upgrade CmdUpgrade() does and says so, rather than
-// quietly being a no-op alias with no indication anything was skipped.
 int CmdFullUpgrade(bool yes, bool force) {
     int rc = CmdUpgrade(yes, force);
     std::printf("hom: full-upgrade currently behaves the same as 'hom upgrade' -- "
@@ -1006,21 +756,15 @@ int CmdFullUpgrade(bool yes, bool force) {
     return rc;
 }
 
-// `hom autoremove` -- see the header comment: hom doesn't record which
-// plugins (if any, in the future) were pulled in only as a dependency of
-// something else, so there's nothing it could safely identify as
-// "orphaned" today. Says so plainly and exits 0 rather than either
-// pretending to clean something up or refusing to run at all.
+// `hom autoremove` -- see the header comment: hom doesn't record which plugins (if any, in
+// the future) were pulled in only as a dependency of something else, so there's nothing it
+// could safely identify as "orphaned" today.
 int CmdAutoremove() {
     std::printf("hom: nothing to do -- hom installs each plugin as one independent .hrp "
                 "and doesn't track dependency-installed plugins, so there are no orphans to find yet.\n");
     return 0;
 }
 
-// Shared by CmdRemove/CmdPurge: locates whichever of the three possible
-// on-disk forms of `name` exist (a top-level .hrp, its extracted
-// .installed\<name>\ copy, or a bare plugins\<name>\ folder) and returns
-// them - callers decide what to actually do with each.
 struct FoundPluginPaths {
     std::string hrp_path;
     std::string installed_dir;
@@ -1059,12 +803,6 @@ int ValidateRemovalArgs(const std::string &name, bool rflag, const char *verb) {
     return 0;
 }
 
-// `hom remove <name> -r` -- deletes the plugin's package/code (the .hrp,
-// and everything in its extracted/bare folder) but leaves its .store
-// file behind, the same way `apt remove` leaves config in /etc - so
-// reinstalling later picks its saved settings back up. -r is required:
-// this is a destructive, irreversible delete of the plugin's code, so
-// (like `rm -r`) it has to be asked for explicitly.
 int CmdRemove(const std::string &name, bool rflag) {
     if (int rc = ValidateRemovalArgs(name, rflag, "remove")) return rc;
     FoundPluginPaths p = LocatePluginPaths(name);
@@ -1125,12 +863,8 @@ int CmdPurge(const std::string &name, bool rflag) {
     return 0;
 }
 
-// `hom search <query>` -- fetches Hom/plugins/index.json and matches
-// `query` against each entry's name + description. Tries it as a regex
-// first (ECMAScript grammar, case-insensitive - matches what apt-cache
-// search accepts); if `query` isn't valid regex syntax, falls back to a
-// plain case-insensitive substring match rather than just erroring out,
-// since most people typing `hom search overlay` don't mean it as regex.
+// `hom search <query>` -- fetches Hom/plugins/index.json and matches `query` against each
+// entry's name + description.
 int CmdSearch(const std::string &query) {
     if (query.empty()) {
         std::fprintf(stderr, "hom: search needs a query, e.g. 'hom search overlay'\n");
@@ -1173,11 +907,8 @@ int CmdSearch(const std::string &query) {
     return 0;
 }
 
-// `hom show <name>` -- prints what the repo's index.json knows about a
-// plugin, plus its local install status. A HEAD request against the
-// .hrp itself gives the download size without pulling the whole file --
-// best-effort: if that request fails, size is just omitted rather than
-// blocking the rest of the output.
+// `hom show <name>` -- prints what the repo's index.json knows about a plugin, plus its
+// local install status.
 int CmdShow(const std::string &name) {
     if (name.empty()) {
         std::fprintf(stderr, "hom: show needs a plugin name, e.g. 'hom show input-overlay'\n");
@@ -1269,10 +1000,9 @@ int CmdList(bool upgradable_only) {
 // Repositories (`hom repo ...`)
 // -----------------------------------------------------------------------
 
-// cfg/hom_repos.cfg lives in the cfg folder next to hom.exe (not in the cwd): hr.exe's console runs
-// hom with cwd = HomRec's folder, but a hom.exe run from somewhere else must
-// still find the same repo list. hr.exe's console reads the very same file
-// to know where to re-download hom.exe from (see hom_common.h).
+// cfg/hom_repos.cfg lives in the cfg folder next to hom.exe (not in the cwd): hr.exe's
+// console runs hom with cwd = HomRec's folder, but a hom.exe run from somewhere else must
+// still find the same repo list.
 static std::filesystem::path RepoCfgPath() {
     wchar_t p[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, p, MAX_PATH);
@@ -1531,10 +1261,8 @@ int main(int argc_in, char **argv_in) {
         return 1;
     }
 
-    // Everything below may touch the network: resolve the active repo once,
-    // and say so when it isn't the official one (so nobody installs from a
-    // fork without noticing). The line starts with "hom:" on purpose - HomRec's
-    // plugin-update badge skips such lines when it parses `list --upgradable`.
+    // Everything below may touch the network: resolve the active repo once, and say so when it
+    // isn't the official one (so nobody installs from a fork without noticing).
     if (cmd == "update" || cmd == "ping" || cmd == "upgrade" || cmd == "full-upgrade" ||
         cmd == "install" || cmd == "search" || cmd == "show" || cmd == "list") {
         SelectActiveRepoFromConfig();
@@ -1583,9 +1311,8 @@ int main(int argc_in, char **argv_in) {
     }
 
     if (cmd == "search") {
-        // Joined rather than a single ParseHomFlags positional, so an
-        // unquoted multi-word query ("hom search input overlay") is
-        // treated as one query string instead of silently dropping
+        // Joined rather than a single ParseHomFlags positional, so an unquoted multi-word query
+        // ("hom search input overlay") is treated as one query string instead of silently dropping
         // everything after the first word.
         std::string query;
         for (int i = 2; i < argc; ++i) { if (i > 2) query += ' '; query += argv[i]; }

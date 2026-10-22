@@ -1,23 +1,4 @@
 // wgc_capture.h - Windows.Graphics.Capture window source (2.4).
-//
-// Records ONE WINDOW itself - the whole window, even when other windows are on top of it or it is
-// partly off-screen / on another monitor - instead of cutting its rectangle out of a screen
-// duplication (which only ever shows "the area where the window currently is").
-//
-// It plugs into pipeline.cpp exactly where the DXGI duplication source sits (same
-// create / capture / get_size / reset / destroy shape), so the encoder, preview, overlays and
-// pause logic are shared. The pipeline asks HrWgcIsHandle() to tell the two sources apart.
-//
-// The picture is delivered into a fixed-size "canvas" (the window's size when recording starts):
-//   * same size            -> straight row copy
-//   * window got smaller   -> centred 1:1, black bars
-//   * window got bigger    -> scaled down to fit, aspect ratio kept, black bars
-// so the recording's resolution never changes mid-file but the WHOLE window stays visible.
-//
-// Needs Windows 10 version 1903 (build 18362) for native WGC; where that is unusable (or has faulted on
-// this PC) HrWgcCreate() hands out a PrintWindow-based source instead (Windows 8.1+, same API, more CPU).
-// HrWgcSupported() says whether either can work here. If both fail the caller falls back to the old
-// screen-crop path.
 #pragma once
 #include <cstdint>
 #include <windows.h>
@@ -38,11 +19,6 @@ bool  HrWgcQueryWindowSize(HWND hwnd, bool client_only, int *w, int *h);
 bool  HrWgcProbeWindow(HWND hwnd);
 
 // 7th pass options of the PrintWindow backend (native WGC ignores them).
-//   smart   - while nothing covers the window its picture is cut out of a cheap screen duplication (the
-//             same cost as a desktop recording, and nothing is recomputed while nothing changes); the
-//             moment another window overlaps it, it switches to the exact capture (PrintWindow) and back.
-//   fps_cap - upper limit of exact captures per second (PrintWindow is expensive and makes the target
-//             window redraw itself); 0 = no limit beyond the recording's own frame rate.
 struct HrWgcOptions {
     bool smart   = true;
     int  fps_cap = 0;

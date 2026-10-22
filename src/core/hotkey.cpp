@@ -1,15 +1,4 @@
-/*
- * hotkey.cpp - HomRec global hotkey manager
- *
- * Global keyboard shortcuts:
- *   F9  = Start / Stop recording toggle
- *   F10 = Pause / Resume recording toggle
- *   F11 = Fullscreen toggle
- *   F8  = Save Replay (Instant Replay - see recording_controller.h)
- *
- * On Windows uses RegisterHotKey / WM_HOTKEY via a hidden message window.
- * On other platforms the stubs are no-ops.
- */
+// hotkey.cpp - HomRec global hotkey manager
 
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -53,10 +42,9 @@ struct CustomHotkeyBinding {
     UINT vk;
 };
 
-/* Forward-declared here since hr_hk_add_custom() (below) needs to call it
- * before its own definition later in this file; both are HR_EXPORT'd with
- * matching signatures so this is just the one declaration moved earlier,
- * not a second copy. */
+// Forward-declared here since hr_hk_add_custom() (below) needs to call it before its own
+// definition later in this file; both are HR_EXPORT'd with matching signatures so this is
+// just the one declaration moved earlier, not a second copy.
 HR_EXPORT int hr_hk_parse_keystring(const char *s, unsigned int *mod_out, unsigned int *vk_out);
 
 /* -- Context --------------------------------------------------------------- */
@@ -73,10 +61,8 @@ struct HotkeyCtx {
 
     std::atomic<bool> running{false};
 
-    /* Configurable key bindings - set via hr_hk_configure() *before*
-       hr_hk_start(), since RegisterHotKey happens once at thread start.
-       Defaults match the historical hardcoded F9/F10/F11 so callers that
-       never configure anything keep working exactly as before. */
+    // Configurable key bindings - set via hr_hk_configure() *before*
+    // hr_hk_start(), since RegisterHotKey happens once at thread start.
     UINT mod_start_stop{0}, vk_start_stop{0x78 /* VK_F9 */};
     UINT mod_pause{0},      vk_pause{0x79 /* VK_F10 */};
     UINT mod_fullscreen{0}, vk_fullscreen{0x7A /* VK_F11 */};
@@ -222,23 +208,7 @@ HR_EXPORT void hr_hk_set_callbacks(void *handle,
     ctx->cb_save_replay = save_replay;
 }
 
-/*
- * hr_hk_set_custom_callback / hr_hk_clear_custom / hr_hk_add_custom
- *
- * The dynamic counterpart to hr_hk_configure()'s fixed four. A caller
- * (main_frame.cpp) that wants N user-defined "run this action string"
- * hotkeys:
- *   1. hr_hk_clear_custom(handle)                      -- wipe old list
- *   2. hr_hk_add_custom(handle, id, "Control+B")  * N   -- one per binding,
- *      id chosen by the caller (>= 100 recommended, see HK_CUSTOM_BASE)
- *      and remembered on the caller's side to map back to an action
- *      string - this module only ever hands the id back via cb_custom.
- *   3. hr_hk_set_custom_callback(handle, fn)
- *   4. hr_hk_start(handle) as usual.
- * Same ordering rule as hr_hk_configure(): all of this must happen
- * *before* hr_hk_start(), since RegisterHotKey only happens once at
- * message-thread startup (see _MsgThread above).
- */
+// hr_hk_set_custom_callback / hr_hk_clear_custom / hr_hk_add_custom
 HR_EXPORT void hr_hk_set_custom_callback(void *handle, HR_HK_CUSTOM_CB cb) {
     if (!handle) return;
     static_cast<HotkeyCtx *>(handle)->cb_custom = cb;
@@ -260,14 +230,8 @@ HR_EXPORT int hr_hk_add_custom(void *handle, int id, const char *keystring) {
     return 1;
 }
 
-/*
- * hr_hk_parse_keystring
- * Parses a hotkey binding string in "Modifier+Modifier+Key" form, e.g.
- * "F9", "Control+F9", "Shift+Control+Escape", "a" - the same format used
- * by the hotkey recorder in Advanced Settings.
- * Returns 1 and fills *mod_out/*vk_out on success, 0 (leaving them
- * untouched) if the string is empty or unrecognized.
- */
+// hr_hk_parse_keystring
+// Parses a hotkey binding string in "Modifier+Modifier+Key" form, e.g.
 HR_EXPORT int hr_hk_parse_keystring(const char *s, unsigned int *mod_out, unsigned int *vk_out) {
     if (!s || !*s) return 0;
 #ifdef _WIN32
@@ -330,16 +294,7 @@ HR_EXPORT int hr_hk_parse_keystring(const char *s, unsigned int *mod_out, unsign
 #endif
 }
 
-/*
- * hr_hk_configure
- * Sets the key bindings to register on the next hr_hk_start(). Must be
- * called *before* hr_hk_start() (RegisterHotKey happens once, at thread
- * start, to keep the "which thread owns the WM_HOTKEY queue" rule simple -
- * callers that change a hotkey while already running should hr_hk_stop(),
- * hr_hk_configure(), then hr_hk_start() again).
- * Any string that fails to parse leaves that action's existing/default
- * binding untouched (so a bad user-typed hotkey doesn't kill the others).
- */
+// hr_hk_configure Sets the key bindings to register on the next hr_hk_start().
 HR_EXPORT void hr_hk_configure(void *handle,
                                 const char *start_stop_str,
                                 const char *pause_str,
@@ -362,12 +317,9 @@ HR_EXPORT void hr_hk_configure(void *handle,
     }
 }
 
-/*
- * hr_hk_start
- * Registers F9/F10/F11 system-wide and starts the message loop.
- * Non-blocking: spawns a background thread.
- * Returns 1 on success, 0 on failure.
- */
+// hr_hk_start
+// Registers F9/F10/F11 system-wide and starts the message loop.
+// Non-blocking: spawns a background thread.
 HR_EXPORT int hr_hk_start(void *handle) {
     if (!handle) return 0;
 #ifdef _WIN32
@@ -384,34 +336,8 @@ HR_EXPORT int hr_hk_start(void *handle) {
 #endif
 }
 
-/*
- * hr_hk_stop
- * Unregisters hotkeys and stops the message loop.
- *
- * This used to just PostMessageW(WM_QUIT) and return immediately,
- * without waiting for _MsgThread to actually exit (unlike hr_hk_destroy(),
- * a few functions up, which does wait). _MsgThread is the only thing that
- * ever sets ctx->running back to false, and it only does that *after* its
- * GetMessage loop returns and it unregisters the hotkeys - all of which
- * happens asynchronously, sometime after WM_QUIT is posted.
- *
- * hr_hk_configure()'s own doc comment says the reconfigure sequence is
- * "hr_hk_stop(), hr_hk_configure(), then hr_hk_start() again" - but
- * hr_hk_start() bails out early with `if (ctx->running) return 1;`. If
- * the old thread hadn't gotten around to flipping that flag yet by the
- * time the caller called hr_hk_start() again, that check would still see
- * running==true, skip spawning a new thread entirely, and report success
- * - while the *old* thread was mid-shutdown and about to unregister every
- * hotkey and exit for good. Net result: hr_hk_start() claims success, but
- * the new key bindings from hr_hk_configure() never get registered and
- * shortly after, no hotkeys work at all until the app is restarted.
- *
- * Now waits for the thread to fully exit (bounded, same as
- * hr_hk_destroy()) before returning, so ctx->running/ctx->hThread are
- * always left in a consistent, already-stopped state and the next
- * hr_hk_start() is guaranteed to spawn a fresh thread with the new
- * bindings.
- */
+// hr_hk_stop
+// Unregisters hotkeys and stops the message loop.
 HR_EXPORT void hr_hk_stop(void *handle) {
     if (!handle) return;
 #ifdef _WIN32
@@ -422,18 +348,13 @@ HR_EXPORT void hr_hk_stop(void *handle) {
         CloseHandle(ctx->hThread);
         ctx->hThread = nullptr;
     }
-    // Belt-and-suspenders in case the thread didn't get to it in time
-    // (e.g. the 3s wait above timed out): don't leave a caller that
-    // immediately checks hr_hk_is_running() or calls hr_hk_start() again
-    // looking at a stale "still running" flag.
+    // Belt-and-suspenders in case the thread didn't get to it in time (e.g.
     ctx->running = false;
 #endif
 }
 
-/*
- * hr_hk_is_running
- * Returns 1 if the hotkey message loop is active.
- */
+// hr_hk_is_running
+// Returns 1 if the hotkey message loop is active.
 HR_EXPORT int hr_hk_is_running(const void *handle) {
     if (!handle) return 0;
     return static_cast<const HotkeyCtx *>(handle)->running ? 1 : 0;

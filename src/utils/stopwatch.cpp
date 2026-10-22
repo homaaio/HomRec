@@ -17,15 +17,7 @@
  * ---------------------------------------------------------------------- */
 static inline int64_t _hw_now_ns() {
 #ifdef _WIN32
-    // This used to call QueryPerformanceFrequency() on every
-    // single invocation. QPF's return value is fixed for the life of the
-    // OS session (it never changes after boot), so re-querying it here is
-    // pure waste - and this function is called *extremely* often: once
-    // per stats poll, and repeatedly in hr_sw_sleep_until_ns()'s spin
-    // phase below, which busy-loops calling this as fast as possible for
-    // the last ~2ms of every single frame-pacing wait. That's thousands
-    // of avoidable extra calls per second while recording, all doing
-    // work whose answer never changes. Query it once and cache it.
+    // This used to call QueryPerformanceFrequency() on every single invocation.
     static const int64_t freq = [] {
         LARGE_INTEGER f;
         QueryPerformanceFrequency(&f);
@@ -108,19 +100,15 @@ HR_EXPORT double hr_sw_elapsed_ms(void *handle) {
     return (double)hr_sw_elapsed_ns(handle) / 1'000'000.0;
 }
 
-/*
- * Hybrid sleep-then-spin until elapsed >= target_ns.
- * Sleeps in 1 ms increments until ~2 ms before target, then spins.
- * This keeps CPU usage low while still being accurate to <100 µs.
- */
+// Hybrid sleep-then-spin until elapsed >= target_ns.
+// Sleeps in 1 ms increments until ~2 ms before target, then spins.
+// This keeps CPU usage low while still being accurate to <100 µs.
 #ifdef _WIN32
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
-// One high-resolution waitable timer per calling thread (Win10 1803+; NULL on
-// older systems -> we fall back to Sleep()).  Wakes with ~0.5ms accuracy
-// without burning a core, which lets the spin phase below shrink from 2ms to
-// ~0.3ms per frame (the old 2ms spin was ~6% of a core at 30fps, constantly).
+// One high-resolution waitable timer per calling thread (Win10 1803+; NULL on older
+// systems -> we fall back to Sleep()).
 static HANDLE _hr_thread_timer() {
     static thread_local HANDLE h = [] {
         return CreateWaitableTimerExW(nullptr, nullptr,

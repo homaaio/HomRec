@@ -42,12 +42,7 @@ static HRESULT g_last_dx_error = S_OK;
  * Internal state
  * ---------------------------------------------------------------------- */
 #ifdef _WIN32
-/* Axis-aligned rectangle [l,r) x [t,b) used for dirty-region bookkeeping.
- * An empty box means "nothing". Unions are always the bounding box of the
- * two inputs - deliberately coarse: one bounding box per frame is enough to
- * turn "copy the whole 8MB desktop" into "copy the few rows that changed"
- * for the typical idle-desktop cases (blinking text caret, a ticking clock,
- * typing) without any per-rect bookkeeping. */
+// Axis-aligned rectangle [l,r) x [t,b) used for dirty-region bookkeeping.
 struct DxBox {
     int l = 0, t = 0, r = 0, b = 0;
 
@@ -71,11 +66,7 @@ struct DxBox {
     }
 };
 
-/* Every this-many *changed* frames one full-frame copy is forced. Dirty
- * rectangles come straight from the driver; a driver that under-reports
- * them would otherwise leave a stale patch on screen indefinitely. This
- * bounds any such artifact to ~2s at 60fps and costs one full copy per
- * ~120 changed frames. */
+// Every this-many *changed* frames one full-frame copy is forced.
 static constexpr int kFullRefreshEvery = 120;
 
 /* GPU scheduler priority of the capture D3D11 device, -7..7 (0 = normal).
@@ -87,15 +78,9 @@ struct DxCapCtx {
     ComPtr<ID3D11DeviceContext>    context;
     ComPtr<IDXGIOutputDuplication> duplication;
 
-    /* ---- CPU readback ring (BGRA) ------------------------------------
-     * Two staging textures used ping-pong: frame N is copied into one
-     * while frame N-1 (already finished on the GPU) is read out of the
-     * other, so Map() never has to wait for the copy it just queued. */
     ComPtr<ID3D11Texture2D> staging[2];
-    /* Per staging texture: the region that may differ from the *latest*
-     * desktop image (union of every changed-rect since that texture was
-     * last brought up to date). A new frame only has to copy this region
-     * into the texture instead of the whole desktop. */
+    // Per staging texture: the region that may differ from the *latest* desktop image (union
+    // of every changed-rect since that texture was last brought up to date).
     DxBox stale[2];
     /* Per staging texture: the region that changed between the frame
      * before it and the frame it currently holds. */
@@ -104,10 +89,8 @@ struct DxCapCtx {
     int  pending_idx  = -1;
     bool have_pending = false;
 
-    /* Region of the CALLER's BGRA buffer that is known to lag behind the
-     * frame we're about to hand out (frames that were dropped, or consumed
-     * by the GPU path instead). Together with slot_box it is exactly what
-     * has to be memcpy'd into the caller's buffer. */
+    // Region of the CALLER's BGRA buffer that is known to lag behind the frame we're about to
+    // hand out (frames that were dropped, or consumed by the GPU path instead).
     DxBox out_carry;
     const uint8_t *last_out = nullptr;  /* buffer the last delivery went to      */
     bool out_valid   = false;           /* caller's buffer holds a coherent frame */
@@ -124,12 +107,6 @@ struct DxCapCtx {
     uint64_t st_partial  = 0;           /* deliveries that copied a sub-region    */
     uint64_t st_full     = 0;           /* deliveries that copied everything      */
 
-    /* ---- GPU path: D3D11 Video Processor, BGRA -> NV12 (+crop/scale) ----
-     * desk_tex is a persistent GPU-side copy of the latest desktop image
-     * (DXGI only hands out an image when something changes, so anything
-     * that wants to re-render a static desktop - mode switches, a moved
-     * crop rectangle - needs its own copy). Only maintained while
-     * gpu_enabled. */
     bool gpu_enabled = false;
     bool vp_ready    = false;
     int  nv_w = 0, nv_h = 0;            /* NV12 output size (even)                */
@@ -158,13 +135,6 @@ struct DxCapCtx {
 
     // Fixed output shape the CALLER's buffer (and, downstream, ffmpeg's
     // rawvideo pipe) was sized for -- set once via hr_dx_set_output_size()
-    // right after the caller allocates its buffer, and deliberately never
-    // touched by reset(). width/height above track whatever DXGI's output
-    // duplication is ACTUALLY handing back right now, which can change
-    // out from under us mid-recording (see hr_dx_capture()'s blit comment
-    // below). 0/0 means "not set yet -- behave exactly as before and just
-    // use width/height", so nothing changes for any caller that never
-    // calls hr_dx_set_output_size().
     int  out_w = 0;
     int  out_h = 0;
 
@@ -192,10 +162,7 @@ struct DxCapCtx {
         desk_valid = false;
     }
 
-    /* Dirty + move rectangles of the currently acquired frame, folded into
-     * one bounding box. Must be called while the frame is still acquired
-     * (the metadata dies with ReleaseFrame). Anything unexpected returns
-     * the full desktop, which is always safe. */
+    // Dirty + move rectangles of the currently acquired frame, folded into one bounding box.
     DxBox changed_box(const DXGI_OUTDUPL_FRAME_INFO &fi) {
         DxBox full; full.set_full(width, height);
         if (rotated || !have_image || fi.TotalMetadataBufferSize == 0) return full;
@@ -244,10 +211,7 @@ struct DxCapCtx {
         nv_out_valid = false;    nv_rect_valid = false;
     }
 
-    /* (Re)creates every GPU-side object for the current desktop size and
-     * NV12 output size. Returns false (leaving vp_ready false) if this
-     * adapter/driver can't do BGRA->NV12 through the video processor; the
-     * caller then simply keeps using the CPU path. */
+    // (Re)creates every GPU-side object for the current desktop size and NV12 output size.
     bool gpu_build() {
         gpu_release();
         if (!gpu_enabled || nv_w < 2 || nv_h < 2 || width <= 0 || height <= 0 || rotated) return false;
@@ -270,12 +234,9 @@ struct DxCapCtx {
         cd.OutputFrameRate  = {60, 1};
         cd.OutputWidth      = (UINT)nv_w;
         cd.OutputHeight     = (UINT)nv_h;
-        /* OPTIMAL_SPEED asks the driver for its cheapest video-processing mode
-         * (no extra filtering/rate-conversion stages) - this blit runs on the
-         * same GPU the game is rendering on, so every microsecond of it is a
-         * microsecond the game doesn't get. PLAYBACK_NORMAL ("balanced") was
-         * what this used before. If a driver rejects the speed hint the
-         * enumerator is simply rebuilt with the old value. */
+        // OPTIMAL_SPEED asks the driver for its cheapest video-processing mode (no extra
+        // filtering/rate-conversion stages) - this blit runs on the same GPU the game is rendering
+        // on, so every microsecond of it is a microsecond the game doesn't get.
         cd.Usage            = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
         if (FAILED(vdev->CreateVideoProcessorEnumerator(&cd, &venum))) {
             venum.Reset();
@@ -517,18 +478,6 @@ HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
 #endif
 }
 
-/* -------------------------------------------------------------------------
- * hr_dx_last_error
- *
- * HRESULT (as an unsigned 32-bit value, since HR_EXPORT functions are
- * plain C and HRESULT isn't a portable type across the DLL boundary) from
- * the most recent hr_dx_create() failure - S_OK (0) if the most recent
- * attempt succeeded or none has run yet. Purely diagnostic: lets callers
- * log *why* DXGI init failed (access denied vs. no current session vs.
- * something else) instead of just "returned null", without having to
- * plumb HRESULT itself across the C boundary. See hr_pl_create()'s use of
- * this in pipeline.cpp.
- * ---------------------------------------------------------------------- */
 HR_EXPORT unsigned long hr_dx_last_error(void) {
 #ifdef _WIN32
     return (unsigned long)g_last_dx_error;
@@ -567,40 +516,8 @@ HR_EXPORT int hr_dx_get_size(void *handle, int *out_w, int *out_h) {
 #endif
 }
 
-/* -------------------------------------------------------------------------
- * hr_dx_set_output_size
- *
- * (diagonal line/pixel corruption + the bottom slice of the frame
- * missing, seen recording fullscreen games -- e.g. older Source titles --
- * running at a lower exclusive-fullscreen resolution than the desktop,
- * such as 1366x768 on a 1600x900 desktop):
- *
- * The caller (pipeline.cpp) allocates its bgra_buf once, at
- * hr_pl_start() time, sized to whatever dx_get_size() reports THEN, and
- * tells ffmpeg's rawvideo demuxer that exact width/height for the entire
- * recording. But a game switching into (or out of, or between two
- * different) exclusive-fullscreen resolutions after that point triggers
- * DXGI_ERROR_ACCESS_LOST -- handled by calling reset() -- and reset()
- * re-reads the OS's current output mode and resizes DxCapCtx::width/
- * height to match it. hr_dx_capture() used to always blit ctx->width
- * tightly-packed columns per row; once ctx->width no longer matched what
- * the caller's buffer/ffmpeg pipe were told, every row landed at the
- * wrong offset in the caller's buffer (a smaller ctx->width packed into a
- * wider expected stride), which reads back as the frame shearing into
- * diagonal lines, and left the buffer's tail -- the bottom rows, since
- * everything is one row-major array -- with whatever stale bytes were
- * there before, i.e. a chunk of the bottom of the frame effectively
- * missing.
- *
- * Call this once with the width/height the caller's buffer was actually
- * allocated for (immediately after that allocation). From then on,
- * hr_dx_capture() always fills exactly that many rows of exactly that
- * stride, regardless of what the desktop's actual mode does mid-
- * recording -- nearest-neighbour stretching the real frame to fit if it
- * doesn't match -- so a resolution change can, at worst, introduce mild
- * resampling, instead of ever writing a corrupted/misaligned frame into
- * the caller's buffer.
- * ---------------------------------------------------------------------- */
+// hr_dx_set_output_size - (diagonal line/pixel corruption + the bottom slice of the frame
+// missing, seen recording fullscreen games -- e.g.
 HR_EXPORT void hr_dx_set_output_size(void *handle, int w, int h) {
 #ifdef _WIN32
     if (!handle) return;
@@ -618,20 +535,7 @@ HR_EXPORT void hr_dx_set_output_size(void *handle, int w, int h) {
 #endif
 }
 
-/* -------------------------------------------------------------------------
- * Frame acquisition shared by the CPU (BGRA) and GPU (NV12) paths.
- *
- * SKIP UNCHANGED FRAMES: AcquireNextFrame() also returns successfully when
- * only the mouse pointer moved or was redrawn. In that case
- * LastPresentTime and AccumulatedFrames are both 0 - the desktop *image*
- * has not changed at all (the pointer is delivered out-of-band). The old
- * code still CopyResource()'d the whole desktop into a staging texture,
- * mapped it, memcpy'd ~8MB (1080p) into the caller's buffer and made the
- * caller re-convert the whole picture - every tick, on an otherwise static
- * screen. Now such frames are released immediately and reported the same
- * way a real DXGI timeout is (HR_DX_TIMEOUT: "nothing new"), which
- * capture_loop() already turns into a cheap "repeat the last frame".
- * ---------------------------------------------------------------------- */
+// Frame acquisition shared by the CPU (BGRA) and GPU (NV12) paths.
 enum class DxAcq { Timeout, Lost, Error, Idle, New };
 
 static DxAcq dx_acquire(DxCapCtx *c, int timeout_ms, ComPtr<ID3D11Texture2D> &tex, DxBox &box) {
@@ -653,10 +557,7 @@ static DxAcq dx_acquire(DxCapCtx *c, int timeout_ms, ComPtr<ID3D11Texture2D> &te
     c->acquired = true;
     ++c->st_acquired;
 
-    /* Pointer-only update: LastPresentTime == 0 AND AccumulatedFrames == 0.
-     * (Requiring both is deliberately conservative: if a driver reports one
-     * without the other we copy - a wasted copy, never a lost update.) The
-     * very first image is always taken. */
+    // Pointer-only update: LastPresentTime == 0 AND AccumulatedFrames == 0.
     if (c->have_image && fi.LastPresentTime.QuadPart == 0 && fi.AccumulatedFrames == 0) {
         c->duplication->ReleaseFrame();
         c->acquired = false;
@@ -718,15 +619,7 @@ static int dx_map(DxCapCtx *c, ID3D11Texture2D *tex, bool wait, int timeout_ms,
     return FAILED(hr) ? HR_DX_ERROR : HR_DX_OK;
 }
 
-/* -------------------------------------------------------------------------
- * CPU path: hand staging[slot] to the caller's BGRA buffer.
- *
- * When the caller's buffer is known to hold the previously delivered frame
- * (same pointer, same shape), only the bounding box of what changed since
- * then is copied - a blinking caret costs a few KB instead of 8MB. The
- * changed row range is remembered for hr_dx_get_dirty_rows() so the
- * pipeline can also skip re-converting the unchanged rows.
- * ---------------------------------------------------------------------- */
+// CPU path: hand staging[slot] to the caller's BGRA buffer.
 static int cpu_deliver(DxCapCtx *c, int slot, uint8_t *out, bool wait, int timeout_ms) {
     D3D11_MAPPED_SUBRESOURCE mapped{};
     int mr = dx_map(c, c->staging[slot].Get(), wait, timeout_ms, mapped);
@@ -768,7 +661,7 @@ static int cpu_deliver(DxCapCtx *c, int slot, uint8_t *out, bool wait, int timeo
         c->out_valid = true;
         c->last_out  = out;
     } else {
-    
+
         if (c->xmap_src_w != W || c->xmap_dst_w != tgt_w) {
             c->xmap.resize((size_t)tgt_w);
             const float rx = (float)W / (float)tgt_w;
@@ -811,22 +704,15 @@ static int cpu_deliver(DxCapCtx *c, int slot, uint8_t *out, bool wait, int timeo
 /* Nothing new from DXGI (timeout, or a pointer-only update). */
 static int cpu_idle(DxCapCtx *c, uint8_t *out, int timeout_ms) {
     if (c->have_pending) {
-        /* FLUSH: the newest real frame is still sitting in the second
-         * staging texture because delivery is deliberately one call behind
-         * (so Map() never stalls on the copy it just queued). On a screen
-         * that then goes quiet nothing would ever push it out: the last
-         * change before a pause (a dialog opening, the final typed
-         * character) stayed invisible in the recording until the *next*
-         * change happened. Hand it over now. If the GPU still isn't done,
-         * keep it pending and retry on the next call. */
+        // FLUSH: the newest real frame is still sitting in the second staging texture because
+        // delivery is deliberately one call behind (so Map() never stalls on the copy it just
+        // queued).
         int r = cpu_deliver(c, c->pending_idx, out, false, timeout_ms);
         if (r == HR_DX_OK) { c->have_pending = false; return HR_DX_OK; }
         return r;
     }
-    /* Nothing pending, but the caller's buffer may still be out of date
-     * (frames were consumed by the GPU/NV12 path meanwhile). Re-render it
-     * from the persistent GPU copy of the desktop, synchronously - this only
-     * happens on a path switch, not per frame. */
+    // Nothing pending, but the caller's buffer may still be out of date (frames were consumed
+    // by the GPU/NV12 path meanwhile).
     if (!c->out_carry.empty() && c->gpu_enabled && c->desk_valid && c->staging[0]) {
         const int w = c->write_idx;
         DxBox all; all.set_full(c->width, c->height);
@@ -851,10 +737,8 @@ static int cpu_new_frame(DxCapCtx *c, ID3D11Texture2D *tex, const DxBox &B,
     dx_copy_region(c, c->staging[w].Get(), tex, cb);
     c->slot_box[w] = B;
 
-    /* Release the desktop-duplication frame as soon as the copy is queued
-     * rather than after Map()/Unmap() -- lets the next AcquireNextFrame()
-     * proceed sooner, and CopyResource()'s destination keeps the data
-     * alive regardless of when the source frame is released. */
+    // Release the desktop-duplication frame as soon as the copy is queued
+    // rather than after Map()/Unmap() -- lets the next AcquireNextFrame()
     dx_release(c);
 
     /* Output the buffer copied on the *previous* call, not this one -- see
@@ -866,13 +750,7 @@ static int cpu_new_frame(DxCapCtx *c, ID3D11Texture2D *tex, const DxBox &B,
     c->write_idx   ^= 1;
 
     if (!have_output) {
-        /* Nothing older to hand out. Normally that just means "first frame
-         * after an idle period": report it like a real DXGI timeout (the
-         * capture loop carries the last frame forward) and deliver this one
-         * on the next call. But when the caller's buffer holds no usable
-         * picture at all (very first frame, after a reset, or after the GPU
-         * path consumed frames) deliver right now instead, so the first
-         * thing that gets encoded isn't stale/black. */
+        // Nothing older to hand out.
         if (c->out_valid && c->out_carry.empty()) return HR_DX_TIMEOUT;
         int r = cpu_deliver(c, w, out, /*wait=*/true, timeout_ms);
         if (r == HR_DX_OK) c->have_pending = false;
@@ -888,37 +766,16 @@ static int cpu_new_frame(DxCapCtx *c, ID3D11Texture2D *tex, const DxBox &B,
     return r;
 }
 
-/* -------------------------------------------------------------------------
- * hr_dx_capture
- * Grabs one frame into caller-allocated BGRA buffer.
- * ---------------------------------------------------------------------- */
+// hr_dx_capture
+// Grabs one frame into caller-allocated BGRA buffer.
 HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
 #ifdef _WIN32
     if (!handle || !out_bgra) return HR_DX_ERROR;
     auto *ctx = static_cast<DxCapCtx *>(handle);
 
-    // CRASHFIX (0xC0000005 null-pointer read a few ms after "DXGI capture
-    // lost -- resetting", nothing else logged in between - matches the
-    // supplied crash dump exactly: exception in hr.exe itself, read access
-    // violation at address 0x0). reset() (called from hr_dx_reset() after
-    // HR_DX_LOST, see capture_loop()'s HR_DX_LOST branch) unconditionally
-    // does `duplication.Reset()` up front before trying to re-acquire a
-    // new IDXGIOutputDuplication - if that re-acquire then fails (e.g. a
-    // game is holding exclusive fullscreen right after the display mode
-    // change that caused the loss in the first place - a completely normal,
-    // expected condition DuplicateOutput() itself already retries for, see
-    // reset()'s own loop), duplication is left null and reset() returns a
-    // failure HRESULT. capture_loop() logs the "resetting" message and
-    // kicks reset() off but was never checking that return value, so on
-    // the very next tick it called back in here anyway - and every call
-    // below assumes ctx->duplication is a live object. Calling a virtual
-    // method (AcquireNextFrame) through a null ComPtr reads the vtable
-    // pointer from address 0, which is exactly this crash. Reporting
-    // HR_DX_LOST here (instead of dereferencing) makes this call site
-    // behave the same way it already does for every OTHER "capture isn't
-    // currently possible" case: capture_loop() falls back to re-encoding
-    // the last good frame and retries dx_reset() again in a second,
-    // instead of taking the whole app down.
+    // CRASHFIX (0xC0000005 null-pointer read a few ms after "DXGI capture lost -- resetting",
+    // nothing else logged in between - matches the supplied crash dump exactly: exception in
+    // hr.exe itself, read access violation at address 0x0).
     if (!ctx->duplication) return HR_DX_LOST;
 
     ComPtr<ID3D11Texture2D> tex;
@@ -943,16 +800,6 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
 #endif
 }
 
-/* -------------------------------------------------------------------------
- * hr_dx_get_dirty_rows
- *
- * After a hr_dx_capture() that returned HR_DX_OK: 1 and [*y0,*y1) if only
- * those rows of the caller's buffer differ from what the PREVIOUS
- * HR_DX_OK delivery left there (so a caller that still has that previous
- * picture converted can re-convert just those rows); 0 if the whole frame
- * must be treated as changed (first frame, stretched output, periodic full
- * refresh, path switch...).
- * ---------------------------------------------------------------------- */
 HR_EXPORT int hr_dx_get_dirty_rows(void *handle, int *y0, int *y1) {
 #ifdef _WIN32
     if (!handle) return 0;
@@ -988,24 +835,9 @@ HR_EXPORT void hr_dx_get_stats(void *handle, unsigned long long *acquired,
 #endif
 }
 
-/* =========================================================================
- * GPU PATH: D3D11 Video Processor, BGRA -> NV12 (+ crop + scale)
- *
- * The desktop image never leaves the GPU until it is already NV12: the
- * readback is 1.5 bytes/pixel instead of 4 and the CPU does no colour
- * conversion or scaling at all (works on integrated GPUs too - the video
- * processor is part of every D3D11 driver that supports video).
- *
- * Semantics of hr_dx_capture_nv12() mirror hr_dx_capture(): HR_DX_OK = a
- * (possibly new) complete NV12 frame is in out_nv12; HR_DX_TIMEOUT =
- * nothing changed, the caller's previous NV12 buffer is still current.
- * ====================================================================== */
+// GPU PATH: D3D11 Video Processor, BGRA -> NV12 (+ crop + scale)
 
-/* Enable (out_w/out_h > 0) or disable (0/0) the GPU path. out_w/out_h are
- * the NV12 frame size; they are rounded down to even. cur_bgra, if not
- * null, is the caller's current full-desktop BGRA buffer, used to seed the
- * persistent GPU copy of the desktop when DXGI has no new image to give us
- * (static screen). Returns 1 if the video processor is usable. */
+// Enable (out_w/out_h > 0) or disable (0/0) the GPU path.
 HR_EXPORT int hr_dx_gpu_enable(void *handle, int out_w, int out_h, const uint8_t *cur_bgra) {
 #ifdef _WIN32
     if (!handle) return 0;
@@ -1024,11 +856,8 @@ HR_EXPORT int hr_dx_gpu_enable(void *handle, int out_w, int out_h, const uint8_t
         if (!ctx->gpu_build()) return 0;
     }
 
-    /* Seed the desktop copy from the caller's buffer - only if that buffer
-     * is provably the latest picture (fully synced, nothing pending, and
-     * exactly the desktop's size). Retried on every call until it works,
-     * because on a static screen DXGI will never deliver an image that
-     * could seed it the normal way. */
+    // Seed the desktop copy from the caller's buffer - only if that buffer is provably the
+    // latest picture (fully synced, nothing pending, and exactly the desktop's size).
     if (!ctx->desk_valid && cur_bgra && ctx->have_image && ctx->out_valid &&
         ctx->last_out == cur_bgra && ctx->out_carry.empty() && !ctx->have_pending &&
         (ctx->out_w <= 0 || ctx->out_w == ctx->width) &&
@@ -1150,10 +979,8 @@ HR_EXPORT int hr_dx_capture_nv12(void *handle, uint8_t *out_nv12, int timeout_ms
     ctx->update_desktop_copy(tex.Get(), box);
     dx_release(ctx);
 
-    /* The CPU ring did not see this frame: its staging textures are now
-     * behind by `box`, its pending frame is obsolete, and the caller's BGRA
-     * buffer no longer matches the desktop. The next CPU-path call will
-     * therefore do one full, synchronous refresh (see cpu_idle()). */
+    // The CPU ring did not see this frame: its staging textures are now behind by `box`, its
+    // pending frame is obsolete, and the caller's BGRA buffer no longer matches the desktop.
     ctx->stale[0].add(box);
     ctx->stale[1].add(box);
     ctx->have_pending = false;
@@ -1296,37 +1123,7 @@ HR_EXPORT int hr_dx_output_desc(int adapter_idx, int output_idx,
 #endif
 }
 
-/* -------------------------------------------------------------------------
- * hr_dx_recommend_codec
- *
- * First-launch-only helper (see main_frame.cpp's `first_launch` branch):
- * HomRec's compiled-in default encoder used to be a flat "libx264" for
- * every install (AppState::video_codec's in-class initializer), regardless
- * of what's actually in the machine. OBS auto-picks a GPU encoder
- * (NVENC/QSV/AMF) when one's available and only falls back to software
- * x264 when it isn't - HomRec never did, so identical recording settings
- * on a machine with a capable GPU meant HomRec was doing real-time video
- * encoding on the CPU while OBS was doing it on the GPU, a large and
- * entirely avoidable CPU gap that had nothing to do with how efficient
- * either app's *own* code was.
- *
- * Walks the same IDXGIAdapter1 list hr_dx_adapter_count()/hr_dx_create()
- * already enumerate (adapter 0 is what capture actually binds to), skips
- * the software/WARP adapter DXGI always reports, and scores every
- * recognized vendor's adapter so a real discrete GPU (NVIDIA/AMD) outranks
- * an Intel iGPU on a laptop that has both, and a bigger card outranks a
- * smaller one of the same vendor. Writes the matching ffmpeg encoder name
- * into out_buf ("h264_nvenc" / "h264_amf" / "h264_qsv") and returns 1, or
- * writes "libx264" and returns 0 if nothing recognized was found (old GPU,
- * remote/RDP session, or a vendor this function doesn't know about yet -
- * software encode is always a safe, working fallback).
- *
- * Deliberately just a static vendor-ID check, not a real "does ffmpeg's
- * h264_nvenc actually initialize on this driver" probe (that would mean
- * spawning ffmpeg and doing a throwaway encode before the user has even
- * seen the main window) - Settings > Video already lets anyone whose
- * hardware encoder turns out not to work switch back to libx264 by hand.
- * ---------------------------------------------------------------------- */
+// hr_dx_recommend_codec - First-launch-only helper (see main_frame.cpp's `first_launch` branch):
 HR_EXPORT int hr_dx_recommend_codec(char *out_buf, int buf_chars) {
     const char *codec = "libx264";
     int found_gpu = 0;

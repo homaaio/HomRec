@@ -25,7 +25,7 @@
 #include <wx/filedlg.h>
 #include <wx/display.h>
 #include <wx/wrapsizer.h>
-#include <thread> 
+#include <thread>
 #include <atomic>
 #include <sstream>
 #include <wx/msgdlg.h>
@@ -66,11 +66,8 @@ extern "C" {
     const char *hr_settings_get_codec(const void *h);
     const char *hr_settings_get_theme(const void *h);
     int hr_settings_get_flag(const void *h, const char *name);
-    // Phase 1 (see commands.md): the set_*/save side of this API is no
-    // longer used here - PersistSettings() (this file) and HrcConfig::Save
-    // (hrc_config.h) replace it. Only the one-time migration read path
-    // above (get_* + load) is still needed, for upgrading an install that
-    // only ever had homrec_settings.json.
+    // Phase 1 (see commands.md): the set_*/save side of this API is no longer used here -
+    // PersistSettings() (this file) and HrcConfig::Save (hrc_config.h) replace it.
 
     // dxgi_capture.cpp - one-shot GPU vendor probe, used only on a
     // genuine first launch (see the first_launch branch below) to pick a
@@ -81,18 +78,6 @@ extern "C" {
 // FromColorref/ColorButton/StatusDot moved to themed_widgets.cpp.
 
 // Raw-Win32 OverlaysDockPanel creates real child HWNDs (list/buttons)
-// owner-drawn level meters) that need WM_HSCROLL/WM_DRAWITEM delivered -
-// Windows sends both to the control's *immediate parent* HWND, not the
-// top-level frame. This wxPanel subclass exists purely to be that immediate
-// parent and forward the two messages on, via MSWWindowProc (the same hook
-// wx itself uses internally for this sort of thing).
-//
-// Defined here at global/file scope (NOT inside the anonymous namespace
-// below) because main_frame.h forward-declares it at global scope too
-// (`class NativeHostPanel *overlays_host_`) - a class defined inside an
-// anonymous namespace is a different, invisible type from one of the same
-// name forward-declared at global scope, which is exactly what produced
-// the "invalid use of incomplete type" build errors.
 class NativeHostPanel : public wxPanel {
 public:
     explicit NativeHostPanel(wxWindow *parent) : wxPanel(parent) {}
@@ -114,15 +99,6 @@ protected:
             on_command(LOWORD(wParam));
             return 0;
         }
-        // The overlay dock's raw HWNDs (the STATIC "panel"
-        // background and the LISTBOX row list -- the two "+"/"x" buttons
-        // already theme themselves via HrWin32Theme::ThemeButton()) send
-        // WM_CTLCOLORSTATIC/WM_CTLCOLORLISTBOX here, to their *immediate*
-        // parent, same as WM_HSCROLL/WM_DRAWITEM above. Nothing answered
-        // them, so they fell through to wxPanel's default handling and
-        // came back as plain system white/gray instead of the app's dark
-        // theme -- the same fix every other raw-Win32 dialog in this app
-        // already applies (see e.g. window_picker_dialog.cpp).
         if (nMsg == WM_CTLCOLORSTATIC) {
             return HrWin32Theme::ColorStatic(reinterpret_cast<HDC>(wParam));
         }
@@ -145,10 +121,6 @@ std::wstring WideFromNarrow(const std::string &s) {
     return w;
 }
 
-// Only one main frame exists per process - the hotkey manager's callbacks
-// (hotkey.cpp's HR_HK_CB is a plain no-arg function pointer, see its
-// header comment) fire on a background thread and need a way back to "the"
-// frame to wxQueueEvent() onto the UI thread; this is it.
 std::atomic<HomRecMainFrame *> g_frame{nullptr};
 
 constexpr int kOuterPad   = 15;
@@ -166,13 +138,6 @@ void HotkeyPauseThunk()     { if (auto *f = g_frame.load()) wxQueueEvent(f, new 
 void HotkeyFullscreenThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_FULLSCREEN)); }
 void HotkeySaveReplayThunk(){ if (auto *f = g_frame.load()) wxQueueEvent(f, new wxThreadEvent(EVT_HOTKEY_SAVE_REPLAY)); }
 
-// Custom (user-defined) hotkeys: hotkey.cpp only ever hands us back the
-// numeric id we picked when registering the binding (see
-// ConfigureHotkeysFromState() below) - g_custom_hotkey_actions maps that id
-// (offset from HK_CUSTOM_BASE=100) back to the action string the user typed
-// in Settings > Hotkeys, so OnHotkeyEvent's EVT_HOTKEY_CUSTOM case knows
-// what to actually run. Same single-frame-per-process assumption as
-// g_frame above.
 constexpr int kCustomHotkeyBase = 100;
 std::vector<std::string> g_custom_hotkey_actions;
 
@@ -209,14 +174,6 @@ constexpr int kOverlayHandle = 10;
 // Where an overlay's rectangle lands inside the on-screen preview bitmap.
 // `prev` is the bitmap's rect within the panel, sx/sy convert overlay-space
 // (native capture) pixels to on-screen pixels.
-//
-// 7th pass: the returned rectangle ALWAYS lies inside `prev`. It used to be inflated to a minimum of 20 px
-// without looking at the picture's border and was never cut to it, so a small overlay near the right /
-// bottom edge - or one left outside a smaller picture (another window / monitor was picked) - had its
-// frame drawn out in the letterbox bars: it looked as if it had slipped under the preview, and it could not
-// be grabbed any more. Now: the part of the overlay that is inside the picture is shown; a tiny one is
-// enlarged inwards only; one that is completely outside gets a small stub parked on the nearest edge so it
-// can still be picked up and dragged back.
 wxRect OverlayScreenRect(const OverlayDef &ov, const wxRect &prev, double sx, double sy) {
     const int minpx = kOverlayHandle * 2;
     const int rx = prev.GetX() + (int)(ov.x * sx);
@@ -250,10 +207,9 @@ PreviewPanel::PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState
       rec_(rec), state_(state), overlay_save_timer_(this) {
     SetBackgroundStyle(wxBG_STYLE_PAINT);
     Bind(wxEVT_PAINT, &PreviewPanel::OnPaint, this);
-    // See ColorSlider's ctor (themed_widgets.cpp) for why: a buffered
-    // paint DC only blits the invalidated strip back to screen on
-    // resize, not the whole client area, which can leave stale pixels
-    // behind when the window is enlarged.
+    // See ColorSlider's ctor (themed_widgets.cpp) for why: a buffered paint DC only blits the
+    // invalidated strip back to screen on resize, not the whole client area, which can leave
+    // stale pixels behind when the window is enlarged.
     Bind(wxEVT_SIZE, [this](wxSizeEvent &evt) { Refresh(true); evt.Skip(); });
     Bind(wxEVT_LEFT_DOWN, &PreviewPanel::OnLeftDown, this);
     Bind(wxEVT_MOTION, &PreviewPanel::OnMouseMove, this);
@@ -287,13 +243,6 @@ void PreviewPanel::PollRefresh() {
     if ((++idle_ticks_ % 10) == 0) Refresh(false);
 }
 
-// The coordinate space overlays are measured in for whatever is currently
-// on screen: the pipeline's real composite size for the live feed (the
-// cropped window rect in window-capture mode, the full monitor otherwise),
-// or the size the one-off screenshot was taken at in snapshot mode. Using
-// capture_width()/height() for this instead is wrong whenever a window crop
-// is active - it would scale every frame by the monitor size, not the
-// picture actually shown.
 bool PreviewPanel::GetNativeSize(int &w, int &h) const {
     w = h = 0;
     if (snapshot_mode_) {
@@ -329,12 +278,9 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         int smileyY = (cs.GetHeight() - ext.GetHeight()) / 2;
         dc.DrawText(smiley, (cs.GetWidth() - ext.GetWidth()) / 2, smileyY);
 
-        // Preview being off means there's no live image to drag overlays
-        // against - clicking anywhere in this area grabs a one-off
-        // screenshot and edits them on that instead (see OnLeftDown() /
-        // BeginSnapshotEditing()). This is just the pointer to it, and
-        // it's what "edit settings hint-no-overlay false" (bter plugin
-        // console command) turns off.
+        // Preview being off means there's no live image to drag overlays against - clicking
+        // anywhere in this area grabs a one-off screenshot and edits them on that instead (see
+        // OnLeftDown() / BeginSnapshotEditing()).
         if (state_.hint_no_overlay) {
             wxFont hintFont = GetFont();
             dc.SetFont(hintFont);
@@ -438,13 +384,6 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
         dc.DrawBitmap(cached_bmp_, (cs.GetWidth() - cached_dst_w_) / 2, (cs.GetHeight() - cached_dst_h_) / 2);
     }
 
-    // Draw a frame around EVERY overlay (with its name/type above it and a
-    // resize handle on the top-left and bottom-right corners) directly on
-    // top of the preview, so it can be clicked, moved and resized right
-    // here instead of only through the "Edit Overlay..." window
-    // (overlay_editor_dialog.h). A clicked overlay stays selected (gold, thicker frame) after
-    // the mouse button is released, so it's always obvious which one is
-    // being edited.
     wxRect prevRect;
     int nw = 0, nh = 0;
     if (GetPreviewRect(prevRect) && GetNativeSize(nw, nh)) {
@@ -457,9 +396,8 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
 
         for (size_t i = 0; i < state_.overlays.size(); ++i) {
             const auto &ov = state_.overlays[i];
-            // In snapshot mode every overlay is shown/draggable, even a
-            // hidden one - that's the only way left to reach it when the
-            // live preview (where it'd otherwise be temporarily unhidden
+            // In snapshot mode every overlay is shown/draggable, even a hidden one - that's the only
+            // way left to reach it when the live preview (where it'd otherwise be temporarily unhidden
             // via Show/Hide) is off.
             if (!ov.visible && !snapshot_mode_) continue;
             wxRect r = OverlayScreenRect(ov, prevRect, sx, sy);
@@ -594,10 +532,6 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
         return;
     }
 
-    // A plain click on empty space deselects, and also clears any drag
-    // state left stuck by a drag that never got a matching OnLeftUp/
-    // OnCaptureLost (mouse capture silently stolen by another window
-    // mid-drag, a modal dialog popping up while the button was held...).
     if (drag_overlay_index_ >= 0 || selected_overlay_index_ >= 0) {
         if (HasCapture()) ReleaseMouse();
         drag_overlay_index_ = -1;
@@ -689,11 +623,6 @@ void PreviewPanel::EndDrag() {
     drag_overlay_index_ = -1; // selected_overlay_index_ stays - the frame stays highlighted
     drag_corner_ = Corner::kNone;
     snap_center_x_ = snap_center_y_ = false;
-    // This in-place drag-on-the-preview path bypasses both
-    // OverlaysDockPanel::Refresh() and ShowOverlayEditorDialog() (the
-    // other places that persist state_.overlays), so a finished drag has to
-    // save itself - but only if the overlay actually moved: a plain click
-    // used to rewrite the whole autosave file for nothing.
     if (drag_moved_) {
         drag_moved_ = false;
         overlay_save_pending_ = true;
@@ -835,28 +764,6 @@ HomRecMainFrame::HomRecMainFrame()
     g_frame = this;
     SetIcon(wxIcon("#1", wxBITMAP_TYPE_ICO_RESOURCE));
 
-    // ====== Settings load (Phase 1 storage migration - see commands.md) ======
-    // homrec.hrc (HrcConfig, .hrc format) replaces homrec_settings.json
-    // (settings.cpp) as the app's own auto-managed settings file - see
-    // settings.cpp's header comment for the JSON-whitelist bug class
-    // this sidesteps (a field missing from that whitelist silently
-    // reverting to its compiled-in default every launch, which is exactly
-    // what happened to show_summary/show_overlays_panel there). Bootstrap
-    // order:
-    //   1. Read the default location (HrcConfig::kDefaultSettingsPath) if
-    //      present. settings_dialog.cpp's OnSave always keeps a live
-    //      mirror of the real settings there even when a custom path is
-    //      configured, purely so this one fixed location is always
-    //      enough to find - or BE - the real settings, without a separate
-    //      pointer-file format just for that redirect.
-    //   2. If that mirror declares a different settings_path, load from
-    //      there too (the actual file, in case it's been hand-edited more
-    //      recently than the last in-app Save mirrored it over).
-    //   3. If neither exists yet, this is either a fresh install or an
-    //      upgrade from a version that only ever had homrec_settings.json
-    //      - read that once with the old JSON engine and immediately
-    //      write a .hrc so every later launch takes the fast, direct path
-    //      above instead of this one-time migration branch.
     std::wstring hrc_path = HrcConfig::kDefaultSettingsPath;
     bool have_hrc = HrcConfig::Load(state_, hrc_path);
     if (have_hrc && !state_.settings_path.empty()) {
@@ -904,25 +811,6 @@ HomRecMainFrame::HomRecMainFrame()
             state_.first_launch = true;
 
             // First-ever launch (no .hrc, no legacy homrec_settings.json):
-            // state_.video_codec is about to be left at its compiled-in
-            // "libx264" default (AppState::video_codec's in-class
-            // initializer) for good, since nothing else runs before this
-            // point to override it and the very next thing that touches
-            // this settings object is Save() writing whatever's in state_
-            // back out. That default never checked what's actually in the
-            // machine, so every fresh install re-encoded on the CPU even
-            // with a perfectly capable NVENC/QSV/AMF GPU sitting idle right
-            // there - a structural reason HomRec could run meaningfully
-            // hotter than OBS at identical settings on such a machine (OBS
-            // does this same GPU-first pick itself), separate from either
-            // app's own capture/compositing efficiency. hr_dx_recommend_codec()
-            // (dxgi_capture.cpp) walks the adapter list once here, only
-            // on this one-time first-launch path, and only ever picks a
-            // *hardware* codec when it actually found one - existing
-            // installs that already saved "libx264" (by detection or by
-            // the user's own choice) are untouched, and anyone whose
-            // hardware encoder misbehaves can still switch back by hand in
-            // Settings > Video.
             char rec_codec[32] = {};
             if (hr_dx_recommend_codec(rec_codec, sizeof(rec_codec))) {
                 state_.video_codec = rec_codec;
@@ -933,10 +821,6 @@ HomRecMainFrame::HomRecMainFrame()
         hr_settings_destroy(settings);
     }
 
-    // Load back whatever the Overlays panel had last saved (see
-    // hrc_config.h's comment on SaveOverlaysOnly/LoadOverlaysOnly) - this
-    // is what's missing before, overlays used to always start empty every
-    // launch even though everything else in state_ was restored above.
     HrcConfig::LoadOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
 
     // Apply the Security tab's logging toggles immediately at startup -
@@ -998,28 +882,10 @@ HomRecMainFrame::HomRecMainFrame()
     plugins_->SetContext(rec_.get(), &theme_);
     plugins_->LoadAll();
 
-    // ====== cfg/autoexec.cfg ======
-    // Console is normally created lazily, the first time someone opens it
-    // (Help > Console / Ctrl+Shift+T) - EnsureCreated() here builds the
-    // window (and its output_ control) up front instead, WITHOUT showing
-    // it, purely so RunCfgFile() below has somewhere for its output to
-    // go. Must come after plugins_->LoadAll() above, not before - a
-    // plugin's homrec.register_command() calls need to have already run
-    // for an autoexec.cfg line to be able to invoke one (e.g. a command
-    // the Bter plugin registers).
     console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), GetHWND(), plugins_.get());
     console_->EnsureCreated(wxGetInstance());
     console_->RunCfgFile(L"autoexec");
 
-    // ====== cfg/config.cfg (Phase 1+2 settings-storage migration, see
-    // commands.md) ======
-    // Runs after autoexec.cfg, and after the .hrc/JSON-migration settings
-    // load earlier in this ctor - so a hand-written config.cfg can start
-    // with "sethrc homrec.hrc 1" to seed itself from whatever the app
-    // already loaded, then override just the handful of settings it
-    // actually cares about on the lines that follow (see commands.md's
-    // "sethrc" section for why that doesn't need any extra priority
-    // syntax beyond normal top-to-bottom execution).
     console_->RunCfgFile(L"config");
 
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnPreviewTimer, this, preview_timer_.GetId());
@@ -1057,16 +923,6 @@ HomRecMainFrame::~HomRecMainFrame() {
     aui_.UnInit();   // 2.4: must happen before dock_host_ and the panes are destroyed
     if (preview_panel_) preview_panel_->FlushOverlaySave(); // children + state_ still alive here
     if (state_.recording && rec_) rec_->Stop();
-    // MUST run on every exit path, not just a clean menu-driven Exit -
-    // SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) persists on a
-    // window until explicitly cleared, independent of HomRec's own
-    // lifetime, and affects every capture tool system-wide (not just
-    // this app). Without this, closing HomRec (including via the X
-    // button, Alt+F4, or a crash reaching this destructor via a
-    // higher-level handler) could leave some other window permanently
-    // invisible to screen-sharing/capture tools with no obvious reason
-    // why, long after HomRec itself is gone. See the comment on
-    // AppState::hidden_capture_windows for the full explanation.
     ClearAllHiddenCaptureWindows(state_);
     if (hotkey_handle_) {
         hr_hk_stop(hotkey_handle_);
@@ -1090,17 +946,6 @@ void HomRecMainFrame::BuildMenuBar() {
     // Every label below now comes from lang_ instead of being a hardcoded
     // English literal - previously this was the single biggest reason a
     // dropped .hrl only ever retranslated the recording buttons/stats:
-    // this function (and SettingsDialog) never consulted lang_ at all, so
-    // no amount of language-file content could reach File/View/Settings/
-    // Help. Accelerators (\tF11, \tCtrl+Shift+T) are appended here in code
-    // rather than baked into the translated string, so a translator's .hrl
-    // never has to know about them.
-    //
-    // Called again from ApplyLanguageText() whenever the language changes
-    // (Settings > Language, or importing a .hrl), not just once at
-    // startup - wxFrame::SetMenuBar() detaches but does not delete the
-    // previous menu bar, so the old one is explicitly deleted first to
-    // avoid leaking one wxMenuBar per language switch.
     if (wxMenuBar *old = GetMenuBar()) {
         SetMenuBar(nullptr);
         delete old;
@@ -1155,31 +1000,6 @@ void HomRecMainFrame::BuildMenuBar() {
 
     // // Quick FPS presets. The "ultra"/"turbo"/"balanced"/"eco" strings (each
     // // naming its own target FPS - see language.cpp) and AppState::
-    // // recording_mode/HrRecordingModeToStr/FromStr have existed since before
-    // // this file's own git history goes back, fully translated and fully
-    // // round-tripped through the .hrc/profile save format - but nothing
-    // // anywhere ever built this menu or read the enum back to actually
-    // // change target_fps, so picking a "mode" (the .hrc/profile format has
-    // // carried a recording_mode value this whole time) never did anything.
-    // // AppendRadioItem instead of four independent AppendCheckItems - the
-    // // four are mutually exclusive (exactly one FPS preset is ever "active"),
-    // // and a contiguous radio group is exactly what that means in a wx menu.
-    // auto *perfMenu = new wxMenu();
-    // perfMenu->AppendRadioItem(ID_PERF_ULTRA,    wxString::FromUTF8(lang_.Get("ultra")));
-    // perfMenu->AppendRadioItem(ID_PERF_TURBO,    wxString::FromUTF8(lang_.Get("turbo")));
-    // perfMenu->AppendRadioItem(ID_PERF_BALANCED, wxString::FromUTF8(lang_.Get("balanced")));
-    // perfMenu->AppendRadioItem(ID_PERF_ECO,      wxString::FromUTF8(lang_.Get("eco")));
-    // {
-    //     int checked_id = ID_PERF_BALANCED;
-    //     switch (state_.recording_mode) {
-    //         case RecordingMode::Ultra:    checked_id = ID_PERF_ULTRA;    break;
-    //         case RecordingMode::Turbo:    checked_id = ID_PERF_TURBO;    break;
-    //         case RecordingMode::Balanced: checked_id = ID_PERF_BALANCED; break;
-    //         case RecordingMode::Eco:      checked_id = ID_PERF_ECO;      break;
-    //     }
-    //     perfMenu->Check(checked_id, true);
-    // }
-    // menuBar->Append(perfMenu, wxString::FromUTF8(lang_.Get("performance_menu")));
 
     auto *themeMenu = new wxMenu();
     themeMenu->Append(ID_THEME_DARK, wxString::FromUTF8(lang_.Get("dark")));
@@ -1370,10 +1190,7 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     preview_toggle_btn_->SetMinSize(wxSize(104, 22));
     headerSizer->Add(preview_toggle_btn_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { ToggleLivePreview(); }, ID_PREVIEW_TOGGLE_BTN);
-    // FPS readout. It used to be created EMPTY, was only filled while recording and was auto-sized: the sizer
-    // had placed a zero-width label at the right edge, so when text appeared the label grew to the right,
-    // outside the header, and was never seen (and the header itself was never re-laid out). Now it has a
-    // fixed width (room for "FPS: 000.0"), never resizes itself and always shows something.
+    // FPS readout.
     preview_fps_lbl_ = new wxStaticText(preview_header_, wxID_ANY,
                                         wxString::FromUTF8(lang_.Get("fps")) + wxString::FromUTF8(" \u2014"),
                                         wxDefaultPosition, wxDefaultSize,
@@ -1438,12 +1255,8 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
             SetPaneShown("overlays", false, false);
         }
     };
-    // "Edit Overlay..." (row context menu, see overlays_dock_panel.h) -
-    // opens the merged position + settings + preview window for that one
-    // overlay (overlay_editor_dialog.h). OverlaysDockPanel has no access to
-    // RecordingController/theme_ itself, so it just asks main_frame.cpp to
-    // open the window; re-Refresh()es the panel afterward so a renamed/re-typed
-    // overlay's row label picks up the change right away.
+    // "Edit Overlay..." (row context menu, see overlays_dock_panel.h) - opens the merged
+    // position + settings + preview window for that one overlay (overlay_editor_dialog.h).
     overlays_panel_->on_edit_overlay = [this](size_t idx) {
         if (!rec_raw_ || !overlays_panel_ || idx >= state_.overlays.size()) return;
         // 8th pass: window / region layers have their own settings window (what is shown + how it is found)
@@ -1487,11 +1300,8 @@ void HomRecMainFrame::BuildBottomBar(wxWindow *parent, wxSizer *parentSizer) {
     file_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI")));
     sizer->Add(file_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
 
-    // Empty (and therefore invisible - wxStaticText with no text takes no
-    // visible space) until CheckHomUpdatesAsync() finds something to
-    // report. Deliberately just a clickable label + a details popup, not
-    // a plugin browser - hom itself already has search/show/install for
-    // that; this is only meant to be "something told me updates exist".
+    // Empty (and therefore invisible - wxStaticText with no text takes no visible space) until
+    // CheckHomUpdatesAsync() finds something to report.
     plugin_updates_lbl_ = new wxStaticText(bottom_bar_, wxID_ANY, wxEmptyString);
     plugin_updates_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI").Bold()));
     plugin_updates_lbl_->SetCursor(wxCursor(wxCURSOR_HAND));
@@ -1538,10 +1348,6 @@ void HomRecMainFrame::ApplyThemeColours() {
     if (made_by_lbl_) { made_by_lbl_->SetForegroundColour(textSecondary); made_by_lbl_->SetBackgroundColour(surface); }
     if (version_bar_lbl_) { version_bar_lbl_->SetForegroundColour(textSecondary); version_bar_lbl_->SetBackgroundColour(surface); }
 
-    // "STATUS"/"TIME"/"STATS" section labels aren't kept as individually
-    // named members (built inline in BuildLeftPanel's addSection lambda),
-    // so re-theme every direct child of left_panel_ uniformly instead -
-    // matches them all having the same accent-on-surface styling anyway.
     if (left_panel_) {
         for (wxWindow *child : left_panel_->GetChildren()) {
             if (auto *st = dynamic_cast<wxStaticText *>(child)) {
@@ -1630,9 +1436,6 @@ void HomRecMainFrame::SetupDocking() {
     aui_.SetManagedWindow(dock_host_);
     // Transparent-window hint + no live-resize: dragging a panel or a sash only shows an outline
     // and relayouts ONCE on release, so the 20 fps preview isn't re-scaled every mouse move.
-    // NOT wxAUI_MGR_RECTANGLE_HINT: that XOR-draws on the screen DC, and the preview (20 fps) and the
-    // raw-HWND overlays panel repaint over it, so the frame flickered, showed only in part, or
-    // not at all. The transparent hint is its own top-level window, so nothing paints over it.
     aui_.SetFlags(wxAUI_MGR_ALLOW_FLOATING | wxAUI_MGR_TRANSPARENT_HINT | wxAUI_MGR_NO_VENETIAN_BLINDS_FADE);
 
     aui_.AddPane(preview_container_, wxAuiPaneInfo().Name("preview").CenterPane().PaneBorder(false)
@@ -1803,24 +1606,10 @@ void HomRecMainFrame::ResetDockLayout() {
 }
 
 void HomRecMainFrame::ApplyLanguageText() {
-    // Previously this only retitled the window - every other piece of
-    // chrome (section headers, Start/Pause buttons, preview title, bottom
-    // bar) was set from lang_ exactly once at startup and never revisited,
-    // so switching languages via Settings (or importing a .hrl) left all
-    // of it stuck in whatever language was active when the window was
-    // built. The only text that ever appeared to "follow" a language
-    // switch was the FPS/resolution readout and the recording/paused word
-    // in the bottom bar - and only while actively recording - because
-    // those happen to re-read lang_.Get() on every OnStatsTimer tick, not
-    // because anything here was actually updating them.
     std::string title = lang_.Get("app_title");
     if (title.empty()) title = std::string("HomRec v") + HR_APP_VERSION;
     SetTitle(wxString::FromUTF8(title));
 
-    // File/View/Settings/Help never followed a language switch before -
-    // BuildMenuBar() reads lang_ now, so rebuilding it here is what
-    // actually retranslates the menu bar (see that function's own comment
-    // for why the old menu bar is deleted rather than just replaced).
     BuildMenuBar();
 
     if (dock_ready_) {
@@ -1841,11 +1630,6 @@ void HomRecMainFrame::ApplyLanguageText() {
     }
     if (made_by_lbl_) made_by_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("made_by")));
 
-    // Start/Pause button text and the status/file labels are state-
-    // dependent (Ready/Recording/Paused, Start/Stop, Pause/Resume) - redo
-    // whichever branch matches the current state_ instead of just
-    // reapplying a single fixed string, so a language switch mid-recording
-    // (or mid-pause) still lands on the right word for that state.
     if (state_.recording) {
         if (start_color_btn_) start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("stop")));
         if (state_.paused) {
@@ -1855,10 +1639,9 @@ void HomRecMainFrame::ApplyLanguageText() {
             if (pause_color_btn_) pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
             SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
         }
-        // file_lbl_ during an active recording is overwritten again on the
-        // very next OnStatsTimer tick (500ms), so it isn't touched here -
-        // doing so would just race that tick and occasionally show the
-        // stale state_word for a moment.
+        // file_lbl_ during an active recording is overwritten again on the very next OnStatsTimer
+        // tick (500ms), so it isn't touched here - doing so would just race that tick and
+        // occasionally show the stale state_word for a moment.
     } else {
         if (start_color_btn_) start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
         if (pause_color_btn_) pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
@@ -1875,20 +1658,12 @@ void HomRecMainFrame::ApplyLanguageText() {
 
 void HomRecMainFrame::SetupTrayIcon() {
     tray_icon_ = new TrayIcon(this);
-    // "#2" = icons/tray.ico (resource.rc) - a separate, smaller asset from
-    // "#1"/main.ico used for the window/taskbar icon. Used to be the same
-    // "#1" resource as the window icon, which is why the tray icon had
-    // the same white outline the full-size app icon does - a 16x16 tray
-    // render of an icon drawn for taskbar/Alt-Tab sizes just isn't the
-    // same asset.
+    // "#2" = icons/tray.ico (resource.rc) - a separate, smaller asset from "#1"/main.ico used
+    // for the window/taskbar icon.
     tray_icon_->SetIcon(wxIcon("#2", wxBITMAP_TYPE_ICO_RESOURCE), "HomRec");
     tray_icon_->Bind(wxEVT_TASKBAR_LEFT_DCLICK, [this](wxTaskBarIconEvent &) {
         RestoreFromTray();
     });
-    // wxTaskBarIcon::PopupMenu() (invoked from TrayIcon::CreatePopupMenu()'s
-    // right-click menu) dispatches wxEVT_MENU to the tray icon object
-    // itself, not the owning frame - bind here, not via the frame's
-    // ID_FILE_OPEN_RECORDINGS..ID_VIEW_OVERLAYS_PANEL range Bind.
     tray_icon_->Bind(wxEVT_MENU, [this](wxCommandEvent &) { RestoreFromTray(); }, ID_TRAY_RESTORE);
     tray_icon_->Bind(wxEVT_MENU, [this](wxCommandEvent &) { Close(true); }, ID_TRAY_EXIT);
 }
@@ -1916,11 +1691,7 @@ void HomRecMainFrame::ConfigureHotkeysFromState() {
                      state_.hotkey_pause.c_str(), state_.hotkey_fullscreen.c_str(),
                      state_.hotkey_save_replay.c_str());
 
-    // Custom action hotkeys (Settings > Hotkeys > "Add Hotkey"). Slot i's
-    // OS-level id is kCustomHotkeyBase+i regardless of whether its combo
-    // actually parsed, so g_custom_hotkey_actions[id-base] always lines up
-    // with state_.custom_hotkeys[i] - a bad combo just never fires, it
-    // doesn't shift every binding after it.
+    // Custom action hotkeys (Settings > Hotkeys > "Add Hotkey").
     hr_hk_clear_custom(hotkey_handle_);
     g_custom_hotkey_actions.clear();
     g_custom_hotkey_actions.reserve(state_.custom_hotkeys.size());
@@ -1979,14 +1750,6 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
     if (file_lbl_) file_lbl_->SetLabel(msg);
 }
 
-// scheduled_start_time has no dedicated settings-dialog control
-// yet (set via .hrc / the console's "<key> = <value>" / a plugin's
-// set_setting()), and this used to require an exact byte-for-byte match
-// against a strictly zero-padded "%02d:%02d" - so "9:30", " 09:30", "09:30 "
-// or "09:30:00" all parsed as valid-looking times that would simply never
-// fire, with nothing telling the person their schedule was silently dead.
-// Parses tolerantly now and logs once if the string can't be understood at
-// all, instead of just doing nothing forever.
 static bool ParseScheduledTime(const std::string &raw, int &hh, int &mm) {
     size_t i = 0, n = raw.size();
     while (i < n && isspace((unsigned char)raw[i])) ++i;
@@ -2030,12 +1793,8 @@ void HomRecMainFrame::OnScheduleTimer(wxTimerEvent &) {
     snprintf(target_buf, sizeof(target_buf), "%02d:%02d", target_hh, target_mm);
 
     // Only fire the instant the current minute first matches the target
-    // (schedule_last_matched_minute_ != current_minute) - without this,
-    // "12:00" would re-trigger RequestStart() every second for the
-    // entire 12:00-12:01 minute. Once the minute rolls over past the
-    // target, this naturally re-arms for the same time tomorrow, with no
-    // date-tracking needed - a mismatch just means "not the trigger
-    // instant right now".
+    // (schedule_last_matched_minute_ != current_minute) - without this, "12:00" would re-
+    // trigger RequestStart() every second for the entire 12:00-12:01 minute.
     if (current_minute == target_buf && current_minute != schedule_last_matched_minute_) {
         schedule_last_matched_minute_ = current_minute;
         HrLog::Info("Recording: scheduled start time (" + current_minute + ") reached - starting.");
@@ -2058,12 +1817,8 @@ void HomRecMainFrame::DoStart() {
     pause_color_btn_->Enable2(true);
     SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
     if (plugins_) plugins_->EmitHook("on_recording_start");
-    // cfg/startrec.cfg: same RunCfgFile() autoexec.cfg already uses at
-    // startup, just re-triggered on every new recording instead of once
-    // at launch. Runs after the plugin hook above so a startrec.cfg line
-    // can rely on plugin-registered commands having already reacted to
-    // on_recording_start if it needs to. Missing file = silent no-op,
-    // same as autoexec.
+    // cfg/startrec.cfg: same RunCfgFile() autoexec.cfg already uses at startup, just re-
+    // triggered on every new recording instead of once at launch.
     if (console_) console_->RunCfgFile(L"startrec");
 }
 
@@ -2086,10 +1841,9 @@ void HomRecMainFrame::DoStop() {
 void HomRecMainFrame::HandleRecordingCrashed() {
     HrLog::Error("Recording: stopping after the ffmpeg process ended unexpectedly.");
 
-    // Same UI-side sequence DoStop() runs - the status dot/time/file label
-    // otherwise stay stuck on whatever they last showed (see rec_->
-    // crashed()'s doc comment for why that used to happen forever, not
-    // just until the next tick).
+    // Same UI-side sequence DoStop() runs - the status dot/time/file label otherwise stay
+    // stuck on whatever they last showed (see rec_-> crashed()'s doc comment for why that used
+    // to happen forever, not just until the next tick).
     SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
@@ -2115,19 +1869,14 @@ void HomRecMainFrame::OnRecordingFinalized() {
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
     if (plugins_) plugins_->EmitHook("on_recording_stop");
 
-    // Came from HandleRecordingCrashed() rather than a normal DoStop() -
-    // let the user know *why* recording just stopped on its own instead
-    // of silently landing back on Ready as if they'd clicked Stop
-    // themselves. Shown before the normal "recording saved" summary below
-    // (still worth showing - whatever was captured up to the crash was
-    // still finalized and kept).
+    // Came from HandleRecordingCrashed() rather than a normal DoStop() - let the user know
+    // *why* recording just stopped on its own instead of silently landing back on Ready as if
+    // they'd clicked Stop themselves.
     if (recording_crashed_pending_notice_) {
         recording_crashed_pending_notice_ = false;
         if (recording_restart_after_crash_) {
             // Full-GPU (ddagrab) capture died - typically because a game switched the display mode (or
-            // went fullscreen) while recording. Do NOT pop up a modal box over the game: just carry on
-            // in a new file with the normal capture pipeline (ddagrab is blocked for this session, see
-            // RecordingController::PollStats()), and say so in the status line + homrec.log.
+            // went fullscreen) while recording.
             recording_restart_after_crash_ = false;
             HrLog::Warn("Recording: full-GPU capture stopped (display mode change?) - the part captured so far "
                         "was saved; continuing in a NEW file with the normal capture pipeline.");
@@ -2157,21 +1906,7 @@ void HomRecMainFrame::OnRecordingFinalized() {
     }
 
     // "Show summary" setting: the "recording saved, open folder?" popup.
-    // Ported from custom_messagebox.h (already used elsewhere in this
-    // file, e.g. ShowWelcomeDialog) - this was the one consumer that had
-    // never actually been wired up (state_.show_summary loaded from
-    // settings and shown as a checkbox, but nothing read it at Stop()
-    // time). Skipped if the setting is off, if the user checked "Don't
-    // show again" earlier, or if there's nowhere to open (empty
-    // output_folder).
     if (state_.show_summary && !summary_dont_show_again_ && !state_.output_folder.empty()) {
-        // This used to pass lang_.Get("recording_saved") as *both*
-        // the title and the headline, and just the bare output folder as
-        // the body - so the popup never actually said anything about the
-        // recording that just finished (no filename, duration, resolution,
-        // or size), which read as "no information about the entry". Build
-        // a real summary instead, from the last-* snapshot RecordingController
-        // takes in Stop() (the live accessors are already zeroed by now).
         std::wstring path = rec_->last_output_path();
         std::wstring filename = path;
         size_t slash = filename.find_last_of(L"\\/");
@@ -2197,13 +1932,6 @@ void HomRecMainFrame::OnRecordingFinalized() {
             info, dont_show);
         summary_dont_show_again_ = dont_show;
 
-        // Checking "Don't show again" only ever set the in-memory
-        // summary_dont_show_again_ flag above, which suppresses the popup
-        // for the rest of this run but is gone the moment the app is
-        // relaunched - from the user's side that reads as the checkbox
-        // "doing nothing". Make it actually stick: turn the real
-        // show_summary setting off and persist that, same as unchecking
-        // "Show summary" in Settings would.
         if (dont_show) {
             state_.show_summary = false;
             PersistSettings();
@@ -2304,13 +2032,6 @@ bool RunCapturedProcessForBadge(const std::wstring &cmdline, const std::wstring 
 }
 } // namespace
 
-// Runs `hom.exe list --upgradable` on a background thread (this shells
-// out and hits the network - hom's search/show/list all fetch
-// Hom/plugins/index.json live, see tools/hom/hom.cpp - so it must not
-// block the UI thread) and posts EVT_HOM_UPDATES_CHECKED back with the
-// result. Silently does nothing if hom.exe isn't sitting next to this
-// exe (an unmodified/portable install without it is a normal, expected
-// case, not an error worth surfacing).
 void HomRecMainFrame::CheckHomUpdatesAsync() {
     std::wstring hom_path = MainFrameExeDir() + L"\\hom.exe";
     if (GetFileAttributesW(hom_path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
@@ -2320,11 +2041,6 @@ void HomRecMainFrame::CheckHomUpdatesAsync() {
         std::wstring out;
         if (!RunCapturedProcessForBadge(cmdline, MainFrameExeDir(), 15000, &out)) return;
 
-        // hom prints one "name: old -> new" line per upgradable plugin
-        // (see tools/hom/hom.cpp's CmdList()) and nothing else useful to
-        // this badge - everything else it might print ("hom: no
-        // upgrades available.", the "N plugin(s) skipped..." note, a
-        // connection error) starts with "hom:" and isn't a plugin line.
         int count = 0;
         wxString summary;
         std::wistringstream iss(out);
@@ -2374,15 +2090,6 @@ void HomRecMainFrame::ToggleFullscreenNative() {
 }
 
 void HomRecMainFrame::OpenProgramFilesFolder() {
-    // Opens the folder hr.exe itself lives in - the installed/portable
-    // program's own files (ffmpeg/, plugins/, icons/, logs/, homrec.hrc,
-    // etc.) - as distinct from ID_FILE_OPEN_RECORDINGS above, which opens
-    // wherever the user has configured recordings to be *saved*
-    // (Settings > General > Output folder), frequently a different drive
-    // or folder entirely from where the program is installed. Useful for
-    // reaching plugins/, dropping in a .hrp by hand, or grabbing a log
-    // file to attach to a bug report without hunting down the install
-    // path first.
     std::wstring dir = MainFrameExeDir();
     if (dir.empty()) return;
 
@@ -2400,14 +2107,9 @@ void HomRecMainFrame::OpenProgramFilesFolder() {
 }
 
 void HomRecMainFrame::ImportHrpPlugin() {
-    // The README's documented install path for a packaged plugin
-    // ("download it and drop it into plugins/ as-is, then restart
-    // HomRec") requires manually finding the plugins folder and
-    // relaunching the app. This does the same copy from an ordinary file
-    // picker and loads the plugin immediately via
-    // plugins_->LoadPluginArchive() (lua_engine.cpp - already used
-    // internally by LoadAll() for every *.hrp sitting in plugins/, see
-    // its own header comment) instead.
+    // The README's documented install path for a packaged plugin ("download it and drop it
+    // into plugins/ as-is, then restart HomRec") requires manually finding the plugins folder
+    // and relaunching the app.
     wxFileDialog dlg(this, "Import Plugin (.hrp)", wxEmptyString, wxEmptyString,
                       "HomRec Plugin (*.hrp)|*.hrp|All files (*.*)|*.*",
                       wxFD_OPEN | wxFD_FILE_MUST_EXIST);
@@ -2415,20 +2117,10 @@ void HomRecMainFrame::ImportHrpPlugin() {
 
     std::string srcPath = dlg.GetPath().ToUTF8().data();
 
-    // Same "plugins" relative directory LuaPluginEngine was constructed
-    // with (plugins_ = std::make_unique<LuaPluginEngine>("plugins"),
-    // below) - its constructor already CreateDirectoryA()s it, so by the
-    // time this can run (plugins_ exists) it's already there.
     std::string base = srcPath;
     size_t slash = base.find_last_of("\\/");
     if (slash != std::string::npos) base = base.substr(slash + 1);
     if (base.empty()) base = "plugin";
-    // LoadPluginArchive() derives the plugin's extracted-folder name from
-    // the filename up to the last '.', so force the copy to actually end
-    // in ".hrp" regardless of what the source file was called - picking
-    // a renamed "cool-plugin.zip" via the "All files" filter above should
-    // still land as plugins\cool-plugin.hrp, not
-    // plugins\cool-plugin.zip.hrp.
     size_t dot = base.find_last_of('.');
     if (dot != std::string::npos) base = base.substr(0, dot);
     std::string destPath = "plugins\\" + base + ".hrp";
@@ -2455,12 +2147,8 @@ void HomRecMainFrame::ImportHrpPlugin() {
         wxMessageBox("Plugin installed and loaded.", "Import Plugin",
                      wxOK | wxICON_INFORMATION, this);
     } else {
-        // Copied fine, but LoadPluginArchive() itself failed (bad
-        // plugin.json, missing entry script, on_load() threw, etc. - see
-        // plugins.log for specifics) or plugins_ isn't up yet. The file
-        // is still sitting in plugins/ either way, so the *next* full
-        // restart's plugins_->LoadAll() will try it again from scratch,
-        // same as if it had been dropped in by hand per the README.
+        // Copied fine, but LoadPluginArchive() itself failed (bad plugin.json, missing entry
+        // script, on_load() threw, etc.
         wxMessageBox("Plugin copied into the plugins folder, but couldn't be "
                       "loaded right now - check the Console/plugins.log for "
                       "details. It will be tried again the next time HomRec starts.",
@@ -2471,23 +2159,9 @@ void HomRecMainFrame::ImportHrpPlugin() {
 void HomRecMainFrame::OpenRecordingsFolder() {
     if (state_.output_folder.empty()) return;
 
-    // Two separate reasons this window can end up hidden behind HomRec
-    // instead of in front of it, both worth guarding against since we
-    // can't tell from here which one actually applies on the user's
-    // machine:
-    //
-    // 1. Windows' foreground-lock heuristic can let a newly-launched
-    //    process's window open without taking focus at all if the OS
-    //    decides this isn't a "user-initiated" enough action - telling
-    //    Windows explicitly that the next foreground request from any
-    //    process is allowed works around that.
     AllowSetForegroundWindow(ASFW_ANY);
 
-    // 2. If Always on Top is on, HomRec is WS_EX_TOPMOST - which by
-    //    definition stays above every non-topmost window regardless of
-    //    activation, so Explorer would open "behind" it no matter how
-    //    hard it tries to come to the front. Drop topmost just long
-    //    enough for the folder window to appear, then restore it.
+    // 2.
     bool was_topmost = (GetWindowStyleFlag() & wxSTAY_ON_TOP) != 0;
     if (was_topmost) {
         SetWindowStyleFlag(GetWindowStyleFlag() & ~wxSTAY_ON_TOP);
@@ -2508,17 +2182,7 @@ void HomRecMainFrame::OnRestoreTopmostTimer(wxTimerEvent &) {
 void HomRecMainFrame::OnStartClicked(wxCommandEvent &) { if (state_.recording) DoStop(); else RequestStart(); }
 void HomRecMainFrame::OnPauseClicked(wxCommandEvent &) { DoPause(); }
 
-// Called right after the window/region pickers return. Both pickers only
-// write into state_ - without this the live preview kept showing (and
-// re-using, for Start()) a pipeline built for the OLD target until some
-// unrelated Settings change happened to rebuild it, so it looked like the
-// pick had been ignored and the full screen was still being captured.
-// Skipped while recording: the running pipeline keeps its crop until Stop(),
-// and RefreshPreviewSettings()'s change-detection snapshot deliberately
-// stays stale so the next call after Stop() rebuilds for the new target.
-// FPS readout in the preview header (next to the Preview ON/OFF button). Recording: the recording's real fps
-// (HomRec's pipeline, or ffmpeg's own -progress count for full-GPU/ddagrab recordings). Idle with the preview
-// on: the capture rate of the preview pipeline. Otherwise a dash - the label itself is always there.
+// Called right after the window/region pickers return.
 void HomRecMainFrame::UpdatePreviewFpsLabel() {
     if (!preview_fps_lbl_) return;
     wxString txt = wxString::FromUTF8(lang_.Get("fps"));
@@ -2682,10 +2346,6 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         }
         case ID_VIEW_FULLSCREEN: ToggleFullscreenNative(); break;
         case ID_VIEW_OVERLAYS_PANEL:
-            // Persisted immediately (matching the ID_THEME_DARK/LIGHT handlers below) rather
-            // than waiting for OnClose(), since minimize-to-tray vetoes the close event
-            // entirely - that was exactly why toggling a panel closed never stuck across a
-            // restart before.
             SetPaneShown("overlays", !state_.show_overlays_panel, true);
             break;
         case ID_VIEW_AUDIO_PANEL:
@@ -2704,46 +2364,12 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
         // case ID_PERF_ULTRA:
         // case ID_PERF_TURBO:
         // case ID_PERF_BALANCED:
-        // case ID_PERF_ECO: {
-        //     // Quick FPS presets (see BuildMenuBar()'s comment on perfMenu
-        //     // for why these did nothing until now). Each one is just "set
-        //     // recording_mode + the FPS its own menu label already promises,
-        //     // then reuse exactly the same apply/persist path the Target FPS
-        //     // field on Settings > Capture already uses" - RefreshPreviewSettings()
-        //     // live-applies target_fps to an idle preview pipeline and defers
-        //     // it (without losing it) until Stop() if a recording is in
-        //     // progress, exactly like typing a new value into that field
-        //     // already does. Reusing it here means this can't drift from
-        //     // that field's own (already-fixed) behavior.
-        //     int fps;
-        //     switch (evt.GetId()) {
-        //         case ID_PERF_ULTRA: state_.recording_mode = RecordingMode::Ultra; fps = 60; break;
-        //         case ID_PERF_TURBO: state_.recording_mode = RecordingMode::Turbo; fps = 30; break;
-        //         case ID_PERF_ECO:   state_.recording_mode = RecordingMode::Eco;   fps = 8;  break;
-        //         default:            state_.recording_mode = RecordingMode::Balanced; fps = 15; break;
-        //     }
-        //     state_.target_fps = fps;
-        //     if (rec_raw_) rec_raw_->RefreshPreviewSettings();
-        //     PersistSettings();
-        //     break;
-        // }
         case ID_SETTINGS_OPEN:
             if (ShowSettingsDialog(this, state_, theme_, lang_, rec_raw_) && rec_raw_) {
-                // Settings dialog's General tab can now change
-                // state_.current_language (including to a language just
-                // imported via "Add Language...") - reload it here so
-                // Save takes effect immediately instead of only after
-                // the next restart, same as the theme handlers below do
-                // for state_.current_theme.
                 lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
                 ApplyLanguageText();
 
                 rec_raw_->RefreshPreviewSettings();
-                // Live preview is authoritative again the moment it's back
-                // on - drop the "Apply with preview off" screenshot (if any
-                // editing session was active) and let CaptureSnapshotFrame's
-                // temporary pipeline go back to being torn down normally
-                // when Disable live preview is still checked.
                 if (preview_panel_ && preview_panel_->InSnapshotMode() && !state_.disable_preview) {
                     preview_panel_->ExitSnapshotMode();
                 }
@@ -2754,11 +2380,8 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             // Settings" entry used to do.
             if (hotkey_handle_) { hr_hk_stop(hotkey_handle_); hr_hk_destroy(hotkey_handle_); hotkey_handle_ = nullptr; }
             SetupHotkeys();
-            // Level meter refresh rate (Settings > Audio) also lives on
-            // this dialog - resync the timer so a change takes effect
-            // immediately instead of only after a restart. Harmless
-            // no-op restart if the dialog was cancelled or the rate
-            // wasn't touched, same reasoning as SetupHotkeys() above.
+            // Level meter refresh rate (Settings > Audio) also lives on this dialog - resync the timer
+            // so a change takes effect immediately instead of only after a restart.
             RestartLevelMeterTimer();
             // 2.4: mixer layout and "lock panel layout" are on that dialog too.
             if (audio_panel_) audio_panel_->ApplyMeterStyle();
@@ -2767,8 +2390,6 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             // Instant Replay's on/off checkbox and buffer-size spinner also
             // live on this dialog - apply whichever way it changed. Calling
             // both Enable/Disable unconditionally is harmless either way:
-            // each is a no-op if already in the requested state (see their
-            // header comments in recording_controller.h).
             if (rec_) {
                 if (state_.instant_replay_enabled) {
                     std::wstring err;
@@ -2786,10 +2407,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             OnCheckForUpdates();
             break;
         case ID_HELP_CONSOLE:
-            // console_ is always non-null by this point now (constructed
-            // at startup so cfg/autoexec.cfg has somewhere to print to -
-            // see plugins_->LoadAll() above) - this null-check is just
-            // defensive leftover from when construction was fully lazy.
+            // console_ is always non-null by this point now (constructed at startup so
+            // cfg/autoexec.cfg has somewhere to print to - see plugins_->LoadAll() above) - this null-
+            // check is just defensive leftover from when construction was fully lazy.
             if (!console_) console_ = std::make_unique<ConsoleWindow>(state_, rec_.get(), GetHWND(), plugins_.get());
             console_->Show(wxGetInstance());
             break;
@@ -2803,11 +2423,6 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
 
 // Downloads the update installer on a worker thread while this (UI) thread
 // keeps the window alive through a wxProgressDialog: progress bar + Cancel.
-// The download used to run directly on the UI thread, so for the whole
-// download (the installer is tens of MB) the window showed "Not responding"
-// and on a slow connection looked permanently hung.
-// Returns true with *installer_path set only for a complete download;
-// *cancelled tells "user pressed Cancel" apart from a real failure.
 static bool DownloadUpdateWithProgress(wxWindow *parent, const HrUpdate::UpdateInfo &info,
                                        std::wstring *installer_path, bool *cancelled) {
     HrUpdate::DownloadState st;
@@ -2844,10 +2459,7 @@ static bool DownloadUpdateWithProgress(wxWindow *parent, const HrUpdate::UpdateI
     return ok;
 }
 
-// Help > Check for Updates. Hits GitHub on a background thread (see
-// update.cpp) so the UI never blocks on the network call, then hops
-// back to the UI thread via CallAfter before touching any widgets or
-// showing a message box.
+// Help > Check for Updates.
 void HomRecMainFrame::OnCheckForUpdates() {
     static std::atomic<bool> check_running{false};
     if (check_running.exchange(true)) return;
@@ -2911,12 +2523,6 @@ void HomRecMainFrame::OnCheckForUpdates() {
 
 void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
     if (rec_) rec_->SyncOverlays();
-    // Once EnsurePreview() has failed enough times in a row (DXGI
-    // dx_create() stuck - RDP, a virtual display, a display mode that
-    // just changed), swap the generic "Preview loading..." placeholder
-    // for something that actually explains it instead of looking like a
-    // permanent freeze. Reverts the instant capture recovers (monitor
-    // reconnected, RDP session promoted to a real session, etc.).
     if (preview_panel_) {
         static const wxString kUnavailableText =
             wxString::FromUTF8("Screen capture unavailable \u2014 check you're not on RDP/a "
@@ -2934,12 +2540,9 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     // right now (smart mode flips between "smart" and "exact"); repaints only when that text changed.
     if (overlays_panel_ && state_.show_overlays_panel) overlays_panel_->RefreshSourceRow();
 
-    // See rec_->crashed()'s doc comment - PollStats() just flagged this,
-    // it doesn't stop anything itself (that touches wx UI state, which
-    // belongs here, not in RecordingController). Bail out of the rest of
-    // this tick immediately - state_.recording is still true until
-    // HandleRecordingCrashed()'s StopAsync() finishes, but there's nothing
-    // useful left to poll from the now-dead ffmpeg process.
+    // See rec_->crashed()'s doc comment - PollStats() just flagged this, it doesn't stop
+    // anything itself (that touches wx UI state, which belongs here, not in
+    // RecordingController).
     if (rec_ && rec_->crashed()) {
         rec_->AcknowledgeCrash();
         HandleRecordingCrashed();
@@ -2980,11 +2583,6 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
         setLabel(res_lbl_, res);
         wxString state_word = wxString::FromUTF8(lang_.Get(state_.paused ? "paused" : "recording"));
         setLabel(file_lbl_, state_word + wxString::FromUTF8(" \u2014 ") + t);
-        // Overload warning: rec_->overloaded() only turns on after a
-        // sustained streak of real frame drops (see PollStats()), so this
-        // isn't fighting the normal "recording"/"paused" status text for
-        // attention on every tick - just while the pipeline is actually
-        // behind.
         if (rec_ && rec_->overloaded()) {
             SetStatusState(wxString::FromUTF8("\u26A0 System overloaded \u2014 dropping frames"),
                             theme_.warning);
@@ -3012,21 +2610,11 @@ void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
         evt.Veto();
         return;
     }
-    // Clear g_frame here, on the real-close path, rather than waiting for
-    // ~HomRecMainFrame() - Destroy() below only *schedules* the actual C++
-    // destruction, which can happen several event-loop turns later. Doing
-    // it now closes (most of) the window where CheckHomUpdatesAsync()'s
-    // background thread could still wxQueueEvent() onto a frame that's
-    // about to be freed. See the comment on g_frame's declaration.
+    // Clear g_frame here, on the real-close path, rather than waiting for ~HomRecMainFrame() -
+    // Destroy() below only *schedules* the actual C++ destruction, which can happen several
+    // event-loop turns later.
     if (g_frame == this) g_frame = nullptr;
     // (app froze ~3-6s on close while Instant Replay was on - log:
-    // "HomRec closing" then, 3s later, "Instant Replay: segment writer didn't
-    // finish gracefully in time - killing it"): TeardownPreview() below
-    // detaches pipeline_ (sets it to nullptr) even though Instant Replay's
-    // segment writer is still piping into it, so ~RecordingController()'s
-    // later StopInstantReplayEncoder() had no pipeline to close the pipe on,
-    // ffmpeg never saw EOF, and both 3s waits ran out before it got killed.
-    // Stop Instant Replay properly first, while pipeline_ still exists.
     PersistSettings();   // 2.4: also stores the dock layout
     if (rec_ && rec_->instant_replay_enabled()) rec_->DisableInstantReplay();
     if (rec_) rec_->TeardownPreview();
@@ -3040,21 +2628,11 @@ void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
     // Plain minimize (not minimize-to-tray) doesn't Hide() the window, so
     // it never reaches OnShowEvent below - the window is still
     // "shown" as far as wx is concerned, just iconized in the taskbar.
-    // Gate the preview pipeline on that too: nothing is visible to show
-    // the live thumbnail to either way.
     if (rec_) rec_->SetPreviewVisible(!evt.IsIconized());
     evt.Skip();
 }
 
 void HomRecMainFrame::OnShowEvent(wxShowEvent &evt) {
-    // Pauses/resumes the preview-only capture pipeline based on whether
-    // the window is actually visible - see SetPreviewVisible()'s comment
-    // in recording_controller.h for why (this is the idle-CPU fix: the
-    // pipeline used to run unconditionally the whole time the app was
-    // open, minimized-to-tray or not). Covers minimize-to-tray, both
-    // tray-restore paths (double-click and the menu item), and a plain
-    // taskbar minimize/restore alike, since they all route through
-    // Show()/Hide() one way or another.
     if (rec_) rec_->SetPreviewVisible(evt.IsShown());
     evt.Skip();
 }
@@ -3068,13 +2646,8 @@ void HomRecMainFrame::OnHotkeyEvent(wxThreadEvent &evt) {
     else if (t == EVT_HOTKEY_CUSTOM) {
         int idx = evt.GetInt() - kCustomHotkeyBase;
         if (idx >= 0 && idx < static_cast<int>(g_custom_hotkey_actions.size()) && console_) {
-            // Run the exact same line a user could type into the console or
-            // put in autoexec.cfg - built-in commands, "setting = value"
-            // assignments (e.g. "disable_preview = true"), and anything a
-            // plugin registered via homrec.register_command/register_setting
-            // all go through this one parser, so a hotkey is just another
-            // way of "typing" the action. `true` = pre-confirmed, since
-            // there's no console window open for a hotkey to prompt in.
+            // Run the exact same line a user could type into the console or put in autoexec.cfg -
+            // built-in commands, "setting = value" assignments (e.g.
             console_->RunSingleCommand(WideFromNarrow(g_custom_hotkey_actions[idx]), true);
         }
     }

@@ -19,9 +19,8 @@ namespace {
 const wchar_t kPresetsDir[] = L"presets";
 
 // Strips characters Windows filenames can't contain, same denylist
-// RecordingController::ResolveCaptureAppName() uses for the {app}
-// template placeholder - kept consistent since both end up as a bare
-// filename component.
+// RecordingController::ResolveCaptureAppName() uses for the {app} template placeholder -
+// kept consistent since both end up as a bare filename component.
 std::wstring SanitizeFileNamePart(std::wstring s) {
     for (wchar_t &c : s) {
         if (wcschr(L"\\/:*?\"<>|", c)) c = L'_';
@@ -141,9 +140,6 @@ private:
     // True for a file that only has an [overlays] section (no other
     // registry keys at all) - i.e. one written by SaveOverlaysOnly() or a
     // hand-trimmed copy of one, as opposed to a full settings export.
-    // Purely cosmetic (the "Type" column) - HrcConfig::Load() doesn't
-    // care either way, it just applies whatever keys are actually
-    // present in the file.
     static bool LooksOverlayOnly(const std::wstring &path) {
         std::ifstream f(path.c_str(), std::ios::binary);
         if (!f) return false;
@@ -224,20 +220,16 @@ private:
             state_.active_preset_name = "default";
             HrLog::Info("Preset: reloaded the active config (homrec.hrc).");
         } else {
-            // Explicit, interactive click on a preset the user picked
-            // themselves - same trust level as the manual "Import
-            // Settings..." menu item, so custom_ffmpeg_args is allowed
-            // through (see HrcConfig::Load()'s header comment on
-            // allow_sensitive_fields).
+            // Explicit, interactive click on a preset the user picked themselves - same trust level as
+            // the manual "Import Settings..." menu item, so custom_ffmpeg_args is allowed through (see
+            // HrcConfig::Load()'s header comment on allow_sensitive_fields).
             if (!HrcConfig::Load(state_, e.path)) {
                 wxMessageBox("Couldn't read that preset file.", "Set Preset", wxOK | wxICON_ERROR, this);
                 return;
             }
-            // Re-save as the active config so the switch survives a
-            // restart - homrec.hrc (or whatever Settings > Advanced >
-            // "Settings file path" points at) is what main_frame.cpp
-            // loads on startup, and presets\ itself is never read at
-            // startup on its own.
+            // Re-save as the active config so the switch survives a restart - homrec.hrc (or whatever
+            // Settings > Advanced > "Settings file path" points at) is what main_frame.cpp loads on
+            // startup, and presets\ itself is never read at startup on its own.
             std::wstring active_path = HrcConfig::ResolveSettingsPath(state_);
             if (!HrcConfig::Save(state_, active_path)) {
                 HrLog::Error("Preset: switched in-session but couldn't persist to the active config file.");

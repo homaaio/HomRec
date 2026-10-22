@@ -73,28 +73,7 @@ static bool wav_write(const char* path,
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Incremental WAV streaming
-//
-// A manual recording used to hold its ENTIRE mic/system audio track as raw
-// 16-bit PCM in mic_buf/sys_buf (see AudioState::max_buffer_sec's comment -
-// 0 during a manual recording means "don't trim, keep everything") until
-// Stop() finally called wav_write() once with the whole thing. At 44.1kHz
-// stereo that's ~176KB/sec per stream (~350KB/sec for both), so a 10-minute
-// recording held over 200MB of raw audio in RAM for its whole duration on
-// top of everything else the app was already using - exactly the steady,
-// recording-length-proportional RAM growth ("оперативка утекает", 164MB ->
-// 210MB and climbing) users were seeing, even though every byte of it *was*
-// eventually freed at Stop() (not a leak in the classic sense, just an
-// unbounded working set for as long as the recording ran).
-//
-// Fix: write the header up front with placeholder sizes, append PCM
-// straight to disk as it's periodically flushed out of mic_buf/sys_buf
-// (see hr_audio_flush_buffered(), called from RecordingController's
-// existing stats-poll timer), and patch the header's size fields in place
-// when the stream closes. RAM now only ever holds a few seconds of audio
-// (whatever's accumulated since the last flush) regardless of how long the
-// recording runs.
 static FILE* wav_stream_open(const char* path)
 {
     if (!path || !path[0]) return nullptr;
@@ -111,10 +90,8 @@ static void wav_stream_append(FILE* f, const int16_t* data, size_t n)
     fwrite(data, 2, n, f);
 }
 
-// Seeks back to patch the header now that the real channel count/rate/byte
-// count are known, then closes the file. Safe to call with data_bytes == 0
-// (an empty stream, e.g. a muted mic that never produced samples) - still
-// leaves a valid, playable (silent) WAV rather than a truncated one.
+// Seeks back to patch the header now that the real channel count/rate/byte count are
+// known, then closes the file.
 static void wav_stream_close(FILE* f, uint16_t channels, uint32_t rate, uint64_t data_bytes)
 {
     if (!f) return;
@@ -190,18 +167,9 @@ static int calc_rms(const int16_t* buf, size_t n)
     double rms = std::sqrt(sum / n);
     if (rms < 1.0) return 0;  // true digital silence
 
-    // A raw *linear* divide such as `min(100, (int)(rms / 150.0))` would
-    // require an RMS of ~15000 (already quite loud -- roughly half of full
-    // scale, 32768) just to reach 100 on the meter, and anything under ~150
-    // would round straight down to 0. Ordinary speech and background music
-    // RMS almost always lives in the low hundreds to low thousands
-    // (full-scale-amplitude audio is rare outside test tones), so a linear
-    // scale would peg the meter at (or a hair above) 0 for completely
-    // normal mic/system audio -- it would look like "complete silence" even
-    // with clearly audible input. Human hearing -- and every real VU/level
-    // meter -- is logarithmic, not linear, so scale dBFS instead: map the
-    // [-50 dBFS, 0 dBFS] range (where normal mic/speaker levels actually
-    // live) onto [0, 100].
+    // A raw *linear* divide such as `min(100, (int)(rms / 150.0))` would require an RMS of
+    // ~15000 (already quite loud -- roughly half of full scale, 32768) just to reach 100 on
+    // the meter, and anything under ~150 would round straight down to 0.
     double dbfs = 20.0 * std::log10(rms / 32768.0);
     const double floor_db = -50.0;
     double pct = (dbfs - floor_db) / (0.0 - floor_db) * 100.0;
@@ -240,19 +208,6 @@ struct WasapiStream {
         device->AddRef();
 
         // (handle/COM leak on any Start() that fails partway):
-        // every early-return below used to just `return false` once
-        // device/client/mix_fmt/data_event/capture had already been
-        // partially acquired - leaking whichever of those had already been
-        // set (device's extra AddRef() above included) instead of releasing
-        // them. On its own this is a slow leak (repeatedly failing to open
-        // a WASAPI stream - a device that's unplugged, in exclusive use by
-        // another app, or a bad mic_device_id from Settings - just leaked a
-        // little more each time), but since Settings can call hr_audio_start()
-        // to preview a device, that "occasionally fails" path could be
-        // exercised often enough to add up over an app session. Every
-        // failure path now calls close() (defined below - already null-
-        // checks each field) before returning, exactly like the success
-        // path's own eventual teardown.
         HRESULT hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
                                       nullptr, (void**)&client);
         if (FAILED(hr)) { close(); return false; }
@@ -355,17 +310,9 @@ struct WasapiStream {
             capture->ReleaseBuffer(n);
         }
 
-        // A/V SYNC FIX (system audio "runs ahead" of the video): WASAPI
-        // loopback delivers NO packets at all while nothing is playing - the
-        // silence is simply absent, not sent as zeros. Every silent stretch
-        // therefore made the system-audio track shorter than real time, and
-        // everything after it played EARLIER than the video it belongs to
-        // (the drift grows with the total silence). The mic stream doesn't
-        // have this problem (it delivers continuously), so only loopback is
-        // padded: compare the frames delivered so far with the wall-clock
-        // time elapsed and insert the missing silence BEFORE this call's data
-        // (the gap precedes it). Small deficits (< 50ms: normal packet
-        // jitter / device-clock ppm drift) are left alone.
+        // A/V SYNC FIX (system audio "runs ahead" of the video): WASAPI loopback delivers NO
+        // packets at all while nothing is playing - the silence is simply absent, not sent as
+        // zeros.
         if (loopback && rate > 0) {
             LARGE_INTEGER now{};
             QueryPerformanceCounter(&now);
@@ -419,12 +366,6 @@ static IMMDevice* get_default_output(IMMDeviceEnumerator* e)
     return dev;
 }
 
-// Find the input device whose endpoint ID matches exactly -- unlike
-// find_input_by_name() above (fuzzy, used only for the Stereo Mix
-// fallback), this backs an explicit user choice from Settings (see
-// mic_enum.h's HrEnumerateMics()/AppState::mic_device_id), so it needs
-// to find *that* device or none at all, never something else that merely
-// sounds similar.
 static IMMDevice* find_input_by_id(IMMDeviceEnumerator* e, const wchar_t* id)
 {
     if (!id || !*id) return nullptr;
@@ -500,23 +441,9 @@ struct AudioState {
     std::atomic<bool>   running{false};
     std::atomic<bool>   paused{false};
 
-    // mic_buf/sys_buf below used to be
-    // appended to unconditionally, every ~10ms, for as long as the app
-    // was open - including all the time spent NOT recording, since the
-    // capture threads run continuously from startup so the live level
-    // meters keep working. Nothing ever drained that idle-time audio
-    // (hr_audio_reset_buffers()/hr_audio_capture_to_wav() only run at
-    // actual Start()/Stop()), so it just accumulated raw 44.1kHz stereo
-    // PCM from both streams for as long as the app sat idle - tens of MB
-    // after a few minutes AFK, unbounded the longer it was left running.
-    // This flag gates the buffer *writes* only; level metering below
-    // reads straight from each read()'s fresh chunk regardless of it, so
-    // the meters keep working while idle exactly as before. Set true by
-    // hr_audio_reset_buffers() (Start()), false by
-    // hr_audio_capture_to_wav()/hr_audio_stop() (Stop()/app exit).
     std::atomic<bool>   buffering{false};
     std::atomic<int>    max_buffer_sec{0};
-    std::mutex stream_mutex; // serializes hr_audio_flush_buffered() (UI thread) vs stream close (finalize thread)
+    std::mutex stream_mutex;
     FILE*    mic_stream_file  = nullptr;
     FILE*    sys_stream_file  = nullptr;
     uint64_t mic_stream_bytes = 0;
@@ -527,11 +454,6 @@ struct AudioState {
     std::atomic<float>  sys_vol{1.0f};
     std::atomic<bool>   mic_mute{false};
     std::atomic<bool>   sys_mute{false};
-    // Gain actually applied to the last sample of the previous chunk -
-    // each worker's own running state, touched only by that one thread
-    // (unlike mic_vol/sys_vol above, which the UI thread writes and this
-    // thread reads) - see mic_worker()/sys_worker()'s ramp comment for
-    // why this exists.
     float mic_vol_smooth = 1.0f;
     float sys_vol_smooth = 1.0f;
 };
@@ -565,17 +487,9 @@ static void mic_worker(AudioState* st)
                 memset(tmp.data(), 0, tmp.size() * 2);
                 st->mic_vol_smooth = target_vol; // don't ramp *into* a stale value on unmute
             } else if (target_vol != st->mic_vol_smooth) {
-                // Ramp linearly from the gain applied to the previous
-                // chunk's last sample up to wherever the slider is *now*,
-                // one step per sample, instead of one flat multiply for
-                // the whole chunk. A slider drag lands its new value
-                // between one ~10ms audio chunk and the next (SLEEP_MS
-                // above) - applying it as a single scalar for the entire
-                // next chunk is an audible step, heard as choppy/
-                // zippering volume changes rather than a smooth fade.
-                // Same per-sample multiply-and-clamp cost as the flat
-                // version below, just an incrementing gain instead of a
-                // constant one - no extra passes, no extra CPU to speak of.
+                // Ramp linearly from the gain applied to the previous chunk's last sample up to wherever
+                // the slider is *now*, one step per sample, instead of one flat multiply for the whole
+                // chunk.
                 float start_vol = st->mic_vol_smooth;
                 size_t n = tmp.size();
                 for (size_t i = 0; i < n; ++i) {
@@ -597,12 +511,7 @@ static void mic_worker(AudioState* st)
                 int cap_sec = st->max_buffer_sec.load();
                 if (cap_sec > 0 && st->mic_stream.rate > 0) {
                     size_t max_samples = (size_t)cap_sec * st->mic_stream.rate * 2; // stereo int16
-                    // PERF: trim in ~1s chunks, not on every 10ms read. Once the
-                    // rolling buffer is full, erasing from the front of a
-                    // std::vector memmoves the whole buffer (megabytes) - doing
-                    // that 100x/sec while holding the mutex was pure overhead.
-                    // The buffer may now exceed the cap by up to 1s; every
-                    // reader trims to the exact cap (see ring_window_start()).
+                    // PERF: trim in ~1s chunks, not on every 10ms read.
                     if (st->mic_buf.size() > max_samples + (size_t)st->mic_stream.rate * 2)
                         st->mic_buf.erase(st->mic_buf.begin(), st->mic_buf.end() - (ptrdiff_t)max_samples);
                 }
@@ -665,12 +574,7 @@ static void sys_worker(AudioState* st)
                 int cap_sec = st->max_buffer_sec.load();
                 if (cap_sec > 0 && st->sys_stream.rate > 0) {
                     size_t max_samples = (size_t)cap_sec * st->sys_stream.rate * 2; // stereo int16
-                    // PERF: trim in ~1s chunks, not on every 10ms read. Once the
-                    // rolling buffer is full, erasing from the front of a
-                    // std::vector memmoves the whole buffer (megabytes) - doing
-                    // that 100x/sec while holding the mutex was pure overhead.
-                    // The buffer may now exceed the cap by up to 1s; every
-                    // reader trims to the exact cap (see ring_window_start()).
+                    // PERF: trim in ~1s chunks, not on every 10ms read.
                     if (st->sys_buf.size() > max_samples + (size_t)st->sys_stream.rate * 2)
                         st->sys_buf.erase(st->sys_buf.begin(), st->sys_buf.end() - (ptrdiff_t)max_samples);
                 }
@@ -699,12 +603,8 @@ HR_EXPORT int hr_audio_init()
     return 0;
 }
 
-/*  hr_audio_start(mic_vol, sys_vol, mic_mute, sys_mute, mic_device_id)
-    Открывает потоки и запускает потоки записи.
-    mic_device_id: WASAPI endpoint ID from HrEnumerateMics() (mic_enum.h),
-    or nullptr/empty to keep using whatever Windows currently considers the
-    default recording device (previous, and still the default, behavior).
-    Возвращает битовую маску: bit0=mic_ok, bit1=sys_ok. */
+// hr_audio_start(mic_vol, sys_vol, mic_mute, sys_mute, mic_device_id)
+// Открывает потоки и запускает потоки записи.
 HR_EXPORT int hr_audio_start(float mic_vol, float sys_vol,
                               int mic_mute, int sys_mute,
                               const wchar_t* mic_device_id)
@@ -724,13 +624,6 @@ HR_EXPORT int hr_audio_start(float mic_vol, float sys_vol,
 
     int result = 0;
 
-    // ---- Mic ---------------------------------------------------------------
-    // This always opened whatever Windows considered the default
-    // capture device, with no way to record from a different one -- see
-    // Settings' new microphone picker (settings_dialog.cpp) which is the
-    // first thing to actually set mic_device_id to something. Falls back to
-    // the default device if the requested one isn't specified, or can't be
-    // found anymore (unplugged since it was chosen, etc).
     IMMDevice* mic_dev = find_input_by_id(enumerator, mic_device_id);
     if (!mic_dev) mic_dev = get_default_input(enumerator);
     if (mic_dev && g_state->mic_stream.open(false, mic_dev)) {
@@ -807,15 +700,7 @@ HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
     if (!g_state) return 0;
     g_state->running.store(false);
 
-    // Join the capture threads BEFORE releasing the WASAPI objects they're
-    // using. The previous order called close() (which Release()s client/
-    // capture) first, while mic_worker/sys_worker could still be mid-call
-    // inside WasapiStream::read() (GetNextPacketSize/GetBuffer/ReleaseBuffer
-    // on those exact pointers) - a released-COM-object race that could hang
-    // the calling thread instead of failing cleanly, which is what made
-    // clicking Stop freeze the whole app. Threads check running.load() at
-    // the top of a ~10ms loop, so this join returns quickly once they exit
-    // on their own; only *then* is it safe to close() the streams.
+    // Join the capture threads BEFORE releasing the WASAPI objects they're using.
     if (g_state->mic_thread.joinable()) g_state->mic_thread.join();
     if (g_state->sys_thread.joinable()) g_state->sys_thread.join();
 
@@ -842,23 +727,7 @@ HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
     return result;
 }
 
-/*  hr_audio_reset_buffers()
-    Clears whatever's accumulated in mic_buf/sys_buf so far without
-    touching the running capture threads. Call this at the moment an
-    actual recording starts, so the WAV eventually written by
-    hr_audio_capture_to_wav() only contains audio from that point
-    forward - audio capture itself runs continuously from app startup
-    (for the live level meters), so without this the file would include
-    whatever was captured while the app just sat idle before Start was
-    clicked. */
-// mic_wav_path/sys_wav_path (new): when non-null, this is a manual
-// recording - open incremental WAV streams at these paths right away (see
-// wav_stream_open()'s comment) so hr_audio_flush_buffered() has somewhere
-// to send PCM as it's periodically drained from RAM instead of it
-// accumulating for the whole recording. Pass nullptr for either/both to
-// keep the old fully-in-RAM behavior (Instant Replay's rolling window,
-// which needs random access to "the last N seconds" and can't be streamed
-// straight to disk).
+// hr_audio_reset_buffers()
 HR_EXPORT void hr_audio_reset_buffers(const char* mic_wav_path, const char* sys_wav_path)
 {
     if (!g_state) return;
@@ -885,21 +754,7 @@ HR_EXPORT void hr_audio_reset_buffers(const char* mic_wav_path, const char* sys_
     g_state->buffering.store(true);
 }
 
-/*  hr_audio_flush_buffered()
-    Drains whatever's currently sitting in mic_buf/sys_buf out to their
-    open incremental WAV streams (see wav_stream_open()'s comment) and
-    clears the in-RAM copy, so a long manual recording's memory use stays
-    flat instead of growing for its entire duration. No-op for either
-    stream that doesn't have a stream file open (Instant Replay's ring
-    buffer, or a manual recording whose hr_audio_reset_buffers() call
-    wasn't given a path for that channel) - that stream keeps behaving
-    exactly as before, fully in RAM.
-
-    Meant to be called periodically (a few times a second is plenty - see
-    RecordingController::PollStats(), which already runs on a timer for
-    the whole duration of a recording) while state_.recording is true; also
-    called once more from hr_audio_capture_to_wav() to catch whatever
-    accumulated since the last periodic call before the stream closes. */
+// hr_audio_flush_buffered()
 static void extra_flush();                 // audio_extra.inc
 
 HR_EXPORT void hr_audio_flush_buffered()
@@ -931,16 +786,7 @@ HR_EXPORT void hr_audio_flush_buffered()
     }
 }
 
-/*  hr_audio_capture_to_wav(mic_wav_path, sys_wav_path)
-    Same WAV-writing behavior as hr_audio_stop(), but does NOT stop the
-    capture threads or tear down the WASAPI streams - used when a
-    *recording* stops but the app itself stays open, so the mic/system
-    level meters keep working afterward instead of going dead until the
-    next recording starts. Buffers are cleared after writing (mirrors
-    hr_audio_reset_buffers()'s job at the other end) so a subsequent
-    recording doesn't pick up leftover audio from the gap in between.
-    Real teardown (thread stop + WASAPI release) only happens via
-    hr_audio_stop(), which should be called once at actual app exit. */
+// hr_audio_capture_to_wav(mic_wav_path, sys_wav_path)
 HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
                                         const char* sys_wav_path)
 {
@@ -952,30 +798,17 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
     // there's no window where a worker thread could sneak in one more insert().
     g_state->buffering.store(false);
 
-    // Catch whatever accumulated since the last periodic
-    // hr_audio_flush_buffered() call (see its own comment) before closing
-    // the streams out below - otherwise the tail end of the recording
-    // (up to one flush interval's worth) would be silently dropped.
     hr_audio_flush_buffered();
 
     std::lock_guard<std::mutex> slk(g_state->stream_mutex);
     if (g_state->mic_stream_file) {
         // Streaming was open for this recording (hr_audio_reset_buffers()
-        // was given a real mic path) - finalize that file's header now
-        // that the real byte count is known, regardless of mic_wav_path
-        // here: the caller may pass nullptr for a muted mic even though a
-        // (silent - mute zeroes samples rather than skipping them, see
-        // mic_worker()) stream was still opened and written the whole
-        // time, and it needs a valid, non-corrupt header either way.
         wav_stream_close(g_state->mic_stream_file, 2, g_state->mic_stream.rate, g_state->mic_stream_bytes);
         g_state->mic_stream_file = nullptr;
         if (mic_wav_path && g_state->mic_stream_bytes > 0) result |= 0x1;
         g_state->mic_stream_bytes = 0;
     } else if (mic_wav_path) {
-        // Fallback for a caller that never opened streaming (e.g. an older
-        // hr_audio_reset_buffers(nullptr, ...) call site, or Instant
-        // Replay's "Save Replay" reusing this function) - same one-shot
-        // write hr_audio_capture_to_wav() always used to do.
+        // Fallback for a caller that never opened streaming (e.g.
         std::vector<int16_t> mic_out;
         {
             std::lock_guard<std::mutex> lk(g_state->mic_mutex);
@@ -1002,26 +835,14 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
     return result;
 }
 
-/*  hr_audio_set_max_buffer_sec(seconds)
-    See AudioState::max_buffer_sec's own comment. Pass 0 before/at every
-    manual-recording Start() (unlimited - the whole recording must be kept),
-    and replay_buffer_sec (plus a little slack) whenever Instant Replay is
-    buffering with no manual recording running, so its background audio
-    capture doesn't grow unbounded for as long as the app is left open. */
+// hr_audio_set_max_buffer_sec(seconds)
 HR_EXPORT void hr_audio_set_max_buffer_sec(int seconds)
 {
     if (!g_state) return;
     g_state->max_buffer_sec.store(seconds > 0 ? seconds : 0);
 }
 
-/*  hr_audio_snapshot_to_wav(mic_wav_path, sys_wav_path)
-    Same WAV-writing behavior as hr_audio_capture_to_wav(), but does NOT
-    clear the buffers or touch `buffering` afterward - used by Instant
-    Replay's "Save Replay" so the rolling audio window keeps accumulating
-    for the *next* save instead of being reset to empty (a manual
-    recording's Stop() wants the destructive version; a background replay
-    buffer being sampled does not - see hr_audio_capture_to_wav()'s own
-    comment for that case). */
+// hr_audio_snapshot_to_wav(mic_wav_path, sys_wav_path)
 // First sample index of the window a rolling buffer should expose: the last
 // max_buffer_sec seconds (the worker threads only trim in ~1s chunks now).
 // Always even, so stereo frames stay aligned. Caller holds the stream's mutex.
@@ -1060,11 +881,9 @@ HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
     return result;
 }
 
-/*  mix_wav_inmemory(mic_wav, sys_wav, out_wav)
-    The ORIGINAL two-file mixer: reads both inputs whole and builds a third buffer, i.e. it
-    needs ~3x the track size in RAM (about 1 GB for a 30-minute recording, 2 GB for an hour).
-    2.4 fix pass 2: hr_audio_mix_wav() below now streams (a few KB of RAM at any length) and only
-    falls back to this for inputs the streaming mixer can't read (e.g. a mono WAV). */
+// mix_wav_inmemory(mic_wav, sys_wav, out_wav)
+// The ORIGINAL two-file mixer: reads both inputs whole and builds a third buffer, i.e. it
+// needs ~3x the track size in RAM (about 1 GB for a 30-minute recording, 2 GB for an hour).
 static int mix_wav_inmemory(const char* mic_path,
                             const char* sys_path,
                             const char* out_path)
@@ -1089,12 +908,8 @@ static int mix_wav_inmemory(const char* mic_path,
     to_stereo(mic_pcm, mic_ch);
     to_stereo(sys_pcm, sys_ch);
 
-    // The two WAVs now (post-fix) carry each stream's real native capture
-    // rate, which the mic and system-output endpoints are free to differ
-    // on. Adding samples 1:1 below assumes both buffers already run at
-    // the same rate, so bring the lower-rate one up to the other's rate
-    // first -- otherwise the resulting mix plays back correctly for
-    // neither track. See resample_linear_stereo()'s comment above.
+    // The two WAVs now (post-fix) carry each stream's real native capture rate, which the mic
+    // and system-output endpoints are free to differ on.
     uint32_t out_rate = mic_rate;
     if (mic_rate != sys_rate) {
         if (mic_rate < sys_rate) {
@@ -1122,12 +937,8 @@ static int mix_wav_inmemory(const char* mic_path,
     return wav_write(out_path, out, 2, out_rate) ? 0 : -3;
 }
 
-/*  hr_audio_mix_wav_list(inputs, out_path)   (2.4)
-    Mixes any number of 16-bit stereo WAVs (this file's own writers: 44-byte header)
-    into one, '|'-separated UTF-8 paths in `inputs`. STREAMING: a few KB of RAM no
-    matter how long the recording is - the older hr_audio_mix_wav() above reads both
-    inputs whole. Inputs at different sample rates are linearly resampled to the first
-    input's rate. Returns 0 on success. */
+// hr_audio_mix_wav_list(inputs, out_path)   (2.4)
+// Mixes any number of 16-bit stereo WAVs (this file's own writers: 44-byte header)
 namespace {
 struct MixIn {
     FILE*    f = nullptr;
@@ -1242,13 +1053,9 @@ HR_EXPORT int hr_audio_mix_wav_list(const char* inputs, const char* out_path)
     return 0;
 }
 
-/*  hr_audio_mix_wav(mic_wav, sys_wav, out_wav)
-    Смешивает два WAV файла в один (без normalize, без subprocess).
-    Возвращает 0 при успехе.
-    2.4 fix pass 2: goes through the streaming N-way mixer first. The old implementation held
-    mic + system + output PCM in RAM at the same time; on a PC that is already short on memory
-    (the reported crash/overload machine had ~1 GB free of 8 GB) a long recording could not be
-    mixed at all, the machine started paging, and ffmpeg's finalization then timed out. */
+// hr_audio_mix_wav(mic_wav, sys_wav, out_wav)
+// Смешивает два WAV файла в один (без normalize, без subprocess).
+// Возвращает 0 при успехе.
 HR_EXPORT int hr_audio_mix_wav(const char* mic_path,
                                 const char* sys_path,
                                 const char* out_path)

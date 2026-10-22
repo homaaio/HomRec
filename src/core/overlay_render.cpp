@@ -29,13 +29,8 @@ void _scopy_local(char *dst, size_t dstlen, const char *src) {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Composite: alpha-blend an RGBA/BGRA overlay buffer onto a BGRA base buffer
-// at (dst_x, dst_y), clipping to the base's bounds. Row-pitch aware (unlike
-// homrec_core.c's hr_blend_rgba, which assumes a 3-byte-per-pixel base with
-// no stride/position -- fine for a full-frame effect, not for a positioned
-// rectangular overlay inside a larger capture frame, which is what this is).
-// ---------------------------------------------------------------------------
+// Composite: alpha-blend an RGBA/BGRA overlay buffer onto a BGRA base buffer at (dst_x,
+// dst_y), clipping to the base's bounds.
 static void CompositeBgra(uint8_t *base, int base_w, int base_h, int base_stride,
                            const uint8_t *overlay, int ov_w, int ov_h,
                            int dst_x, int dst_y, uint8_t extra_opacity = 255)
@@ -57,12 +52,6 @@ static void CompositeBgra(uint8_t *base, int base_w, int base_h, int base_stride
             const uint8_t *o = src_row + (size_t)col * 4;
             uint8_t *d = dst_row + (size_t)col * 4;
             uint32_t a = o[3];
-            // The overlay's own opacity slider (OverlayDef::opacity, 0-100
-            // in the UI -> 0-255 here) stacks on top of whatever per-pixel
-            // alpha the rendered layer already has (text coverage, an
-            // image's real alpha channel, etc.) rather than replacing it -
-            // a half-transparent PNG at 50% overlay opacity should still
-            // end up at roughly quarter strength, not full strength.
             if (extra_opacity != 255) a = (a * extra_opacity + 127u) / 255u;
             if (a == 0) continue;               // fully transparent
             if (a == 255) {                      // fully opaque
@@ -78,21 +67,7 @@ static void CompositeBgra(uint8_t *base, int base_w, int base_h, int base_stride
     }
 }
 
-// ---------------------------------------------------------------------------
 // Composite: alpha-blend a BGRA overlay layer straight into an NV12 frame.
-//
-// Colour maths is deliberately the same BT.601 limited-range matrix as
-// hr_bgra_to_nv12_band() (encoder_helpers.c) and hr_composite_cursor_nv12()
-// (ui_utils.cpp), so an overlay looks identical whether the frame went
-// through the GPU path (this function) or the classic BGRA path
-// (CompositeBgra + CPU conversion).
-//
-// Luma is blended per pixel; chroma is blended per 2x2 block using the
-// alpha-weighted mean colour of the block's covered pixels, with the block's
-// coverage deciding how much of the old chroma survives. Only the overlay's
-// own rectangle is touched, so cost scales with the overlay's size, not with
-// the frame's.
-// ---------------------------------------------------------------------------
 static void CompositeBgraNv12(uint8_t *nv12, int w, int h,
                               const uint8_t *ov, int ov_w, int ov_h,
                               int dst_x, int dst_y, uint8_t extra_opacity)
@@ -154,14 +129,7 @@ static void CompositeBgraNv12(uint8_t *nv12, int w, int h,
 
 #ifdef _WIN32
 
-// ---------------------------------------------------------------------------
-// Nearest-neighbor resample of a BGRA buffer, alpha included. Used to scale
-// an input-overlay's composited spritesheet (drawn at the layout JSON's
-// native size) to whatever size the user dragged the overlay's box to on
-// the preview -- without this, resizing an input overlay has no visible
-// effect since the layout's element coordinates are only meaningful at
-// their native resolution.
-// ---------------------------------------------------------------------------
+// Nearest-neighbor resample of a BGRA buffer, alpha included.
 static void ScaleBgraNearest(const std::vector<uint8_t> &src, int sw, int sh,
                               std::vector<uint8_t> &dst, int dw, int dh)
 {
@@ -241,12 +209,6 @@ static bool RenderTextBgra(const std::wstring &text, int w, int h, COLORREF colo
     // a little padding, matching how the drag-resize handle on the preview
     // implies "this box is roughly how big the text will be".
     int pointSize = std::max(8, (int)(h * 0.65));
-    // font_name is whatever the overlay editor's font dropdown has picked
-    // (see OverlayDef::font_family) - if that family isn't actually
-    // installed on this machine, GDI silently substitutes its own default
-    // rather than failing, so an unavailable choice degrades gracefully
-    // instead of breaking the overlay. Empty falls back to the original
-    // hardcoded "Segoe UI" (overlays saved before this field existed).
     const wchar_t *face = font_name.empty() ? L"Segoe UI" : font_name.c_str();
     HFONT font = CreateFontW(-pointSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -278,19 +240,9 @@ static bool RenderTextBgra(const std::wstring &text, int w, int h, COLORREF colo
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Image: decode via WIC (built into Windows -- handles PNG/JPG/BMP/GIF/etc.
 // without pulling in a third-party image library) straight to a
 // premultiplied-alpha-free 32bpp BGRA buffer, scaled to the overlay's w x h.
-// ---------------------------------------------------------------------------
-// Image, native resolution -- decodes straight to a 32bpp BGRA buffer with
-// no resize step. Used both for input-overlay spritesheets (whose source
-// pixel rects in the layout JSON are only meaningful against the image's
-// actual size) and for regular image overlays (GetOrRenderImage() rescales
-// from this cached native decode to whatever size the overlay is currently
-// configured at -- see ImageSourceCache's comment in overlay_render.h
-// for why decode and resize are kept separate/independently cached).
-// ---------------------------------------------------------------------------
 static bool RenderImageBgraNative(const std::wstring &path, std::vector<uint8_t> &out, int &out_w, int &out_h)
 {
     ComPtr<IWICImagingFactory> factory;
@@ -325,16 +277,6 @@ static bool RenderImageBgraNative(const std::wstring &path, std::vector<uint8_t>
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// GIF: decodes every frame via WIC, compositing each one onto a persistent
-// canvas the size of the GIF's logical screen (its "/logscrdesc/..." global
-// metadata), resolving each frame's disposal method (leave in place / clear
-// to background / restore the previous frame) as it goes, so what comes out
-// is a plain list of already-fully-composed canvas-sized BGRA frames, each
-// tagged with its own delay. That keeps playback (GetOrRenderGif() below)
-// as simple as "pick a frame index and scale it", the same as a static
-// image overlay, with no disposal-method bookkeeping needed at render time.
-// ---------------------------------------------------------------------------
 struct GifFrameNative {
     std::vector<uint8_t> bgra;
     int delay_ms = 100;
@@ -371,11 +313,8 @@ static bool DecodeGifFramesNative(const std::wstring &path, std::vector<GifFrame
     ComPtr<IWICBitmapFrameDecode> frame0;
     if (FAILED(decoder->GetFrame(0, &frame0))) return false;
 
-    // The overall canvas size lives in the GIF's logical screen descriptor,
-    // which WIC only exposes through frame 0's metadata reader (not a
-    // decoder-level one). Fall back to frame 0's own pixel size if that
-    // read fails for any reason, so a plain single-frame/malformed-header
-    // GIF still decodes instead of being rejected outright.
+    // The overall canvas size lives in the GIF's logical screen descriptor, which WIC only
+    // exposes through frame 0's metadata reader (not a decoder-level one).
     {
         ComPtr<IWICMetadataQueryReader> qr;
         if (SUCCEEDED(frame0->GetMetadataQueryReader(&qr))) {
@@ -451,10 +390,6 @@ static bool DecodeGifFramesNative(const std::wstring &path, std::vector<GifFrame
         gf.delay_ms = delay_cs * 10;
         frames.push_back(std::move(gf));
 
-        // Resolve this frame's disposal *after* capturing its composed
-        // image above, so the canvas is ready for the next frame to draw
-        // onto (disposal 0/"unspecified" and 1/"do not dispose" both just
-        // leave the canvas as-is, so there's no branch needed for them).
         if (disposal == 2) {
             for (int row = 0; row < (int)fh; ++row) {
                 int cy = top + row;
@@ -475,10 +410,6 @@ static bool DecodeGifFramesNative(const std::wstring &path, std::vector<GifFrame
     return !frames.empty();
 }
 
-// Alpha-blends a single sub-rect of one BGRA buffer onto another at
-// (dst_x, dst_y), clipping to the destination's bounds -- the input-overlay
-// equivalent of CompositeBgra() above, but copying FROM an arbitrary
-// (src_x, src_y, src_w, src_h) window instead of the whole source image.
 static void BlitBgraRect(uint8_t *dst, int dst_w, int dst_h,
                           const uint8_t *src, int src_stride_w, int src_h,
                           int src_x, int src_y, int rect_w, int rect_h,
@@ -692,10 +623,9 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderGif(size_t i
                     src.frames.push_back(std::move(gc));
                 }
                 src.valid = !src.frames.empty() && src.total_duration_ms > 0;
-                // Anchor playback to "now" so the loop always starts from
-                // frame 0 the moment this GIF is (re)loaded, rather than
-                // some arbitrary offset if start_time were left at its
-                // default-constructed epoch value.
+                // Anchor playback to "now" so the loop always starts from frame 0 the moment this GIF is
+                // (re)loaded, rather than some arbitrary offset if start_time were left at its default-
+                // constructed epoch value.
                 src.start_time = std::chrono::steady_clock::now();
             }
             if (!src.valid) {
@@ -705,10 +635,6 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderGif(size_t i
     }
     if (!src.valid || src.frames.empty() || src.total_duration_ms <= 0) return nullptr;
 
-    // Pick whichever frame is due right now, based on wall-clock time since
-    // this overlay's GIF was (re)loaded -- one shared clock per overlay
-    // instance, not per Apply() call, so playback speed matches the file's
-    // authored frame delays regardless of how often frames get composited.
     auto now = std::chrono::steady_clock::now();
     long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - src.start_time).count();
     long long pos = elapsed_ms % src.total_duration_ms;
@@ -761,10 +687,8 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderWebcam(size_
     bool got_new = src.capture && src.capture->GetLatestFrame(frame_bgra, fw, fh);
 
     if (!got_new) {
-        // Nothing new this tick (usual case -- camera frame rate is
-        // normally lower than capture frame rate) or the device never
-        // came up at all. Either way, keep showing the last good frame if
-        // there is one instead of vanishing between camera frames.
+        // Nothing new this tick (usual case -- camera frame rate is normally lower than capture
+        // frame rate) or the device never came up at all.
         if (!src.have_layer && src.capture && !src.capture->IsAlive() && !src.warned_dead) {
             src.warned_dead = true;
             HrLog::Warn(std::string("Overlay: couldn't open webcam '") + ov.webcam_name +
@@ -805,7 +729,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::CropFromSource(size_t i
     } else if (cx0 != ov.src_x || cy0 != ov.src_y || cx1 != ov.src_x + ov.src_w || cy1 != ov.src_y + ov.src_h) {
         std::fill(layer.bgra.begin(), layer.bgra.end(), (uint8_t)0);    // partly outside: keep the rest clear
     }
-    layer.key = "src";    // never matches a text / image key, so those renderers rebuild if this index changes type
+    layer.key = "src";
 
     const double fx = (double)ov.w / ov.src_w, fy = (double)ov.h / ov.src_h;
     int dx0 = (int)((cx0 - ov.src_x) * fx + 0.5), dy0 = (int)((cy0 - ov.src_y) * fy + 0.5);
@@ -937,16 +861,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
             HrLog::Warn(std::string("Input overlay: couldn't parse layout '") + ov.input_json_path + "'");
             return nullptr;
         }
-        // Sanity-clamp the parsed canvas size before it's ever used to size
-        // an allocation. A hand-edited or corrupt layout file (this preset
-        // format is plain user-editable JSON, not something HomRec
-        // generates itself) could otherwise hand us a huge or negative
-        // width/height, which would either throw (std::bad_alloc, on a
-        // std::thread with no exception handler around it -- see the
-        // try/catch note in Apply() below for why that's worth avoiding on
-        // its own) or, if it didn't throw, ask for a multi-gigabyte
-        // allocation for something that's only ever a few hundred pixels
-        // across in every real preset.
+        // Sanity-clamp the parsed canvas size before it's ever used to size an allocation.
         constexpr int kMaxOverlayCanvasDim = 8192;
         if (c.layout.width <= 0 || c.layout.height <= 0 ||
             c.layout.width > kMaxOverlayCanvasDim || c.layout.height > kMaxOverlayCanvasDim) {
@@ -976,13 +891,9 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
     }
     if (!c.valid || c.layout.width <= 0 || c.layout.height <= 0) return nullptr;
 
-    // The layout's element coordinates (map_x/map_y/pos_x/pos_y/etc.) are
-    // only meaningful at the layout's own native width/height, so the
-    // buttons are always composited at that native size first. The result
-    // is then scaled to the overlay's configured w/h -- ov.w/ov.h are what
-    // the user actually dragged the overlay box to on the preview, and
-    // without this scaling step the overlay would render at a fixed size
-    // no matter how it's resized.
+    // The layout's element coordinates (map_x/map_y/pos_x/pos_y/etc.) are only meaningful at
+    // the layout's own native width/height, so the buttons are always composited at that
+    // native size first.
     const int native_w = c.layout.width, native_h = c.layout.height;
 
     // Poll the live key state (one GetAsyncKeyState per key-driven element).
@@ -1000,12 +911,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
     }
     if (c.last_ov_w != ov.w || c.last_ov_h != ov.h) changed = true;
 
-    // Unchanged since the last frame (nobody pressed or released anything,
-    // box not resized)? Then last frame's finished layer is still exactly
-    // right - hand it back instead of clearing, re-blitting every element,
-    // re-scaling and copying the whole thing again. Needs the layer in
-    // cache_[idx] to still be ours (a different overlay type may have used
-    // this idx in the meantime).
+    // Unchanged since the last frame (nobody pressed or released anything, box not resized)?
     if (!changed) {
         auto it = cache_.find(idx);
         if (it != cache_.end() && it->second.key == c.layer_key) return &it->second;
@@ -1020,10 +926,9 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
         const auto &el = c.layout.elements[k];
         int sx = el.map_x, sy = el.map_y;
         if (pressed_now[k]) {
-            // Convention (matches the bundled univrsal/input-overlay
-            // presets): the "pressed" frame for a button sits directly
-            // below its "released" frame in the spritesheet, offset by
-            // the element's own height plus the layout's space_v gap.
+            // Convention (matches the bundled univrsal/input-overlay presets): the "pressed" frame for
+            // a button sits directly below its "released" frame in the spritesheet, offset by the
+            // element's own height plus the layout's space_v gap.
             int pressed_y = el.map_y + el.map_h + c.layout.space_v;
             if (pressed_y + el.map_h <= c.sheet_h) sy = pressed_y;
         }
@@ -1084,10 +989,8 @@ void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays,
 
     for (size_t i = 0; i < overlays.size(); ++i) {
         const HrOverlayDesc &ov = overlays[i];
-        // Hidden, zero-sized or fully faded-out (opacity 0) overlays draw
-        // nothing - don't render them either. (Opacity 0 used to fall
-        // through and burn a full render per frame - e.g. an input overlay
-        // rebuilt its whole layer - only for CompositeBgra() to discard it.)
+        // Hidden, zero-sized or fully faded-out (opacity 0) overlays draw nothing - don't render
+        // them either.
         if (!HrOverlayDrawsAnything(ov)) {
             if (std::strcmp(ov.type, "webcam") == 0) {
                 webcam_cache_.erase(i);   // closes the camera while the overlay is invisible

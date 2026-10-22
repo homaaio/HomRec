@@ -16,13 +16,8 @@ std::string ReadWholeFile(const std::string &path) {
     return ss.str();
 }
 
-// ---------------------------------------------------------------------------
-// Small recursive-descent JSON parser -- just enough of the spec (objects,
-// arrays, strings, numbers, true/false/null) to read the input-overlay
-// preset shape. Not a general-purpose library (no \uXXXX unescaping, no
-// error positions) -- these presets are simple, machine-generated JSON, so
-// that's not needed here.
-// ---------------------------------------------------------------------------
+// Small recursive-descent JSON parser -- just enough of the spec (objects, arrays,
+// strings, numbers, true/false/null) to read the input-overlay preset shape.
 struct JsonCursor {
     const char *p, *end;
     explicit JsonCursor(const std::string &s) : p(s.data()), end(s.data() + s.size()) {}
@@ -119,10 +114,8 @@ struct JsonCursor {
     }
 };
 
-// Reads one {..} element object into `el`, cursor positioned right after
-// the opening '{' has been consumed by the caller... actually simpler: the
-// caller passes the cursor still *before* the '{', matching ParseObject-
-// style helpers above.
+// Reads one {..} element object into `el`, cursor positioned right after the opening '{'
+// has been consumed by the caller...
 bool ParseElementObject(JsonCursor &jp, HrInputOverlayElement &el) {
     if (!jp.Consume('{')) return false;
     if (jp.Peek() == '}') { ++jp.p; return true; } // empty element object -- keep the all-zero default

@@ -1,17 +1,4 @@
-/*
- * ui_utils.cpp - HomRec UI-support utilities
- *
- * Assorted helpers used by the UI layer:
- *
- *   AudioLevelMeter logic   RMS, peak-decay, lerp-color calculations
- *   Stopwatch               monotonic timer with pause/resume
- *   RecBadge renderer       generates RGBA pixels for the "REC" badge
- *   PC Analytics            CPU %, RAM, Disk (Win32)
- *   Countdown timer         countdown (callback-based)
- *   Notification            WinAPI MessageBeep / flash
- *   Idle mic monitor        WASAPI/loopback RMS
- *   Tray utilities          icon, AppUserModelID
- */
+// ui_utils.cpp - HomRec UI-support utilities
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -116,10 +103,8 @@ HR_EXPORT void hr_stopwatch_resume(void *h) {
     sw->paused           = false;
 }
 
-/*
- * hr_stopwatch_elapsed_ms
- * Returns elapsed active recording time in milliseconds (excludes paused time).
- */
+// hr_stopwatch_elapsed_ms
+// Returns elapsed active recording time in milliseconds (excludes paused time).
 HR_EXPORT int64_t hr_stopwatch_elapsed_ms(const void *h) {
     const auto *sw = static_cast<const HrStopwatch *>(h);
     if (!sw || !sw->running) return 0;
@@ -129,10 +114,8 @@ HR_EXPORT int64_t hr_stopwatch_elapsed_ms(const void *h) {
     return now - sw->start_ms - paused;
 }
 
-/*
- * hr_stopwatch_format
- * Write "HH:MM:SS" elapsed string to out (≥9 bytes).
- */
+// hr_stopwatch_format
+// Write "HH:MM:SS" elapsed string to out (≥9 bytes).
 HR_EXPORT void hr_stopwatch_format(const void *h, char *out, int out_len) {
     if (!out || out_len < 9) return;
     int64_t ms = hr_stopwatch_elapsed_ms(h);
@@ -145,16 +128,8 @@ HR_EXPORT void hr_stopwatch_format(const void *h, char *out, int out_len) {
 /*  Audio level meter maths                                                     */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_audio_rms_int16
- *
- * Computes RMS of a raw PCM int16 buffer and scales to 0–100.
- * Equivalent of audioop.rms(data, 2) / 150 clamped to [0, 100].
- *
- * buf      : pointer to int16 samples (little-endian native byte order)
- * n_frames : number of int16 samples (= byte_count / 2)
- * Returns 0–100.
- */
+// hr_audio_rms_int16 - Computes RMS of a raw PCM int16 buffer and scales to 0–100.
+// Equivalent of audioop.rms(data, 2) / 150 clamped to [0, 100].
 HR_EXPORT int hr_audio_rms_int16(const int16_t *buf, int n_frames) {
     if (!buf || n_frames <= 0) return 0;
     uint64_t sum = 0;
@@ -167,12 +142,8 @@ HR_EXPORT int hr_audio_rms_int16(const int16_t *buf, int n_frames) {
     return (level < 0) ? 0 : (level > 100) ? 100 : level;
 }
 
-/*
- * hr_lerp_color
- *
- * Green → Yellow → Red interpolation for the VU meter bar.
- * t in [0, 1].  Returns packed 0xRRGGBB.
- */
+// hr_lerp_color - Green → Yellow → Red interpolation for the VU meter bar.
+// t in [0, 1].  Returns packed 0xRRGGBB.
 HR_EXPORT uint32_t hr_lerp_color(float t) {
     int r, g, b;
     if (t < 0.0f) t = 0.0f;
@@ -194,14 +165,8 @@ HR_EXPORT uint32_t hr_lerp_color(float t) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-/*
- * hr_peak_decay
- *
- * Implements the peak-hold + decay logic from AudioLevelMeter.set_level().
- * In-place update: *peak, *peak_decay are state; level is the new sample.
- *
- * Call once per frame (~50 ms).
- */
+// hr_peak_decay - Implements the peak-hold + decay logic from AudioLevelMeter.set_level().
+// In-place update: *peak, *peak_decay are state; level is the new sample.
 HR_EXPORT void hr_peak_decay(int level, int *peak, int *peak_decay) {
     if (!peak || !peak_decay) return;
     if (level > *peak) {
@@ -221,16 +186,8 @@ HR_EXPORT void hr_peak_decay(int level, int *peak, int *peak_decay) {
 /*  REC badge RGBA renderer                                                     */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_render_rec_badge
- *
- * Renders a «REC ●» badge as raw RGBA pixels (no image lib needed).
- * width × height must be pre-allocated by the caller.
- *
- * bright  : 1 = dot bright (frame 0), 0 = dot dimmed (frame 1)
- * w, h    : badge dimensions in pixels (recommend 72 × 28)
- * rgba_out: RGBA byte buffer, size = w * h * 4
- */
+// hr_render_rec_badge - Renders a «REC ●» badge as raw RGBA pixels (no image lib needed).
+// width × height must be pre-allocated by the caller.
 HR_EXPORT void hr_render_rec_badge(int bright, int w, int h, uint8_t *rgba_out) {
     if (!rgba_out || w <= 0 || h <= 0) return;
 
@@ -328,18 +285,11 @@ struct HrSysStats {
     int    cpu_count;
 };
 
-/*
- * hr_get_sys_stats
- *
- * Fills HrSysStats.  disk_path is the recordings folder (used for disk stats).
- * Returns 1 on success, 0 if not supported.
- */
+// hr_get_sys_stats - Fills HrSysStats.  disk_path is the recordings folder (used for disk stats).
+// Returns 1 on success, 0 if not supported.
 #ifdef _WIN32
-/* Every path in HomRec is UTF-8, but the *A Win32 functions (and
- * fopen) read narrow strings in the ANSI code page. With a non-ASCII output
- * folder (e.g. a Cyrillic user name) the path check failed, a junk mojibake
- * folder got created, and the free-space/size queries silently returned nothing.
- * The Windows branches below convert to UTF-16 and call the *W functions. */
+// Every path in HomRec is UTF-8, but the *A Win32 functions (and fopen) read narrow
+// strings in the ANSI code page.
 static std::wstring _hr_wide(const char *s) {
     if (!s) return std::wstring();
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
@@ -351,20 +301,7 @@ static std::wstring _hr_wide(const char *s) {
 }
 #endif
 
-/*
- * hr_get_free_disk_mb
- *
- * Fast, disk-only free-space check (megabytes) for `path`'s volume.
- * Deliberately separate from hr_get_sys_stats() below - that one does a
- * blocking 100ms CPU-usage sample every call (fine for an on-demand
- * analytics dialog, not something you want on the hot path of "the user
- * just clicked Record and is waiting for it to start"). This is just the
- * one disk-free syscall, safe to call right before starting a recording.
- *
- * Returns 1 on success (out_free_mb filled), 0 if the query failed (e.g.
- * bad path) - callers should treat 0 as "couldn't determine, don't block
- * on it" rather than "definitely out of space".
- */
+// hr_get_free_disk_mb - Fast, disk-only free-space check (megabytes) for `path`'s volume.
 HR_EXPORT int hr_get_free_disk_mb(const char *path, uint64_t *out_free_mb) {
     if (!path || !path[0] || !out_free_mb) return 0;
 #ifdef _WIN32
@@ -486,11 +423,9 @@ HR_EXPORT int hr_get_sys_stats(const char *disk_path, HrSysStats *out) {
 /*  Notification helpers                                                        */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_notify_beep
- * Plays the Windows "default beep" sound (MessageBeep MB_OK).
- * No-op on Linux/macOS.
- */
+// hr_notify_beep
+// Plays the Windows "default beep" sound (MessageBeep MB_OK).
+// No-op on Linux/macOS.
 HR_EXPORT void hr_notify_beep(void) {
 #ifdef _WIN32
     MessageBeep(MB_OK);
@@ -499,11 +434,9 @@ HR_EXPORT void hr_notify_beep(void) {
 #endif
 }
 
-/*
- * hr_flash_window
- * Flashes the given window handle n_times with interval_ms between flashes.
- * hwnd is passed as intptr_t to avoid platform type pollution in ctypes.
- */
+// hr_flash_window
+// Flashes the given window handle n_times with interval_ms between flashes.
+// hwnd is passed as intptr_t to avoid platform type pollution in ctypes.
 HR_EXPORT void hr_flash_window(intptr_t hwnd, int n_times, int interval_ms) {
 #ifdef _WIN32
     FLASHWINFO fi = {sizeof(fi)};
@@ -521,11 +454,9 @@ HR_EXPORT void hr_flash_window(intptr_t hwnd, int n_times, int interval_ms) {
 /*  AppUserModelID (Windows taskbar grouping)                                   */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_set_app_user_model_id
- * Sets the Win32 AppUserModelID for correct taskbar icon grouping.
- * Equivalent of ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID.
- */
+// hr_set_app_user_model_id
+// Sets the Win32 AppUserModelID for correct taskbar icon grouping.
+// Equivalent of ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID.
 HR_EXPORT void hr_set_app_user_model_id(const char *id_utf8) {
 #ifdef _WIN32
     if (!id_utf8) return;
@@ -549,18 +480,8 @@ HR_EXPORT void hr_set_app_user_model_id(const char *id_utf8) {
 /*  Countdown timer                                                             */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_countdown_async
- *
- * Runs a background thread that fires tick_cb(n, user_data) each second,
- * counting down from `seconds` to 0, then fires done_cb(user_data).
- *
- * Callbacks are called from a worker thread - caller must marshal to UI thread.
- * Returns immediately.
- *
- * tick_cb  : called with (n = seconds remaining, user_data)
- * done_cb  : called when countdown reaches 0
- */
+// hr_countdown_async - Runs a background thread that fires tick_cb(n, user_data) each second,
+// counting down from `seconds` to 0, then fires done_cb(user_data).
 typedef void (*hr_tick_cb)(int n, void *user_data);
 typedef void (*hr_done_cb)(void *user_data);
 
@@ -600,11 +521,9 @@ HR_EXPORT void hr_fps_tracker_destroy(void *h) {
     delete static_cast<HrFpsTracker *>(h);
 }
 
-/*
- * hr_fps_tracker_tick
- * Call once per captured frame.
- * Returns the smoothed FPS over the last ~2 seconds, or 0 if not enough data.
- */
+// hr_fps_tracker_tick
+// Call once per captured frame.
+// Returns the smoothed FPS over the last ~2 seconds, or 0 if not enough data.
 HR_EXPORT float hr_fps_tracker_tick(void *h) {
     auto *t = static_cast<HrFpsTracker *>(h);
     if (!t) return 0.0f;
@@ -623,10 +542,8 @@ HR_EXPORT float hr_fps_tracker_tick(void *h) {
 /*  File size helper                                                             */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_file_size_mb
- * Returns file size in megabytes (float), or -1 if file not found.
- */
+// hr_file_size_mb
+// Returns file size in megabytes (float), or -1 if file not found.
 HR_EXPORT float hr_file_size_mb(const char *path) {
     if (!path) return -1.0f;
 #ifdef _WIN32
@@ -651,11 +568,9 @@ HR_EXPORT float hr_file_size_mb(const char *path) {
 /*  HRC / theme / language name extraction (convenience wrappers for ctypes)    */
 /* --------------------------------------------------------------------------- */
 
-/*
- * hr_make_output_dir
- * Creates the recordings output directory (and any parents).
- * Returns 1 if created or already exists, 0 on error.
- */
+// hr_make_output_dir
+// Creates the recordings output directory (and any parents).
+// Returns 1 if created or already exists, 0 on error.
 HR_EXPORT int hr_make_output_dir(const char *path) {
     if (!path || !path[0]) return 0;
 #ifdef _WIN32
@@ -676,10 +591,8 @@ HR_EXPORT int hr_make_output_dir(const char *path) {
 #endif
 }
 
-/*
- * hr_open_folder
- * Opens the given folder in the system file manager.
- */
+// hr_open_folder
+// Opens the given folder in the system file manager.
 HR_EXPORT void hr_open_folder(const char *path) {
     if (!path || !path[0]) return;
 #ifdef _WIN32
@@ -693,10 +606,8 @@ HR_EXPORT void hr_open_folder(const char *path) {
 #endif
 }
 
-/*
- * hr_path_exists
- * Returns 1 if the path exists (file or directory), 0 otherwise.
- */
+// hr_path_exists
+// Returns 1 if the path exists (file or directory), 0 otherwise.
 HR_EXPORT int hr_path_exists(const char *path) {
     if (!path || !path[0]) return 0;
 #ifdef _WIN32
@@ -710,47 +621,9 @@ HR_EXPORT int hr_path_exists(const char *path) {
 #endif
 }
 
-/*
- * hr_filename_from_template
- *
- * Expands a filename template like "HomRec_{date}_{time}_{app}" to a concrete
- * name using the current local time plus the caller-resolved app_name (see
- * RecordingController::ResolveCaptureAppName() - "Desktop" in desktop-capture
- * mode, or the captured window's process name with no ".exe" in window-capture
- * mode). Appends ".mp4" extension.
- *
- * v2.3 token set (see todo2.3.md section 3, "Токены в имени файла записи"):
- *   {date}          - yyyymmdd, unchanged for backward compat with existing
- *                      saved templates
- *   {time}          - HHMMSS, unchanged
- *   {app}           - resolved app/window name, unchanged
- *   {hh} {min} {sec}- the current hour/minute/second on their own, each
- *                      zero-padded to 2 digits (e.g. "05", not "5") so a
- *                      template like "{hh}-{min}" always sorts correctly
- *   {preset}        - name of the currently active preset (see preset_name
- *                      param below; "default" when nothing's been switched
- *                      to yet - see AppState::active_preset_name)
- *   {date:FMT}      - strftime-style custom date/time formatting, resolving
- *                      the open syntax question in todo2.3.md in favor of
- *                      the flexible single-token form: one token gives you
- *                      any piece of the date *and* time without needing a
- *                      new fixed token for every combination, e.g.
- *                      "{date:%d.%m.%Y}" -> "23.09.2026",
- *                      "{date:%Y-%m-%d_%H-%M}" -> "2026-09-23_14-05".
- *                      Any strftime conversion is accepted (day/month
- *                      already come zero-padded via %d/%m); an empty or
- *                      unrecognized format falls back to yyyymmdd so a
- *                      typo can't silently produce a blank filename
- *                      segment.
- *
- * out must be at least 256 bytes.
- */
 /* (2.3) Filename-template safety helpers. ---------------------------------- */
 
-/* Replace characters that can't be part of a Windows file name. Used on every
- * *expanded* token: {date:%H:%M} used to put a ':' in the file name (an NTFS
- * alternate data stream / an ffmpeg open failure) and {date:%d/%m/%Y} a '/'
- * (a folder that doesn't exist). */
+// Replace characters that can't be part of a Windows file name.
 static std::string _sanitize_name_segment(const std::string &in) {
     std::string out;
     out.reserve(in.size());
@@ -762,10 +635,7 @@ static std::string _sanitize_name_segment(const std::string &in) {
     return out;
 }
 
-/* Only allow strftime conversions that behave the same on msvcrt and UCRT.
- * Anything else (%e %F %T %D ... or a dangling '%') can trigger the C runtime's
- * invalid-parameter handler, which terminates the whole app - from something as
- * harmless as a typo in the filename template. */
+// Only allow strftime conversions that behave the same on msvcrt and UCRT.
 static bool _is_safe_strftime_fmt(const std::string &fmt) {
     for (size_t i = 0; i < fmt.size(); ++i) {
         if (fmt[i] != '%') continue;
@@ -866,37 +736,7 @@ HR_EXPORT void hr_filename_from_template(const char *tmpl, const char *folder,
     hr_filename_from_template_ex(tmpl, folder, app_name, out, out_len, preset_name, "mp4");
 }
 
-/* -------------------------------------------------------------------------
- * Cursor compositing ("Cursor" setting)
- *
- * Draws the real system cursor (whatever it currently is - arrow, I-beam,
- * a custom app cursor, etc.) directly into a captured BGRA frame buffer,
- * the same way the overlay compositor bakes overlays in -- so what's in
- * the recording matches what's actually on screen instead of always
- * showing a bare desktop with no pointer.
- *
- * Approach: GetCursorInfo()+DrawIconEx() into an off-screen 32bpp DIB,
- * rather than reading DXGI's own pointer-shape stream. DXGI's pointer
- * data comes in three different formats (color/masked-color/monochrome
- * XOR+AND masks) that need separate blending math to render correctly;
- * DrawIconEx already handles all of that correctly for us since it's the
- * same code path Windows itself uses to draw the cursor, so this reuses
- * that instead of re-implementing cursor mask blending here.
- *
- * DrawIconEx doesn't hand back an alpha channel, so the pointer is drawn
- * TWICE: once onto a pure-black and once onto a pure-white DIB. For a pixel of
- * colour c and coverage a that gives  black = c*a  and  white = c*a + 255*(1-a),
- * so a = 255 - (white - black) and c = black / a  (straight alpha). This is exact
- * for every cursor type: classic AND/XOR cursors (a is 0 or 255), 32-bit ARGB cursors
- * with anti-aliased edges and drop shadows, and "invert" pixels (the I-beam of
- * mask cursors), which come out as white < black and are flagged separately.
- *
- * 2.4 fix pass 2: this used to fill the DIB with ONE magenta chroma-key colour
- * and treat only exact-magenta pixels as transparent. Every anti-aliased / shadow
- * pixel of a modern cursor was alpha-blended by GDI WITH the magenta background
- * and therefore no longer matched the key -> it stayed in the recording as an opaque
- * purple/pink fringe around the pointer (the "purple pixels near the cursor").
- * ---------------------------------------------------------------------- */
+// Cursor compositing ("Cursor" setting)
 #ifdef _WIN32
 namespace {
 // Safety refresh only: the cache is rebuilt whenever the HCURSOR handle changes, and DrawIconEx always
@@ -927,10 +767,8 @@ int64_t NowMs() {
         .count();
 }
 
-// Does the actual GDI rasterization -- only called when the cache needs
-// (re)building, not on every frame. Returns false (leaves *cache alone) on
-// any failure so a transient GDI hiccup just means "keep showing the last
-// good cursor bitmap" rather than losing the cursor for a frame.
+// Does the actual GDI rasterization -- only called when the cache needs (re)building, not
+// on every frame.
 bool RasterizeCursor(HCURSOR hCursor, CursorCache &cache) {
     ICONINFO ii{};
     if (!GetIconInfo(hCursor, &ii)) return false;
@@ -938,10 +776,9 @@ bool RasterizeCursor(HCURSOR hCursor, CursorCache &cache) {
     BITMAP bmMask{};
     GetObject(ii.hbmMask, sizeof(bmMask), &bmMask);
     int cw = bmMask.bmWidth;
-    // Monochrome cursors pack the AND mask (top half) and XOR mask
-    // (bottom half) into one double-height hbmMask bitmap and have no
-    // hbmColor at all; colour cursors have a real hbmColor the same
-    // height as hbmMask.
+    // Monochrome cursors pack the AND mask (top half) and XOR mask (bottom half) into one
+    // double-height hbmMask bitmap and have no hbmColor at all; colour cursors have a real
+    // hbmColor the same height as hbmMask.
     int ch = ii.hbmColor ? bmMask.bmHeight : bmMask.bmHeight / 2;
     bool ok = false;
 
@@ -1019,23 +856,9 @@ bool RasterizeCursor(HCURSOR hCursor, CursorCache &cache) {
 }
 } // namespace
 
-/*
- * hr_composite_cursor
- *
- * bgra          : capture buffer, width*height*4 bytes, BGRA, row-major,
- *                 no padding (row pitch == width*4) -- matches
- *                 hr_dx_capture()'s output that this is always called on.
- * origin_x/y    : the top-left corner of this buffer in *virtual desktop*
- *                 screen coordinates (i.e. the captured monitor's
- *                 DesktopCoordinates.left/top from hr_dx_output_desc) --
- *                 needed because GetCursorInfo() reports the cursor's
- *                 position in those same virtual-desktop coordinates, not
- *                 relative to whichever monitor is being captured.
- *
- * See the CursorCache comment above: the expensive GDI rasterization only
- * runs when the cursor shape has actually (or might have, for an animated
- * cursor) changed; every other call just blits the cached bitmap.
- */
+// hr_composite_cursor - bgra          : capture buffer, width*height*4 bytes, BGRA, row-major,
+// no padding (row pitch == width*4) -- matches
+// hr_dx_capture()'s output that this is always called on.
 HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
                                     int origin_x, int origin_y) {
     if (!bgra || width <= 0 || height <= 0) return;
@@ -1052,13 +875,9 @@ HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
                          !cache.valid ||
                          (now - cache.last_refresh_ms >= kCursorRefreshIntervalMs);
     if (need_refresh) {
-        // Record the attempted handle unconditionally (even on failure) so
-        // a cursor that can't be rasterized doesn't defeat the interval
-        // throttle by re-triggering the handle-mismatch check every single
-        // frame. A failed rasterize otherwise leaves cache.bgra/cw/ch
-        // untouched (see RasterizeCursor: it only writes them on success),
-        // so a transient GDI hiccup just means "keep showing the last good
-        // cursor bitmap for one more cycle" instead of losing the cursor.
+        // Record the attempted handle unconditionally (even on failure) so a cursor that can't be
+        // rasterized doesn't defeat the interval throttle by re-triggering the handle-mismatch
+        // check every single frame.
         bool ok = RasterizeCursor(ci.hCursor, cache);
         cache.handle = ci.hCursor;
         if (ok) cache.valid = true;
@@ -1104,15 +923,7 @@ HR_EXPORT void hr_composite_cursor(uint8_t *bgra, int width, int height,
     }
 }
 
-/*
- * hr_cursor_state
- *
- * Cheap "would the pointer look different?" probe for the capture loop:
- * visible flag, screen position and cursor handle, without touching the
- * raster cache. Returns 0 (and visible=0) if the cursor is hidden or the
- * query failed. Lets the pipeline keep re-sending an unchanged picture
- * while the mouse rests on a static screen even with "Cursor" turned on.
- */
+// hr_cursor_state - Cheap "would the pointer look different?" probe for the capture loop:
 HR_EXPORT int hr_cursor_state(int *visible, int *x, int *y, unsigned long long *handle) {
     CURSORINFO ci{};
     ci.cbSize = sizeof(ci);

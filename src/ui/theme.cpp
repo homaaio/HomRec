@@ -58,7 +58,6 @@ const ThemeColors &GetBuiltinTheme(const std::string &name) {
     return kDark; // default
 }
 
-
 void ThemeBrushes::Rebuild(const ThemeColors &c) {
     Release();
     bg = CreateSolidBrush(c.bg);

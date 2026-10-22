@@ -1,24 +1,4 @@
 // audio_panel.h - the Audio Mixer (rebuilt for 2.4).
-//
-// What changed in 2.4:
-//   * every channel is a self-contained "card": icon + name, mute, a level meter and a
-//     fader. The fader is FlatFader (themed_widgets.h) which paints with its own colours -
-//     the white frames the old LabeledSlider/wxSpinCtrl pair drew around each slider are
-//     gone (the exact value is shown as text, e.g. "112%").
-//   * two layouts, Settings > Audio > Mixer layout (AppState::audio_meter_style):
-//       "horizontal" - cards stacked top to bottom, level bar above the fader (pre-2.4 feel)
-//       "vertical"   - OBS-style channel strips side by side: vertical meter + vertical fader
-//   * "+ Add source": another microphone, a browser, one program's/window's sound, or an
-//     audio file. Those channels are stored in AppState::audio_sources and captured by the
-//     hr_audio_extra_* backend (audio_extra.inc).
-//   * icons: icons/audio/microphone.png and desktop_audio.png (see icons.h); a text
-//     glyph is drawn when a file is missing.
-//   * lives in a dockable pane (main_frame.cpp), so it has no title row / close button of its
-//     own any more - the pane caption provides both.
-//
-// Cost: no timers of its own. PollLevels() is driven by the main frame's level-meter timer,
-// repaints a meter only when its level or peak actually changed, and does nothing while
-// hidden/minimized.
 #pragma once
 
 #include <wx/wx.h>

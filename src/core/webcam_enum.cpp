@@ -33,14 +33,6 @@ std::vector<HrWebcamDevice> HrEnumerateWebcams() {
     // This can be called from the UI thread at any point after the app's
     // already up, when COM may or may not already be initialized here
     // (wxWidgets typically does its own OleInitialize on the main thread).
-    // CoInitializeEx tells us which case we're in via its return code:
-    //   S_OK               - we just initialized it fresh, ours to release
-    //   S_FALSE            - already initialized (same apartment type),
-    //                        also ours to release (matches any other
-    //                        successful CoInitializeEx caller's contract)
-    //   RPC_E_CHANGED_MODE - already initialized as MTA elsewhere on this
-    //                        thread; we must NOT call CoUninitialize in
-    //                        that case since we don't own that reference
     HRESULT hr_co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bool should_uninit = (hr_co == S_OK || hr_co == S_FALSE);
 

@@ -44,11 +44,6 @@ std::wstring ShortcutPath(const std::string &dir_utf8) {
     return dir + L"HomRec.lnk";
 }
 
-// RAII CoInitialize - every public function below does its own OLE work
-// and needs COM live for exactly that long; a process-wide CoInitialize
-// done once at startup would work too, but scoping it here means this
-// module has no startup/shutdown ordering dependency on the rest of the
-// app (win_main.cpp doesn't need to know this module exists at all).
 struct ComScope {
     HRESULT hr;
     ComScope() : hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
@@ -95,11 +90,6 @@ bool CreateDesktopShortcut(const std::string &dir_utf8) {
     if (FAILED(hr) || !shellLink) return false;
 
     shellLink->SetPath(exePath.c_str());
-    // Working directory = the exe's own folder, same as double-clicking
-    // hr.exe directly - without this a shortcut on the Desktop would
-    // otherwise launch HomRec with the Desktop itself as its CWD, which
-    // breaks the relative homrec_settings.json / logs\ / plugins\ paths
-    // the rest of the app assumes are next to the exe.
     std::wstring workDir = exePath.substr(0, exePath.find_last_of(L"\\/"));
     shellLink->SetWorkingDirectory(workDir.c_str());
     shellLink->SetDescription(L"HomRec - Screen Recorder");

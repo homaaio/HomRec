@@ -56,10 +56,7 @@ struct HrWebcamCapture::Impl {
 
 namespace {
 
-// Reads the reader's currently-negotiated frame size + row stride. Called
-// once right after format negotiation and again whenever ReadSample
-// reports MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED (some devices/drivers
-// renegotiate mid-stream, e.g. on an exposure/resolution auto-switch).
+// Reads the reader's currently-negotiated frame size + row stride.
 void ReadCurrentDims(IMFSourceReader *reader, int &w, int &h, LONG &stride) {
     w = h = 0; stride = 0;
     ComPtr<IMFMediaType> cur;
@@ -87,10 +84,8 @@ void ReadCurrentDims(IMFSourceReader *reader, int &w, int &h, LONG &stride) {
 // Impl type) -- kept at global scope rather than inside the anonymous
 // namespace above so that friend declaration can actually name it.
 void HrWebcamCaptureThreadMain(HrWebcamCapture::Impl *impl) {
-    // A brand-new thread, independent of the capture pipeline's own
-    // CoInitializeEx (pipeline.cpp) -- needs its own COM apartment. MTA
-    // to match how the rest of this codebase initializes background
-    // threads (pipeline.cpp, webcam_enum.cpp).
+    // A brand-new thread, independent of the capture pipeline's own CoInitializeEx
+    // (pipeline.cpp) -- needs its own COM apartment.
     HRESULT hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     bool should_uninit_co = (hr_co == S_OK || hr_co == S_FALSE);
     bool mf_started = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
@@ -99,10 +94,6 @@ void HrWebcamCaptureThreadMain(HrWebcamCapture::Impl *impl) {
         impl->alive = false;
         if (mf_started) MFShutdown();
         if (should_uninit_co) CoUninitialize();
-        // Signal the destructor (if it's still waiting on us) that we're
-        // done, then check whether it already gave up and handed cleanup
-        // off to us instead (see Impl's own comment) - if so, it's not
-        // coming back, so we delete ourselves here rather than leaking.
         bool was_handed_off = impl->handed_off.load(std::memory_order_acquire);
         {
             std::lock_guard<std::mutex> lk(impl->finish_mtx);
@@ -128,10 +119,6 @@ void HrWebcamCaptureThreadMain(HrWebcamCapture::Impl *impl) {
     }
 
     // Primary match: exact friendly-name match (first one found). Fallback:
-    // the device_index-th enumerated device -- see the reasoning in the
-    // header. Last resort: whatever camera is first, rather than nothing,
-    // matching how a missing image/gif path still shows *something* is
-    // better than silently compositing nothing wherever reasonable.
     int chosen = -1;
     if (!impl->device_name.empty()) {
         for (UINT32 i = 0; i < count; ++i) {
@@ -235,11 +222,6 @@ HrWebcamCapture::~HrWebcamCapture() {
     if (impl_) {
         impl_->stop = true;
         if (impl_->thread.joinable()) {
-            // Bounded wait (see Impl's comment for why an unconditional
-            // join() here isn't safe) - 2s is generous for a thread that's
-            // just idling between camera frames (checks `finished` the
-            // instant it actually exits), but short enough that a genuinely
-            // stuck driver doesn't freeze whoever's destroying this overlay.
             bool finished;
             {
                 std::unique_lock<std::mutex> lk(impl_->finish_mtx);

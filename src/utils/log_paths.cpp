@@ -19,10 +19,7 @@ namespace HrLogPaths {
 
 std::wstring LogsDir() {
     std::wstring dir = ExeDir() + L"\\logs";
-    // Best-effort: if this fails (e.g. read-only install dir), the
-    // loggers' own std::ofstream opens below will just silently fail
-    // too, same as they always have for a bad path - no new failure
-    // mode introduced by adding the subfolder.
+    // Best-effort: if this fails (e.g.
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }
@@ -57,10 +54,6 @@ std::wstring SanitizeLogFilename(const std::wstring &requested) {
 
     if (cleaned.empty()) return L"plugin.log";
 
-    // Plugins write logs, not arbitrary files - if a plugin didn't ask
-    // for a .log/.txt extension, add one rather than trusting whatever
-    // it did ask for (keeps logs\ from silently accumulating .exe/.dll/
-    // etc-named files from a careless or malicious plugin).
     auto hasExt = [&](const wchar_t *ext) {
         size_t n = wcslen(ext);
         return cleaned.size() >= n &&
@@ -86,10 +79,6 @@ void CapFileSize(const std::wstring &path, long long maxBytes) {
     // Over the limit: read the file back in and keep only its second
     // half, so a long session's most recent history survives instead of
     // either an unbounded file or losing everything on every rotation.
-    // This is the one genuinely non-trivial disk operation any of these
-    // loggers ever do, and it's gated to run only once per maxBytes'
-    // worth of growth (e.g. once per several thousand pc.log lines at
-    // the default cap) rather than on a fixed schedule.
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;

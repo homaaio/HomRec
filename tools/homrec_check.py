@@ -20,16 +20,13 @@ LOG_FAILURE_STRINGS = [
 
 results = []  # list of (level, message) - level is "OK", "WARN", or "FAIL"
 
-
 def record(level, message):
     results.append((level, message))
     tag = {"OK": "  ok  ", "WARN": " warn ", "FAIL": " FAIL "}[level]
     print(f"[{tag}] {message}")
 
-
 def section(title):
     print(f"\n=== {title} ===")
-
 
 # ---------------------------------------------------------------------------
 # Locating hr.exe and the files that live next to it
@@ -57,7 +54,6 @@ def find_hr_exe(explicit_path):
         return os.path.abspath(which)
     return None
 
-
 def run_quiet(args, timeout=10):
     """Best-effort subprocess run; returns stdout text or None."""
     try:
@@ -65,7 +61,6 @@ def run_quiet(args, timeout=10):
         return out.stdout
     except Exception:
         return None
-
 
 # ---------------------------------------------------------------------------
 # CPU / RAM
@@ -105,7 +100,6 @@ def check_cpu_ram():
     else:
         record("OK", "RAM looks fine.")
 
-
 # ---------------------------------------------------------------------------
 # Windows version + GPU (DXGI Desktop Duplication needs both)
 # ---------------------------------------------------------------------------
@@ -124,7 +118,6 @@ def check_windows_version():
                         "Duplication) requires Windows 8 or newer and will not initialize here.")
     else:
         record("OK", "Windows version supports DXGI Desktop Duplication.")
-
 
 def check_gpu():
     section("GPU / display adapter")
@@ -177,7 +170,6 @@ def check_gpu():
                         "capture will most likely fail to initialize (dx_create() returned null) "
                         "on this session (common over RDP or in a VM without GPU passthrough).")
 
-
 # ---------------------------------------------------------------------------
 # Disk
 # ---------------------------------------------------------------------------
@@ -212,7 +204,6 @@ def check_disk(output_folder):
     except OSError as e:
         record("FAIL", f"Output folder is NOT writable ({e}) - recordings will fail to save here.")
 
-
 # ---------------------------------------------------------------------------
 # ffmpeg
 # ---------------------------------------------------------------------------
@@ -236,7 +227,6 @@ def check_ffmpeg(hr_exe):
         record("OK", "ffmpeg is reachable and runs.")
     else:
         record("FAIL", f"ffmpeg found at {exe} but failed to run.")
-
 
 # ---------------------------------------------------------------------------
 # Settings: current .hrc, or legacy homrec_settings.json
@@ -274,7 +264,6 @@ def check_settings(install_dir):
     record("WARN", f"No homrec.hrc or homrec_settings.json in {install_dir} - fine on first run, "
                     f"defaults will be used and homrec.hrc created on exit.")
 
-
 # ---------------------------------------------------------------------------
 # cfg/autoexec.cfg, cfg/startrec.cfg
 # ---------------------------------------------------------------------------
@@ -299,7 +288,6 @@ def check_cfg_scripts(install_dir):
             record("OK", f"{name} is readable text with {len(commands)} command(s).")
         except OSError as e:
             record("WARN", f"Could not read {name}: {e}")
-
 
 # ---------------------------------------------------------------------------
 # plugins/*/plugin.json
@@ -336,7 +324,6 @@ def check_plugins(install_dir):
     else:
         record("OK", f"Checked {checked} plugin(s) under plugins/.")
 
-
 # ---------------------------------------------------------------------------
 # logs/
 # ---------------------------------------------------------------------------
@@ -354,7 +341,6 @@ def grep_log_tail(path, label):
     else:
         record("OK", f"{label}: no known failure strings in the last 200 lines.")
 
-
 def check_logs(install_dir):
     section("logs/")
     logs_dir = os.path.join(install_dir, "logs")
@@ -366,7 +352,6 @@ def check_logs(install_dir):
     pc_log = os.path.join(logs_dir, "pc.log")
     if os.path.isfile(pc_log):
         print(f"logs/pc.log present ({os.path.getsize(pc_log)} bytes).")
-
 
 # ---------------------------------------------------------------------------
 # Optional smoke test
@@ -386,7 +371,6 @@ def smoke_test(hr_exe, install_dir, wait_seconds=6):
 
     proc.terminate()
     print("Smoke test finished (app terminated).")
-
 
 # ---------------------------------------------------------------------------
 # main
@@ -444,7 +428,6 @@ def main():
         print("Everything checked out.")
 
     return 1 if n_fail else 0
-
 
 if __name__ == "__main__":
     try:

@@ -1,25 +1,4 @@
 // main_frame.h - wxWidgets rewrite of the main shell.
-//
-// Supersedes main_window.h/.cpp. The raw-GDI version (see git history /
-// main_window.cpp.bak if kept) rendered its own text and colors by hand
-// with CreateFontW(-heightInPixels, ...), which does not participate in
-// Windows DPI scaling the way real widgets do - that's what produced the
-// "tiny fonts" complaint. wxWidgets gives real retained-mode widgets
-// (wxStaticText/wxButton/wxPanel - conceptually the same model as
-// Tkinter's Label/Button/Frame), proper DPI-aware font point sizes, and a
-// wxImage/wxBitmap pipeline for the live preview instead of a hand-rolled
-// StretchDIBits call, which is also what was silently failing to show any
-// preview at all.
-//
-// Scope of this pass: the shell (menu, left sidebar, preview, bottom bar),
-// AudioPanel (mic/desktop mixer strip), and the Settings dialog are now
-// wx. RecordingController/OverlaysDockPanel/the remaining dialogs
-// (Advanced Settings, Welcome, Console, Overlay Manager, Log Viewer, PC
-// Analytics, Window Picker) are still untouched raw-Win32 code - a wxFrame
-// is still a real HWND under the hood on Windows (GetHandle()), so they
-// mount onto it/get launched with it as HWND parent exactly like before.
-// Porting each of
-// those to wx widgets too is follow-up work, not done here.
 #pragma once
 
 #include <wx/wx.h>
@@ -74,24 +53,15 @@ enum MenuCommandId {
     ID_VIEW_LOCK_UI         = 1034,
     ID_FILE_FULL_DESKTOP    = 1035,
     ID_VIEW_RESET_LAYOUT    = 1036,
-    ID_PREVIEW_TOGGLE_BTN   = 1037,   // on/off button in the preview header (replaces Settings > Disable live preview)
+    ID_PREVIEW_TOGGLE_BTN   = 1037,
     ID_VIEW_DOCK_FIRST      = 1040,
     ID_VIEW_DOCK_LAST       = 1069,
-    // ID_PERF_ULTRA            = 1030,
-    // ID_PERF_TURBO            = 1031,
-    // ID_PERF_BALANCED         = 1032,
-    // ID_PERF_ECO              = 1033,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
 // and settings_dialog (also now wx-based) can share them instead of
 // duplicating - see that header for their docs.
 
-// Draws the live capture preview from RecordingController::GetPreviewFrame's
-// raw RGB24 buffer (converted to a wxImage/wxBitmap and scaled to fit) -
-// this is the actual fix for "no preview": the old code's StretchDIBits
-// call was structurally fine but nothing was verified to reach it; wx's
-// wxImage path is simpler to get right and easier to debug.
 class PreviewPanel : public wxPanel {
 public:
     PreviewPanel(wxWindow *parent, RecordingController *&rec, AppState &state);
@@ -101,28 +71,11 @@ public:
         Refresh();
     }
 
-    // Called from the main frame's preview timer instead of an unconditional
-    // Refresh(): repaints only when the pipeline has produced a new thumbnail
-    // (one atomic load), plus a slow fallback tick so state-only changes
-    // (overlay list edits, theme) still show up.
     void PollRefresh();
 
     // Writes any debounced overlay edit (arrow-key nudges) to disk right now.
-    // The main frame calls this before it is destroyed - the panel itself must
-    // not do it from its own destructor, because AppState (a frame member) is
-    // already gone by the time wx destroys child windows.
     void FlushOverlaySave();
 
-    // "Apply with preview off" (overlays_dock_panel.cpp's row context
-    // menu, wired up in main_frame.cpp) - lets overlays still be dragged/
-    // resized here even with Settings > Disable live preview on, using a
-    // one-off screenshot instead of the live feed. While active, every
-    // overlay is drawn/hit-testable regardless of OverlayDef::visible (the
-    // user needs to be able to reach a hidden one to reposition it too),
-    // not just the ones normally shown live.
-    // native_w/native_h = the full-resolution size overlays are measured in
-    // (0 = same as w/h). Clicking the preview while Disable live preview is
-    // on starts this by itself - see OnLeftDown()/BeginSnapshotEditing().
     void EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h,
                            int native_w = 0, int native_h = 0);
     void UpdateSnapshotFrame(const std::vector<uint8_t> &buf, int w, int h,
@@ -148,20 +101,10 @@ private:
     void EndDrag();               // shared by OnLeftUp / stuck-drag recovery
     void ScheduleOverlaySave();   // debounced (400ms) autosave of state_.overlays
 
-    // Maps the current preview bitmap's on-screen rect within the panel
-    // (position + scale), so overlay coordinates (always stored in real
-    // source/capture pixels, matching what actually gets recorded) can be
-    // translated to/from the panel's on-screen pixels for hit-testing,
-    // dragging, and drawing.
     bool GetPreviewRect(wxRect &out) const;
 
     RecordingController *&rec_;
     AppState &state_;
-    // Shown only for the brief moment before the very first preview frame
-    // has arrived (EnsurePreview()'s pipeline starts at app launch and
-    // keeps running the whole session now - see RecordingController -
-    // so this is no longer "you must be recording to see anything", just
-    // "still warming up").
     wxString placeholder_ = "Preview loading...";
     std::vector<uint8_t> frame_buf_;
 
@@ -171,13 +114,6 @@ private:
     int snapshot_w_ = 0, snapshot_h_ = 0;
     int snapshot_native_w_ = 0, snapshot_native_h_ = 0;
 
-    // -- direct overlay drag/resize on the preview -------------------------
-    // Overlays previously could only be repositioned via a
-    // separate full-screen "Position Overlays" window (now the merged
-    // "Edit Overlay..." window, see overlay_editor_dialog.h) opened from
-    // the overlay row context menu. Users expect to just grab the overlay on the
-    // live preview shown in the main window instead -- this makes that the
-    // primary way to move/resize them.
     int drag_overlay_index_ = -1;
     // Which corner (if any) is being dragged to resize. kNone means a
     // plain move-drag (grabbed the body, not a handle).
@@ -191,13 +127,6 @@ private:
     int drag_start_mouse_x_ = 0, drag_start_mouse_y_ = 0;
     int drag_start_ov_x_ = 0, drag_start_ov_y_ = 0, drag_start_ov_w_ = 0, drag_start_ov_h_ = 0;
 
-    // The underlying preview frame updates far less often than the 30fps
-    // paint timer used to assume (throttled in pipeline.cpp, more so
-    // when idle) - re-running the bilinear Scale() on an unchanged frame
-    // every single paint was pure wasted CPU, most annoyingly right when
-    // a recording is also competing for the same cores. Cache the last
-    // scaled bitmap and only redo the scale when the source frame (or the
-    // panel's size) actually changed.
     std::vector<uint8_t> last_frame_buf_;
     wxBitmap cached_bmp_;
     int cached_src_w_ = -1, cached_src_h_ = -1;
@@ -234,13 +163,9 @@ private:
     void BuildBottomBar(wxWindow *parent, wxSizer *parentSizer);
     void ApplyThemeColours();
     void ApplyLanguageText();
-    // Phase 1 settings-storage migration (see commands.md): persists the
-    // *entire* current state_ via HrcConfig::Save(), mirroring to the
-    // default location too if a custom settings path is configured (see
-    // hrc_config.h's ResolveSettingsPath()). Used by every menu-toggle /
-    // panel-close handler that used to hand-roll its own
-    // hr_settings_set_flag()+hr_settings_save() pair against the old,
-    // no-longer-authoritative homrec_settings.json.
+    // Phase 1 settings-storage migration (see commands.md): persists the *entire* current
+    // state_ via HrcConfig::Save(), mirroring to the default location too if a custom settings
+    // path is configured (see hrc_config.h's ResolveSettingsPath()).
     void PersistSettings();
     void ToggleLivePreview();          // preview on/off (button above the preview); persists the choice
     void UpdatePreviewFpsLabel();      // FPS readout next to the Preview ON/OFF button (always visible, fixed width)
@@ -252,12 +177,6 @@ private:
     void OpenCaptureSourceDialog();
     void RunSourceAction(int action);
 
-    // -- 2.4: dockable panels (wxAUI) -------------------------------------------------
-    // Controls (Start/Pause/status/time), Audio Mixer and Overlays are AUI panes around
-    // the live preview: drag a pane's title to dock it to any side or to tear it out
-    // into its own window (and back), drag the sashes to resize. View > Panels can also
-    // send a pane straight to Left / Right / Top / Bottom / Floating. "Lock layout"
-    // freezes everything (AppState::ui_locked).
     enum DockSlot { kDockLeft = 0, kDockRight, kDockTop, kDockBottom, kDockFloat };
     void SetupDocking();
     void ApplyDockArtColours();
@@ -286,57 +205,30 @@ private:
 
     void DoStart();
     void DoStop();
-    // Runs on the UI thread (via CallAfter from RecordingController's
-    // background finalize thread) once StopAsync()'s tail is fully done -
-    // the rest of what DoStop() used to do synchronously right after
-    // rec_->Stop() returned. See DoStop()'s comment.
+    // Runs on the UI thread (via CallAfter from RecordingController's background finalize
+    // thread) once StopAsync()'s tail is fully done - the rest of what DoStop() used to do
+    // synchronously right after rec_->Stop() returned.
     void OnRecordingFinalized();
-    // Called from OnStatsTimer() the moment rec_->crashed() comes back
-    // true - runs the same stop/finalize sequence DoStop() does (so the
-    // status dot/elapsed time/Recording label don't stay stuck showing a
-    // recording that's no longer actually happening - see rec_->crashed()'s
-    // doc comment), then tells the user what happened once it's done.
     void HandleRecordingCrashed();
     void DoPause();
     void DoSaveReplay(); // Instant Replay hotkey/menu action - see recording_controller.h's SaveReplay()
-    // Wraps DoStart() with the "Countdown (3s)" setting: if
-    // state_.countdown_enabled is on, shows a 3-2-1 countdown in the
-    // status label (cancellable by clicking Start again) before actually
-    // calling DoStart(); otherwise starts immediately, same as before.
-    // Both places that used to call DoStart() directly for a fresh start
-    // (the Start button and the global hotkey) now go through this.
     void RequestStart();
     void OnCountdownTimer(wxTimerEvent &evt);
     // Ticks every second; fires RequestStart() once local time reaches
-    // AppState::scheduled_start_time, if scheduled_start_enabled and
-    // nothing's already recording. See the .cpp for the "don't re-fire
-    // every second within the same minute" logic.
+    // AppState::scheduled_start_time, if scheduled_start_enabled and nothing's already
+    // recording.
     void OnScheduleTimer(wxTimerEvent &evt);
     wxTimer countdown_timer_;
-    // Scheduled recording start (todo2.3.md section 3) - checked once a
-    // second against AppState::scheduled_start_time/_enabled by
-    // OnScheduleTimer(). Independent of countdown_timer_ above (that one
-    // only runs during the 3s "Starting in..." window right before an
-    // already-requested start).
+    // Scheduled recording start (todo2.3.md section 3) - checked once a second against
+    // AppState::scheduled_start_time/_enabled by OnScheduleTimer().
     wxTimer schedule_timer_;
-    // Last "HH:MM" this ticked a match against scheduled_start_time -
-    // see OnScheduleTimer()'s comment for why this (not a simple
-    // fired-once bool) is what lets it correctly fire again on a later
-    // day without re-firing every second within the same matching
-    // minute.
     std::string schedule_last_matched_minute_;
     bool schedule_parse_warned_ = false; // avoid re-logging every second while scheduled_start_time is malformed
     int countdown_remaining_ = 0;
     // Session-only (not persisted to settings.json) - resets each launch,
     // same lifetime as the Python original's in-memory dont_show_again
     // this ports from. state_.show_summary (the actual settings toggle)
-    // is what's persisted.
     bool summary_dont_show_again_ = false;
-    // Set by HandleRecordingCrashed() right before it kicks off the same
-    // StopAsync()->OnRecordingFinalized() path DoStop() uses - lets
-    // OnRecordingFinalized() tell the difference between "the user clicked
-    // Stop" and "ffmpeg died and we're cleaning up after it" so it can
-    // show the right message.
     bool recording_crashed_pending_notice_ = false;
     // The crash was the full-GPU (ddagrab) ffmpeg dying (e.g. a game changed the display mode): once the
     // interrupted recording is finalized, a new one is started right away with the normal pipeline.
@@ -362,10 +254,9 @@ private:
     void OnCheckForUpdates();
     void OnPreviewTimer(wxTimerEvent &evt);
     void OnStatsTimer(wxTimerEvent &evt);
-    // Own timer for the Audio Mixer's VU meter bars (see the .cpp for why
-    // this isn't just piggybacked on stats_timer_ anymore) - also
-    // (re)started from ID_SETTINGS_OPEN's handler whenever
-    // state_.level_meter_fps changes.
+    // Own timer for the Audio Mixer's VU meter bars (see the .cpp for why this isn't just
+    // piggybacked on stats_timer_ anymore) - also (re)started from ID_SETTINGS_OPEN's handler
+    // whenever state_.level_meter_fps changes.
     void OnLevelMeterTimer(wxTimerEvent &evt);
     void RestartLevelMeterTimer();
     void OnClose(wxCloseEvent &evt);
@@ -394,7 +285,6 @@ private:
     // OverlaysDockPanel is still raw-Win32 (creates real child HWNDs -
     // list/buttons - that need WM_DRAWITEM delivered to their immediate
     // parent); this wx panel exists purely to be that immediate parent.
-    // AudioPanel no longer needs one of these - it's real wx widgets now.
     class NativeHostPanel *overlays_host_ = nullptr;
 
     wxPanel *left_panel_ = nullptr;
@@ -408,10 +298,6 @@ private:
     wxStaticText *time_lbl_ = nullptr;
     wxStaticText *fps_lbl_ = nullptr;
     wxStaticText *res_lbl_ = nullptr;
-    // "STATUS"/"TIME"/"STATS" section headers built inline by
-    // BuildLeftPanel's addSection() lambda - kept as named members (rather
-    // than discarded, as before) so ApplyLanguageText() can retranslate
-    // them after a language switch instead of only re-theming their colour.
     wxStaticText *section_status_lbl_ = nullptr;
     wxStaticText *section_time_lbl_ = nullptr;
     wxStaticText *section_stats_lbl_ = nullptr;
@@ -427,9 +313,7 @@ private:
     wxStaticText *file_lbl_ = nullptr;
     wxStaticText *made_by_lbl_ = nullptr;
     // Bottom-bar "N plugin update(s)" badge - hidden (empty label) until
-    // CheckHomUpdatesAsync()'s background `hom list --upgradable` finds
-    // something. plugin_updates_summary_ holds the full per-plugin detail
-    // text shown when the badge is clicked.
+    // CheckHomUpdatesAsync()'s background `hom list --upgradable` finds something.
     wxStaticText *plugin_updates_lbl_ = nullptr;
     wxString plugin_updates_summary_;
     wxStaticText *version_bar_lbl_ = nullptr;

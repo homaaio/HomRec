@@ -1,17 +1,4 @@
-/*
- * ffmpeg_runner.cpp  -  HomRec FFmpeg process manager  (v1.6.1)
- *
- * Replaces the FFmpeg subprocess logic from homrec.py:
- *   _build_ffmpeg_cmd(), _start_ffmpeg_process(), _stop_ffmpeg_process(),
- *   _wait_ffmpeg(), and the file-size polling helpers.
- *
- * The module wraps CreateProcess (Windows) / posix_spawn (Linux/macOS) and
- * exposes a minimal C API for the rest of the app to launch/manage ffmpeg.
- *
- * Build (MinGW-w64):
- *   g++ -O2 -std=c++17 -shared -static-libgcc -static-libstdc++ ^
- *       -o hr_ffmpeg_runner.dll ffmpeg_runner.cpp
- */
+// ffmpeg_runner.cpp  -  HomRec FFmpeg process manager  (v1.6.1)
 
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -74,21 +61,11 @@ struct FfmpegCtx {
 
     /* video params */
     int width{1920}, height{1080}, fps{30};
-    // Output (post-scale) size, if different from width/height above -
-    // 0 means "same as input, no scale filter needed". Input width/height
-    // MUST always match the actual raw frame size arriving on the pipe
-    // (i.e. the real capture resolution) - any resolution reduction
-    // (AppState::scale_factor) happens via ffmpeg's own -vf scale filter
-    // on the way to the encoder, not by lying about the raw input size.
+    // Output (post-scale) size, if different from width/height above - 0 means "same as input,
+    // no scale filter needed".
     int output_width{0}, output_height{0};
     bool pipe_input{false};  /* true → read raw BGRA from stdin */
 
-    /* ---- ffmpeg "ddagrab" fast path (ffmpeg 6.0+) ---------------------------
-     * ffmpeg captures the desktop itself (DXGI Desktop Duplication, frames stay
-     * in GPU memory as D3D11 textures) and hands them straight to a hardware
-     * encoder: no readback, no CPU colour conversion, no pipe. Fastest option,
-     * but HomRec's overlays/plugins never see a frame. stdin is used ONLY as
-     * the "q\n" graceful-stop channel here (pipe_input stays false). */
     bool gpu_capture{false};
     int  grab_output_idx{0};
     int  grab_off_x{0}, grab_off_y{0};
@@ -101,12 +78,9 @@ struct FfmpegCtx {
     bool gpu_low_priority{false};
     bool gpu_priority_applied{false};   /* result of the call above, for hr_ff_gpu_priority_applied() */
 
-    /* Diagnostics for the ddagrab path (stderr of a GUI-launched ffmpeg used to go
-     * nowhere, so a mid-recording death left no trace of the reason):
-     *   log_path      - ffmpeg's stderr is redirected here (logs\ffmpeg_ddagrab.log)
-     *   progress_path - "-progress" file; its last "frame=N" line is the live frame
-     *                   count the UI turns into an FPS value (ddagrab bypasses
-     *                   HomRec's own pipeline, which is what normally measures it). */
+    // Diagnostics for the ddagrab path (stderr of a GUI-launched ffmpeg used to go
+    // nowhere, so a mid-recording death left no trace of the reason):
+    // log_path      - ffmpeg's stderr is redirected here (logs\ffmpeg_ddagrab.log)
     std::string log_path;
     std::string progress_path;
 };
@@ -132,18 +106,6 @@ extern "C" int hr_gpu_sched_set_process(void *hProcess, int level);
 extern "C" long hr_gpu_sched_last_status();
 
 #ifdef _WIN32
-// Plain CreatePipe() (used here previously) hands back an anonymous
-// pipe that only supports blocking, synchronous I/O - the write end had no
-// way to time out a WriteFile() that ffmpeg wasn't draining, which is what
-// caused the writer thread to hang forever under load (see write_pipe()'s
-// comment in pipeline.cpp for the full story, including the
-// std::terminate() it led to). CreatePipe() itself can't be made overlapped
-// no matter what flags you pass it - this is the standard workaround:
-// a uniquely-named pipe with exactly one instance, server end
-// (FILE_FLAG_OVERLAPPED, for us to write) plus client end (opened normally,
-// for ffmpeg's child process to read) - functionally identical to
-// CreatePipe()'s anonymous pipe from ffmpeg's side, but our end now
-// supports the timeout/cancel logic write_pipe() needs.
 static bool _create_overlapped_stdin_pipe(HANDLE *out_read, HANDLE *out_write) {
     static std::atomic<uint32_t> s_counter{0};
     wchar_t name[128];
@@ -285,16 +247,8 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
 
 /* -- Build ffmpeg command line --------------------------------------------- */
 
-/*
- * Builds the complete ffmpeg argument list for screen recording.
- * When pipe_input is false, MSS captures to a file and ffmpeg re-encodes it.
- * When pipe_input is true, the pipeline converts each captured frame to
- * planar YUV420p or NV12 (hr_bgra_to_yuv420p / hr_bgra_to_nv12_band in
- * pipeline.cpp/encoder_helpers.c, chosen to match the encoder - see
- * _wants_hw_pixfmt() below) before writing it to ffmpeg's stdin, matching
- * the "-pixel_format"/"-pix_fmt" args below - ffmpeg never sees the
- * original BGRA capture buffer.
- */
+// Builds the complete ffmpeg argument list for screen recording.
+// When pipe_input is false, MSS captures to a file and ffmpeg re-encodes it.
 #ifdef _WIN32
 static std::wstring _utf8_to_wide(const std::string &s) {
     if (s.empty()) return std::wstring();
@@ -310,37 +264,14 @@ static std::wstring _utf8_to_wide(const std::string &s) {
 }
 #endif
 
-// Hardware encoders (nvenc/qsv/amf) natively consume NV12; feeding them
-// yuv420p makes ffmpeg silently swscale-convert yuv420p->nv12 on the CPU
-// right before encode - a second, redundant color-conversion pass on top
-// of the one hr_bgra_to_yuv420p/hr_bgra_to_nv12 already did. codec_args
-// (e.g. "-c:v h264_qsv -preset veryfast ...") already names the encoder,
-// so that's the single source of truth here - same substring check
-// hr_build_codec_args() (tools.cpp) uses to pick its own encoder-
-// specific flags, kept in sync with the raw pixel format the pipeline
-// actually writes (see Yuv420pWorkerPool::SetUseNv12() in pipeline.cpp
-// and hr_pl_set_output_pixfmt() - the caller must select the same format
-// on both sides or the rawvideo demuxer below will misinterpret the bytes
-// arriving on the pipe).
 static bool _wants_hw_pixfmt(const std::string &codec_args) {
     return codec_args.find("nvenc") != std::string::npos ||
            codec_args.find("qsv")   != std::string::npos ||
            codec_args.find("amf")   != std::string::npos;
 }
 
-// In that path the frames are D3D11/QSV BGRA surfaces and the HARDWARE
-// ENCODER does the RGB -> YUV conversion itself (Intel MFX / NVENC / AMF). All
-// three produce studio ("tv", 16..235) BT.601-style YUV, but ffmpeg is not
-// told so: the surfaces carry no colour tags (or an RGB-style "full range"
-// one that ffmpeg copies into the stream's VUI), so a player may decode
-// limited-range samples as full range -> lifted blacks (VS Code black ->
-// grey), dimmer whites, a washed-out picture.
-// Plain "-color_range/-colorspace" output options are NOT used here (see the
-// comment in _build_cmdline(): with hardware frames they can end up in the
-// filter graph). A bitstream filter only rewrites the VUI of the already
-// encoded stream (and the SPS in the mp4 header), never touches the frames,
-// so the GPU zero-copy path stays intact. Returns "" for codecs it does not
-// know (the stream is then left exactly as before).
+// In that path the frames are D3D11/QSV BGRA surfaces and the HARDWARE ENCODER does the
+// RGB -> YUV conversion itself (Intel MFX / NVENC / AMF).
 static std::wstring _ddagrab_vui_bsf(const std::string &codec_args) {
     // 6 = smpte170m (BT.601), same tag the pipe path writes for its own data.
     if (codec_args.find("h264") != std::string::npos) {
@@ -378,11 +309,8 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     }
 
     if (ctx->gpu_capture) {
-        /* ddagrab fast path. Documented ffmpeg recipes (doc/filters.texi):
-         *   NVENC / AMF : -filter_complex ddagrab=0            -c:v h264_nvenc ...
-         *   QSV         : -init_hw_device d3d11va -filter_complex ddagrab=0,hwmap=derive_device=qsv,format=qsv
-         * The frames are D3D11 hardware frames end to end, so NO -pix_fmt /
-         * -color_* / -vf scale here (any of them would force a download). */
+        // ddagrab fast path. Documented ffmpeg recipes (doc/filters.texi):
+        // NVENC / AMF : -filter_complex ddagrab=0            -c:v h264_nvenc ...
         const bool is_qsv = ctx->codec_args.find("qsv") != std::string::npos;
         std::wostringstream grab;
         grab << L"ddagrab=output_idx=" << ctx->grab_output_idx
@@ -424,36 +352,20 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
        hardware encoders receive NV12 directly instead of ffmpeg silently
        re-converting from yuv420p. */
     ss << L" -pix_fmt " << raw_pixfmt;
-    /* BUGFIX: this used to always say "-color_range pc" for both paths.
-       hr_bgra_to_yuv420p_band (software libx264/libx265 path) really is
-       full/PC range and libx264/libx265 reliably write that into the
-       bitstream, so "pc" is correct there. hr_bgra_to_nv12_band (hardware
-       nvenc/qsv/amf path) no longer is: NVENC/QSV/AMF don't reliably
-       propagate "-color_range pc" into the encoded VUI, so a plain
-       full-range flag request here was silently getting dropped and
-       players fell back to the default limited-range decode on genuinely
-       full-range samples - crushed shadows, dark/dull picture. The NV12
-       converter (encoder_helpers.c) now emits real limited/"tv" range
-       samples instead, so this just has to say what they actually are. */
+    // BUGFIX: this used to always say "-color_range pc" for both paths.
     const wchar_t *out_color_range = _wants_hw_pixfmt(ctx->codec_args) ? L"tv" : L"pc";
     ss << L" -color_range " << out_color_range << L" -colorspace smpte170m"
           L" -color_primaries smpte170m -color_trc smpte170m";
 
-    /* Encode-time downscale (AppState's Settings > Resolution, e.g. 75%/
-       50%/25% of native) - applied here via ffmpeg's own scaler rather
-       than by ever telling the rawvideo demuxer above a size that doesn't
-       match the actual bytes arriving on the pipe. Skipped entirely at
-       "Native" (output size unset or equal to input) so there's no
-       wasted no-op filter in the common case. */
+    // Encode-time downscale (AppState's Settings > Resolution, e.g.
     if (ctx->output_width > 0 && ctx->output_height > 0 &&
         (ctx->output_width != ctx->width || ctx->output_height != ctx->height)) {
         ss << L" -vf scale=" << ctx->output_width << L":" << ctx->output_height;
     }
 
-    /* Extra output-side flags (Instant Replay's segment muxer, etc.) -
-       must land after codec/scale args and before -y/output_path, same
-       position ffmpeg itself expects "-f segment ..." in on a real
-       command line. */
+    // Extra output-side flags (Instant Replay's segment muxer, etc.) - must land after
+    // codec/scale args and before -y/output_path, same position ffmpeg itself expects "-f
+    // segment ..." in on a real command line.
     if (!ctx->extra_output_args.empty()) {
         ss << L" " << _utf8_to_wide(ctx->extra_output_args);
     }
@@ -480,16 +392,6 @@ HR_EXPORT void hr_ff_destroy(void *handle) {
         CloseHandle(ctx->hProcess);
         CloseHandle(ctx->hThread);
         // Same handle-ownership split as hr_ff_kill()/hr_ff_stop_graceful():
-        // in pipe_input mode, hStdin is the raw video pipe the capture
-        // pipeline's writer thread may still be writing to (it's the sole
-        // owner and closes it itself once, right after its loop ends - see
-        // writer_loop() in pipeline.cpp). Destroy() can be reached with
-        // ctx->running still true - StopFinalizeTail()'s last-resort
-        // force-stop path calls this directly after a wait timeout - so
-        // closing the handle here unconditionally would race that thread
-        // the same way hr_ff_kill() used to. Only non-pipe-input mode
-        // (stdin as ffmpeg's own interactive channel, no shared ownership)
-        // still closes it directly here.
         if (ctx->hStdin) {
             if (!ctx->pipe_input) CloseHandle(ctx->hStdin);
             ctx->hStdin = nullptr;
@@ -511,12 +413,8 @@ HR_EXPORT void hr_ff_set_output_path(void *h, const char *path) {
     static_cast<FfmpegCtx *>(h)->output_path = path;
 }
 
-/*
- * hr_ff_set_input_path
- * Only meaningful when pipe_input is disabled (hr_ff_set_pipe_input(h, 0)):
- * the file ffmpeg should read frames from, in place of "-i pipe:0". Unused
- * (and unnecessary) in the normal/default pipe_input=1 mode.
- */
+// hr_ff_set_input_path
+// Only meaningful when pipe_input is disabled (hr_ff_set_pipe_input(h, 0)):
 HR_EXPORT void hr_ff_set_input_path(void *h, const char *path) {
     if (!h || !path) return;
     static_cast<FfmpegCtx *>(h)->input_path = path;
@@ -538,37 +436,23 @@ HR_EXPORT void hr_ff_set_video_params(void *h, int w, int h2, int fps) {
     ctx->width = w; ctx->height = h2; ctx->fps = fps;
 }
 
-/*
- * hr_ff_set_output_size
- * Sets the final encoded resolution, if it should differ from the raw
- * input size set via hr_ff_set_video_params() (i.e. AppState's Settings
- * > Resolution knob, applied as an encode-time -vf scale filter). Pass
- * 0,0 (or just never call this) for "same as input, no scaling".
- */
+// hr_ff_set_output_size Sets the final encoded resolution, if it should differ from the
+// raw input size set via hr_ff_set_video_params() (i.e.
 HR_EXPORT void hr_ff_set_output_size(void *h, int out_w, int out_h) {
     if (!h) return;
     auto *ctx = static_cast<FfmpegCtx *>(h);
     ctx->output_width = out_w; ctx->output_height = out_h;
 }
 
-/*
- * hr_ff_set_gpu_capture  (ffmpeg "ddagrab" fast path, ffmpeg 6.0+)
- * enable   : 1 = ffmpeg captures + encodes on the GPU by itself (no pipe).
- * output_idx : DXGI output index (same numbering as hr_dx_create()).
- * off_x/off_y/w/h : region relative to that output; w/h 0 = the whole output.
- * draw_mouse : let ddagrab draw the pointer.
- * Only sensible with a hardware encoder (nvenc/qsv/amf) and when output size
- * == captured size (ddagrab has no scaler). The caller decides that.
- */
+// hr_ff_set_gpu_capture  (ffmpeg "ddagrab" fast path, ffmpeg 6.0+)
+// enable   : 1 = ffmpeg captures + encodes on the GPU by itself (no pipe).
+// output_idx : DXGI output index (same numbering as hr_dx_create()).
 HR_EXPORT void hr_ff_set_normal_priority(void *h, int enable) {
     if (!h) return;
     static_cast<FfmpegCtx *>(h)->normal_priority = (enable != 0);
 }
 
 // hr_ff_set_gpu_low_priority:
-// enable != 0: lower the ffmpeg child's GPU scheduling class (below normal) right after it is
-// launched. Must be called before hr_ff_start(). hr_ff_gpu_priority_applied() tells afterwards
-// whether the driver stack accepted it (1) or not (0), so the caller can log the outcome.
 HR_EXPORT void hr_ff_set_gpu_low_priority(void *h, int enable) {
     if (!h) return;
     static_cast<FfmpegCtx *>(h)->gpu_low_priority = (enable != 0);
@@ -593,12 +477,9 @@ HR_EXPORT void hr_ff_set_gpu_capture(void *h, int enable, int output_idx,
     if (ctx->gpu_capture) ctx->pipe_input = false;
 }
 
-/*
- * hr_ff_set_diag_paths
- * ddagrab mode only. log_path: ffmpeg's stderr is written there. progress_path: ffmpeg's
- * "-progress" output (read back by hr_ff_progress_frames()). Either may be NULL/empty.
- * Must be called before hr_ff_start().
- */
+// hr_ff_set_diag_paths
+// ddagrab mode only. log_path: ffmpeg's stderr is written there. progress_path: ffmpeg's
+// "-progress" output (read back by hr_ff_progress_frames()). Either may be NULL/empty.
 HR_EXPORT void hr_ff_set_diag_paths(void *h, const char *log_path, const char *progress_path) {
     if (!h) return;
     auto *ctx = static_cast<FfmpegCtx *>(h);
@@ -632,11 +513,9 @@ static std::string _read_file_tail(const std::string &utf8_path, size_t cap) {
 }
 #endif
 
-/*
- * hr_ff_progress_frames
- * Number of frames ffmpeg has encoded so far, from the last "frame=N" line of its -progress
- * file; -1 if unknown (no progress file yet / not ddagrab mode).
- */
+// hr_ff_progress_frames
+// Number of frames ffmpeg has encoded so far, from the last "frame=N" line of its -progress
+// file; -1 if unknown (no progress file yet / not ddagrab mode).
 HR_EXPORT long long hr_ff_progress_frames(const void *handle) {
     if (!handle) return -1;
 #ifdef _WIN32
@@ -657,11 +536,9 @@ HR_EXPORT long long hr_ff_progress_frames(const void *handle) {
 #endif
 }
 
-/*
- * hr_ff_read_log_tail
- * Copies the last bytes of ffmpeg's stderr log (see hr_ff_set_diag_paths) into buf
- * (NUL-terminated). Returns the number of bytes written (0 if there is no log).
- */
+// hr_ff_read_log_tail
+// Copies the last bytes of ffmpeg's stderr log (see hr_ff_set_diag_paths) into buf
+// (NUL-terminated). Returns the number of bytes written (0 if there is no log).
 HR_EXPORT int hr_ff_read_log_tail(const void *handle, char *buf, int buf_len) {
     if (!buf || buf_len <= 0) return 0;
     buf[0] = '\0';
@@ -677,10 +554,8 @@ HR_EXPORT int hr_ff_read_log_tail(const void *handle, char *buf, int buf_len) {
 #endif
 }
 
-/*
- * hr_ff_exit_code
- * Exit code of the ffmpeg process once it has ended; -1 while it is still running / unknown.
- */
+// hr_ff_exit_code
+// Exit code of the ffmpeg process once it has ended; -1 while it is still running / unknown.
 HR_EXPORT int hr_ff_exit_code(const void *handle) {
     if (!handle) return -1;
 #ifdef _WIN32
@@ -699,18 +574,9 @@ HR_EXPORT void hr_ff_set_pipe_input(void *h, int enable) {
     static_cast<FfmpegCtx *>(h)->pipe_input = (enable != 0);
 }
 
-/*
- * hr_ff_get_stdin_handle
- * Returns the write end of ffmpeg's stdin pipe (valid only once
- * hr_ff_start() has succeeded and pipe_input was enabled), as an
- * intptr_t-sized value so it round-trips through a 64-bit HANDLE on
- * Win64 without truncation. Returns 0 if there's no process, the
- * process hasn't been started yet, or pipe mode wasn't requested.
- * The capture pipeline (pipeline.cpp) needs this raw value to know
- * where to WriteFile() the raw BGRA/YUV frames it captures - it has no
- * other way to reach ffmpeg's stdin, since that HANDLE otherwise never
- * leaves this file.
- */
+// hr_ff_get_stdin_handle Returns the write end of ffmpeg's stdin pipe (valid only once
+// hr_ff_start() has succeeded and pipe_input was enabled), as an intptr_t-sized value so
+// it round-trips through a 64-bit HANDLE on Win64 without truncation.
 HR_EXPORT intptr_t hr_ff_get_stdin_handle(void *h) {
     if (!h) return 0;
 #ifdef _WIN32
@@ -720,11 +586,9 @@ HR_EXPORT intptr_t hr_ff_get_stdin_handle(void *h) {
 #endif
 }
 
-/*
- * hr_ff_start
- * Launches the ffmpeg process.
- * Returns HR_FF_OK on success, HR_FF_ERROR on failure.
- */
+// hr_ff_start
+// Launches the ffmpeg process.
+// Returns HR_FF_OK on success, HR_FF_ERROR on failure.
 HR_EXPORT int hr_ff_start(void *handle) {
     if (!handle) return HR_FF_ERROR;
     auto *ctx = static_cast<FfmpegCtx *>(handle);
@@ -744,11 +608,9 @@ HR_EXPORT int hr_ff_start(void *handle) {
     return HR_FF_OK;
 }
 
-/*
- * hr_ff_stop_graceful
- * Sends 'q\n' to ffmpeg's stdin (graceful finish).
- * Returns HR_FF_OK if the signal was sent, HR_FF_ERROR otherwise.
- */
+// hr_ff_stop_graceful
+// Sends 'q\n' to ffmpeg's stdin (graceful finish).
+// Returns HR_FF_OK if the signal was sent, HR_FF_ERROR otherwise.
 HR_EXPORT int hr_ff_stop_graceful(void *handle) {
     if (!handle) return HR_FF_ERROR;
     auto *ctx = static_cast<FfmpegCtx *>(handle);
@@ -758,43 +620,11 @@ HR_EXPORT int hr_ff_stop_graceful(void *handle) {
 #ifdef _WIN32
     if (ctx->hStdin) {
         if (ctx->pipe_input) {
-            // BUGFIX (recording finalizes to a broken ~1KB placeholder
-            // file): ctx->hStdin here is the exact same HANDLE the
-            // Pipeline's writer thread has open as its raw video pipe
-            // (see hr_pl_set_recording()/hr_ff_get_stdin_handle()) - in
-            // pipe_input mode stdin *is* the raw frame stream, not an
-            // interactive console. Writing "q\n" into it doesn't tell
-            // ffmpeg to finish gracefully (that keystroke handling isn't
-            // wired to a redirected pipe that's already declared as
-            // "-i pipe:0" video input) - it just splices 2 garbage bytes
-            // into the middle of whatever frame comes next, desyncing
-            // every raw frame that follows since rawvideo has no framing
-            // markers to resync on.
-            //
-            // Worse, closing the handle here unconditionally raced the
-            // writer thread: if hr_pl_stop() had to hand this recording's
-            // writer thread off (still draining a backlog in the
-            // background - see hr_pl_stop()'s handed_off path), that
-            // thread could still be mid-WriteFile() on this very handle
-            // when CloseHandle() ran here from a completely different
-            // thread. The pipe would then see a truncated/garbled stream
-            // followed by an abrupt EOF before more than a few frames had
-            // actually gone out, so ffmpeg finalized (or errored out)
-            // almost immediately: just the initial ftyp/moov placeholder,
-            // nothing playable.
-            //
-            // The writer thread is the only thing that actually knows
-            // when every real frame has been written, so it - not this
-            // function - now owns closing this handle exactly once, right
-            // after its loop naturally ends (see writer_loop() in
-            // pipeline.cpp). Here we just drop our own reference to it
-            // without touching the OS handle.
             ctx->hStdin = nullptr;
         } else {
-            // Non-pipe-input mode: stdin genuinely is ffmpeg's interactive
-            // control channel here (no raw video sharing the same fd), so
-            // the "q\n" graceful-stop keystroke is legitimate and this is
-            // the only owner of the handle.
+            // Non-pipe-input mode: stdin genuinely is ffmpeg's interactive control channel here (no
+            // raw video sharing the same fd), so the "q\n" graceful-stop keystroke is legitimate and
+            // this is the only owner of the handle.
             DWORD written = 0;
             WriteFile(ctx->hStdin, "q\n", 2, &written, nullptr);
             CloseHandle(ctx->hStdin);
@@ -807,11 +637,9 @@ HR_EXPORT int hr_ff_stop_graceful(void *handle) {
     return HR_FF_OK;
 }
 
-/*
- * hr_ff_wait
- * Blocks until ffmpeg exits or timeout_ms elapses.
- * Returns exit code (0 = success), or -1 on timeout / error.
- */
+// hr_ff_wait
+// Blocks until ffmpeg exits or timeout_ms elapses.
+// Returns exit code (0 = success), or -1 on timeout / error.
 HR_EXPORT int hr_ff_wait(void *handle, int timeout_ms) {
     if (!handle) return -1;
     auto *ctx = static_cast<FfmpegCtx *>(handle);
@@ -849,10 +677,8 @@ HR_EXPORT int hr_ff_wait(void *handle, int timeout_ms) {
 #endif
 }
 
-/*
- * hr_ff_is_running
- * Returns 1 if process is alive, 0 otherwise.
- */
+// hr_ff_is_running
+// Returns 1 if process is alive, 0 otherwise.
 HR_EXPORT int hr_ff_is_running(const void *handle) {
     if (!handle) return 0;
     const auto *ctx = static_cast<const FfmpegCtx *>(handle);
@@ -867,10 +693,8 @@ HR_EXPORT int hr_ff_is_running(const void *handle) {
 #endif
 }
 
-/*
- * hr_ff_output_size_mb
- * Returns the current output file size in megabytes.
- */
+// hr_ff_output_size_mb
+// Returns the current output file size in megabytes.
 HR_EXPORT double hr_ff_output_size_mb(const void *handle) {
     if (!handle) return 0.0;
     const auto *ctx = static_cast<const FfmpegCtx *>(handle);
@@ -878,10 +702,8 @@ HR_EXPORT double hr_ff_output_size_mb(const void *handle) {
     return (double)_file_size(ctx->output_path.c_str()) / (1024.0 * 1024.0);
 }
 
-/*
- * hr_ff_kill
- * Immediately terminates the ffmpeg process.
- */
+// hr_ff_kill
+// Immediately terminates the ffmpeg process.
 HR_EXPORT void hr_ff_kill(void *handle) {
     if (!handle) return;
     auto *ctx = static_cast<FfmpegCtx *>(handle);
@@ -892,26 +714,8 @@ HR_EXPORT void hr_ff_kill(void *handle) {
         WaitForSingleObject(ctx->hProcess, 3000);
         CloseHandle(ctx->hProcess);
         CloseHandle(ctx->hThread);
-        // BUGFIX: this used to CloseHandle(ctx->hStdin) unconditionally,
-        // same as hr_ff_stop_graceful() did before *its* pipe_input fix
-        // (see the big comment over there). In pipe_input mode, hStdin is
-        // the exact same OS handle value the capture pipeline's writer
-        // thread has as its raw video pipe (hr_pl_set_recording() was
-        // handed this HANDLE via hr_ff_get_stdin_handle()), and that
-        // thread closes it itself exactly once, right after its loop ends
-        // (writer_loop() in pipeline.cpp) - it's the only thing that
-        // actually knows when it's done writing. Every hr_ff_kill() call
-        // site that can run while a pipeline is still attached (e.g.
-        // RecordingController::Start()'s "capture pipeline didn't start"
-        // cleanup, which calls hr_ff_kill() before hr_pl_destroy()) was
-        // therefore racing that writer thread - closing the handle out
-        // from under a possibly in-flight overlapped WriteFile(), and/or
-        // double-closing it once the writer thread got to its own
-        // CloseHandle(). Same fix as hr_ff_stop_graceful(): in pipe_input
-        // mode, just drop our reference and let the writer thread be the
-        // sole owner of the close. Non-pipe-input mode has no such
-        // handoff (stdin is only ever ffmpeg's interactive control
-        // channel there), so it keeps closing the handle directly.
+        // BUGFIX: this used to CloseHandle(ctx->hStdin) unconditionally, same as
+        // hr_ff_stop_graceful() did before *its* pipe_input fix (see the big comment over there).
         if (ctx->hStdin) {
             if (!ctx->pipe_input) CloseHandle(ctx->hStdin);
             ctx->hStdin = nullptr;

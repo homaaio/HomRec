@@ -12,11 +12,6 @@
 namespace {
 
 #ifdef _WIN32
-// NOTE: deliberately *not* reusing the symbol name PKEY_Device_FriendlyName
-// that audio.cpp defines for itself (that .cpp's copy has external
-// linkage, and a second definition of the same name in this translation
-// unit would be a duplicate-symbol link error) -- this is the same GUID,
-// just under a name local to this file.
 static const PROPERTYKEY kPkeyFriendlyName = {
     { 0xa45c254e, 0xdf1c, 0x4efd,
       { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14

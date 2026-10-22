@@ -26,10 +26,8 @@ std::string ReadFile(const std::string &path) {
     return ss.str();
 }
 
-// Extremely small hand-rolled JSON reader for plugin.json - just enough
-// for the flat {id, name, version, entry} shape these manifests use. Not a
-// general JSON parser; if plugin.json has nested structures this will need
-// swapping for a real JSON library (nlohmann/json is a common, easy add).
+// Extremely small hand-rolled JSON reader for plugin.json - just enough for the flat {id,
+// name, version, entry} shape these manifests use.
 std::string ExtractJsonString(const std::string &json, const std::string &key) {
     std::string needle = "\"" + key + "\"";
     size_t pos = json.find(needle);
@@ -44,11 +42,6 @@ std::string ExtractJsonString(const std::string &json, const std::string &key) {
 }
 
 // Finds a top-level object value for `key` (e.g. `"permissions": { ... }`)
-// and returns just the inside of its braces, or empty if the key isn't
-// present. Simple brace-counting, not a general JSON parser (same caveat
-// as ExtractJsonString() above) - fine for plugin.json's "permissions"
-// block, which is expected to stay a flat {network, filesystem, store}
-// shape with no further nesting of its own.
 std::string ExtractJsonObject(const std::string &json, const std::string &key) {
     std::string needle = "\"" + key + "\"";
     size_t pos = json.find(needle);
@@ -71,9 +64,6 @@ std::string ExtractJsonObject(const std::string &json, const std::string &key) {
 
 // Reads a bare JSON boolean (true/false, unquoted) for `key` out of a
 // flat object chunk like the one ExtractJsonObject() above returns.
-// Returns def if the key isn't present at all, so a "permissions" block
-// that only mentions some of the three flags leaves the rest at their
-// (allowed-by-default) value rather than needing every flag spelled out.
 bool ExtractJsonBool(const std::string &json, const std::string &key, bool def) {
     std::string needle = "\"" + key + "\"";
     size_t pos = json.find(needle);
@@ -223,11 +213,6 @@ bool LuaPluginEngine::LoadPluginArchive(const std::string &hrp_path) {
 
     std::string extracted_dir = plugins_dir_ + "\\.installed\\" + name;
 
-    // Only re-extract if the .hrp is newer than the last extraction (or
-    // there's no extraction yet) -- an unconditional re-extract every
-    // LoadAll() would silently wipe out plugin.store's saved key/value
-    // data (PluginStore writes into the extracted directory, not the
-    // archive) even when the .hrp itself hasn't changed.
     std::string marker = extracted_dir + "\\plugin.json";
     bool need_extract = !DirectoryExists(extracted_dir) ||
                          IsNewerThan(LastWriteTime(hrp_path), LastWriteTime(marker));
@@ -293,12 +278,8 @@ void LuaPluginEngine::EmitHook(const char *hook_name) {
 }
 
 void LuaPluginEngine::EmitHookWithColors(const char *hook_name, const ThemeColors & /*colors*/) {
-    // NOTE: passing the full color table into Lua needs a small helper to
-    // push it as a table (same shape homrec.get_colors() returns - see
-    // lua_api.cpp). Reusing that here rather than duplicating the push
-    // logic; wire-through happens once main_window calls this on theme
-    // change (integration step, still pending per your "keep building"
-    // instruction - noting the dependency rather than silently skipping it).
+    // NOTE: passing the full color table into Lua needs a small helper to push it as a table
+    // (same shape homrec.get_colors() returns - see lua_api.cpp).
     EmitHook(hook_name);
 }
 
@@ -336,11 +317,6 @@ void LuaPluginEngine::RegisterCommand(const std::string &plugin_id, const std::s
                                        const std::string &description, int lua_ref) {
     std::string key = ToLowerAscii(name);
     if (key.empty()) return;
-    // Last plugin to register a given name wins (and its predecessor's ref
-    // just leaks in that plugin's own lua_State until that plugin unloads
-    // - not worth the complexity of unref'ing a ref that belongs to
-    // whichever plugin registered it first, for what should be a rare
-    // collision between two plugins in practice).
     commands_[key] = RegisteredCommand{plugin_id, description, lua_ref};
 }
 
@@ -401,12 +377,7 @@ bool LuaPluginEngine::DispatchSetting(const std::string &name, const std::string
             lua_pop(L, 1);
         }
     } else {
-        // Assign: fn(raw_value_string). A plugin that wants its own
-        // confirmation text calls homrec.print() from inside set_fn (it
-        // lands in out_lines via print_sink, same as register_command's
-        // handler); if it didn't print anything, fall back to a default
-        // confirmation line so a plugin setting still gives feedback
-        // without every plugin author needing to remember to add it.
+        // Assign: fn(raw_value_string).
         lua_rawgeti(L, LUA_REGISTRYINDEX, sit->second.set_ref);
         lua_pushstring(L, raw_value.c_str());
         if (lua_pcall(L, 1, 0, 0) != LUA_OK) {

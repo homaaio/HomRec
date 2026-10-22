@@ -6,10 +6,9 @@
 #include <string>
 #include <shlobj.h>
 
-// Phase 1 (see commands.md): persistence now goes through HrcConfig::Save
-// (hrc_config.h), which writes the entire AppState in one shot - the old
-// hr_settings_* JSON engine's fixed field whitelist is no longer touched
-// from this wizard at all.
+// Phase 1 (see commands.md): persistence now goes through HrcConfig::Save (hrc_config.h),
+// which writes the entire AppState in one shot - the old hr_settings_* JSON engine's fixed
+// field whitelist is no longer touched from this wizard at all.
 
 namespace {
 
@@ -45,11 +44,6 @@ struct WelcomeCtx {
     HWND hBackBtn = nullptr, hNextBtn = nullptr;
 };
 
-// Applies the settings-page fields to *ctx->state and persists the three
-// fields this wizard actually edits (folder/fps/resolution) - mirrors
-// SettingsDialog::OnSave()'s load-existing/set-a-few/save round trip so
-// nothing else in homrec_settings.json gets clobbered. Skipped entirely
-// if the user checked "I understand" (defaults are kept as-is).
 void ApplyAndPersistSettings(WelcomeCtx *ctx) {
     if (!ctx->state) return;
     if (SendMessageW(ctx->hSkipChk, BM_GETCHECK, 0, 0) == BST_CHECKED) return;
@@ -67,10 +61,6 @@ void ApplyAndPersistSettings(WelcomeCtx *ctx) {
     int fpsSel = (int)SendMessageW(ctx->hFpsCombo, CB_GETCURSEL, 0, 0);
     if (fpsSel >= 0 && fpsSel < 4) ctx->state->target_fps = kFpsOpt[fpsSel];
 
-    // Phase 1 (see commands.md): persist the whole AppState via HrcConfig
-    // instead of the old JSON engine's fixed field whitelist - this first-
-    // run wizard is often the very first save an install ever makes, so
-    // it's what actually creates the initial homrec.hrc.
     HrcConfig::Save(*ctx->state, HrcConfig::ResolveSettingsPath(*ctx->state));
 }
 
@@ -105,10 +95,9 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case WM_TIMER:
             if (wParam == IDT_PULSE) {
                 ctx->pulse_on = !ctx->pulse_on;
-                // Only the header (top ~100px) actually changes on the pulse
-                // tick - restricting the invalidated rect avoids repainting
-                // (and re-drawing text into) the page content underneath it
-                // 600ms out of every second for no reason.
+                // Only the header (top ~100px) actually changes on the pulse tick - restricting the
+                // invalidated rect avoids repainting (and re-drawing text into) the page content
+                // underneath it 600ms out of every second for no reason.
                 RECT header; GetClientRect(hwnd, &header); header.bottom = 100;
                 InvalidateRect(hwnd, &header, FALSE);
             }
@@ -282,10 +271,6 @@ void ShowWelcomeDialog(HWND parent, HINSTANCE hInst, AppState &state) {
     // -- Page 1: basic settings --------------------------------------------
     ctx.hSettingsTitle = CreateWindowExW(0, L"STATIC", L"A couple of basic settings",
         WS_CHILD | SS_LEFT, 28, 118, W - 56, 22, hwnd, nullptr, hInst, nullptr);
-    // static: ShowWelcomeDialog() can be re-entered (Help > Welcome), and
-    // this same font object is reused by both page titles below - a fresh
-    // CreateFontW() per call with no matching DeleteObject would leak one
-    // GDI font handle every time the wizard is reopened.
     static HFONT boldFont = CreateFontW(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");

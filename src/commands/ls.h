@@ -1,22 +1,6 @@
-// ls.h
-//
-// The console's `ls` command: a filesystem listing, not the old "registry"
-// listing it used to be (aliases / env vars - that one is still reachable
-// through `ls --aliases` / `ls --env`, and a bare `ls`, see
-// ConsoleWindow::CmdLs()).
-//
-//   ls .                     the HomRec folder (the one hr.exe lives in)
-//   ls plugins               any folder, relative to the HomRec folder
-//   ls plugins/bter.hrp      the CONTENTS of a .hrp plugin package, shown
-//                            like a folder (a .hrp is a renamed .zip, see
-//                            utils/archive.h) - read straight from the zip's
-//                            central directory, nothing is extracted
-//   ls plugins/bter.hrp/lua  a folder inside the package
-//   ls -a <path>             also show hidden entries (".installed", ...)
-//
-// This file knows nothing about wx / the console window: Run() returns plain
-// lines tagged with a Kind, and ConsoleWindow decides how each Kind is
-// coloured. That keeps the command testable on its own.
+// ls.h - The console's `ls` command: a filesystem listing, not the old "registry" listing
+// it used to be (aliases / env vars - that one is still reachable through `ls --aliases` /
+// `ls --env`, and a bare `ls`, see ConsoleWindow::CmdLs()).
 #pragma once
 
 #include <string>
@@ -51,10 +35,8 @@ struct Args {
 // Quotes ("...") are honoured so paths with spaces work.
 Args Parse(const std::wstring &rawLine);
 
-// True when the line asks for a filesystem listing: it has a path, one of the
-// filesystem options (-a -l -h -1), --help, or an unknown option (so the
-// typo gets a proper error). False for a bare `ls` and for the legacy
-// --aliases / --env forms, which the console still answers itself.
+// True when the line asks for a filesystem listing: it has a path, one of the filesystem
+// options (-a -l -h -1), --help, or an unknown option (so the typo gets a proper error).
 bool WantsFilesystem(const Args &a);
 
 // Runs the listing. `baseDir` is what "." means (the HomRec folder).

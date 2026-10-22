@@ -153,11 +153,6 @@ extern "C" {
     void hr_audio_set_volumes(float mic_vol, float sys_vol, int mic_mute, int sys_mute);
     void hr_audio_get_levels(int *out_mic, int *out_sys);
     void hr_audio_pause(int paused);
-    // mic_wav_path/sys_wav_path: pass real paths for a manual recording so
-    // audio streams straight to disk instead of accumulating in RAM for the
-    // whole recording (see hr_audio_flush_buffered()'s comment) - pass
-    // nullptr for either/both to keep the old fully-in-RAM rolling-window
-    // behavior (Instant Replay).
     void hr_audio_reset_buffers(const char *mic_wav_path, const char *sys_wav_path);
     void hr_audio_flush_buffered();
     int hr_audio_capture_to_wav(const char *mic_wav_path, const char *sys_wav_path);
@@ -177,10 +172,6 @@ extern "C" {
 #include <cstdio> // remove()/rename() for temp WAV cleanup in Stop()
 
 namespace {
-// Below this, Start() refuses to begin a new recording rather than let it
-// run for a few seconds and then die mid-file when ffmpeg can't write any
-// more - 200MB is comfortably more than a couple of encoded frames need
-// but small enough not to nag on a nearly-full-but-still-usable drive.
 constexpr uint64_t kMinFreeDiskMb = 200;
 
 std::string NarrowFromWide(const std::wstring &w) {
@@ -200,11 +191,9 @@ std::wstring WideFromNarrow(const std::string &s) {
     return w;
 }
 
-// Std::remove()/std::rename() take an ANSI-codepage path on
-// Windows, but every path in this file is UTF-8 - so a temp WAV inside an
-// output folder with non-ASCII characters (e.g. a Cyrillic user name) was
-// never found/deleted/renamed. These go through the wide APIs instead;
-// MoveFileExW also replaces an existing target like a real "rename over".
+// Std::remove()/std::rename() take an ANSI-codepage path on Windows, but every path in
+// this file is UTF-8 - so a temp WAV inside an output folder with non-ASCII characters
+// (e.g.
 bool RemoveFileUtf8(const std::string &p) {
     return DeleteFileW(WideFromNarrow(p).c_str()) != 0;
 }
@@ -213,21 +202,6 @@ bool RenameFileUtf8(const std::string &from, const std::string &to) {
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0;
 }
 
-// 
-// StartInstantReplayEncoder() creates a fresh, uniquely-numbered
-// %TEMP%\HomRec_replay\<N>\ subfolder every time it runs - both when
-// Instant Replay is (re-)enabled and, critically, every single time
-// SaveReplay() restarts buffering after a save - but nothing ever
-// deleted the *previous* folder's seg_*.mp4 files once they were no
-// longer needed. Instant Replay + repeatedly pressing Save Replay
-// (exactly its intended use, e.g. saving highlights through a long
-// session) is precisely "call StartInstantReplayEncoder() many times",
-// so each save left another folder's worth of video segments behind
-// forever. Over a long session this silently ate disk space until
-// writes started failing outright. Segment folders only ever contain
-// flat files directly inside them (no subfolders), so a simple
-// find+delete+RemoveDirectory is enough - no need for a recursive
-// shell delete.
 void DeleteReplayDir(const std::wstring &dir) {
     if (dir.empty()) return;
     WIN32_FIND_DATAW fd;
@@ -290,12 +264,6 @@ void RecordingController::Initialize() {
         }
     }
     hr_audio_init();
-    // Capture runs continuously from app startup so the mixer's level
-    // meters actually move before you hit Start - previously this only
-    // happened inside Start(), so the meters (and the sliders that look
-    // like they "don't respond") sat dead until a recording was already
-    // running. hr_audio_reset_buffers()/hr_audio_capture_to_wav() scope
-    // what actually ends up in a given recording's WAV.
     hr_audio_start(1.0f, 1.0f, 0, 0, WideFromNarrow(state_.mic_device_id).c_str());
     applied_mic_device_id_ = state_.mic_device_id;
 }
@@ -326,14 +294,6 @@ static void HrLogFfmpegGpuPriorityStart(bool applied_now) {
 }
 
 std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
-    // state_.custom_ffmpeg_args (the "Custom FFmpeg args" box on
-    // the Video/Codec settings tab) was saved/loaded like every other
-    // setting but never actually consulted here - recording always used
-    // the auto-generated args below regardless of what a power user typed
-    // in that box. It's meant as a full escape hatch, so when it's set,
-    // use it verbatim instead of the auto-built preset/crf/threads args
-    // (still prefixed with the chosen codec, since that's a separate
-    // dropdown from this one).
     if (!state_.custom_ffmpeg_args.empty()) {
         return L"-c:v " + codec + L" " + WideFromNarrow(state_.custom_ffmpeg_args);
     }
@@ -342,11 +302,6 @@ std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     // state_.enc_preset (the "Encoder preset" dropdown, same tab)
-    // had the same problem - saved, reloaded, never read. Passed through
-    // now; hr_build_codec_args() only actually uses it for the software
-    // libx264 path (the hardware encoder branches use their own fixed
-    // low-latency presets, which aren't meaningfully tunable via x264-style
-    // preset names like "medium"/"veryslow").
     std::wstring preset = WideFromNarrow(state_.enc_preset);
     hr_build_codec_args_ex(codec.c_str(), state_.quality, state_.target_fps,
                             (int)si.dwNumberOfProcessors, output_w_, output_h_,
@@ -453,9 +408,6 @@ std::wstring RecordingController::BuildOutputPath() {
     // Ffmpeg is always run with -y, so a template that isn't
     // unique per recording (e.g. "{app}_{date}", or two clips in the same
     // minute with "{hh}-{min}") silently overwrote the earlier file.
-    // Append _2, _3, ... instead.
-    // 2.4: in "both" mode the .mp4 copy that will be written next to the .mkv
-    // must not clobber an older one either.
     const bool both_fmt = state_.video_format == VideoFormat::Both;
     auto taken = [both_fmt](const std::wstring &p) {
         if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
@@ -488,15 +440,9 @@ void RecordingController::ScaledPreviewSize(int &out_w, int &out_h) const {
     if (out_h < 2) out_h = 2;
 }
 
-// Settings > Resolution: turns a source size (the full monitor, or the
-// cropped window rect in window-capture mode) into the desired *output*
-// size, honoring ResolutionMode::Percent (scale_factor, e.g. 75% of
-// src_w/src_h) or ResolutionMode::Absolute (an exact resolution_w x
-// resolution_h target, e.g. "1280x720" for an old/low-power playback
-// device). Absolute mode never upscales past src_w/src_h - there's no
-// extra detail to gain from it, only extra bytes to capture/encode - and
-// always leaves at least a 2x2 output so a bad/zero setting can't produce
-// a degenerate 0x0 pipe.
+// Settings > Resolution: turns a source size (the full monitor, or the cropped window rect
+// in window-capture mode) into the desired *output* size, honoring ResolutionMode::Percent
+// (scale_factor, e.g.
 void RecordingController::ComputeOutputDims(int src_w, int src_h, int &out_w, int &out_h) const {
     if (state_.resolution_mode == ResolutionMode::Absolute) {
         out_w = state_.resolution_w;
@@ -569,10 +515,6 @@ void RecordingController::ResolveCaptureSize() {
     // Unified "crop target" rect in virtual-desktop coordinates, resolved
     // once, and used below for BOTH which monitor to capture and where to
     // crop it - for either Window capture (from the live window's RECT)
-    // or Region capture (todo2.3.md's "Захват произвольной области
-    // экрана", from AppState::region_x/y/w/h, set by the region-picker
-    // overlay). Desktop mode leaves have_target false and crop_*_ at 0,
-    // same as before this was generalized from window-only.
     RECT target_rect{};
     bool have_target = false;
     bool is_window = WindowTargetDefined();
@@ -592,12 +534,6 @@ void RecordingController::ResolveCaptureSize() {
         have_target = true;
     }
 
-    // ====== 2.4: PROPER WINDOW CAPTURE ======
-    // Record the window ITSELF (Windows.Graphics.Capture) rather than the part of a monitor it
-    // happens to cover: other windows on top of it don't show up, it can be partly off-screen or
-    // on another monitor, and it is always captured whole. The pre-2.4 screen crop is still used
-    // for Region mode, when "Window capture" is set to "Screen crop", and as the fallback when
-    // Windows refuses to hand out a capture item for this particular window.
     use_wgc_ = false;
     wgc_hwnd_ = nullptr;
     // Changing the method in Settings gives WGC a fresh chance after an earlier failure.
@@ -605,11 +541,7 @@ void RecordingController::ResolveCaptureSize() {
         wgc_method_seen_ = state_.window_capture_method;
         wgc_disabled_ = false;
     }
-    // WGC is OPT-IN (window_capture_method = "wgc", Settings > General > Window capture). The default
-    // is the screen crop: the WGC window probe crashed the app natively on 2026-10-07 (access violation
-    // on the GUI thread, wgc_guard.flag left behind), and a native crash can't be caught. Even when
-    // WGC is chosen it is skipped after a failure earlier in this session (wgc_disabled_) or after a
-    // crash inside it (the crash sentinel in wgc_capture.cpp makes HrWgcSupported() false).
+    // WGC is OPT-IN (window_capture_method = "wgc", Settings > General > Window capture).
     if (is_window && have_target && capture_hwnd && state_.WindowCaptureWantsWgc() && !wgc_disabled_) {
         int ww = 0, wh = 0;
         if (HrWgcSupported() && HrWgcProbeWindow(capture_hwnd) &&
@@ -668,16 +600,6 @@ void RecordingController::ResolveCaptureSize() {
     state_.monitor_left = mx;
     state_.monitor_top = my;
 
-    // idx above indexes display_info.cpp's list (EnumDisplayMonitors,
-    // re-sorted primary-first), but hr_pl_create() hands it to DXGI's
-    // IDXGIAdapter::EnumOutputs(), which has its OWN ordering - the two
-    // only agree by luck (single monitor, or a lucky multi-monitor layout).
-    // When they disagree, DXGI duplicates a DIFFERENT monitor than the one
-    // the window/region crop was computed for: the crop rect then doesn't
-    // fit the frame that actually arrives (a different-sized monitor), the
-    // pipeline can't apply it, and the whole screen gets scaled down into
-    // the window-sized output instead - i.e. "I picked a window but the
-    // entire screen is recorded". Match by desktop coordinates instead.
     {
         const int dx_count = hr_dx_output_count(0);
         for (int i = 0; i < dx_count; ++i) {
@@ -694,56 +616,25 @@ void RecordingController::ResolveCaptureSize() {
         }
     }
 
-    // capture_w_/capture_h_ MUST equal the monitor's actual native
-    // resolution - this is the size DXGI Desktop Duplication actually
-    // hands back (it has no "capture at a reduced size" mode), the size
-    // the capture buffer is allocated at, and the size ffmpeg's rawvideo
-    // demuxer is told to expect on the pipe. Any of those disagreeing
-    // with what's *actually* captured is exactly what produced the
-    // garbled/green/tiled recordings - this was previously scaled down
-    // by scale_factor here, which the pipeline would then silently
-    // "correct" back to native right before it started capturing (to
-    // avoid overflowing the undersized buffer), but ffmpeg had already
-    // been told the smaller, wrong size and had no way to know that changed.
     capture_w_ = mw;
     capture_h_ = mh;
     if (capture_w_ % 2) capture_w_--;
     if (capture_h_ % 2) capture_h_--;
 
-    // Settings > Resolution (scale_factor / resolution_w+h, depending on
-    // resolution_mode) instead becomes the desired *output* size - applied
-    // as a capture-side downscale before encoding (see
-    // hr_pl_set_output_size()/pipeline.cpp), not by changing what DXGI
-    // itself captures.
     ComputeOutputDims(mw, mh, output_w_, output_h_);
 
-    // ====== WINDOW/REGION CAPTURE: crop the now-correctly-selected
-    // monitor's frame down to the target rect ======
-    // Reuses the resolve done above (have_target/target_rect) instead of
-    // re-resolving here - besides the redundant EnumWindows() pass for
-    // Window mode, re-resolving could in theory hit a narrow window
-    // between two calls where the window closed and its title got reused
-    // by something else, cropping to the wrong window's rect. One
-    // resolve, used consistently for both which monitor to capture and
-    // where to crop it.
     crop_x_ = crop_y_ = crop_w_ = crop_h_ = 0;
     if (is_window || is_region) {
         if (have_target) {
             RECT r = target_rect;
-            // Target rect is in virtual-desktop coordinates; crop_x_/y_
-            // need to be relative to the captured monitor's own frame
-            // (monitor_left/top, set above), matching what bgra_buf
+            // Target rect is in virtual-desktop coordinates; crop_x_/y_ need to be relative to the
+            // captured monitor's own frame (monitor_left/top, set above), matching what bgra_buf
             // actually holds.
             int wx = r.left - mx, wy = r.top - my;
             int ww = r.right - r.left, wh = r.bottom - r.top;
-            // Clamp to the monitor bounds - hr_pl_set_capture_rect() also
-            // clamps defensively, but doing it here too means output_w_/
-            // output_h_ (computed from ww/wh below) reflect the actual
-            // clamped crop size, not the pre-clamp one. For a region that
-            // spans two monitors, this means only the part that falls on
-            // the resolved (majority-overlap-by-center) monitor is kept -
-            // same letterboxing-by-clamp behavior Window capture already
-            // had for a window that's partly off-monitor.
+            // Clamp to the monitor bounds - hr_pl_set_capture_rect() also clamps defensively, but
+            // doing it here too means output_w_/ output_h_ (computed from ww/wh below) reflect the
+            // actual clamped crop size, not the pre-clamp one.
             if (wx < 0) { ww += wx; wx = 0; }
             if (wy < 0) { wh += wy; wy = 0; }
             if (wx + ww > capture_w_) ww = capture_w_ - wx;
@@ -771,11 +662,7 @@ void RecordingController::ResolveCaptureSize() {
                             "monitor - falling back to full desktop.");
             }
         } else if (is_window) {
-            // Window was closed/renamed since being picked, or isn't on
-            // screen anymore. Fall back to full-desktop capture rather
-            // than starting a recording of nothing/garbage - crop_*_ are
-            // already 0 from the reset above, so capture_w_/h_/output_w_/
-            // h_ (monitor-sized, set earlier in this function) stand as-is.
+            // Window was closed/renamed since being picked, or isn't on screen anymore.
             HrLog::Warn("Window capture: couldn't find the window '" +
                         WindowTargetLabel() + "' - falling back to full desktop.");
         }
@@ -878,12 +765,6 @@ void RecordingController::RetargetWindowCapture() {
         return;
     }
 
-    // Same monitor-relative clamp ResolveCaptureSize() applies, against
-    // the monitor that pipeline_ is ACTUALLY duplicating right now
-    // (state_.monitor_left/_top, capture_w_/_h_, set once by
-    // ResolveCaptureSize()) - not re-resolving which monitor to capture,
-    // since that's bound into the running pipeline_/DXGI duplication and
-    // isn't something this can safely change mid-recording.
     int wx = r.left - state_.monitor_left, wy = r.top - state_.monitor_top;
     int ww = r.right - r.left, wh = r.bottom - r.top;
     if (wx < 0) { ww += wx; wx = 0; }
@@ -940,19 +821,6 @@ static void LogFfmpegDeathDetails(void *ff, const std::string &what) {
     HrLog::Error(msg);
 }
 
-// ---------------------------------------------------------------------------
-// TryStartDdagrab
-//
-// Full-GPU recording via ffmpeg's "ddagrab" source (ffmpeg 6.0+): ffmpeg
-// duplicates the desktop itself and feeds the D3D11 textures straight into a
-// hardware encoder, so neither pixels nor colour conversion ever touch the CPU
-// and HomRec's own capture pipeline isn't involved at all.
-//
-// Because HomRec's pipeline is bypassed, this is only used when the recording
-// needs nothing the pipeline provides. Returns false WITHOUT side effects when
-// it can't / shouldn't be used (the caller then starts the normal pipeline);
-// returns true with ffproc_ running and verified.
-// ---------------------------------------------------------------------------
 bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool codec_is_hw,
                                           std::chrono::steady_clock::time_point &t_video_go) {
     if (!state_.gpu_capture_ddagrab) return false;
@@ -1014,12 +882,9 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     if (state_.gpu_low_priority)
         HrLogFfmpegGpuPriorityStart(hr_ff_gpu_priority_applied(ff) != 0);
 
-    // ffmpeg writes the container header only once the first captured frame has
-    // gone through the filter graph and the encoder is initialised, so "the
-    // output file has content" == "capture is really running". A process that
-    // exits during this window (no ddagrab, no D3D11 device, encoder rejects the
-    // frames, ...) means we fall back. Polled, not slept, so the common case
-    // costs only as long as ffmpeg itself needs to start.
+    // ffmpeg writes the container header only once the first captured frame has gone through
+    // the filter graph and the encoder is initialised, so "the output file has content" ==
+    // "capture is really running".
     const std::string out_path = NarrowFromWide(current_output_path_);
     const auto t0 = std::chrono::steady_clock::now();
     bool capturing = false, died = false;
@@ -1054,7 +919,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     if (finalizing_) { error_out = L"The previous recording is still being saved - try again in a moment."; return false; }
     if (finalize_thread_.joinable()) finalize_thread_.join();
 
-    // Start() runs on the UI thread, so every millisecond spent in here is a frozen window.
+    // 2.4.2: Start() runs on the UI thread, so every millisecond spent in here is a frozen window.
     // Per-phase timing, written to homrec.log as ONE line when Start() returns (any way it returns),
     // so a "the UI freezes for 10-20 s when I press Record" report shows exactly which step it was.
     struct StartPhaseTimer {
@@ -1078,30 +943,17 @@ bool RecordingController::Start(std::wstring &error_out) {
     } start_timer;
     start_timer.preview_off = state_.disable_preview;
 
-    // Refuse up front (before Instant Replay gets paused or anything else
-    // is touched) if the chosen window/region can't be recorded - the old
-    // behavior of quietly recording the whole desktop instead is exactly
-    // what "I picked a window but my entire screen got recorded" was.
     if (!CheckCaptureTarget(error_out)) return false;
 
     // Instant Replay gets paused just below, and only Stop()
     // ever resumed it - so ANY failed Start() (ffmpeg missing, low disk,
     // encoder/pipeline failed to start...) left Instant Replay silently dead.
-    // This guard resumes it on every early `return false`; it is disarmed once
-    // the recording has really started.
     struct StartFailGuard {
         std::function<void()> resume;
         bool armed = true;
         ~StartFailGuard() { if (armed && resume) resume(); }
     } start_guard;
 
-    // Instant Replay and a manual recording share this class's one
-    // pipeline_ and hr_pl_set_recording()'s one active pipe_fd (see the
-    // header comment on EnableInstantReplay()) - if the background
-    // buffer is currently running, stop its segment writer so Start()
-    // below is free to redirect pipeline_'s pipe to the manual recording
-    // instead. instant_replay_enabled_ (the user's "I want this on"
-    // choice) stays true; Stop() resumes it once this recording ends.
     if (instant_replay_active_) {
         StopInstantReplayEncoderAsync();
         instant_replay_active_ = false;
@@ -1131,12 +983,9 @@ bool RecordingController::Start(std::wstring &error_out) {
         return false;
     }
 
-    // hr_get_free_disk_mb() (ui_utils.cpp) existed already but nothing
-    // ever called it - a recording would happily start on an almost-full
-    // drive and just die (ffmpeg write failure) partway through instead of
-    // being refused up front. A 0 return (query failed, e.g. odd path) is
-    // treated as "couldn't determine" and doesn't block Start(), same as
-    // the helper's own doc comment says callers should treat it.
+    // hr_get_free_disk_mb() (ui_utils.cpp) existed already but nothing ever called it - a
+    // recording would happily start on an almost-full drive and just die (ffmpeg write
+    // failure) partway through instead of being refused up front.
     uint64_t free_mb = 0;
     if (hr_get_free_disk_mb(state_.output_folder.c_str(), &free_mb) && free_mb < kMinFreeDiskMb) {
         error_out = L"Not enough free disk space on the output drive (" +
@@ -1163,12 +1012,8 @@ bool RecordingController::Start(std::wstring &error_out) {
     HrLog::Info("Recording: encoding with " + NarrowFromWide(codec) +
                 (codec_is_hw ? " (hardware)" : " (software)"));
 
-    // ---- optional full-GPU path: ffmpeg's own "ddagrab" capture -------------
-    // Settings > Video > GPU acceleration. Used only when this recording needs
-    // nothing HomRec's pipeline provides (overlays, pause, window tracking,
-    // downscaling); TryStartDdagrab() verifies that ffmpeg really started
-    // capturing and otherwise cleans up after itself so the normal pipeline
-    // below takes over exactly as before.
+    // ---- optional full-GPU path: ffmpeg's own "ddagrab" capture ------------- Settings >
+    // Video > GPU acceleration.
     ddagrab_active_ = false;
     crash_was_ddagrab_ = false;
     crash_video_elapsed_sec_ = 0.0;
@@ -1195,14 +1040,6 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_ff_set_codec_args(ffproc_, NarrowFromWide(codec_args).c_str());
         hr_ff_set_normal_priority(ffproc_, state_.game_friendly_priority ? 1 : 0);
         hr_ff_set_gpu_low_priority(ffproc_, state_.gpu_low_priority ? 1 : 0);
-        // Video params tell ffmpeg's rawvideo demuxer the size of the frames
-        // that will actually arrive on the pipe - that's the CROPPED size in
-        // window-capture mode (crop_w_/crop_h_ > 0), not the monitor's native
-        // capture_w_/capture_h_, since hr_pl_set_capture_rect() below makes
-        // the pipeline crop before writing to the pipe. Getting this wrong is
-        // exactly the "garbled/green/tiled recording" failure mode the big
-        // comment in ResolveCaptureSize() warns about, just triggered from
-        // window-capture mode instead of a stale scale_factor.
         int pipe_w = output_w_;
         int pipe_h = output_h_;
         hr_ff_set_video_params(ffproc_, pipe_w, pipe_h, state_.target_fps);
@@ -1221,10 +1058,8 @@ bool RecordingController::Start(std::wstring &error_out) {
         if (state_.gpu_low_priority)
             HrLogFfmpegGpuPriorityStart(hr_ff_gpu_priority_applied(ffproc_) != 0);
 
-        // The pipeline writes captured frames straight into ffmpeg's stdin
-        // pipe, so it needs the real write-end HANDLE ffmpeg was launched
-        // with - not a placeholder. hr_ff_start() above creates that pipe
-        // internally; this is the only way to get it back out.
+        // The pipeline writes captured frames straight into ffmpeg's stdin pipe, so it needs the
+        // real write-end HANDLE ffmpeg was launched with - not a placeholder.
         intptr_t ff_stdin = hr_ff_get_stdin_handle(ffproc_);
         if (ff_stdin == 0) {
             error_out = L"Failed to start the ffmpeg process.";
@@ -1238,31 +1073,18 @@ bool RecordingController::Start(std::wstring &error_out) {
         // Pipeline handles the actual DXGI capture + frame conversion + piping
         // frames into ffmpeg's stdin. pv_w/pv_h come from AppState's preview
         // panel size (set by main_window on layout).
-        //
-        // If EnsurePreview() already has a preview-only pipeline running at
-        // the same capture size, just flip it into recording mode instead of
-        // destroying and recreating it - keeps the live preview seamless
-        // right through Start() instead of it blinking out and back.
-        // ffmpeg expects.
         bool reused_preview_pipeline = false;
         if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h &&
             pipeline_output_idx_ == capture_output_idx_ && PipelineMatchesTarget()) {
             hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
             hr_pl_set_output_size(pipeline_, output_w_, output_h_);
-            // The pixel format used to be set only AFTER recording had
-            // already been switched on, so the very first frame(s) of a recording that
-            // reused the preview pipeline could go out in the previous encoder's chroma
-            // layout (NV12 vs I420). Also clear a stale "paused" flag: a recording that
-            // was stopped while paused left the kept-alive pipeline paused, and the next
-            // recording then captured nothing.
+            // The pixel format used to be set only AFTER recording had already been switched on, so
+            // the very first frame(s) of a recording that reused the preview pipeline could go out in
+            // the previous encoder's chroma layout (NV12 vs I420).
             hr_pl_pause(pipeline_, 0);
             hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
-            // A reused preview pipeline keeps whatever fps it was created with,
-            // but ffmpeg above was just told state_.target_fps - if they differ
-            // (e.g. Target FPS changed while the pipeline couldn't be rebuilt),
-            // frames arrive at the old rate and the recording silently comes out
-            // at that rate (the "set 30, got 15" bug). Push the current value in
-            // BEFORE recording starts so both sides agree.
+            // A reused preview pipeline keeps whatever fps it was created with, but ffmpeg above was
+            // just told state_.target_fps - if they differ (e.g.
             hr_pl_set_fps(pipeline_, state_.target_fps);
             hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
             reused_preview_pipeline = true;
@@ -1271,14 +1093,8 @@ bool RecordingController::Start(std::wstring &error_out) {
             start_timer.mark("join_replay_stop");
             if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
             start_timer.mark("destroy_old_pipeline");
-            // See JoinPendingPreviewTeardown()'s comment
-            // (recording_controller.h) - without this, starting a recording
-            // shortly after preview was torn down (e.g. "Disable live preview"
-            // is on, or the user just closed "Position Overlays...") could
-            // race that async teardown's DXGI duplication release and fail
-            // here with "Failed to start the capture pipeline", looking like
-            // recording just can't start with preview off until the app is
-            // restarted.
+            // See JoinPendingPreviewTeardown()'s comment (recording_controller.h) - without this,
+            // starting a recording shortly after preview was torn down (e.g.
             JoinPendingPreviewTeardown();
             start_timer.mark("join_preview_teardown");
             int pvw = 0, pvh = 0;
@@ -1301,20 +1117,11 @@ bool RecordingController::Start(std::wstring &error_out) {
         }
         if (pipeline_) {
             hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
-            // A manual recording always needs a real Pipeline (it's also the
-            // encoder path) regardless of the "Disable live preview" setting,
-            // but there's no reason for it to keep generating an unread
-            // thumbnail every preview_fps tick when that setting is on - see
-            // Pipeline::preview_needed's own comment (pipeline.cpp).
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
         if (!pipeline_ || !pipeline_started) {
-            // CreatePipelineForTarget() sets wgc_disabled_ when Windows.Graphics.Capture could not
-            // be started for this window. ffmpeg was already told the WGC canvas size, so this
-            // attempt can't simply switch sources - but the user must not have to press Start a
-            // second time: clean up and run Start() once more. ResolveCaptureSize() sees
-            // wgc_disabled_ and resolves the screen crop (so this can't loop - the retry never
-            // takes the WGC branch again).
+            // CreatePipelineForTarget() sets wgc_disabled_ when Windows.Graphics.Capture could not be
+            // started for this window.
             const bool retry_with_crop = !pipeline_ && use_wgc_ && wgc_disabled_;
             HrLog::Error("Start failed: capture pipeline didn't start");
             hr_ff_kill(ffproc_);
@@ -1331,20 +1138,9 @@ bool RecordingController::Start(std::wstring &error_out) {
             return false;
         }
 
-        // Belt-and-suspenders: hr_pl_create() (fresh pipeline) already turns
-        // recording on internally, and the reuse branch above already called
-        // this too - but re-asserting here is a harmless no-op either way and
-        // guards against either path's default ever silently changing.
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         t_video_go = std::chrono::steady_clock::now();
 
-        // A manual recording is genuinely happening now (as opposed to just
-        // Instant Replay's background buffer, which also sets `recording` via
-        // hr_pl_set_recording() above but should stay at ordinary priority -
-        // see boost_priority's comment in pipeline.cpp / bug #5) - this is
-        // the one place that's actually true, so bump the capture thread.
-        // game_friendly_priority: keep the threads at their ordinary ABOVE_NORMAL instead of
-        // HIGHEST so a game on a weak CPU isn't preempted by the recorder's own threads.
         hr_pl_set_priority_boost(pipeline_, state_.game_friendly_priority ? 0 : 1);
         if (state_.game_friendly_priority)
             HrLog::Info("Recording: game-friendly priority is on (encoder at normal priority, "
@@ -1367,13 +1163,6 @@ bool RecordingController::Start(std::wstring &error_out) {
     if (state_.audio_out_channels > 0) {
         hr_audio_set_max_buffer_sec(0);
         hr_audio_pause(0); // never start with audio left paused by a previous recording
-        // Same _mic_tmp.wav/_sys.wav paths StopFinalizeTail() below builds
-        // from current_output_path_ (already resolved above, before ffmpeg
-        // was even started) - opening the incremental WAV streams at these
-        // exact paths right now, instead of only writing a WAV once
-        // everything's been held in RAM until Stop(), is what keeps a long
-        // recording's memory use flat (see hr_audio_flush_buffered()'s
-        // comment in audio.cpp for the full story).
         std::string audio_base = NarrowFromWide(current_output_path_);
         size_t audio_dot = audio_base.find_last_of('.');
         std::string audio_stem = (audio_dot == std::string::npos) ? audio_base : audio_base.substr(0, audio_dot);
@@ -1411,13 +1200,8 @@ bool RecordingController::Start(std::wstring &error_out) {
 }
 
 void RecordingController::Stop() {
-    // Old synchronous behavior, kept for callers that genuinely want to
-    // block until everything's done (e.g. the app closing, where there's
-    // nothing useful to do except wait anyway). See StopAsync() for what
-    // actually does the work and why DoStop() (main_frame.cpp) uses that
-    // instead - this used to be the whole implementation, freezing
-    // whichever thread called it (in practice, the UI thread) for up to
-    // ~30s.
+    // Old synchronous behavior, kept for callers that genuinely want to block until
+    // everything's done (e.g.
     StopAsync(nullptr);
     if (finalize_thread_.joinable()) finalize_thread_.join();
 }
@@ -1427,24 +1211,14 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     finalizing_ = true;
     if (finalize_thread_.joinable()) finalize_thread_.join();
 
-    // If we're keeping the pipeline alive afterward for continued live
-    // preview, don't call hr_pl_stop() here - that joins the capture
-    // thread, which would freeze the preview the moment Stop() runs
-    // instead of leaving it live. Just stop ffmpeg; the pipeline gets
-    // switched out of recording mode (not stopped) further down.
+    // If we're keeping the pipeline alive afterward for continued live preview, don't call
+    // hr_pl_stop() here - that joins the capture thread, which would freeze the preview the
+    // moment Stop() runs instead of leaving it live.
     bool keep_for_preview = pipeline_ && !state_.disable_preview;
 
-    // 
-    // hr_pl_stop() itself waits (with a timeout) for the capture thread
-    // and then the writer thread to each signal that they've actually
-    // stopped - up to ~1s per thread, by design (see its own comment in
-    // pipeline.cpp). This function is StopAsync() - callers (the Stop
-    // button's DoStop()) call it directly on the UI thread specifically
-    // so they *don't* have to block - but this call used to run right
-    // here, before finalize_thread_ below even existed, so every one of
-    // those waits still happened synchronously on whichever thread called
-    // StopAsync(). Move it inside the background thread instead, right
-    // alongside the rest of the (already-async) finalize work.
+    // hr_pl_stop() itself waits (with a timeout) for the capture thread and then the writer
+    // thread to each signal that they've actually stopped - up to ~1s per thread, by design
+    // (see its own comment in pipeline.cpp).
     hr_ff_stop_graceful(ffproc_);
 
     finalize_thread_ = std::thread([this, keep_for_preview, on_done]() {
@@ -1452,10 +1226,8 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // user is usually back in the game by now: keep this thread out of the game's way.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     if (ddagrab_active_) {
-        // ffmpeg captured by itself (no pipe was ever attached to this recording),
-        // so there is no recording segment to close; the graceful "q" sent above
-        // is all it needs. Only a preview pipeline that isn't wanted any more
-        // goes away.
+        // ffmpeg captured by itself (no pipe was ever attached to this recording), so there is no
+        // recording segment to close; the graceful "q" sent above is all it needs.
         if (!keep_for_preview) hr_pl_stop(pipeline_);
     } else if (!keep_for_preview) {
         hr_pl_stop(pipeline_);
@@ -1463,15 +1235,6 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
         // (recordings always took ~30s to "finalize" and came out
         // corrupt whenever preview was left on - see
         // hr_pl_end_recording_segment()'s comment for the full story):
-        // hr_pl_stop() above is what used to be the *only* thing that
-        // ever actually closed ffmpeg's stdin pipe (as part of fully
-        // tearing the pipeline's threads down) - skipped here specifically
-        // so the pipeline survives for continued preview, which also
-        // meant nothing closed the pipe, so StopFinalizeTail()'s
-        // hr_ff_wait() below could never see the EOF it needs and always
-        // ran out its full timeout before force-killing ffmpeg mid-write.
-        // Ask the still-running writer thread to close just this
-        // recording's pipe instead.
         hr_pl_end_recording_segment(pipeline_, 3000);
     }
     FinishPipelineAfterStop(keep_for_preview);
@@ -1513,38 +1276,11 @@ void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
 }
 
 void RecordingController::StopFinalizeTail(bool keep_for_preview) {
-    // Belt-and-suspenders alongside the two call sites in Start()/
-    // EnableInstantReplay() that actually race this: this function can
-    // go on to destroy pipeline_ below (the !keep_for_preview / Instant-
-    // Replay-resume-failed branches) - vanishingly unlikely but possible
-    // for Start()'s own instant_replay_stop_thread_ (see
-    // JoinPendingInstantReplayStop()'s comment) to still be running if
-    // Stop() is pressed within a couple seconds of Start(). Cheap no-op
-    // in the overwhelmingly common case where it already finished.
     JoinPendingInstantReplayStop();
 
-    // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second
-    // budget for ffmpeg to receive EOF on stdin, flush libx264's internal
-    // frame buffer, and write the moov atom (mp4) / cues (mkv) that make the
-    // file actually playable. 3 seconds is fine on an idle machine for a
-    // short clip, but under real load (a long recording, a slower CPU, the
-    // encoder having a backlog queued -- see the CPU-usage notes elsewhere)
-    // it's easy to still be finishing that flush when the timeout expires.
-    // hr_ff_wait() only clears ctx->running on a *successful* wait -- on a
-    // timeout it just returns, leaving ffmpeg running -- and hr_ff_destroy()
-    // a few lines down force-kills (TerminateProcess) anything still marked
-    // running. So a slow-but-otherwise-fine finalize was getting yanked out
-    // from under ffmpeg mid-write, which is exactly how you end up with a
-    // ~1KB file Windows calls an unsupported codec: just the initial
-    // ftyp/moov placeholder, no actual finalized index.
-    //
-    // Now: wait considerably longer (10s) before even checking in, and if
-    // it's still not done, log that clearly and give it one more, longer
-    // window (20s) rather than silently killing it. Only after ~30s total
-    // -- long enough that something is genuinely stuck, not just finishing
-    // up -- does hr_ff_destroy() below fall back to a force-kill, and by
-    // then the log at least explains why the file might be incomplete
-    // instead of leaving the user with an unexplained corrupt recording.
+    // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second budget for ffmpeg to
+    // receive EOF on stdin, flush libx264's internal frame buffer, and write the moov atom
+    // (mp4) / cues (mkv) that make the file actually playable.
     if (hr_ff_wait(ffproc_, 10000) != 0 && hr_ff_is_running(ffproc_)) {
         HrLog::Warn("Recording: ffmpeg is still finalizing the output after 10s "
                     "(large/long recording, or the machine is under heavy load) -- "
@@ -1555,11 +1291,9 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         }
     }
 
-    // mic/system audio were captured into separate temp WAVs (unless
-    // muted); mix them into one file, then remux that into the finished
-    // video via hr_merge_av, the native fast path used when no custom
-    // bitrate/extra ffmpeg args are set. See the notes below for
-    // what happens to that intermediate WAV afterward.
+    // mic/system audio were captured into separate temp WAVs (unless muted); mix them into one
+    // file, then remux that into the finished video via hr_merge_av, the native fast path used
+    // when no custom bitrate/extra ffmpeg args are set.
     std::string base = NarrowFromWide(current_output_path_);
     size_t dot = base.find_last_of('.');
     std::string stem = (dot == std::string::npos) ? base : base.substr(0, dot);
@@ -1648,14 +1382,9 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
                     audio_wav + "' next to the video.");
     }
 
-    // "Also save audio as a separate MP3" (Settings) was persisted
-    // (see hrc_config.cpp) and shown in the dialog, but nothing anywhere
-    // ever read state_.separate_audio_mp3 or produced an .mp3 -- the
-    // checkbox did nothing at all. On a successful merge the WAV's contents
-    // already live inside the finished video, so: encode a real .mp3 next
-    // to it if the setting's on, otherwise just delete the now-redundant
-    // WAV. On a failed/skipped merge the WAV is always kept regardless of
-    // the setting, since in that case it's the only copy of the audio.
+    // "Also save audio as a separate MP3" (Settings) was persisted (see hrc_config.cpp) and
+    // shown in the dialog, but nothing anywhere ever read state_.separate_audio_mp3 or
+    // produced an .mp3 -- the checkbox did nothing at all.
     if (merged) {
         if (state_.separate_audio_mp3 && ffmpeg_found_) {
             std::string mp3_path = stem + ".mp3";
@@ -1683,16 +1412,8 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         }
     }
 
-    // hr_ctl_stop()'s return value is "elapsed seconds for final
-    // summary" per its own doc comment, but this used to be called as a
-    // bare statement that threw the result away. hr_ctl_stop() also flips
-    // the session to HR_STATE_IDLE, at which point elapsed_seconds()/
-    // elapsed_formatted() (both read the *live* session) start returning
-    // 0.0 / "00:00:00" -- so anything built after this line that wanted to
-    // show "you just recorded N seconds" got nothing. Snapshot it (plus the
-    // output path/size, which have the same "still fine right now, gone a
-    // few lines down" problem once ffproc_ is destroyed below) into
-    // last_*_ members that stay valid until the next Start().
+    // hr_ctl_stop()'s return value is "elapsed seconds for final summary" per its own doc
+    // comment, but this used to be called as a bare statement that threw the result away.
     last_duration_sec_ = hr_ctl_stop(ctl_);
     last_output_path_ = current_output_path_;
     last_output_size_mb_ = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
@@ -1719,12 +1440,6 @@ void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
 
     switch (state_.post_record_hook_type) {
     case AppState::PostRecordHookType::OpenFolder: {
-        // Same as the existing "Open Folder" button - opens the
-        // configured output_folder in Explorer, not necessarily this
-        // specific file's folder (they're normally the same, but a
-        // filename_template with a folder-changing {app}/{preset} token
-        // could in principle differ - output_folder is the honest
-        // "where recordings normally land" answer).
         std::wstring folder = WideFromNarrow(state_.output_folder);
         HINSTANCE r = ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         if ((INT_PTR)r <= 32) {
@@ -1745,11 +1460,6 @@ void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
         std::wstring filename = (slash == std::wstring::npos) ? output_path : output_path.substr(slash + 1);
         if (!dest_dir.empty() && dest_dir.back() != L'\\' && dest_dir.back() != L'/') dest_dir += L'\\';
         std::wstring dest_path = dest_dir + filename;
-        // MOVEFILE_REPLACE_EXISTING so re-recording the same {app}/{date}
-        // template into an already-used destination doesn't just silently
-        // fail; MOVEFILE_COPY_ALLOWED so this still works when the
-        // destination folder lives on a different drive than
-        // output_folder (a plain MoveFileW would refuse that).
         if (!MoveFileExW(output_path.c_str(), dest_path.c_str(),
                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
             HrLog::Error("Recording: post-record hook couldn't move the output file to " +
@@ -1765,11 +1475,8 @@ void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
             HrLog::Warn("Recording: post-record hook is set to \"script\" but no script path is configured.");
             break;
         }
-        // Fire-and-forget: quoted script path, then the finished file's
-        // full path as argv[1], same convention as passing a file to
-        // handle on a command line generally. Not awaited - a slow or
-        // hung script shouldn't ever block finalize_thread_ (or, by
-        // extension, a subsequent Start()) from proceeding.
+        // Fire-and-forget: quoted script path, then the finished file's full path as argv[1], same
+        // convention as passing a file to handle on a command line generally.
         std::wstring cmdline = L"\"" + script + L"\" \"" + output_path + L"\"";
         STARTUPINFOW si{};
         si.cb = sizeof(si);
@@ -1808,11 +1515,9 @@ void RecordingController::TogglePause() {
     int new_state = hr_ctl_pause_toggle(ctl_);
     state_.paused = (new_state == 2 /* HR_STATE_PAUSED */);
     if (pipeline_) hr_pl_pause(pipeline_, state_.paused ? 1 : 0);
-    // Audio was never paused (hr_audio_pause() was declared but not
-    // called anywhere), so it kept recording while the video timeline stood still
-    // and everything after a pause was out of sync by the pause length. While
-    // paused the audio workers still read + meter (needed for silence auto-resume)
-    // but throw the samples away.
+    // Audio was never paused (hr_audio_pause() was declared but not called anywhere), so it
+    // kept recording while the video timeline stood still and everything after a pause was out
+    // of sync by the pause length.
     hr_audio_pause(state_.paused ? 1 : 0);
     // Resuming counts as "just heard something" - otherwise the silence that
     // built up while paused made auto-pause fire again immediately.
@@ -1870,10 +1575,9 @@ void RecordingController::PollStats() {
         current_fps_ = fps;
     }
 
-    // Overload warning: a few consecutive ticks of new drops while
-    // actually recording (not paused) means the capture/encode pipeline
-    // can't keep up in real time, as opposed to one stray drop under a
-    // momentary hiccup. Streak resets the instant a tick comes back clean.
+    // Overload warning: a few consecutive ticks of new drops while actually recording (not
+    // paused) means the capture/encode pipeline can't keep up in real time, as opposed to one
+    // stray drop under a momentary hiccup.
     long long drops_delta = drops - last_drops_seen_;
     last_drops_seen_ = drops;
     if (!state_.paused && drops_delta > 0) {
@@ -1900,11 +1604,7 @@ void RecordingController::PollStats() {
     // hr_audio_flush_buffered()). Cheap no-op when no stream is open.
     if (!finalizing_) hr_audio_flush_buffered();
 
-    // Auto-pause/resume on mic silence (todo2.3.md section 3). Mirrors
-    // hr_audio_rms_int16's level<->dBFS mapping (see audio_panel.cpp's
-    // kZoneYellowStart/kZoneRedStart comment for the same derivation) to
-    // turn the configured dB threshold into a level (0..100) comparable
-    // against mic_level_ directly.
+    // Auto-pause/resume on mic silence (todo2.3.md section 3).
     if (state_.auto_pause_on_silence && !mic_muted_) {
         double threshold_rms = 32768.0 * std::pow(10.0, state_.silence_threshold_db / 20.0);
         int threshold_level = (int)(threshold_rms / 150.0);
@@ -1949,12 +1649,9 @@ void RecordingController::SyncOverlays() {
     }
     RetargetWindowCapture();
 
-    // "Cursor" setting - cheap atomic store, fine to re-apply every tick
-    // rather than needing its own change-tracking like the overlay list
-    // below (which is expensive enough per-tick to be worth skipping when
-    // unchanged).
-    // (With the Desktop layer hidden the pointer would be drawn at its DESKTOP position on top of the
-    // other layers, where it does not belong - so it is not drawn then.)
+    // "Cursor" setting - cheap atomic store, fine to re-apply every tick rather than needing
+    // its own change-tracking like the overlay list below (which is expensive enough per-tick
+    // to be worth skipping when unchanged).
     hr_pl_set_include_cursor(pipeline_, (state_.cursor_enabled && state_.desktop_visible) ? 1 : 0);
     // GPU colour conversion (Settings > Video): only ever takes effect for NV12
     // output, i.e. hardware encoders - the capture loop checks that itself.
@@ -1983,9 +1680,6 @@ void RecordingController::SyncOverlays() {
     };
 
     // Rebuilt into a member scratch vector (capacity is kept between ticks)
-    // instead of a fresh local: this runs on every preview-timer tick, and
-    // HrOverlayDesc is several KB of fixed char buffers per overlay, so a
-    // new heap allocation + zero-fill per tick was pure churn.
     std::vector<HrOverlayDesc> &descs = overlays_scratch_;
     descs.clear();
     descs.reserve(state_.overlays.size());
@@ -2029,12 +1723,9 @@ void RecordingController::SyncOverlays() {
         descs.push_back(d);
     }
 
-    // SyncOverlays() runs on every preview timer tick (continuously, not
-    // just while recording/dragging), but the overlay list itself only
-    // actually changes on a real add/remove/drag/resize/edit. Skip the
-    // pipeline call entirely when the list is identical to what was last
-    // sent, instead of re-locking the pipeline's overlays_mtx and copying
-    // the whole vector on every single tick for no reason.
+    // SyncOverlays() runs on every preview timer tick (continuously, not just while
+    // recording/dragging), but the overlay list itself only actually changes on a real
+    // add/remove/drag/resize/edit.
     bool same = last_overlays_sent_valid_ &&
                 last_overlays_sent_.size() == descs.size() &&
                 (descs.empty() ||
@@ -2090,10 +1781,6 @@ void RecordingController::ResolveWindowLayer(OverlayDef &ov, HrOverlayDesc &d) {
 bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    // A fresh, uniquely-numbered subfolder per run rather than reusing/
-    // clearing one folder - guarantees a stale segment from a previous
-    // run (or a previous app session, if the temp folder was never
-    // cleaned) can never end up in a concat list built from replay_dir_.
     std::wstring base_dir = std::wstring(tmp) + L"HomRec_replay\\";
     CreateDirectoryW(base_dir.c_str(), nullptr); // fine if it already exists
     replay_dir_ = base_dir + std::to_wstring(++replay_run_seq_) + L"\\";
@@ -2101,11 +1788,6 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
 
     int buf_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
     replay_applied_buffer_sec_ = buf_sec;
-    // +1 segment of slack so the oldest segment still needed for a
-    // full-length Save Replay isn't wrapped-over right as it's about to
-    // be read, and a sane hard ceiling (720 * 5s = 1hr) so a huge/typo'd
-    // buffer-seconds setting can't make the writer wrap through an
-    // unbounded number of segment files.
     int wrap = (buf_sec + kReplaySegmentSec - 1) / kReplaySegmentSec + 1;
     if (wrap > 720) wrap = 720;
     if (wrap < 2) wrap = 2;
@@ -2145,34 +1827,17 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
     hr_pl_set_recording(pipeline_, /*active=*/1, stdin_h);
 
-    // Instant Replay's segment writer above only ever piped raw video -
-    // a saved replay clip came out completely silent regardless of the
-    // mic/system-audio settings, which from the outside looks the same
-    // as "audio and video got saved separately" (here, audio just never
-    // existed at all). Keep a rolling window of mic/system audio the same
-    // length as the video buffer (+1 segment slack, matching `wrap`
-    // above) so SaveReplay() has real audio to mux in instead of none.
-    // Gated on the same "audio enabled" setting manual recording uses, and
-    // skipped while a manual recording is running (it owns the buffer
-    // uncapped from Start() to Stop() - see hr_audio_set_max_buffer_sec()).
     if (state_.audio_out_channels > 0 && !state_.recording) {
         hr_audio_set_max_buffer_sec(wrap * kReplaySegmentSec);
-        // nullptr, nullptr -- this is the rolling ring buffer, not a manual
-        // recording, so it must stay fully in RAM (SaveReplay() needs
-        // random access to "the last N seconds" on demand); see
-        // hr_audio_reset_buffers()'s comment (audio.cpp) for why real
-        // paths there mean something different (a streamed-to-disk manual
-        // recording).
         hr_audio_reset_buffers(nullptr, nullptr);
         hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
     }
     return true;
 }
 
-// Stops+destroys replay_ff_ (waiting briefly so its last, currently-open
-// segment gets finalized rather than left mid-write) without touching
-// pipeline_ itself - callers decide what the pipeline's recording pipe
-// should point at next.
+// Stops+destroys replay_ff_ (waiting briefly so its last, currently-open segment gets
+// finalized rather than left mid-write) without touching pipeline_ itself - callers decide
+// what the pipeline's recording pipe should point at next.
 void RecordingController::StopInstantReplayEncoder() {
     if (!replay_ff_) return;
     hr_pl_end_recording_segment(pipeline_, 3000);
@@ -2185,49 +1850,17 @@ void RecordingController::StopInstantReplayEncoder() {
     replay_ff_ = nullptr;
 }
 
-// (preview freezes for a second or two right after clicking
-// Start/Record): Start() below pauses a running Instant Replay buffer by
-// calling StopInstantReplayEncoder() - which used to be this same
-// synchronous function, called directly on whichever thread called
-// Start() (the UI thread, via RequestStart()). hr_ff_wait(replay_ff_,
-// 3000) there blocks for up to a full 3 seconds waiting for the segment
-// writer to finish gracefully, which is exactly the freeze users saw the
-// instant they pressed the button. The replay buffer being paused for a
-// manual recording doesn't need to be waited on synchronously - it's a
-// background feature the user isn't actively looking at output from, and
-// losing at most a fraction of a second off its last (in-progress)
-// segment is a fine trade for not freezing the UI. Hand the same
-// stop/wait/kill/destroy sequence off to a background thread instead
-// (tracked via instant_replay_stop_thread_ rather than detached - see
-// JoinPendingInstantReplayStop()'s comment), and clear replay_ff_
-// immediately so nothing else touches it while that thread finishes up.
 void RecordingController::StopInstantReplayEncoderAsync() {
     if (!replay_ff_) return;
     void *h = replay_ff_;
     replay_ff_ = nullptr;
     void *pl = pipeline_;
     // See JoinPendingInstantReplayStop()'s comment (recording_controller.h)
-    // - joins whatever the *previous* call to this function started
-    // (normally already finished; this is just the same defensive
-    // pattern JoinPendingPreviewTeardown() uses) before overwriting the
-    // member with this call's thread.
     JoinPendingInstantReplayStop();
     hr_pl_end_recording_segment(pl, 1500);
     instant_replay_stop_thread_ = std::thread([h]() {
         // (std::terminate() crash a moment after "Instant Replay:
         // segment writer didn't finish gracefully in time - killing it"):
-        // this is a bare std::thread with no exception handler anywhere
-        // above it on the call stack (tracked/joined now instead of
-        // detached - see JoinPendingInstantReplayStop() - but that alone
-        // doesn't catch anything thrown *inside* it) - every other bare
-        // std::thread lambda in this codebase (capture_loop()/
-        // writer_loop() in pipeline.cpp) got wrapped in a try/catch
-        // specifically because an uncaught throw in one of these calls
-        // std::terminate() and takes the whole app down with it; this one
-        // was missed. Whatever the actual trigger (hr_ff_wait()/
-        // hr_ff_kill()/hr_ff_destroy() hitting an edge case under load),
-        // catching it here turns a full crash into a logged, recoverable
-        // failure - same tradeoff those other two threads already made.
         try {
             hr_ff_stop_graceful(h);
             if (hr_ff_wait(h, 3000) != 0 && hr_ff_is_running(h)) {
@@ -2287,13 +1920,7 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
         error_out = L"Failed to start the capture pipeline.";
         return false;
     }
-    // The branch above only configures a pipeline it (re)creates. An
-    // already-running (preview) pipeline was built for whatever target was
-    // selected back then, but StartInstantReplayEncoder() below tells
-    // ffmpeg the CURRENT output_w_/output_h_ - re-apply the crop and output
-    // size so both sides agree (otherwise a window picked after the preview
-    // started leaves the pipeline on the full desktop while ffmpeg expects
-    // window-sized frames).
+    // The branch above only configures a pipeline it (re)creates.
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     hr_pl_set_output_size(pipeline_, output_w_, output_h_);
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
@@ -2323,10 +1950,6 @@ void RecordingController::DisableInstantReplay() {
         else hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
     }
     // Instant Replay's rolling audio window (see StartInstantReplayEncoder())
-    // was only ever meant to run while the feature is active. If a manual
-    // recording is what's actually running right now, leave it alone -
-    // that recording owns audio buffering uncapped until its own Stop()
-    // (Start() already reconfigured it via hr_audio_set_max_buffer_sec(0)).
     if (!state_.recording) {
         hr_audio_capture_to_wav(nullptr, nullptr); // stop buffering, discard the window
         hr_audio_set_max_buffer_sec(0);
@@ -2342,11 +1965,6 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
     std::wstring dir_to_read = replay_dir_;
 
     // Stop the current segment writer so its last (possibly still-open)
-    // segment gets finalized on disk, then immediately start a fresh one
-    // into a new folder - the gap this leaves is in the *background*
-    // buffer, not in the clip being saved right now, and starting the
-    // replacement first (before the slower concat below) means the
-    // background buffer is covering new ground again as soon as possible.
     StopInstantReplayEncoder();
     std::wstring restart_err;
     bool restarted = StartInstantReplayEncoder(restart_err);
@@ -2386,13 +2004,6 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
     if (want < 1) want = 1;
     if ((int)segs.size() > want) segs.erase(segs.begin(), segs.end() - want);
 
-    // Instant Replay's segment writer only ever piped raw video (see
-    // StartInstantReplayEncoder()), so a saved clip used to come out
-    // completely silent - snapshot the rolling mic/system-audio window
-    // that same function now keeps (non-destructively: the buffer keeps
-    // accumulating for the *next* Save Replay) and mux it into the clip
-    // below, the same mix-then-merge path a manual recording's Stop()
-    // uses.
     std::string mic_wav_a = NarrowFromWide(dir_to_read + L"replay_mic_tmp.wav");
     std::string sys_wav_a = NarrowFromWide(dir_to_read + L"replay_sys.wav");
     std::string audio_wav_a = NarrowFromWide(dir_to_read + L"replay_audio.wav");
@@ -2424,10 +2035,8 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
 
     std::wstring list_path = dir_to_read + L"concat_list.txt";
     {
-        // This was a std::wofstream in the "C" locale, which can't
-        // encode non-ASCII characters - a temp path under a non-ASCII user name
-        // cut the list off and Save Replay failed. Written as UTF-8 instead (what
-        // ffmpeg's concat demuxer expects).
+        // This was a std::wofstream in the "C" locale, which can't encode non-ASCII characters - a
+        // temp path under a non-ASCII user name cut the list off and Save Replay failed.
         FILE *out = _wfopen(list_path.c_str(), L"wb");
         for (const auto &s : segs) {
             // ffmpeg concat-demuxer lines are single-quoted; escape any
@@ -2453,12 +2062,6 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
 
     bool keep_dir_for_audio_fallback = false;
     if (ok && have_replay_audio) {
-        // real_elapsed_sec = 0.0 deliberately skips hr_merge_av()'s
-        // dropped-frame "stretch" correction (see its own comment) - that
-        // logic needs a genuine wall-clock recording duration to compare
-        // against, which doesn't apply to an already-concatenated set of
-        // fixed-length segments. Just mux the audio in at the fast
-        // stream-copy path.
         if (hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
                          WideFromNarrow(audio_wav_a).c_str(), 0.0, 0.0) != 0) {
             RemoveFileUtf8(audio_wav_a);
@@ -2484,12 +2087,8 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
         HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering after Save Replay - " + restart_err));
     }
 
-    // See DeleteReplayDir()'s comment - dir_to_read's run is over either
-    // way (StartInstantReplayEncoder() above already moved replay_dir_ on
-    // to a new folder). The one exception is the audio-merge-failed
-    // branch just above, which deliberately leaves audio_wav_a behind
-    // inside dir_to_read as a last-resort recovery file - don't delete
-    // out from under that.
+    // See DeleteReplayDir()'s comment - dir_to_read's run is over either way
+    // (StartInstantReplayEncoder() above already moved replay_dir_ on to a new folder).
     if (!keep_dir_for_audio_fallback) DeleteReplayDir(dir_to_read);
 
     if (!ok) {
@@ -2515,11 +2114,7 @@ bool RecordingController::GetPreviewFrame(std::vector<uint8_t> &out, int &out_w,
 int RecordingController::GetPreviewFrameIfNew(std::vector<uint8_t> &out, int &out_w, int &out_h,
                                               int &native_w, int &native_h, uint64_t &seq) {
     if (!pipeline_) return 0;
-    // Room for the largest thumbnail this pipeline can produce. The pipeline
-    // sizes its thumbnail from ScaledPreviewSize() (<= preview_width x
-    // preview_height) at creation time, but AppState can change afterwards,
-    // so the capacity is passed to the pipeline, which refuses to overrun it.
-    // Only ever grown - shrinking/regrowing would zero-fill on every call.
+    // Room for the largest thumbnail this pipeline can produce.
     const size_t cap = (size_t)std::max(state_.preview_width, 2) *
                        (size_t)std::max(state_.preview_height, 2) * 3;
     if (out.size() < cap) out.resize(cap);
@@ -2527,11 +2122,6 @@ int RecordingController::GetPreviewFrameIfNew(std::vector<uint8_t> &out, int &ou
                                 &native_w, &native_h, &seq);
 }
 
-// The live thumbnail used to be produced at the (fixed) preview_width x preview_height and then
-// bilinear-rescaled on the UI thread for every single new frame; with the docked layout the preview
-// pane is rarely that size, so that rescale was pure CPU waste. The pipeline now makes the thumbnail
-// at the size the pane actually shows (capped by the user's preview quality setting), so the UI can
-// blit it as-is.
 void RecordingController::SetPreviewViewSize(int w, int h) {
     if (w < 64 || h < 64) return;
     pv_view_w_ = w;
@@ -2560,15 +2150,11 @@ void RecordingController::EnsurePreview() {
     if (pipeline_ || state_.disable_preview) return; // already running, or user turned it off
     // See JoinPendingPreviewTeardown()'s comment (recording_controller.h) -
     // without this, creating a new pipeline right after TeardownPreview()
-    // kicked off an async destroy of the old one could race its DXGI
-    // duplication handle and silently fail to start.
     JoinPendingPreviewTeardown();
     ResolveCaptureSize();
     // pipe_fd=0 -> hr_pl_create() leaves this in preview-only mode (frames
     // captured + thumbnailed for the UI, nothing written anywhere) - see
     // its "false -> preview only" comment in pipeline.cpp. Start()
-    // later flips this same pipeline into recording mode via
-    // hr_pl_set_recording() instead of replacing it, when the size matches.
     int pvw = 0, pvh = 0;
     ScaledPreviewSize(pvw, pvh);
     pipeline_ = CreatePipelineForTarget(/*pipe_fd=*/0, pvw, pvh);
@@ -2581,12 +2167,6 @@ void RecordingController::EnsurePreview() {
     if (!pipeline_) {
         // This used to fail completely silently - no error, no
         // status change, nothing - so a stuck DXGI capture (dx_create()
-        // returning null: RDP, a virtual display, a display mode that
-        // just changed) just looked like a frozen preview forever, with
-        // SyncOverlays() hammering it again every 2s regardless. Track
-        // the failure streak here so SyncOverlays() can back off and,
-        // past a few failures, flag preview_capture_unavailable() so the
-        // UI can show something more honest than "still loading".
         if (preview_retry_streak_ < 1'000'000) ++preview_retry_streak_; // don't overflow if this runs for days
         if (preview_retry_streak_ >= kPreviewRetryBackoffAfter && !preview_unavailable_) {
             preview_unavailable_ = true;
@@ -2598,16 +2178,12 @@ void RecordingController::EnsurePreview() {
         }
         return;
     }
-    // Reached only on success - clear any backoff state from earlier
-    // failures so the next time preview needs to (re)start (settings
-    // change, monitor reconnected, etc.) it retries at the fast cadence
-    // again instead of staying artificially slow.
+    // Reached only on success - clear any backoff state from earlier failures so the next time
+    // preview needs to (re)start (settings change, monitor reconnected, etc.) it retries at
+    // the fast cadence again instead of staying artificially slow.
     preview_retry_streak_ = 0;
     preview_unavailable_ = false;
     // Same crop rect ResolveCaptureSize() above just resolved for Start()
-    // to reuse - without this, the live preview panel would keep showing
-    // the full desktop even when a window is selected, only "correcting"
-    // itself once Start() reuses this pipeline and re-applies the crop.
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
     // EnsurePreview() already bailed out above when state_.disable_preview
@@ -2624,18 +2200,7 @@ void RecordingController::TeardownPreview() {
     void *doomed = pipeline_;
     pipeline_ = nullptr;
 
-    // If an earlier teardown is still in flight (its own stuck-DXGI 1s x2
-    // timeout hasn't elapsed yet), wait for it here rather than detaching a
-    // second one - two of these racing on unrelated Pipeline objects is
-    // harmless in itself, but it's needless overlap and makes it easy to
-    // lose track of one at shutdown. This only blocks the caller for the
-    // (rare) remainder of the previous teardown, not a fresh one.
     if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
-    // Wrapped in try/catch for the same reason as the thread
-    // entry points in pipeline.cpp/audio.cpp (see their matching
-    // comments) - this lambda is a bare std::thread with nothing above it
-    // to catch an uncaught exception out of hr_pl_destroy(), which would
-    // otherwise be another std::terminate() path.
     preview_teardown_thread_ = std::thread([doomed]() {
         try {
             hr_pl_destroy(doomed);
@@ -2662,12 +2227,6 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
         return false;
     }
 
-    // Resolve the selected monitor exactly like ResolveCaptureSize()'s
-    // desktop-capture branch (same state_.monitor_id -1 convention), but
-    // kept entirely local - this must NOT touch capture_w_/h_/output_w_/
-    // h_/capture_output_idx_, since those belong to the real recording/
-    // preview pipeline_ and a test can run without a real recording ever
-    // starting.
     void *di = hr_di_create();
     hr_di_refresh(di);
     int mx = 0, my = 0, mw = 1920, mh = 1080;
@@ -2695,12 +2254,9 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
     qt_w_ = mw;
     qt_h_ = mh;
 
-    // DXGI Desktop Duplication only allows one active duplication handle
-    // per monitor at a time - if the live preview is currently capturing
-    // this same monitor, creating a second pipeline for the test would
-    // just fail. Tear it down for the test's duration (JoinPendingPreviewTeardown()
-    // makes sure that's actually finished, not just kicked off, before the
-    // create below runs); FinishQuickTest() brings it back.
+    // DXGI Desktop Duplication only allows one active duplication handle per monitor at a time
+    // - if the live preview is currently capturing this same monitor, creating a second
+    // pipeline for the test would just fail.
     qt_preview_was_torn_down_ = (pipeline_ != nullptr);
     TeardownPreview();
     JoinPendingPreviewTeardown();
@@ -2716,12 +2272,6 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
     qt_encoder_used_ = NarrowFromWide(codec);
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
 
-    // Same args-building hr_build_codec_args() call BuildCodecArgs() makes,
-    // just with the Settings dialog's live (possibly-unsaved) preset
-    // instead of state_.enc_preset - BuildCodecArgs() itself isn't
-    // parameterized on preset, so it's inlined here rather than mutating
-    // state_ (which a background timer/preview tick could be reading
-    // concurrently) to borrow it temporarily.
     std::wstring codec_args;
     if (!state_.custom_ffmpeg_args.empty()) {
         codec_args = L"-c:v " + codec + L" " + WideFromNarrow(state_.custom_ffmpeg_args);
@@ -2828,19 +2378,8 @@ RecordingController::QuickTestResult RecordingController::FinishQuickTest() {
     result.avg_fps = qt_fps_samples_ > 0 ? qt_fps_sum_ / qt_fps_samples_ : 0.0;
     result.encoder_used = qt_encoder_used_;
 
-    // qt_overloaded_ (PollQuickTest) only fires on a *sustained* rise --
-    // three consecutive 200ms polls where the drop count went up. A codec
-    // that's hopelessly behind for this machine usually falls behind hard
-    // once (a single big catch-up burst that adds dozens of dropped/
-    // duplicated frames between two polls) and then goes quiet because
-    // there's nothing left to catch up on, or the pipeline simply can't
-    // produce more - that shows up as one poll with a huge delta
-    // surrounded by flat ones, which never reaches a streak of 3 and so
-    // never sets qt_overloaded_, even though the codec is clearly not
-    // fine (see: a test reporting 242 of 317 frames dropped and still
-    // claiming "no sustained frame drops"). Back the verdict with the
-    // actual drop ratio too, so a single catastrophic burst can't hide
-    // behind the streak check.
+    // qt_overloaded_ (PollQuickTest) only fires on a *sustained* rise -- three consecutive
+    // 200ms polls where the drop count went up.
     const bool ratio_bad = result.frames > 0 &&
         (double)result.drops / (double)result.frames > 0.15;
     result.overloaded = qt_overloaded_ || ratio_bad;
@@ -2851,10 +2390,9 @@ RecordingController::QuickTestResult RecordingController::FinishQuickTest() {
         qt_pipeline_ = nullptr;
     }
     if (qt_ffproc_) {
-        // Same generous wait Stop()'s finalize tail gives a real
-        // recording (see StopFinalizeTail()'s comment) would be overkill
-        // for a few seconds of test footage that's about to be deleted
-        // anyway - a shorter budget before force-stopping is fine here.
+        // Same generous wait Stop()'s finalize tail gives a real recording (see
+        // StopFinalizeTail()'s comment) would be overkill for a few seconds of test footage that's
+        // about to be deleted anyway - a shorter budget before force-stopping is fine here.
         hr_ff_stop_graceful(qt_ffproc_);
         if (hr_ff_wait(qt_ffproc_, 5000) != 0) {
             HrLog::Warn("Quick test: ffmpeg didn't finish on its own after 5s - stopping it.");
@@ -2907,11 +2445,6 @@ void RecordingController::RefreshPreviewSettings() {
     now.preview_quality_pct = state_.preview_quality_pct;
 
     if (!applied_preview_capture_settings_valid_ || !(now == applied_preview_capture_settings_)) {
-        // TeardownPreview() destroys the pipeline, but when Instant
-        // Replay is buffering that very pipeline feeds its encoder - so picking a
-        // window/region (or changing monitor/fps/preview settings) silently killed
-        // the replay buffer while EnableInstantReplay() still saw it as "active".
-        // Stop the replay first, rebuild, then start it again on the new pipeline.
         const bool replay_was_on = instant_replay_active_ && !state_.recording;
         if (replay_was_on) DisableInstantReplay();
         TeardownPreview();
@@ -2925,12 +2458,8 @@ void RecordingController::RefreshPreviewSettings() {
             }
         }
         if (!replay_back) EnsurePreview();
-        // TeardownPreview()/EnsurePreview() are both no-ops while a
-        // recording owns pipeline_, so nothing was actually applied in that
-        // case. Only remember these settings as "applied" when a rebuild
-        // really could happen; otherwise the change (e.g. Target FPS made
-        // mid-recording) was forgotten forever and the kept-alive pipeline
-        // kept its stale values for every later recording.
+        // TeardownPreview()/EnsurePreview() are both no-ops while a recording owns pipeline_, so
+        // nothing was actually applied in that case.
         if (!state_.recording) {
             applied_preview_capture_settings_ = now;
             applied_preview_capture_settings_valid_ = true;
@@ -2942,23 +2471,12 @@ void RecordingController::RefreshPreviewSettings() {
         if (!state_.recording) hr_pl_set_fps(pipeline_, state_.target_fps);
         hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
         // Covers the case TeardownPreview()/EnsurePreview() above don't:
-        // a recording already in progress owns pipeline_ and keeps it
-        // regardless of this setting (see TeardownPreview()'s own "never
-        // tear down while state_.recording" guard), so toggling "Disable
-        // live preview" mid-recording needs to reach the existing
-        // pipeline directly rather than only affecting the next preview-
-        // only pipeline EnsurePreview() would create.
         hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
     }
 
-    // Picking a different microphone in Settings had no effect
-    // until the app was restarted -- hr_audio_start() only ever ran once,
-    // at Init(), with whatever mic_device_id was set at the time. Restart
-    // the continuous capture stream (level meters, not an actual recording)
-    // with the newly-chosen device instead. Skipped while a recording is
-    // in progress -- tearing down/reopening the WASAPI stream mid-recording
-    // would risk a gap or a hang, and there's no urgency to apply it before
-    // the current recording finishes anyway.
+    // Picking a different microphone in Settings had no effect until the app was restarted --
+    // hr_audio_start() only ever ran once, at Init(), with whatever mic_device_id was set at
+    // the time.
     if (!state_.recording && state_.mic_device_id != applied_mic_device_id_) {
         hr_audio_stop(nullptr, nullptr);
         hr_audio_start(1.0f, 1.0f, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0,
@@ -2973,30 +2491,12 @@ void RecordingController::SetPreviewVisible(bool visible) {
         // The recording owns the pipeline until Stop(), so it can't be torn
         // down here - but its live-preview thumbnails (a downscale + copy of
         // every Nth frame, plus a repaint request to a window nobody can see)
-        // are pure waste while HomRec sits minimized or in the tray, which is
-        // exactly where it is while you are playing the game being recorded.
-        // Switch just that part off/on. (Snapshot editing forces it on itself.)
         if (pipeline_ && !snapshot_forced_preview_)
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         return;
     }
     if (visible) {
         // Used to call EnsurePreview() directly here and nothing else.
-        // If the preview had already backed off before being hidden (DXGI
-        // hiccup, RDP session, no monitor - see EnsurePreview()'s
-        // comment), TeardownPreview() below never touches
-        // preview_retry_streak_/next_preview_retry_, so this call
-        // inherited whatever escalated backoff was already in effect. If
-        // THIS attempt (e.g. right as the window un-hides, before the
-        // display's had a moment to settle) also failed, the panel could
-        // sit missing/on "Preview loading..." for up to
-        // kPreviewRetryMaxSeconds after a tray restore, since
-        // SyncOverlays()'s automatic retry wouldn't fire again until
-        // next_preview_retry_ - a stale schedule from before the restore,
-        // unrelated to when the window actually came back. Restoring
-        // visibility is exactly as deliberate/user-initiated as toggling
-        // the Settings checkbox RefreshPreviewSettings() already resets
-        // this for, so it gets the same clean slate.
         ResetPreviewRetryState();
         EnsurePreview();
         // EnsurePreview() returns early when a pipeline is already running
@@ -3010,20 +2510,13 @@ void RecordingController::SetPreviewVisible(bool visible) {
 
 bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &out_w, int &out_h,
                                                 int &native_w, int &native_h, bool first_call) {
-    // This used to be gated on `first_call` too, so if the very
-    // first attempt of an editing session failed to get a pipeline going
-    // (EnsurePreview() briefly stuck right after e.g. a tray restore),
-    // pipeline_ stayed null forever and every later Refresh - always
-    // called with first_call=false - hit the `if (!pipeline_) return
-    // false;` below without ever trying EnsurePreview() again. Refresh
-    // now retries the start on every call, not just the first.
+    // This used to be gated on `first_call` too, so if the very first attempt of an editing
+    // session failed to get a pipeline going (EnsurePreview() briefly stuck right after e.g.
     bool just_started = false;
     if (!pipeline_) {
-        // EnsurePreview() no-ops when state_.disable_preview is set - this
-        // is an explicit "show me a screenshot anyway" request, so start
-        // it regardless, same as SetPreviewVisible() would if the setting
-        // were off. Left running afterward; EndSnapshotEditing() is what
-        // decides whether to tear it back down once the user's done here.
+        // EnsurePreview() no-ops when state_.disable_preview is set - this is an explicit "show me
+        // a screenshot anyway" request, so start it regardless, same as SetPreviewVisible() would
+        // if the setting were off.
         bool was_disabled = state_.disable_preview;
         state_.disable_preview = false;
         EnsurePreview();
@@ -3032,24 +2525,11 @@ bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &o
     }
     if (!pipeline_) return false;
 
-    // The pipeline can already exist without producing thumbnails: a
-    // recording or Instant Replay started while Settings > Disable live
-    // preview is on keeps its pipeline alive but switches the thumbnail
-    // generator off (see Pipeline::preview_needed), so hr_pl_get_preview()
-    // would never return a frame and overlay editing would just fail with
-    // "no screenshot". Switch it back on for the duration of the editing
-    // session - EndSnapshotEditing() switches it off again.
     if (state_.disable_preview) {
         hr_pl_set_preview_needed(pipeline_, 1);
         snapshot_forced_preview_ = true;
     }
 
-    // A freshly-started pipeline's capture thread needs a moment to
-    // produce its first thumbnail (hr_pl_get_preview() returns false
-    // until then) - worth waiting out whenever EnsurePreview() just (re)ran
-    // above, not only on the session's first call; an already-running
-    // pipeline from an earlier call should already have one available
-    // immediately.
     const int max_wait_ms = (first_call || just_started || snapshot_forced_preview_) ? 1000 : 0;
     const int step_ms = 25;
     for (int waited = 0; ; waited += step_ms) {
@@ -3068,9 +2548,6 @@ bool RecordingController::CaptureSnapshotFrame(std::vector<uint8_t> &out, int &o
 void RecordingController::EndSnapshotEditing() {
     if (!state_.disable_preview) { snapshot_forced_preview_ = false; return; }
     // A recording or Instant Replay still owns the pipeline (TeardownPreview()
-    // deliberately refuses while recording, and must not be allowed to
-    // destroy the pipeline Instant Replay is buffering through either) -
-    // just switch its thumbnail generator back off instead.
     if (pipeline_ && (state_.recording || instant_replay_active_)) {
         hr_pl_set_preview_needed(pipeline_, 0);
     } else {

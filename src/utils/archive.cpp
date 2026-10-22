@@ -30,10 +30,8 @@ bool CreateDirRecursive(const std::string &dir_path) {
            GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-// Runs a command line to completion, redirecting stdout/stderr to NUL
-// (this is a background extraction step, not something the user needs to
-// see a console flash by for). Returns the process exit code, or -1 if it
-// couldn't even be launched.
+// Runs a command line to completion, redirecting stdout/stderr to NUL (this is a
+// background extraction step, not something the user needs to see a console flash by for).
 int RunAndWait(const std::wstring &cmdline) {
     SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE hNul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE | FILE_SHARE_READ,

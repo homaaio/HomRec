@@ -1,33 +1,6 @@
 #pragma once
-// -----------------------------------------------------------------------------
-// input_overlay.h
-//
-// Parsing for the "input overlay" layout format: a keyboard/mouse/gamepad
-// on-screen overlay driven by a JSON layout + PNG spritesheet. This is the
-// same preset format used by the well-known univrsal/input-overlay OBS
-// plugin: a flat JSON object with "elements", each mapping a rectangle in
-// the spritesheet ("mapping": [x,y,w,h]) to a position on the overlay
-// canvas ("pos": [x,y]), keyed to a keyboard scan code ("code") for key
-// state.
-//
-// Two ways an overlay ends up with a layout+spritesheet pair (both land
-// here the same way, via Load()):
-//   - "External Overlay" in the "+" menu (overlays_dock_panel.cpp) --
-//     the user picks the .json and .png directly, no archive involved.
-//   - "Select Input-Overlay" in the same menu -- picks a preset a plugin
-//     registered via homrec.register_input_overlay() (see
-//     input_overlay_registry.h and plugins/input_overlay_presets/).
-//
-// Only a data-driven subset is rendered (no plugin code execution is
-// needed or used for this overlay type -- see the "type" field notes
-// below, and overlay_render.cpp for the actual rendering): elements
-// with type 1 are treated as keyboard buttons and redrawn pressed/
-// unpressed based on live key state; everything else (gamepad axes, mouse
-// position, etc.) is drawn as a static element. That covers the large
-// majority of the bundled presets (WASD/QWERTY/arrow-key layouts); full
-// gamepad/mouse-motion support would need its own input polling and is a
-// reasonable follow-on, not attempted here.
-// -----------------------------------------------------------------------------
+// input_overlay.h - Parsing for the "input overlay" layout format: a
+// keyboard/mouse/gamepad on-screen overlay driven by a JSON layout + PNG spritesheet.
 #include <string>
 #include <vector>
 

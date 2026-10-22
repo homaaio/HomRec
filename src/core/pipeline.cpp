@@ -43,21 +43,9 @@ static constexpr int HR_DX_ERROR   = -1;
 // Dynamic loader for helper DLLs
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// PATCHED for static linking (see INTEGRATION_NOTES.md "internal DLL
-// loading" finding): this used to LoadLibraryW/GetProcAddress
-// hr_dxgi_capture.dll / hr_encoder_helpers.dll / hr_stopwatch.dll by
-// filename at runtime. Under the C++ port those three files are compiled
-// directly into the same exe as this one (see the root Makefile), so
-// those DLLs never exist on disk and ensure_libs() would silently fail
-// (dx_create/bgra_to_yuv/etc. all null, capture never starts, no error
-// surfaced anywhere obvious). Fixed by declaring the real exported
-// functions extern "C" and pointing the same g_libs fields at them
-// directly - every call site below (g_libs.dx_create(...), g_libs.
-// bgra_to_yuv(...), etc.) is UNCHANGED, only how the fields get populated.
-// If you still want the DLL-split architecture instead, revert this hunk
-// and go back to building hr_dxgi_capture.dll/hr_encoder_helpers.dll/
-// hr_stopwatch.dll via build_native.py.
+// PATCHED for static linking (see INTEGRATION_NOTES.md "internal DLL loading" finding):
+// this used to LoadLibraryW/GetProcAddress hr_dxgi_capture.dll / hr_encoder_helpers.dll /
+// hr_stopwatch.dll by filename at runtime.
 #ifdef _WIN32
 extern "C" {
     void *hr_dx_create(int adapter_idx, int output_idx);
@@ -142,30 +130,12 @@ static bool ensure_libs() {
     return g_libs.loaded;
 }
 
-// Forward decl - Yuv420pWorkerPool::Downscale() (below) dispatches per-band
-// calls into this from worker threads, but its real definition (converted
-// from the old single-threaded bgra_downscale(), see that function's own
-// comment) lives further down this file next to bgra_to_thumb(). Needs to
-// be visible up here already since the class comes first.
 static void bgra_downscale_band(const uint8_t* __restrict src,
                                  uint8_t*       __restrict dst,
                                  int sw, int sh, int dw, int dh,
                                  int dy0, int dy1);
 
-// ---------------------------------------------------------------------------
-// Generic scanline-band worker pool. Originally just BGRA->YUV420p; now
-// also drives the Settings > Resolution downscale (see Downscale() below) -
-// PERF: that downscale used to run as a single, unthreaded pass on the
-// capture thread, BEFORE the (already-threaded) color conversion below it.
-// For anyone recording at a non-native output resolution (e.g. this class's
-// original motivating case, but also just "downscale my 1440p/1080p desktop
-// to a lighter 900p/720p recording"), that was a fully serial chunk of the
-// per-frame budget sitting right in the middle of an otherwise-parallel
-// pipeline. Downscale() now reuses these SAME worker threads (started once,
-// already boosted in step with the capture thread) for its own bands
-// instead of running alone - no extra threads spun up, no extra cores
-// reserved beyond what Convert() already needed.
-//----------------------------------------------------------------------------
+// Generic scanline-band worker pool.
 
 class Yuv420pWorkerPool {
 public:
@@ -176,10 +146,6 @@ public:
     }
 
     // PERF: the capture thread (HIGHEST while recording) blocks in Convert()
-    // until every worker has finished its band.  The workers used to run at
-    // NORMAL priority, so under CPU load (a game) they were scheduled late and
-    // the high-priority capture thread just sat waiting on them -> late frames
-    // and "dropping frames".  Workers now follow the capture thread's boost.
     void SetBoost(bool boost) { boost_.store(boost, std::memory_order_relaxed); }
 
     void Stop() {
@@ -193,16 +159,9 @@ public:
         threads_.clear();
     }
 
-    // Splits [0,total_rows) into worker_count()+1 bands (rounded up to a
-    // multiple of row_align - 2 for YUV's chroma-paired rows, 1 for
-    // anything else) and blocks until every worker-owned band AND the
-    // caller's own last band have run fn(y0,y1). Falls back to running the
-    // whole range on the calling thread if the pool ends up with zero
-    // workers (single-core machine, or a frame small enough that
-    // kMinPixelsForThreads decided threading wasn't worth it for this
-    // session). total_pixels_hint only matters on the very first call ever
-    // made on this pool (see EnsureStarted) - later calls (whether from
-    // Convert() or Downscale()) just reuse whatever got decided then.
+    // Splits [0,total_rows) into worker_count()+1 bands (rounded up to a multiple of row_align
+    // - 2 for YUV's chroma-paired rows, 1 for anything else) and blocks until every worker-
+    // owned band AND the caller's own last band have run fn(y0,y1).
     template <class Fn>
     void RunBanded(long long total_pixels_hint, int total_rows, int row_align, Fn &&fn) {
         EnsureStarted(total_pixels_hint);
@@ -245,10 +204,6 @@ public:
     // Parallel replacement for the old single-threaded bgra_downscale() -
     // banded by DESTINATION row (each output row is fully independent, no
     // chroma-pairing constraint, hence row_align=1). See bgra_downscale_band()
-    // for the actual box-filter/nearest-neighbour math; this just fans it
-    // out across the pool's existing worker threads.
-    // PERF: re-converts only rows [y0,y1) (y0 even) of an otherwise up-to-date
-    // frame - used when DXGI told us which rows actually changed.
     void ConvertRows(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1) {
         if (y1 <= y0) return;
         auto band_fn = convert_band_;
@@ -268,11 +223,6 @@ public:
     }
 
 private:
-    // No-op after the first call - sizing is decided once, from the first
-    // frame actually converted, rather than re-evaluated (and the pool
-    // restarted) if dimensions later change slightly mid-session, which
-    // isn't worth the thread churn this class exists to avoid in the
-    // first place.
     void EnsureStarted(long long total_pixels) {
         if (started_) return;
         started_ = true;
@@ -280,25 +230,6 @@ private:
         unsigned hw = std::thread::hardware_concurrency();
         int n_bands = 1;
         if (total_pixels >= kMinPixelsForThreads && hw > 1) {
-            // (game FPS drop while recording, worst on quad/hexa-
-            // core machines): this used to be std::min(hw - 1, 4), which
-            // only ever held back a single core for "the capture thread
-            // (DXGI grab + overlay compositing + BGRA->YUV) and everything
-            // else (audio, UI)" the comment on this class promises -
-            // despite that comment's own wording ("just holding a couple
-            // back"). On an 8+ core machine that 1-core margin is plenty
-            // (this class already caps at 4 bands total), but on the
-            // 4-6 core CPUs a lot of gaming PCs/laptops actually have, it
-            // meant 3 of 4 cores (75%) or 4 of 6 (67%) going straight to
-            // color conversion alone, on top of the separately-boosted
-            // capture/writer threads - leaving the game itself starved of
-            // CPU for the entire recording, which is exactly the
-            // "Minecraft drops from 100+ fps to 60-90 while recording"
-            // report this was causing. Now actually reserves 2 cores
-            // (matching the comment's own stated intent) before deciding
-            // how many bands to split into, still capped at 4 bands so
-            // nothing changes on the higher-core-count machines this was
-            // already fine for.
             static constexpr unsigned kReservedCores = 2;
             unsigned usable = (hw > kReservedCores) ? (hw - kReservedCores) : 1;
             n_bands = (int)std::min<unsigned>(usable, 4);
@@ -354,7 +285,6 @@ private:
 };
 #endif  // _WIN32
 
-
 // ---------------------------------------------------------------------------
 // BGRA→thumbnail (box-filter, no intermediate RGB buffer)
 // ---------------------------------------------------------------------------
@@ -405,13 +335,7 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
     }
 }
 
-// ---------------------------------------------------------------------------
-// NV12 -> thumbnail (RGB), nearest-neighbour. Used for the live preview while
-// the GPU colour-conversion path is active: no BGRA picture exists on the CPU
-// then, only the finished NV12 frame. Samples ~preview-size pixels (a few
-// hundred thousand at most), BT.601 studio range - the inverse of what the
-// converter and the D3D11 video processor produce.
-// ---------------------------------------------------------------------------
+// NV12 -> thumbnail (RGB), nearest-neighbour.
 static void nv12_to_thumb(const uint8_t* __restrict nv12,
                            uint8_t*       __restrict dst,
                            int sw, int sh, int dw, int dh)
@@ -438,41 +362,6 @@ static void nv12_to_thumb(const uint8_t* __restrict nv12,
     }
 }
 
-// ---------------------------------------------------------------------------
-// BGRA->BGRA downscale (box filter on integer ratios, nearest-neighbour
-// otherwise) - used to shrink a captured frame down to the user's chosen
-// output resolution (Settings > Resolution) BEFORE color conversion and
-// encoding, instead of capturing/converting at full native size and only
-// scaling down afterward (previously done via ffmpeg's own -vf scale, see
-// hr_ff_set_output_size()'s comment in ffmpeg_runner.cpp for the old
-// path). On weak/old hardware this matters a lot: color conversion
-// (bgra_to_yuv) and the bytes actually written to the pipe both now scale
-// with the OUTPUT size instead of the native capture size, and ffmpeg
-// never has to run its own scaler at all since what arrives on the pipe
-// already matches the encode size (hr_ff_build_cmd() already skips -vf
-// scale whenever input/output sizes match). Same structure as
-// bgra_to_thumb() above, just BGRA-in/BGRA-out instead of BGRA-in/RGB-out
-// (thumb is display-only, this feeds the encoder so channel order must be
-// preserved); alpha is irrelevant either way (hr_bgra_to_yuv420p never
-// reads it) so it's just written as opaque.
-//
-// PERF: this used to do the whole [0,dh) range in one single-threaded pass,
-// run directly on the capture thread - the one and only unthreaded, CPU-
-// bound step left in the per-frame path (color conversion right after it
-// has been split across the Yuv420pWorkerPool's worker threads since that
-// pool existed at all). On a recording set to any non-native output
-// resolution (Settings > Resolution), that meant a full extra serial box-
-// filter/nearest-neighbour pass sitting in the middle of an otherwise-
-// parallel pipeline, on exactly the machines (weak/old hardware, per the
-// comment below) that can least afford spending part of their frame budget
-// running single-core. Split into a banded core (this function, takes a
-// destination row range) plus Yuv420pWorkerPool::Downscale() (declared near
-// the top of this file), which fans those bands out across the SAME worker
-// threads Convert() already uses - see that method's own comment for why
-// that's free (no new threads, no extra reserved cores). The original
-// single-shot entry point is kept as a thin wrapper below for anything that
-// still wants a plain, non-threaded call.
-// ---------------------------------------------------------------------------
 static void bgra_downscale_band(const uint8_t* __restrict src,
                                  uint8_t*       __restrict dst,
                                  int sw, int sh, int dw, int dh,
@@ -484,13 +373,9 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
     if (dy0 >= dy1) return;
 
     if (sw == dw && sh == dh) {
-        // Whole-frame identity copy - independent per row, so still just
-        // copies this band's rows rather than special-casing a single
-        // whole-buffer memcpy (this path can now be entered from several
-        // worker threads at once, each with its own [dy0,dy1)). Not
-        // actually reachable from the capture_loop call site (which only
-        // calls Downscale() when sizes differ - see its own comment), kept
-        // here only for any other caller of the plain wrapper below.
+        // Whole-frame identity copy - independent per row, so still just copies this band's rows
+        // rather than special-casing a single whole-buffer memcpy (this path can now be entered
+        // from several worker threads at once, each with its own [dy0,dy1)).
         std::memcpy(dst + (size_t)dy0 * dw * 4,
                     src + (size_t)dy0 * sw * 4,
                     (size_t)(dy1 - dy0) * dw * 4);
@@ -498,11 +383,6 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
     }
 
     if ((sw % dw) == 0 && (sh % dh) == 0) {
-        // Fast integer-ratio box filter - same cost class as the color
-        // conversion it feeds into, and much cheaper than ffmpeg's
-        // general-purpose swscale for this common case (exact ratios like
-        // 100%->75%->50%->25% of a 16:9/16:10 native resolution almost
-        // always land here).
         int rx = sw / dw, ry = sh / dh;
         int bsz = rx * ry;
         for (int y = dy0; y < dy1; ++y) {
@@ -528,10 +408,7 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
             }
         }
     } else {
-        // Nearest-neighbour fallback (non-integer ratio, e.g. a custom
-        // absolute target resolution that doesn't evenly divide the
-        // monitor's native size) - cheaper than a general box filter and
-        // plenty for a downscale destined for lossy video encoding.
+        // Nearest-neighbour fallback (non-integer ratio, e.g.
         float rx = (float)sw / dw, ry = (float)sh / dh;
         for (int y = dy0; y < dy1; ++y) {
             int sy = (int)(y * ry); if (sy >= sh) sy = sh - 1;
@@ -547,12 +424,6 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
     }
 }
 
-// Plain, non-threaded, whole-frame entry point - not called from the hot
-// capture_loop path anymore (that now goes through
-// Yuv420pWorkerPool::Downscale() for the parallel version above), kept for
-// any other/future caller that just wants a single-shot downscale without
-// needing a Yuv420pWorkerPool instance around. Marked maybe_unused since
-// that's currently nobody, to keep -Wall/-Wextra quiet about it.
 [[maybe_unused]] static void bgra_downscale(const uint8_t* __restrict src,
                             uint8_t*       __restrict dst,
                             int sw, int sh, int dw, int dh)
@@ -560,34 +431,11 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
     bgra_downscale_band(src, dst, sw, sh, dw, dh, 0, dh);
 }
 
-// ---------------------------------------------------------------------------
 // Outstanding "handed-off" Pipelines - see hr_pl_destroy()'s handed_off/
 // leak_pl comments below for what this refers to.
-//
-// A Pipeline whose worker threads didn't stop within hr_pl_destroy()'s
-// 1s-per-thread budget gets detached rather than joined, and finishes
-// tearing itself down (dx_destroy/sw_destroy/delete this, from
-// finish_thread()) on its own time, on its own thread, once it actually
-// exits - anywhere from a few hundred ms to (per hr_dx_capture.cpp's own
-// retry budget) several seconds later. Nothing previously waited for that
-// to actually finish before the app itself was allowed to close: main()
-// returning (or WinMain falling out the bottom of the message loop) starts
-// unloading DLLs and tearing down process-wide state (including the very
-// g_libs function pointers and HrLog machinery those lingering threads are
-// still calling into) out from under them - exactly the
-// "[CRASH] unhandled C++ exception / std::terminate() -- (no dump written)"
-// users hit right around closing the app (or Start()/Stop() quickly
-// recreating a pipeline) shortly after a "did not stop in time" message.
-// Track how many Pipelines are currently in that handed-off-but-not-yet-
-// self-deleted state so shutdown can wait on it via hr_pl_wait_all_detached()
-// below instead of racing it blind.
 static std::atomic<int> g_handed_off_pipelines{0};
 
-// Process-wide counter behind Pipeline::pv_seq. Global (not per-pipeline) on
-// purpose: RecordingController tears preview pipelines down and creates new
-// ones during a session, and a per-pipeline counter restarting at 1 could
-// collide with the "last seen" value the UI still holds from the old
-// pipeline and make the UI think a brand-new frame is unchanged.
+// Process-wide counter behind Pipeline::pv_seq.
 static std::atomic<uint64_t> g_pv_seq_counter{0};
 
 // ---------------------------------------------------------------------------
@@ -597,112 +445,32 @@ struct Pipeline {
     int src_w = 0, src_h = 0;
     std::atomic<int> fps{30};
     int pv_w  = 960, pv_h = 540;
-    // "Preview:" settings (Settings > General) - separate from the
-    // recording fps/size above, since the live preview thumbnail costs
-    // real CPU/GPU time on weak machines even when nothing is being
-    // recorded and ideally shouldn't cost more than the user actually
-    // wants it to. Read every capture-loop iteration so a live change
-    // (hr_pl_set_preview_fps()) takes effect immediately, not just on
-    // the next hr_pl_create().
     std::atomic<int> preview_fps{15};
 
-    // Whether anything is actually going to consume the live-preview
-    // thumbnail this pipeline produces (hr_pl_get_preview()). Defaults to
-    // true so every existing caller that never touches this flag keeps its
-    // current behavior. RecordingController sets this to false whenever
-    // Settings > "Disable live preview (for performance)" is on
-    // (hr_pl_set_preview_needed()) - see that flag's own comment
-    // (app_state.h) for why. Before this flag existed, capture_loop()
-    // called update_preview() unconditionally at up to preview_fps times a
-    // second (60 by default) even with the setting checked and the preview
-    // panel torn down/never polling hr_pl_get_preview() - the exact
-    // "supposed to be off but still costing CPU" gap that setting's own
-    // label promised not to have, and pure waste on the low-end machines
-    // that setting exists for in the first place. A manual recording still
-    // creates a real Pipeline regardless of this setting (it's also the
-    // encoder path), so this couldn't be fixed by simply not creating one.
+    // Whether anything is actually going to consume the live-preview thumbnail this pipeline
+    // produces (hr_pl_get_preview()).
     std::atomic<bool> preview_needed{true};
 
-    // pipe_handle and `recording` are written by the UI
-    // thread (hr_pl_set_recording()/hr_pl_end_recording_segment()) while the
-    // capture and writer threads read - and the writer thread also zeroes -
-    // them, with no synchronisation at all. Plain non-atomic reads/writes
-    // from two threads are undefined behaviour and, on a bad day, let the
-    // writer thread keep using (or double-close) a handle the UI thread had
-    // already swapped out. Both are std::atomic now; every access below goes
-    // through load()/store() explicitly so the intent is visible.
+    // pipe_handle and `recording` are written by the UI thread
+    // (hr_pl_set_recording()/hr_pl_end_recording_segment()) while the capture and writer
+    // threads read - and the writer thread also zeroes - them, with no synchronisation at all.
     std::atomic<intptr_t> pipe_handle{0};
     std::atomic<bool> recording{false};   // pipe open → encode YUV; false → preview only
 
-    // Separate from `recording` above on purpose: `recording` just means
-    // "a pipe is open, encode YUV for it" and is also true while Instant
-    // Replay's background segment buffer is running with no manual
-    // recording active (see RecordingController::StartInstantReplayEncoder()).
-    // The capture thread used to bump itself to THREAD_PRIORITY_HIGHEST
-    // any time `recording` was true, which meant simply having Instant
-    // Replay's passive background buffer turned on - a feature explicitly
-    // designed to sit there unnoticed - ran the capture thread at the same
-    // elevated, system-wide-contending priority as an actively-requested
-    // recording, indefinitely, for as long as the app was open. On a
-    // laptop or a machine with a small cooler, that reads as "the fan
-    // spins up/PC gets loud" from a screen recorder that, as far as the
-    // user can tell, isn't even doing anything. This flag is only set
-    // while a *manual* recording (or an Instant Replay clip actually being
-    // saved) is genuinely in progress - see hr_pl_set_priority_boost().
     std::atomic<bool> boost_priority{false};
     std::atomic<bool> light_cpu_path{false};
 
-    // ====== WINDOW CAPTURE (crop rect) ======
-    // src_w/src_h above MUST stay the full monitor's native resolution --
-    // that's what DXGI Desktop Duplication actually hands back per frame
-    // into bgra_buf, independent of what we do with it afterward (see the
-    // big comment on this in RecordingController::ResolveCaptureSize()).
-    // "Record just this window" is implemented as a crop applied AFTER
-    // capture, not by trying to make DXGI itself capture a smaller area
-    // (it can't). crop_w == 0 means "no crop" -- the original/default
-    // full-desktop behavior, at zero extra cost per frame. Set via
-    // hr_pl_set_capture_rect(); first resolved from the target window's
-    // screen rect by RecordingController at Start()/EnsurePreview() time,
-    // then kept in sync with the live window (position/size) for the rest
-    // of the recording by RecordingController::RetargetWindowCapture(),
-    // called on every SyncOverlays() tick -- see its doc comment
-    // (recording_controller.h) for why that's safe to do this often and
-    // what it deliberately does NOT touch (output_w_/output_h_).
     int crop_x = 0, crop_y = 0, crop_w = 0, crop_h = 0;
-    // Guards the four crop_* fields above: hr_pl_set_capture_rect() runs on
-    // the UI thread while capture_loop() may be mid-frame on this pipeline
-    // (Start() re-targets an already-running preview pipeline). Unlocked,
-    // the capture thread could read e.g. the new crop_y with the old
-    // crop_h and copy rows from past the end of bgra_buf. Uncontended
-    // lock/unlock once per frame is negligible.
+    // Guards the four crop_* fields above: hr_pl_set_capture_rect() runs on the UI thread
+    // while capture_loop() may be mid-frame on this pipeline (Start() re-targets an already-
+    // running preview pipeline).
     std::mutex crop_mtx;
 
-    // "Effective" frame dimensions for THIS frame: src_w/src_h when
-    // crop_w==0, or crop_w/crop_h when a crop rect is active. Every
-    // downstream step (overlay/cursor compositing, YUV conversion, the
-    // live preview) reads eff_w/eff_h instead of src_w/src_h directly, so
-    // window-capture mode doesn't need every one of those call sites to
-    // separately know about cropping. Set once per captured frame, right
-    // after the crop step in capture_loop() below.
+    // "Effective" frame dimensions for THIS frame: src_w/src_h when crop_w==0, or
+    // crop_w/crop_h when a crop rect is active.
     int eff_w = 0, eff_h = 0;
 
-    // ====== OUTPUT-SIZE DOWNSCALE (Settings > Resolution) ======
-    // 0/0 (the default) means "no override, encode at eff_w/eff_h" - the
-    // capture_w_==output_w_ common case at 100%/Native costs nothing extra
-    // (bgra_downscale() above short-circuits to a memcpy... actually not
-    // even that, see the `enc_src` fast path in capture_loop() below,
-    // which skips the call entirely when sizes match). Set via
-    // hr_pl_set_output_size(), called once by RecordingController::Start()
-    // right after hr_pl_set_capture_rect(). Read every frame (capture_loop
-    // is the hot path) so it must stay atomic-safe even though in
-    // practice it's only ever written once before recording starts.
     std::atomic<int> out_w{0}, out_h{0};
-    // Scratch buffer the downscaled BGRA frame is written into ahead of
-    // YUV conversion - separate from bgra_buf (rather than downscaling in
-    // place) so update_preview()'s thumbnail keeps reading the full
-    // eff_w/eff_h frame with cursor/overlays already composited into it,
-    // completely unaffected by the encode-side output size. Only ever
-    // touched by the capture thread, so no lock needed.
     std::vector<uint8_t> scaled_buf;
 
     void* dx_ctx = nullptr;
@@ -715,22 +483,12 @@ struct Pipeline {
 
     // "Cursor" setting: whether to draw the live system cursor into each
     // captured frame (see hr_composite_cursor() in ui_utils.cpp).
-    // cap_origin_x/y is the captured output's virtual-desktop offset
-    // (from hr_dx_output_desc), needed to translate GetCursorInfo()'s
-    // virtual-desktop coordinates into this buffer's local coordinates.
     std::atomic<bool> include_cursor{false};
     int cap_origin_x = 0, cap_origin_y = 0;
 
     std::vector<uint8_t> bgra_buf;  // src_w * src_h * 4 -- ALWAYS the pristine, untouched last full-desktop frame
 
-    // Per-tick work frame (cropped window rect and/or overlays/cursor baked
-    // in). Kept separate from bgra_buf on purpose: the TIMEOUT/LOST paths in
-    // capture_loop() deliberately re-encode "whatever is still in bgra_buf"
-    // from the last real frame, and the old code cropped/composited IN PLACE
-    // on bgra_buf -- so every repeated tick re-cropped an already-compacted
-    // buffer using the full-monitor stride (garbled, skewed horizontal
-    // streaks in window-capture recordings) and re-drew overlays/cursor on
-    // top of themselves. Only touched by the capture thread.
+    // Per-tick work frame (cropped window rect and/or overlays/cursor baked in).
     std::vector<uint8_t> work_buf;
     // Pointer to the frame every downstream step reads this tick:
     // bgra_buf.data() (no crop/overlay/cursor -- zero extra cost) or
@@ -743,12 +501,7 @@ struct Pipeline {
     std::mutex overlays_mtx;
     std::vector<HrOverlayDesc> overlays;
     OverlayCompositor overlay_compositor;
-    // OPT: bumped every time hr_pl_set_overlays() actually changes the
-    // list. The capture loop (running at recording fps, so this is a
-    // hot path) used to lock overlays_mtx and copy the whole vector every
-    // single frame even though the overlay configuration itself changes
-    // rarely (drag/resize/edit, not per-frame) -- it only needs the
-    // lock+copy again once this generation counter has moved.
+    // OPT: bumped every time hr_pl_set_overlays() actually changes the list.
     std::atomic<uint64_t> overlays_gen{0};
 
     // Preview
@@ -757,11 +510,8 @@ struct Pipeline {
     int  pv_actual_w = 0, pv_actual_h = 0;
     int  pv_native_w = 0, pv_native_h = 0;
     bool pv_ready    = false;
-    // Bumped (from g_pv_seq_counter, so it is unique across pipelines) every
-    // time update_preview() publishes a new thumbnail. Lets the UI poll
-    // "has anything changed?" with one atomic load and skip the copy + compare
-    // + rescale work entirely on paints where it hasn't - see
-    // hr_pl_get_preview_ex()/hr_pl_get_preview_seq().
+    // Bumped (from g_pv_seq_counter, so it is unique across pipelines) every time
+    // update_preview() publishes a new thumbnail.
     std::atomic<uint64_t> pv_seq{0};
 
     std::thread       capture_thread;
@@ -777,11 +527,8 @@ struct Pipeline {
     std::atomic<bool>       pending_close_done{false};
 
 #ifdef _WIN32
-    // Manual-reset event for overlapped writes to ffmpeg's stdin pipe - see
-    // write_pipe()'s own comment for why this exists. Created lazily (only
-    // ever needed while actually recording) and closed alongside dx_ctx/
-    // sw_ctx wherever those are (both hr_pl_destroy()'s direct-delete path
-    // and finish_thread()'s handed-off path).
+    // Manual-reset event for overlapped writes to ffmpeg's stdin pipe - see write_pipe()'s own
+    // comment for why this exists.
     HANDLE write_evt = nullptr;
 #endif
 
@@ -799,12 +546,6 @@ struct Pipeline {
             if (write_evt) { CloseHandle(write_evt); write_evt = nullptr; }
 #endif
             delete this;
-            // Must be decremented after the delete above, not
-            // before - hr_pl_wait_all_detached() uses this counter hitting
-            // zero as its "safe to let the process exit now" signal, and
-            // callers only want that signal once the Pipeline (and the
-            // dx_/sw_ handles it owned) are actually gone, not just about
-            // to be.
             g_handed_off_pipelines.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
@@ -817,16 +558,8 @@ struct Pipeline {
     std::atomic<int64_t> frames_stalled{0};
     std::atomic<double>  fps_actual{0.0};
 
-    // ====== FRAME QUEUE FOR ASYNC WRITING ======
-    // One queue entry = one converted YUV frame plus how many consecutive
-    // times it must be written to the pipe. `repeat` > 1 is how the capture
-    // thread's catch-up logic keeps the muxed timeline on pace with real
-    // time (see capture_loop()'s extra_slots): the SAME picture is simply
-    // written several times, instead of being re-scaled, re-converted and
-    // re-queued as up to 90 separate buffers. That used to burn ~90x the
-    // conversion CPU in exactly the situation where the machine was already
-    // behind, and - because MAX_QUEUE_SIZE is 3 - all but the last few of
-    // those buffers were evicted from the queue again immediately anyway.
+    // ====== FRAME QUEUE FOR ASYNC WRITING ====== One queue entry = one converted YUV frame
+    // plus how many consecutive times it must be written to the pipe.
     struct QueuedFrame {
         std::vector<uint8_t> data;
         int repeat = 1;
@@ -840,15 +573,6 @@ struct Pipeline {
                                                   // game stealing the CPU) evicted frames -> "Recording overloaded".
                                                   // Latency is irrelevant when recording to a file.
 
-    // ====== RECYCLED BUFFER POOL ======
-    // The writer thread returns finished conversion buffers here so the
-    // capture thread can reuse them via move instead of allocating a fresh
-    // buffer and copying the full YUV frame (~3 MB at 1080p) every frame -
-    // steady-state adds zero heap allocations and zero extra memcpy per
-    // frame.
-    // Last converted frame, owned by the capture thread only. When the desktop
-    // is static (DXGI TIMEOUT: nothing changed) the next tick re-sends this
-    // instead of re-running the whole BGRA->YUV conversion.
     std::vector<uint8_t> last_yuv;
     bool last_yuv_valid = false;
     int  last_yuv_w = 0, last_yuv_h = 0;
@@ -857,13 +581,6 @@ struct Pipeline {
     // rows changed" hint be applied on top of it (partial re-conversion).
     bool last_yuv_direct = false;
 
-    // ====== GPU COLOUR CONVERSION (Settings > Video > "GPU colour conversion") ======
-    // While recording with NV12 output and nothing to composite on the CPU,
-    // capture_loop() asks the D3D11 video processor (hr_dx_capture_nv12) to
-    // crop/scale/convert BGRA->NV12 on the GPU instead of reading back BGRA
-    // and converting it here. Overlays are drawn on the CPU, so any active
-    // overlay switches ticks back to the normal path; the cursor is drawn
-    // straight into the NV12 frame (hr_composite_cursor_nv12).
     std::atomic<bool> gpu_convert{false};
     bool gpu_failed = false;                  // capture thread only: give up for this pipeline
     bool gpu_fail_transient = false;          // gpu_failed came from a runtime error that is worth retrying
@@ -937,7 +654,7 @@ struct Pipeline {
                                                    : THREAD_PRIORITY_ABOVE_NORMAL);
 #if defined(HR_HAS_SET_THREAD_DESC)
         typedef HRESULT (WINAPI *PFN_SET_THREAD_DESC)(HANDLE, PCWSTR);
-        static PFN_SET_THREAD_DESC set_thread_desc = 
+        static PFN_SET_THREAD_DESC set_thread_desc =
             (PFN_SET_THREAD_DESC)GetProcAddress(
                 GetModuleHandleW(L"KernelBase.dll"), "SetThreadDescription");
         if (set_thread_desc) {
@@ -948,19 +665,12 @@ struct Pipeline {
 
         writer_running.store(true, std::memory_order_relaxed);
 
-        // Same reasoning as the try/catch wrapped around
-        // capture_loop()'s while-loop above - this is also a bare
-        // std::thread with nothing above it on the call stack to catch an
-        // uncaught exception, so any throw in here (write_pipe(), the
-        // free-list bookkeeping, etc.) was another std::terminate() path.
         try {
         while (writer_running.load(std::memory_order_relaxed)) {
 #ifdef _WIN32
-            // See the matching comment above (~line 620) - boost_priority
-            // can change independently of this thread's lifetime, so this
-            // needs to be checked every iteration, not just once at
-            // thread-start, exactly like capture_loop()'s own want_boost
-            // check.
+            // See the matching comment above (~line 620) - boost_priority can change independently of
+            // this thread's lifetime, so this needs to be checked every iteration, not just once at
+            // thread-start, exactly like capture_loop()'s own want_boost check.
             bool writer_want_boost = boost_priority.load(std::memory_order_relaxed) &&
                                      !light_cpu_path.load(std::memory_order_relaxed);
             if (writer_want_boost != writer_was_boosted) {
@@ -972,21 +682,21 @@ struct Pipeline {
 #endif
             std::vector<uint8_t> frame;
             int frame_repeat = 1;
-            
+
             {
                 std::unique_lock<std::mutex> lock(pipe_queue_mtx);
-                
+
                 // Wait for frames or shutdown signal
                 pipe_queue_cv.wait_for(lock, std::chrono::milliseconds(10), [this]() {
-                    return !pipe_queue.empty() || 
+                    return !pipe_queue.empty() ||
                            !writer_running.load(std::memory_order_relaxed);
                 });
-                
+
                 // Exit if shutting down and queue is empty
                 if (!writer_running.load(std::memory_order_relaxed) && pipe_queue.empty()) {
                     break;
                 }
-                
+
                 if (pipe_queue.empty()) {
                     if (pending_close_requested.load(std::memory_order_acquire)) {
                         const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
@@ -1006,13 +716,13 @@ struct Pipeline {
                     }
                     continue;
                 }
-                
+
                 // Move frame out of queue (no copy)
                 frame = std::move(pipe_queue.front().data);
                 frame_repeat = pipe_queue.front().repeat;
                 pipe_queue.pop();
             }
-            
+
             // Write to pipe outside the lock
             if (!frame.empty()) {
                 bool ok = true;
@@ -1044,19 +754,6 @@ struct Pipeline {
 
         // pipe_handle is the same OS
         // handle as ffmpeg's stdin. hr_ff_stop_graceful() (ffmpeg_runner.cpp)
-        // used to close that handle itself, unconditionally, the moment
-        // Stop was pressed - including while this thread might still be
-        // detached and mid-flight writing real queued frames to it (see
-        // hr_pl_stop()'s handed_off path). That truncated the raw video
-        // stream and sent ffmpeg an EOF before it had received more than a
-        // few frames, so it finalized (or errored out) almost immediately:
-        // just the initial ftyp/moov placeholder, nothing playable.
-        // This thread is the only thing that actually knows when every
-        // queued frame has genuinely been written, so it alone closes the
-        // handle now, exactly once, right here - whether that's a few
-        // milliseconds after Stop (the common case) or well after being
-        // handed off to run detached in the background (the case that was
-        // triggering the broken file).
         {
             const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
             if (ph != 0 && ph != -1) {
@@ -1080,10 +777,8 @@ struct Pipeline {
         finish_thread();
     }
 
-    // -------------------------------------------------------------------------
     // Update preview thumbnail - directly from BGRA, no intermediate RGB copy
     // OPT: устранён bgra_to_rgb_inplace() и буфер rgb_pv
-    // -------------------------------------------------------------------------
     void update_preview() {
         std::lock_guard<std::mutex> lock(pv_mtx);   // also guards pv_w/pv_h (hr_pl_set_preview_size)
         int tw = pv_w, th = pv_h;
@@ -1122,14 +817,10 @@ struct Pipeline {
         bool com_inited = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
         // Start at a moderate priority; bumped to TIME_CRITICAL only while
         // actually recording (see the dynamic adjustment in the loop below).
-        // Pinning this to TIME_CRITICAL unconditionally - including for the
-        // entire time the app just sits open with a live preview and
-        // nothing being recorded - was needless system-wide contention for
-        // no benefit preview capture actually needs.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #if defined(HR_HAS_SET_THREAD_DESC)
         typedef HRESULT (WINAPI *PFN_SET_THREAD_DESC)(HANDLE, PCWSTR);
-        static PFN_SET_THREAD_DESC set_thread_desc = 
+        static PFN_SET_THREAD_DESC set_thread_desc =
             (PFN_SET_THREAD_DESC)GetProcAddress(
                 GetModuleHandleW(L"KernelBase.dll"), "SetThreadDescription");
         if (set_thread_desc) {
@@ -1145,12 +836,6 @@ struct Pipeline {
         // Preview-only mode (not recording) never needs more than a
         // handful of frames/sec - the thumbnail shown in the UI is
         // already throttled by the preview-fps check further down.
-        // Capturing at the full target fps (often 60+) just to immediately
-        // discard nearly all of it was pure waste. Cap idle capture at the
-        // user's Preview FPS setting instead of a fixed 15 - never *slow
-        // down* a deliberately-low target fps though. Recomputed on every
-        // is_recording_now transition below so a live change to the
-        // Preview FPS setting is picked up without restarting the pipeline.
         auto compute_frame_ns_idle = [&]() {
             int want_fps = preview_fps.load(std::memory_order_relaxed);
             if (want_fps < 1) want_fps = 1;
@@ -1158,41 +843,19 @@ struct Pipeline {
         };
         int64_t frame_ns_idle = compute_frame_ns_idle();
         bool was_recording = recording.load(std::memory_order_acquire);
-        // Start at the pace matching the CURRENT mode. This used to be
-        // initialised to frame_ns_recording unconditionally, so a
-        // preview-only pipeline (recording == false, no transition ever
-        // fires to correct it) captured at the full target fps the whole
-        // time it sat idle - the "idle app still eats ~10% CPU" bug.
+        // Start at the pace matching the CURRENT mode.
         int64_t frame_ns = was_recording ? frame_ns_recording : frame_ns_idle;
         bool was_boosted = boost_priority.load(std::memory_order_relaxed);
         bool thread_is_high_prio = was_boosted;   // mirrors the SetThreadPriority() just below
         yuv_pool.SetBoost(was_boosted);
 #ifdef _WIN32
-        // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL
-        // the moment recording started (both here and in the is_recording_now
-        // transition below). TIME_CRITICAL is the highest priority Windows
-        // has -- above every normal-priority thread in the system, not just
-        // this process -- so on anything less than a beefy multi-core
-        // machine it could starve the UI thread of the CPU time it needs to
-        // pump messages and repaint, which is exactly what "the preview
-        // freezes the moment recording starts" looks like from the user's
-        // side (the capture thread itself was fine; the UI just couldn't
-        // get scheduled to show it). HIGHEST is still well above normal/
-        // idle-process-class threads (enough to keep capture timing tight
-        // under load) without reserving the CPU ahead of literally
-        // everything else, including our own UI thread.
+        // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL the moment recording started
+        // (both here and in the is_recording_now transition below).
         SetThreadPriority(GetCurrentThread(), boost_priority.load(std::memory_order_relaxed)
                                                   ? THREAD_PRIORITY_HIGHEST
                                                   : THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
 
-        // Dynamic preview frequency: driven by the "Preview FPS" setting
-        // (AppState::preview_fps / hr_pl_set_preview_fps()) rather than a
-        // fixed fraction of the recording fps - time-based (elapsed ns
-        // since the last preview update) instead of a frame-count modulo
-        // so it stays accurate to the requested rate regardless of how
-        // fast the capture loop itself is ticking (recording vs idle
-        // pacing above already differ by 2-4x).
         int64_t last_preview_ns = 0;
 
         // timeout_ms = 2/3 frame (was 1/2) → fewer TIMEOUT drops
@@ -1211,10 +874,8 @@ struct Pipeline {
         // refreshed (under overlays_mtx) when the generation counter has
         // actually moved, instead of every single captured frame.
         std::vector<HrOverlayDesc> overlays_snapshot;
-        // True only if some overlay would actually be DRAWN (same visibility/size
-        // test OverlayCompositor::Apply() uses). A configured-but-hidden overlay
-        // must not keep the cheap paths (GPU conversion, static-frame reuse,
-        // partial re-conversion) switched off.
+        // True only if some overlay would actually be DRAWN (same visibility/size test
+        // OverlayCompositor::Apply() uses).
         bool overlays_active = false;
         // 8th pass: some overlay reads / blanks the captured monitor picture (region / window / hidden
         // Desktop layer) - that picture only exists as BGRA on the CPU, so no GPU colour conversion.
@@ -1222,26 +883,7 @@ struct Pipeline {
         uint64_t last_overlays_gen = (uint64_t)-1; // sentinel: forces the first copy below
         bool warned_bad_crop = false;              // see the crop clamp below - log it once, not per frame
 
-        // The whole loop below now runs inside a try/catch. This
-        // thread is started bare (std::thread([pl]{ pl->capture_loop(); }),
-        // see hr_pl_start()) with no exception handler anywhere above it on
-        // the call stack - the overlay-compositing try/catch further down
-        // was already added for exactly this reason (see its own comment),
-        // but it only covered that one call site. Any OTHER uncaught throw
-        // in this loop (a bad_alloc from a resize with a bogus size, a
-        // vector::at, anything) was still an unhandled C++ exception on a
-        // std::thread with nothing above it to catch it - which per the
-        // standard calls std::terminate() and takes the whole process down
-        // with it, matching the "[CRASH] unhandled C++ exception /
-        // std::terminate()" entries this app was hitting. Catching here
-        // turns that into "this one pipeline stops, logged, app keeps
-        // running" instead - same outcome a clean Stop()/TeardownPreview()
-        // would have produced.
-        // ---- helpers shared by the classic (BGRA) and the GPU (NV12) path ----------
-        // Pointer look-alike signature: visibility, position, cursor handle and a
-        // 100ms time bucket (the cursor raster cache refreshes at that rate, so
-        // animated cursors keep animating). Two equal signatures = "compositing
-        // the pointer again would produce the same pixels".
+        // The whole loop below now runs inside a try/catch.
         struct CursorSig {
             int vis = 0, x = 0, y = 0;
             unsigned long long handle = 0;
@@ -1303,35 +945,15 @@ struct Pipeline {
             }
         };
         // Hand a finished frame to the writer thread (moved, not copied).
-        // A frame is only dropped when the queue is genuinely full (the writer
-        // really is behind), matching the MAX_QUEUE_SIZE backpressure the queue
-        // is designed to provide.
         auto enqueue_frame = [&](std::vector<uint8_t> &yuv_frame, int extra_slots_) {
             std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
             int carried_repeat = 0;        // timeline slots owned by an evicted entry
             {
                 std::lock_guard<std::mutex> lock(pipe_queue_mtx);
 
-                // Backpressure: the queue is capped at MAX_QUEUE_SIZE
-                // entries. A full queue means the writer/ffmpeg really is
-                // behind, so the oldest entry is evicted (and counted as
-                // a drop) instead of letting memory grow without bound
-                // (see the earlier "freeze + memory growth after Stop on
-                // a long recording" fix - that bug was catch-up frames
-                // bypassing this cap, which the repeat count can no
-                // longer do: it costs no extra buffers at all).
+                // Backpressure: the queue is capped at MAX_QUEUE_SIZE entries.
                 if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
                     dropped = std::move(pipe_queue.front().data);
-                    // A/V SYNC FIX: an evicted entry used to take its
-                    // timeline slots with it, so every drop made the
-                    // video 1+ frame shorter than real time while the
-                    // audio kept its full length - heard as audio
-                    // lagging behind the picture after an "overloaded:
-                    // dropping frames" warning. The newest frame now
-                    // inherits the evicted entry's slots (the picture
-                    // holds for that moment instead of the clock
-                    // slipping). Capped so one long stall can't
-                    // become a multi-second burst of writes.
                     carried_repeat = pipe_queue.front().repeat;
                     pipe_queue.pop();
                     frames_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -1352,12 +974,9 @@ struct Pipeline {
             }
         };
 
-        // ---- stall diagnostics -------------------------------------------------
-        // A benchmark of a game with the recorder running showed a 0.1 FPS minimum that the logs could not
-        // attribute to anything. This watches the gap between two consecutive capture ticks while
-        // recording; a gap of >= max(250 ms, 6 frames) is a "hitch" (display-mode switch, GPU reset,
-        // driver stall, a blocked Map()...). The first 15 are logged with the duration of the capture call
-        // that preceded them, and a one-line summary is written when the recording (or pipeline) ends.
+        // ---- stall diagnostics ------------------------------------------------- A benchmark of
+        // a game with the recorder running showed a 0.1 FPS minimum that the logs could not
+        // attribute to anything.
         using hitch_clock = std::chrono::steady_clock;
         hitch_clock::time_point hitch_last_tick{};
         bool   hitch_last_valid = false;
@@ -1379,10 +998,9 @@ struct Pipeline {
                 continue;
             }
 
-            // Recording can start/stop mid-flight on this same pipeline
-            // now (see hr_pl_set_recording()/RecordingController's preview
-            // reuse) - react to that instead of only sizing pacing/
-            // priority once when the thread was first created.
+            // Recording can start/stop mid-flight on this same pipeline now (see
+            // hr_pl_set_recording()/RecordingController's preview reuse) - react to that instead of
+            // only sizing pacing/ priority once when the thread was first created.
             {
                 const bool is_recording_now = recording.load(std::memory_order_acquire);
                 // Live-apply Target FPS / Preview FPS changes (cheap atomic
@@ -1415,19 +1033,6 @@ struct Pipeline {
                     next_frame_ns = 0; // resync pacing to "now" rather than an old cadence
                     // fps_acc_frames/fps_acc_start_ns (the
                     // "measured actual capture fps" stat shown in the UI)
-                    // used to keep accumulating across this switch. Idle
-                    // preview paces at preview_fps (15 by default - see
-                    // the .hrc's [capture] preview_fps) which is much
-                    // slower than a real recording's target_fps; starting
-                    // a new recording on a pipeline kept alive from the
-                    // previous one's preview (the normal case - see
-                    // hr_pl_set_recording()) could report roughly that
-                    // slower idle rate for up to a second after Start(),
-                    // even though real capture had already sped back up,
-                    // simply because the 1-second averaging window
-                    // straddled the switch. Restarting the window exactly
-                    // on the switch makes the very next reading reflect
-                    // only the new pacing.
                     fps_acc_frames = 0;
                     fps_acc_start_ns = 0;
 #ifdef _WIN32
@@ -1523,15 +1128,7 @@ struct Pipeline {
                 std::lock_guard<std::mutex> crop_lk(crop_mtx);
                 c_x = crop_x; c_y = crop_y; c_w = crop_w; c_h = crop_h;
             }
-            // If a crop was requested but doesn't fit the frame DXGI is
-            // actually delivering (e.g. it was computed for a different
-            // monitor/size than the one being duplicated), the old check
-            // just turned cropping OFF for that frame - while the output
-            // size (out_w/out_h, set for the crop) stayed put, so the WHOLE
-            // desktop got scaled down into the window-sized output: the
-            // "I picked a window but the entire screen is recorded" symptom.
-            // Clamp the rect to the real frame instead so what's kept is
-            // still (the visible part of) the requested area, and say so once.
+            // If a crop was requested but doesn't fit the frame DXGI is actually delivering (e.g.
             if (c_w > 0 && c_h > 0 &&
                 (c_x < 0 || c_y < 0 || c_x + c_w > src_w || c_y + c_h > src_h)) {
                 if (!warned_bad_crop) {
@@ -1550,13 +1147,6 @@ struct Pipeline {
             const bool do_crop = c_w > 0 && c_h > 0 && c_x >= 0 && c_y >= 0 &&
                                  c_x + c_w <= src_w && c_y + c_h <= src_h;
 
-            // ====== PATH SELECTION: GPU colour conversion or classic BGRA ======
-            // GPU path (D3D11 video processor: crop + scale + BGRA->NV12 all on
-            // the GPU, 1.5 bytes/pixel read back instead of 4, no CPU colour
-            // conversion) needs: recording with NV12 output, the setting on,
-            // an unscaled output if overlays are active (they are blended into
-            // the NV12 frame, see below), and the desktop still the size the
-            // buffers were sized for. Anything else -> classic path.
             bool gpu_tick = false;
             int  gpu_enc_w = 0, gpu_enc_h = 0;
             // Source rectangle in the DESKTOP's CURRENT pixel space (see the mode-change
@@ -1582,23 +1172,13 @@ struct Pipeline {
                 const int rq_h = out_h.load(std::memory_order_relaxed);
                 gpu_enc_w = (rq_w > 0) ? rq_w : src_rw;
                 gpu_enc_h = (rq_h > 0) ? rq_h : src_rh;
-                // Overlays are blended into the finished NV12 frame
-                // (OverlayCompositor::ApplyNv12), which only works when that
-                // frame is the same size as the space overlay coordinates
-                // live in (no GPU downscale). A scaled output with overlays
-                // still takes the classic CPU path, exactly as before.
+                // Overlays are blended into the finished NV12 frame (OverlayCompositor::ApplyNv12), which
+                // only works when that frame is the same size as the space overlay coordinates live in (no
+                // GPU downscale).
                 const bool ov_blocks_gpu = overlays_active && (gpu_enc_w != src_rw || gpu_enc_h != src_rh);
-                // DISPLAY MODE CHANGED MID-RECORDING (typical: a game switches the
-                // desktop to its own resolution right after Start): the buffers and the
-                // encoder were sized for src_w x src_h, but DXGI now delivers real_w x
-                // real_h. This used to switch the GPU path OFF for the rest of the
-                // recording, so every frame went through the CPU instead - full BGRA
-                // readback + nearest-neighbour stretch + BGRA->NV12 conversion, exactly
-                // while the game needs the CPU (logs: "full readbacks 2289, GPU NV12
-                // frames 57", -35% game FPS). The D3D11 video processor scales for
-                // free, so keep the GPU path and let it stretch the new desktop onto
-                // the unchanged encoder frame; the crop rectangle (kept in src space)
-                // is mapped into the new desktop space proportionally.
+                // DISPLAY MODE CHANGED MID-RECORDING (typical: a game switches the desktop to its own
+                // resolution right after Start): the buffers and the encoder were sized for src_w x src_h,
+                // but DXGI now delivers real_w x real_h.
                 const bool size_changed = (real_w != src_w || real_h != src_h);
                 if (!ov_blocks_gpu &&
                     real_w > 0 && real_h > 0 && src_w > 0 && src_h > 0 &&
@@ -1658,8 +1238,6 @@ struct Pipeline {
                 if (ret == HR_DX_ERROR) {
                     // Not fatal for the pipeline: stop using the GPU path and let
                     // the classic one (which resyncs from the GPU-side desktop copy)
-                    // take over on the next tick. Retried up to 3 times (3 s apart) -
-                    // the cause is often a momentary display-mode/driver hiccup.
                     ++gpu_fail_count;
                     gpu_failed = true;
                     gpu_fail_transient = true;
@@ -1678,32 +1256,13 @@ struct Pipeline {
             last_cap_ms = std::chrono::duration<double, std::milli>(hitch_clock::now() - t_cap0).count();
 #endif
             if (ret == HR_DX_TIMEOUT) {
-                // A timeout here does NOT
-                // mean capture failed -- DXGI's AcquireNextFrame() times out
-                // by design whenever the desktop simply hasn't changed since
-                // the last frame (e.g. the user is talking but not moving the
-                // mouse/typing), which happens constantly during a normal
-                // recording. The old code did `continue` here, which skipped
-                // this entire frame_ns interval -- nothing was captured,
-                // converted, or queued for it. Since ffmpeg is told a fixed
-                // -framerate, every skipped interval is one less frame in the
-                // output for the same amount of *real* elapsed time, so the
-                // finished file's timeline ends up shorter than the actual
-                // recording (a 5-second recording plays back in 3 seconds).
-                // bgra_buf still holds the last successfully captured frame
-                // (dx_capture() never touched it on a timeout), so fall
-                // through and re-encode/re-send that same frame instead of
-                // skipping the slot -- this keeps one frame going out per
-                // frame_ns tick, so the output duration matches wall-clock
-                // time regardless of how static the screen is. Still counted
-                // in frames_dropped so the stats reflect that it's a
-                // duplicate, not a freshly captured frame.
+                // A timeout here does NOT mean capture failed -- DXGI's AcquireNextFrame() times out by
+                // design whenever the desktop simply hasn't changed since the last frame (e.g.
                 frames_dropped.fetch_add(1, std::memory_order_relaxed);
                 logged_lost_ = false;
-                // Deliberately NOT `continue`-ing here (see comment above) --
-                // fall through to the shared capture-success path below,
-                // which will re-convert/re-queue whatever's still in
-                // bgra_buf from the last real frame.
+                // Deliberately NOT `continue`-ing here (see comment above) -- fall through to the shared
+                // capture-success path below, which will re-convert/re-queue whatever's still in bgra_buf
+                // from the last real frame.
             } else if (ret == HR_DX_LOST) {
                 if (!logged_lost_) {
                     HrLog::Warn(wgc_mode ? "Window capture lost (GPU reset) -- resetting"
@@ -1713,21 +1272,8 @@ struct Pipeline {
 #ifdef _WIN32
                 auto now = std::chrono::steady_clock::now();
                 if (g_libs.dx_reset && now >= next_reset_attempt_) {
-                    // CRASHFIX: this return value used to be thrown away
-                    // ("whether or not that succeeded" - see below), so a
-                    // reset that failed to re-acquire the duplication
-                    // interface (e.g. a game briefly holds exclusive
-                    // fullscreen right after the very mode change that
-                    // caused the loss - routine, not fatal) left dx_ctx's
-                    // duplication pointer null with nothing to show for
-                    // it in the log. hr_dx_capture() now refuses to
-                    // dereference that null pointer itself (see its own
-                    // comment - that null deref is exactly what the
-                    // supplied crash dump's 0xC0000005 was), so this is
-                    // belt-and-suspenders: log it once so a reset that
-                    // keeps failing is visible instead of silently
-                    // retrying forever with only the original "resetting"
-                    // line to go on.
+                    // CRASHFIX: this return value used to be thrown away ("whether or not that succeeded" -
+                    // see below), so a reset that failed to re-acquire the duplication interface (e.g.
                     const auto t_reset0 = hitch_clock::now();
                     int reset_ok = g_libs.dx_reset(dx_ctx);
                     const double reset_ms = std::chrono::duration<double, std::milli>(hitch_clock::now() - t_reset0).count();
@@ -1746,20 +1292,11 @@ struct Pipeline {
                     } else {
                         logged_reset_fail_ = false;
                     }
-                    // Don't try again for a full second regardless of the
-                    // outcome above - if it failed, back-to-back retries
-                    // just burn GPU/driver time neither of us can spare. A
-                    // successful reset also isn't free to redo constantly,
-                    // and the very next AcquireNextFrame() will tell us
-                    // immediately if it actually worked anyway.
+                    // Don't try again for a full second regardless of the outcome above - if it failed, back-
+                    // to-back retries just burn GPU/driver time neither of us can spare.
                     next_reset_attempt_ = now + std::chrono::seconds(1);
                 }
 #endif
-                // Same reasoning as the HR_DX_TIMEOUT branch above: fall
-                // through and re-encode whatever's still in bgra_buf from
-                // the last real frame rather than skipping this slot
-                // entirely, so the output timeline doesn't fall behind
-                // wall-clock time for however long capture stays lost.
                 frames_dropped.fetch_add(1, std::memory_order_relaxed);
             } else if (ret != HR_DX_OK) {
                 HrLog::Error("Capture pipeline stopped: dx_capture() returned a fatal error (ret=" + std::to_string(ret) + ")");
@@ -1771,15 +1308,6 @@ struct Pipeline {
 
             // ====== WINDOW CROP (optional) ======
             // See the crop_x/crop_w/eff_w comments on the Pipeline struct.
-            // Copies just the target window's sub-rectangle of the full
-            // monitor frame into a tightly-packed work_buf (bgra_buf itself
-            // is never modified -- see the work_buf comment) and points
-            // eff_w/eff_h at ITS dimensions. Every step below (overlays,
-            // cursor, YUV conversion, preview) reads eff_w/eff_h + `frame`,
-            // not src_w/src_h, so this one spot is the only place that needs
-            // to know about cropping. The crop rect is snapshotted into
-            // locals and re-validated because hr_pl_set_capture_rect() can
-            // run on the UI thread mid-loop.
             int extra_slots = 0;
             if (gpu_tick) {
                 // ====== GPU PATH: the frame is already a finished NV12 picture ======
@@ -1807,8 +1335,6 @@ struct Pipeline {
                 const size_t needed = (size_t)gpu_enc_w * gpu_enc_h * 3 / 2;
                 // Nothing changed on screen AND the pointer looks the same as in the
                 // picture already queued -> just hold that picture one slot longer.
-                // Overlays animate (key presses, gif, webcam, {time}/{fps}
-                // text), so a "nothing changed" picture can't be re-sent as is.
                 bool merged = false;
                 if (ret != HR_DX_OK && gpu_emit_valid && !overlays_active &&
                     (!cur_on || cur_now == gpu_emit_sig))
@@ -1835,8 +1361,6 @@ struct Pipeline {
                         // The live preview reads nv12_buf (the clean GPU frame).
                         // With overlays on, hand it a copy that has them baked in
                         // (before the pointer, like the clean frame it replaces)
-                        // so the preview keeps showing what gets recorded. Only
-                        // while a preview is actually being shown.
                         if (preview_needed.load(std::memory_order_relaxed)) {
                             if (pv_nv12.size() != needed) pv_nv12.resize(needed);
                             std::memcpy(pv_nv12.data(), yuv_frame.data(), needed);
@@ -1885,11 +1409,8 @@ struct Pipeline {
                 eff_h = src_h;
             }
 
-            // Copy-on-write for the non-cropped case: overlays/cursor draw
-            // in place, so if `frame` still points at the pristine bgra_buf,
-            // duplicate it into work_buf first. Free when nothing needs
-            // compositing (no overlays, cursor off) and in the cropped case
-            // (frame already is work_buf).
+            // Copy-on-write for the non-cropped case: overlays/cursor draw in place, so if `frame`
+            // still points at the pristine bgra_buf, duplicate it into work_buf first.
             auto ensure_work_copy = [&](uint8_t*& f) {
                 if (f != bgra_buf.data()) return;
                 const size_t need = (size_t)eff_w * eff_h * 4;
@@ -1898,40 +1419,12 @@ struct Pipeline {
                 f = work_buf.data();
             };
 
-            // ====== OVERLAY COMPOSITING ======
-            // Bakes any configured text/image/input overlays directly into
-            // bgra_buf, in place, before it's used for either the preview
-            // thumbnail or YUV conversion/encoding below -- so what's shown
-            // in the live preview is exactly what ends up in the recording.
-            // (Previously overlays were UI-only state that never touched
-            // the actual captured frame at all.)
-            //
-            // Only lock overlays_mtx and copy the overlays vector when the
-            // overlay configuration has actually changed (drag/resize/
-            // add/remove -- see hr_pl_set_overlays()), rather than on every
-            // single captured frame (i.e. up to the full recording fps) even
-            // though it rarely changes. overlays_snapshot and
-            // last_overlays_gen live outside this block/loop
-            // iteration, and the lock+copy only happens again once
-            // overlays_gen has actually moved -- steady state is a single
-            // relaxed atomic load per frame instead of a mutex acquisition
-            // and a std::vector<HrOverlayDesc> copy.
             {
                 // (overlays_snapshot itself is refreshed before the capture
                 // call above - the GPU path needs to know whether anything
                 // has to be composited on the CPU BEFORE choosing a path.)
                 if (!overlays_snapshot.empty()) {
                     if (overlays_active) ensure_work_copy(frame);   // hidden-only: nothing is drawn, no 8MB copy
-                    // Belt-and-suspenders alongside the try/catch
-                    // now inside OverlayCompositor::Apply() itself (see
-                    // overlay_render.cpp) -- this loop runs on a bare
-                    // std::thread with no exception handler anywhere above
-                    // it, so *any* uncaught throw here calls std::terminate()
-                    // and kills the whole process mid-recording (ffmpeg's
-                    // stdin pipe never gets a clean EOF, so the output file
-                    // is left truncated/unplayable). Catching here too means
-                    // even a future change to this call site can't silently
-                    // reopen that hole.
                     try {
                         // The pristine capture buffer is the source of region / window layers (it is
                         // untouched while `frame` is the work copy of it and nothing was cropped).
@@ -1948,21 +1441,13 @@ struct Pipeline {
                 }
             }
 
-            // ====== CURSOR COMPOSITING ("Cursor" setting) ======
-            // Drawn after overlays so the pointer stays visually on top,
-            // matching what a viewer would actually see on the real
-            // screen. See hr_composite_cursor()'s own comment
-            // (ui_utils.cpp) for how/why. Origin is offset by
-            // crop_x/crop_y (both 0 when not cropping) since cap_origin_x/y
-            // is the *monitor's* virtual-desktop offset, but bgra_buf now
-            // holds just the cropped window sub-rectangle of it.
+            // ====== CURSOR COMPOSITING ("Cursor" setting) ====== Drawn after overlays so the pointer
+            // stays visually on top, matching what a viewer would actually see on the real screen.
             if (include_cursor.load(std::memory_order_relaxed)) {
                 ensure_work_copy(frame);
-                // This used the raw crop_x/crop_y members - read
-                // without crop_mtx while the UI thread may be rewriting them (window
-                // tracking now does that ~20x/s), and not the clamped values the
-                // frame was actually cropped with (c_x/c_y). The cursor could sit a
-                // few pixels off while a tracked window was moving or partly off-screen.
+                // This used the raw crop_x/crop_y members - read without crop_mtx while the UI thread may
+                // be rewriting them (window tracking now does that ~20x/s), and not the clamped values the
+                // frame was actually cropped with (c_x/c_y).
                 hr_composite_cursor(frame, eff_w, eff_h,
                                      cap_origin_x + (do_crop ? c_x : 0),
                                      cap_origin_y + (do_crop ? c_y : 0));
@@ -1980,29 +1465,6 @@ struct Pipeline {
             }
 #endif
 
-            // ====== YUV CONVERSION ======
-            // A frame is only dropped when the queue is genuinely full (the
-            // writer really is behind), matching the MAX_QUEUE_SIZE
-            // backpressure the queue is designed to provide -- with
-            // MAX_QUEUE_SIZE == 3, dropping on *any* frame being present
-            // instead would silently discard most frames even when the
-            // writer isn't behind, since there's almost always >=1 frame in
-            // flight, causing visibly choppy recordings for little CPU
-            // benefit.
-            //
-            // Conversion writes into a buffer recycled from the free-list
-            // (filled by the writer thread once it's done with a frame) and
-            // is moved -- not copied -- into pipe_queue. This avoids
-            // both the per-frame heap allocation and the full-frame memcpy
-            // that pipe_queue.push(yuv_buf) used to perform.
-            //
-            // Converted ONCE per tick. The catch-up slots (extra_slots, see
-            // above) are expressed as QueuedFrame::repeat - the writer thread
-            // simply writes the same converted picture that many times - so
-            // the muxed timeline's frame count still keeps pace with real
-            // elapsed time, but without re-scaling and re-converting the
-            // identical frame up to 90 times in a row while the machine is
-            // already behind (which is exactly when CPU is scarcest).
 #ifdef _WIN32
             if (recording.load(std::memory_order_acquire) && g_libs.bgra_to_yuv) {
                 int req_w = out_w.load(std::memory_order_relaxed);
@@ -2017,13 +1479,8 @@ struct Pipeline {
                 // pure function of bgra_buf, so DXGI's changed-rows hint applies.
                 const bool direct = (frame == bgra_buf.data()) && !scaling;
 
-                // PERF: static desktop (DXGI timeout) -> the picture is identical
-                // to the last one we converted. Re-send it instead of downscaling
-                // + converting the same pixels again (typical for tutorials/
-                // desktop recordings: most ticks). With "Cursor" on that used to
-                // be impossible (the pointer is baked into every frame); now it
-                // still holds while the pointer looks exactly as it did in the
-                // cached picture (same handle/position/visibility).
+                // PERF: static desktop (DXGI timeout) -> the picture is identical to the last one we
+                // converted.
                 const bool reuse_last = (ret == HR_DX_TIMEOUT) && last_yuv_valid &&
                                         !overlays_on &&
                                         (!cursor_on_now || cur_sig_now == last_yuv_sig) &&
@@ -2067,9 +1524,6 @@ struct Pipeline {
                                 if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
                                 // PERF: was bgra_downscale(...) - a single-threaded
                                 // pass on this (already highest/boosted-priority)
-                                // capture thread. Now fanned out across the same
-                                // worker threads Convert() (right below) uses -
-                                // see Yuv420pWorkerPool::Downscale()'s comment.
                                 yuv_pool.Downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
                                 enc_src = scaled_buf.data();
                             }
@@ -2077,8 +1531,6 @@ struct Pipeline {
                             // Keep a private copy so a following static tick can reuse
                             // it - for ANY conversion whose result depends only on
                             // bgra_buf + the pointer (i.e. no overlays: those animate).
-                            // (Used to be OK ticks only, which is what made "Cursor on"
-                            // unable to reuse anything.)
                             if (!overlays_on) {
                                 last_yuv.assign(yuv_frame.begin(), yuv_frame.end());
                                 last_yuv_valid = true;
@@ -2095,12 +1547,6 @@ struct Pipeline {
             }
 #endif
             }   // else (classic BGRA path)
-            // Catch-up reps count as captured (they keep the timeline
-            // correct) but are also counted as "stalled" duplicates in the
-            // stats, same bucket the TIMEOUT/LOST paths above already use
-            // for a duplicated frame -- so this shows up in
-            // hr_pl_stats()'s existing counters instead of silently
-            // inflating frames_captured with no visible trace.
             frames_captured.fetch_add(1 + extra_slots, std::memory_order_relaxed);
             if (extra_slots > 0) {
                 frames_dropped.fetch_add(extra_slots, std::memory_order_relaxed);
@@ -2215,22 +1661,11 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     pl->pipe_handle.store(pipe_fd, std::memory_order_release);
     pl->recording.store(pipe_fd != 0 && pipe_fd != -1, std::memory_order_release);
 
-    // This used to be a hardcoded dx_create(0, 0), so the
-    // "Monitor:" setting only ever affected capture *sizing*
-    // (RecordingController::ResolveCaptureSize()) and never which
-    // physical display DXGI actually duplicated - picking any monitor
-    // but the primary silently kept recording the primary one anyway.
-    // output_idx is RecordingController's resolved (0-based) monitor
-    // index; adapter_idx stays 0 (single-adapter assumption, i.e. all
-    // monitors on the same GPU - the common case; multi-adapter setups
-    // are a separate, bigger fix).
     pl->dx_ctx = g_libs.dx_create(0, output_idx);
     if (!pl->dx_ctx) {
-        // This used to just say "returned null" with no way to
-        // tell which of the "common causes" it actually was - now logs
-        // the real HRESULT (hex, so it's directly greppable against the
-        // DXGI/WinError docs) alongside the guess. See hr_dx_last_error()
-        // in dxgi_capture.cpp for where this comes from.
+        // This used to just say "returned null" with no way to tell which of the "common causes"
+        // it actually was - now logs the real HRESULT (hex, so it's directly greppable against the
+        // DXGI/WinError docs) alongside the guess.
         char hres_buf[32];
         std::snprintf(hres_buf, sizeof(hres_buf), "0x%08lX", g_libs.dx_last_error ? g_libs.dx_last_error() : 0ul);
         HrLog::Error(std::string("Pipeline create failed: dx_create() returned null, HRESULT ") + hres_buf +
@@ -2241,8 +1676,6 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
     // Matches dx_create(0, output_idx) above - needed so
     // hr_composite_cursor() can translate GetCursorInfo()'s virtual-
     // desktop coordinates into this capture buffer's local coordinates.
-    // Defaults to (0,0) (i.e. "assume the captured output starts at the
-    // desktop origin") if the lookup fails for some reason.
     {
         int ox = 0, oy = 0, ow = 0, oh = 0;
         if (hr_dx_output_desc(0, output_idx, &ox, &oy, &ow, &oh, nullptr, 0)) {
@@ -2261,12 +1694,7 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
 #endif
 }
 
-/*  hr_pl_create_window  (2.4)
-    Same as hr_pl_create(), but the picture comes from ONE WINDOW (Windows.Graphics.Capture) instead
-    of a monitor duplication: the whole window is recorded even when other windows cover it. w x h is
-    the canvas the window is fitted into (its size when recording starts - see wgc_capture.h).
-    Returns nullptr when the window can't be captured that way; the caller then falls back to
-    hr_pl_create() + hr_pl_set_capture_rect() (the pre-2.4 screen crop). */
+// hr_pl_create_window  (2.4)
 HR_EXPORT void* hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int pv_w, int pv_h,
                                     void* hwnd, int client_only, int draw_cursor,
                                     int smart, int fps_cap) {
@@ -2307,10 +1735,7 @@ HR_EXPORT void* hr_pl_create_window(int w, int h, int fps, intptr_t pipe_fd, int
 #endif
 }
 
-/*  hr_pl_window_retarget  (7th pass)
-    Points a running window pipeline at another window (the program opened a new main window, the
-    window was re-created, the browser tab switch gave it a new handle...). Returns 1 when the source
-    followed, 0 when it can't (not a window pipeline, or native WGC - which is bound to its window). */
+// hr_pl_window_retarget  (7th pass)
 HR_EXPORT int hr_pl_window_retarget(void* handle, void* hwnd) {
     if (!handle || !hwnd) return 0;
 #ifdef _WIN32
@@ -2340,21 +1765,15 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     if (!handle) return;
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
-    
+
     // Stop all threads
     pl->writer_running.store(false, std::memory_order_relaxed);
     pl->pipe_queue_cv.notify_all();
     pl->running.store(false, std::memory_order_relaxed);
-    
-    // Both worker threads capture the raw `pl` pointer, so if either one is
-    // still running after we give up waiting, force-detaching it and then
-    // deleting `pl` below would leave that thread touching freed memory the
-    // next time it wakes up. A leaked Pipeline used to be permanent (see
-    // the finish_thread()/handed_off comment on the Pipeline struct); now
-    // it's only temporary - detaching sets handed_off, and whichever
-    // thread finishes last does the actual free once it's really safe,
-    // instead of nobody ever doing it. leak_pl here just means "don't also
-    // do it ourselves below", not "it's gone forever".
+
+    // Both worker threads capture the raw `pl` pointer, so if either one is still running
+    // after we give up waiting, force-detaching it and then deleting `pl` below would leave
+    // that thread touching freed memory the next time it wakes up.
     bool leak_pl = false;
 
     if (pl->writer_thread.joinable()) {
@@ -2367,16 +1786,7 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
         if (finished) {
             pl->writer_thread.join();
         } else {
-            // Force detach if stuck. handed_off must be set *immediately*,
-            // before we go on to (possibly) wait up to another second on
-            // capture_thread below - if this writer thread finishes just
-            // after this WaitForSingleObject gave up on it (very plausible;
-            // it timed out by definition, not by a huge margin) and we
-            // hadn't set handed_off yet, its finish_thread() call would see
-            // handed_off still false and skip the cleanup it's now
-            // responsible for, right before we set it true a moment too
-            // late - leaking for real, forever, again. Setting it here,
-            // per-detach, closes that window.
+            // Force detach if stuck.
             HrLog::Error("Pipeline destroy: writer thread did not stop in time - handing off cleanup to it instead of leaking Pipeline forever");
             bool was_off = false;
             if (pl->handed_off.compare_exchange_strong(was_off, true, std::memory_order_release))
@@ -2385,7 +1795,7 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
             leak_pl = true;
         }
     }
-    
+
     // Wait for capture thread with timeout - see the writer-thread branch
     // above for why this uses finish_cv instead of native_handle().
     if (pl->capture_thread.joinable()) {
@@ -2409,14 +1819,6 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
         }
     }
 
-    // Defensive: if handed_off somehow ended up set without leak_pl being
-    // set in this same call - the expected way that happens now is
-    // hr_pl_stop() (see its own comment) already having detached one or
-    // both threads before this function ever ran, in which case both
-    // joinable() checks above are false and this call never touched
-    // leak_pl at all - treat it the same as detaching right now, rather
-    // than freeing `this` out from under a thread that might still be
-    // alive.
     if (pl->handed_off.load(std::memory_order_acquire)) leak_pl = true;
 
     if (leak_pl) return;
@@ -2434,7 +1836,7 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
             pl->free_bufs.pop();
         }
     }
-    
+
     // Cleanup resources
     if (pl->dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(pl->dx_ctx);
     if (pl->sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(pl->sw_ctx);
@@ -2443,21 +1845,6 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// hr_pl_wait_all_detached
-//
-// Blocks (sleeping, not busy-looping) until every Pipeline that
-// hr_pl_destroy() ever had to hand off (see g_handed_off_pipelines' own
-// comment above) has actually finished tearing itself down, or until
-// timeout_ms elapses - whichever comes first. Returns 1 if everything was
-// clear (either nothing was ever handed off, or it finished in time), 0 on
-// timeout, so the caller can log that something is still stuck rather than
-// silently racing it.
-//
-// Meant to be called once, late in app shutdown (after the window/recording
-// UI has already told everything to stop, right before returning from
-// WinMain/main) - see main_frame.cpp's OnClose(). Safe to call even if
-// nothing was ever handed off (returns 1 immediately).
 HR_EXPORT int hr_pl_wait_all_detached(int timeout_ms) {
 #ifdef _WIN32
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -2481,22 +1868,6 @@ HR_EXPORT int hr_pl_start(void* handle) {
 
     int real_w = pl->src_w, real_h = pl->src_h;
     if (g_libs.dx_get_size) g_libs.dx_get_size(pl->dx_ctx, &real_w, &real_h);
-    // dx_get_size() reads back whatever DXGI's output-duplication
-    // desc last reported, queried right after dx_create()/reset() - under
-    // exactly the conditions this whole file's "common causes" comment
-    // keeps citing (RDP, a virtual display, a display mode that changes
-    // mid-query) that can come back as some huge/bogus positive value
-    // instead of failing outright. real_w/real_h > 0 alone doesn't catch
-    // that. Before this clamp, a bogus size sailed straight into the
-    // bgra_buf.resize() below with no try/catch anywhere above this call
-    // (hr_pl_start() runs on the caller's thread - RecordingController's,
-    // i.e. the UI thread, via EnsurePreview()/Start()) - a multi-gigabyte
-    // resize() request throws std::length_error/std::bad_alloc, uncaught,
-    // which is exactly an "unhandled C++ exception" crossing back out
-    // through wx's message loop: the std::terminate() this app was seen
-    // hitting. Clamp to a generous real-world bound (same idea as
-    // kMaxOverlayCanvasDim in overlay_render.cpp) and fall back to
-    // whatever size the Pipeline already had instead.
     constexpr int kMaxReasonableDim = 16384;
     if (real_w > 0 && real_h > 0 &&
         real_w <= kMaxReasonableDim && real_h <= kMaxReasonableDim) {
@@ -2529,7 +1900,7 @@ HR_EXPORT int hr_pl_start(void* handle) {
     // Start capture thread
     pl->running.store(true, std::memory_order_relaxed);
     pl->capture_thread = std::thread([pl]() { pl->capture_loop(); });
-    
+
     return 1;
 #endif
 }
@@ -2538,36 +1909,12 @@ HR_EXPORT void hr_pl_stop(void* handle) {
     if (!handle) return;
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
-    
+
     // Signal stop
     pl->running.store(false, std::memory_order_relaxed);
     pl->writer_running.store(false, std::memory_order_relaxed);
     pl->pipe_queue_cv.notify_all();
-    
-    // This used to WaitForSingleObject() on each thread and then
-    // just fall through without ever calling .join() or .detach() on
-    // either - the std::thread objects stayed "joinable" (from the C++
-    // object's point of view) no matter how the wait came out. That's
-    // harmless *today* only because RecordingController::Stop() (the one
-    // caller) always follows this up with hr_pl_destroy() on the same
-    // handle a little later, which redundantly re-waits and does the
-    // real join()/detach() itself - up to another 2s of needless waiting
-    // on top of the 2s already spent here, and a stuck pipeline sat
-    // completely unaccounted-for in g_handed_off_pipelines (see its own
-    // comment) for however long RecordingController::Stop() then spends
-    // finalizing ffmpeg/merging audio (documented up to ~30s) before it
-    // finally reaches that hr_pl_destroy() call. Any code path that ever
-    // called hr_pl_stop() without a guaranteed follow-up hr_pl_destroy()
-    // would leave a joinable-but-abandoned std::thread sitting in the
-    // Pipeline - destroying that Pipeline via any route other than
-    // hr_pl_destroy()'s own careful handling would destruct a joinable
-    // std::thread and call std::terminate() outright. Doing the real
-    // join()/detach() (with the same handed_off/g_handed_off_pipelines
-    // bookkeeping hr_pl_destroy() uses) here instead removes that
-    // fragility, makes hr_pl_destroy()'s later call on the same handle an
-    // instant no-op (both threads already non-joinable), and starts the
-    // handed-off accounting as soon as this function actually gives up
-    // instead of only once hr_pl_destroy() eventually runs.
+
     if (pl->capture_thread.joinable()) {
         bool finished;
         {
@@ -2607,26 +1954,6 @@ HR_EXPORT void hr_pl_stop(void* handle) {
         }
     }
 
-    // If either thread got handed off above, hr_pl_destroy() (the only
-    // caller of this function today, a little further down in
-    // RecordingController::Stop()) will see handed_off already set and
-    // its own capture_thread/writer_thread.joinable() checks will both be
-    // false (already consumed by join()/detach() here) - it'll fall
-    // straight through to its own `if (pl->handed_off.load()) leak_pl =
-    // true;` and return without touching pl again, exactly as if it had
-    // done the detaching itself. Safe to keep going here either way.
-    //
-    // BUT: this function must apply that exact same rule to ITSELF. Once
-    // handed_off is true, the detached thread(s) above own `pl` and may
-    // call finish_thread() -> delete this the instant their own work
-    // finishes, on another thread, with no further synchronization back
-    // to us. The code below used to keep touching pl->pipe_queue_mtx/
-    // pl->pipe_queue unconditionally after the detach - a straight
-    // use-after-free (and occasionally a use-after-free of the mutex
-    // itself) racing against that detached thread's delete this, which is
-    // exactly the access violation seen right after "capture thread did
-    // not stop in time" in the crash logs. Bail out here, the same way
-    // hr_pl_destroy() already does, instead of touching pl again.
     if (pl->handed_off.load(std::memory_order_acquire)) return;
 
     // Clear queue
@@ -2663,20 +1990,7 @@ HR_EXPORT void hr_pl_set_include_cursor(void* handle, int flag) {
 #endif
 }
 
-// Window-capture crop rect, in pixels relative to the captured monitor's
-// own frame (i.e. window's screen rect minus the monitor's origin - the
-// caller, RecordingController, already has both). w<=0 or h<=0 clears
-// the crop (back to full-desktop). See the Pipeline::crop_x/crop_w
-// comment for the full explanation.
-//
-// Safe to call at any time (including while the pipeline is already
-// running, e.g. RecordingController re-resolving it on every Start()
-// call even when reusing an existing preview pipeline) - same caveat as
-// hr_pl_set_recording()'s plain fields elsewhere in this file: not
-// synchronized against the capture thread, so a change can take a frame
-// or two to visibly land rather than being atomic with the very next
-// frame, which is fine for a rect that only changes when the user picks
-// a different window, not every frame.
+// Window-capture crop rect, in pixels relative to the captured monitor's own frame (i.e.
 HR_EXPORT void hr_pl_set_capture_rect(void* handle, int x, int y, int w, int h) {
     if (!handle) return;
 #ifdef _WIN32
@@ -2690,7 +2004,7 @@ HR_EXPORT void hr_pl_set_capture_rect(void* handle, int x, int y, int w, int h) 
         if (y < 0) { h += y; y = 0; }
         if (x + w > pl->src_w) w = pl->src_w - x;
         if (y + h > pl->src_h) h = pl->src_h - y;
-        if (w % 2) w--;  // keep it even, same reasoning as capture_w_/h_ elsewhere (YUV420 needs even dims)
+        if (w % 2) w--;
         if (h % 2) h--;
         if (w > 0 && h > 0) { cx = x; cy = y; cw = w; ch = h; }
     }
@@ -2700,11 +2014,6 @@ HR_EXPORT void hr_pl_set_capture_rect(void* handle, int x, int y, int w, int h) 
 }
 
 // Settings > Resolution - the final encoded size (see ComputeOutputDims()
-// in recording_controller.cpp). Pass 0,0 (or never call this) for "no
-// downscale, encode at the captured/cropped size" - the default. Must be
-// called with the actual output size whenever it differs from the capture
-// size, otherwise ffmpeg's rawvideo demuxer (told this same size via
-// hr_ff_set_video_params()) will misinterpret the pipe's byte stream.
 HR_EXPORT void hr_pl_set_output_size(void* handle, int w, int h) {
     if (!handle) return;
 #ifdef _WIN32
@@ -2716,16 +2025,6 @@ HR_EXPORT void hr_pl_set_output_size(void* handle, int w, int h) {
 #endif
 }
 
-// Selects the raw pixel format the pipeline converts captured BGRA into
-// before writing it to ffmpeg's stdin: NV12 (nv12 != 0) for hardware
-// encoders (nvenc/qsv/amf), planar YUV420p (the default) for software
-// libx264/libx265 - see Yuv420pWorkerPool::SetUseNv12()'s comment.
-// Callers (RecordingController) should call this right after
-// hr_pl_create()/whenever the encoder choice changes and before the next
-// hr_pl_set_recording(..., active=1); it only affects frames converted
-// after the call, so it does nothing useful mid-recording once frames are
-// already flowing with the old format baked into the ffmpeg process's
-// already-negotiated "-pixel_format"/"-pix_fmt" args.
 HR_EXPORT void hr_pl_set_output_pixfmt(void* handle, int nv12) {
     if (!handle) return;
 #ifdef _WIN32
@@ -2733,11 +2032,9 @@ HR_EXPORT void hr_pl_set_output_pixfmt(void* handle, int nv12) {
 #endif
 }
 
-// Settings > Video > "GPU colour conversion": lets the capture loop use the
-// D3D11 video processor (BGRA->NV12 + scale on the GPU) whenever recording
-// with NV12 output and nothing has to be composited on the CPU. Takes effect
-// on the next captured frame; a pipeline that hit a GPU error stays on the
-// CPU path for the rest of its life.
+// Settings > Video > "GPU colour conversion": lets the capture loop use the D3D11 video
+// processor (BGRA->NV12 + scale on the GPU) whenever recording with NV12 output and
+// nothing has to be composited on the CPU.
 HR_EXPORT void hr_pl_set_gpu_convert(void* handle, int enabled) {
     if (!handle) return;
 #ifdef _WIN32
@@ -2752,9 +2049,6 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
     // A close request that timed out earlier (see hr_pl_end_recording_segment())
-    // is still flagged; left alone, the writer thread would honor it as soon
-    // as its queue next runs empty and close the NEW recording's pipe --
-    // ffmpeg would see EOF seconds into the next recording.
     if (active != 0) pl->pending_close_requested.store(false, std::memory_order_release);
     pl->pipe_handle.store(pipe_fd, std::memory_order_release);
     pl->recording.store((active != 0) && (pipe_fd != 0) && (pipe_fd != -1), std::memory_order_release);
@@ -2762,46 +2056,8 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
 #endif
 }
 
-// (a manual recording, or an Instant Replay segment, never
-// finalizes on its own whenever the pipeline stays alive afterward -
-// i.e. almost always, since that's exactly what happens when live
-// preview is left on, the default, and it's *also* what always happens
-// to Instant Replay's segment writer since it shares this same
-// long-lived pipeline_ with everything else - see EnableInstantReplay()'s
-// header comment in recording_controller.h):
-//
-// RecordingController used to just call hr_pl_set_recording(handle, 0, 0)
-// (or, for Instant Replay, simply overwrite pipe_handle with the next
-// segment's handle) and separately tell that recording's ffmpeg process
-// to stop gracefully (hr_ff_stop_graceful() + hr_ff_wait()). But
-// hr_ff_stop_graceful() in pipe_input mode deliberately does NOT close
-// ffmpeg's stdin itself (see its own comment) - the writer thread above
-// is the only thing that knows when every real queued frame has actually
-// gone out, so it alone closes that handle, and only ever did so as part
-// of its own full shutdown (writer_running -> false, e.g. hr_pl_stop()/
-// hr_pl_destroy()). Whenever the pipeline *wasn't* being fully stopped -
-// preview staying up, or Instant Replay handing off to its next segment -
-// that shutdown path never ran, so the handle was simply overwritten/
-// forgotten while ffmpeg sat blocked reading pipe:0, never seeing an EOF.
-// hr_ff_wait()'s 3s/10s/30s budgets elsewhere in this codebase then always
-// ran out (there was nothing to finish waiting for) and fell back to
-// TerminateProcess()-ing ffmpeg mid-write: the "still finalizing" /
-// "didn't finish gracefully - killing it" warnings, a needlessly slow
-// Stop (waiting out a timeout that could never succeed), and a
-// truncated/corrupt output file every single time, not just under load.
-//
-// This function asks the writer thread itself to close whatever pipe it
-// currently holds (once its queue drains - see writer_loop()) without
-// touching writer_running, so the pipeline/preview/Instant Replay's next
-// segment keeps running right through it, and blocks the caller (which
-// should NOT be the UI thread - the finalize thread StopAsync() already
-// runs on, or an already-background/detached Instant Replay thread, are
-// both fine) for up to timeout_ms for confirmation, so the caller's own
-// subsequent hr_ff_wait() on that ffmpeg process sees a real EOF instead
-// of a doomed-from-the-start wait. Call this BEFORE hr_pl_set_recording()
-// (or before overwriting pipe_handle for a new segment) - it reads the
-// current pipe_handle itself and also flips `recording` off so no further
-// frames get queued for the segment being closed.
+// (a manual recording, or an Instant Replay segment, never finalizes on its own whenever
+// the pipeline stays alive afterward - i.e.
 HR_EXPORT int hr_pl_end_recording_segment(void* handle, int timeout_ms) {
     if (!handle) return 1;
 #ifndef _WIN32
@@ -2823,44 +2079,15 @@ HR_EXPORT int hr_pl_end_recording_segment(void* handle, int timeout_ms) {
         HrLog::Warn("Pipeline: writer thread didn't close the previous recording's pipe in time "
                     "(it may be stuck writing) - the ffmpeg process for it likely won't finalize cleanly yet, "
                     "still waiting for it in the background.");
-        // (recordings always took the full ~30s "still finalizing" /
-        // "force-stopping" path above AND still came out corrupt - every
-        // single time the writer thread had any backlog left to drain at
-        // Stop, e.g. right after a load spike like the "Recording
-        // overloaded: dropping frames" warnings that precede this in the
-        // reported log): this used to unconditionally clear
-        // pending_close_requested right here on a timeout, with the
-        // comment "don't leave it armed for the next recording" - but
-        // hr_pl_set_recording(handle, /*active=*/1, ...) (the ONLY other
-        // place a "next recording" begins) already clears this same flag
-        // itself the moment that next recording actually starts (see its
-        // own comment above), specifically so a stale request can never
-        // reach across and close the wrong pipe. Clearing it here too was
-        // redundant for that case - and actively harmful for the far more
-        // common one: the writer thread hasn't drained its backlog yet
-        // (still busy, not stuck), so the request hasn't been honored at
-        // all, and clearing the flag out from under it here permanently
-        // cancels the ONLY close this pipe's ffmpeg was ever going to get.
-        // With the flag left set, the writer thread just honors it
-        // whenever its queue actually empties - a few seconds later under
-        // load, same as everything else that's backed up - so
-        // StopFinalizeTail()'s own 10s/20s waits (which is what this
-        // function's caller relies on next) see a real EOF instead of
-        // ffmpeg sitting blocked on a pipe nothing will ever close, and
-        // the file finalizes properly instead of being force-killed
-        // mid-write. Only report "not done yet" to the caller; whether
-        // this ever completes no longer determines whether it's requested.
+        // (recordings always took the full ~30s "still finalizing" / "force-stopping" path above
+        // AND still came out corrupt - every single time the writer thread had any backlog left to
+        // drain at Stop, e.g.
     }
     return done ? 1 : 0;
 #endif
 }
 
-// See Pipeline::boost_priority's own comment. Call with flag=1 exactly
-// while a manual recording (or an Instant Replay clip actively being
-// saved) is genuinely in progress, and flag=0 the rest of the time -
-// including while Instant Replay's background buffer is otherwise
-// running via hr_pl_set_recording(handle, 1, ...), which on its own
-// should stay at ordinary preview-level thread priority.
+// See Pipeline::boost_priority's own comment.
 HR_EXPORT void hr_pl_set_priority_boost(void* handle, int flag) {
     if (!handle) return;
 #ifdef _WIN32
@@ -2885,24 +2112,6 @@ HR_EXPORT int hr_pl_get_preview(void* handle, uint8_t* out_rgb,
 }
 
 // Bounds-checked, change-aware replacement for hr_pl_get_preview().
-//
-// Why it exists (two real problems with the old call):
-//  1. It memcpy'd pv_buf.size() bytes into a buffer whose size the caller
-//     only *assumed* (RecordingController sized it from AppState's
-//     preview_width x preview_height, which the pipeline's own thumbnail
-//     size is derived from at creation time). If those settings shrank
-//     between pipeline creation and the next UI poll, the copy ran past the
-//     end of the caller's buffer - a heap overflow. `out_cap` makes the copy
-//     refuse instead.
-//  2. The UI polls on every paint (20x/sec) and used to copy the whole
-//     thumbnail, memcmp it against the previous one and rescale it even when
-//     the pipeline hadn't produced anything new (preview fps is usually
-//     lower than the paint rate). `seq_io` carries the caller's last-seen
-//     sequence number; when it still matches, nothing is copied.
-//
-// Returns 0 = no frame available (or `out_cap` too small), 1 = new frame
-// copied (out_w/out_h/native size/seq_io updated), 2 = unchanged since
-// *seq_io (no bytes copied, all outputs left untouched).
 HR_EXPORT int hr_pl_get_preview_ex(void* handle, uint8_t* out_rgb, size_t out_cap,
                                     int* out_w, int* out_h,
                                     int* out_native_w, int* out_native_h,
@@ -2940,13 +2149,7 @@ HR_EXPORT uint64_t hr_pl_get_preview_seq(void* handle) {
 }
 
 // Native (full-resolution, pre-thumbnail-downscale) size the most recent
-// hr_pl_get_preview() thumbnail was generated from -- i.e. the coordinate
-// space OverlayDef::x/y/w/h are actually composited in (see
-// overlay_compositor.Apply(bgra_buf.data(), eff_w, eff_h, ...) in
-// capture_loop()). The overlay placement dialog shows the user the
-// thumbnail from hr_pl_get_preview() but must convert drag positions
-// through *this* size, not the thumbnail's own w/h, or every placement
-// ends up scaled down by however much the thumbnail was downscaled by.
+// hr_pl_get_preview() thumbnail was generated from -- i.e.
 HR_EXPORT int hr_pl_get_native_size(void* handle, int* out_w, int* out_h) {
     if (!handle || !out_w || !out_h) return 0;
 #ifndef _WIN32
@@ -2982,21 +2185,8 @@ HR_EXPORT void hr_pl_set_overlays(void* handle, const HrOverlayDesc* items, int 
     if (!pl) return;
     std::lock_guard<std::mutex> lock(pl->overlays_mtx);
 
-    // This used to fetch_add() the generation counter on every
-    // single call, regardless of whether the list actually changed. The
-    // UI calls hr_pl_set_overlays() from the preview timer tick (see
-    // RecordingController::SyncOverlays(), invoked ~20-60x/sec any time the
-    // app window is open, not just while recording), so overlays_gen was
-    // moving every tick even when nothing about the overlays changed.
-    // That completely defeated the capture loop's "only re-copy the
-    // snapshot when overlays_gen has actually moved" optimization
-    // described above -- it was taking overlays_mtx and copying the whole
-    // vector on every single captured frame, exactly the cost this counter
-    // exists to avoid. Comparing against the previous contents (cheap:
-    // these lists are tiny, and HrOverlayDesc is POD) means the gen only
-    // moves on a real add/remove/drag/resize/edit, restoring the intended
-    // "steady state costs one relaxed atomic load" behavior and cutting a
-    // real, continuous, needless chunk of per-frame CPU work.
+    // This used to fetch_add() the generation counter on every single call, regardless of
+    // whether the list actually changed.
     bool changed;
     if (!items || count <= 0) {
         changed = !pl->overlays.empty();
@@ -3025,17 +2215,10 @@ HR_EXPORT void hr_pl_set_preview_size(void* handle, int pw, int ph) {
     std::lock_guard<std::mutex> lock(pl->pv_mtx);
     pl->pv_w    = pw;
     pl->pv_h    = ph;
-    // pv_ready is deliberately left alone (it used to be cleared here): the previous thumbnail
-    // stays valid - pv_buf/pv_actual_w/h always describe each other - until the capture thread
-    // publishes one at the new size, so the UI never flashes its "loading" placeholder when the
-    // preview panel is resized.
 #endif
 }
 
-// Settings > General "Preview FPS" - how often the live preview thumbnail
-// is refreshed. Takes effect immediately (read every capture-loop
-// iteration, see preview_fps's declaration on the Pipeline struct), no
-// need to restart the pipeline.
+// Settings > General "Preview FPS" - how often the live preview thumbnail is refreshed.
 HR_EXPORT void hr_pl_set_preview_fps(void* handle, int fps) {
     if (!handle || fps <= 0) return;
 #ifdef _WIN32
@@ -3046,9 +2229,6 @@ HR_EXPORT void hr_pl_set_preview_fps(void* handle, int fps) {
 // See Pipeline::preview_needed's own comment. Call with enabled=0 whenever
 // nothing is going to read hr_pl_get_preview() for this pipeline (Settings
 // > "Disable live preview" is on) so capture_loop() skips update_preview()
-// entirely instead of building a thumbnail every tick just to have it sit
-// unread in pv_buf. Safe to call at any time, including mid-recording;
-// takes effect on the very next capture_loop() iteration.
 HR_EXPORT void hr_pl_set_preview_needed(void* handle, int enabled) {
     if (!handle) return;
 #ifdef _WIN32

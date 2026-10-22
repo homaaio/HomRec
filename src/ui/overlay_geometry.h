@@ -1,16 +1,4 @@
 // overlay_geometry.h - the arithmetic of dragging / resizing an overlay (7th pass).
-//
-// Shared by the live preview (main_frame.cpp's PreviewPanel) and the "Edit Overlay" window's canvas
-// (overlay_editor_dialog.cpp) so both behave identically, and kept free of wx / Win32 so it can be
-// tested on its own. All values are in CANVAS pixels (the coordinate space of OverlayDef::x/y/w/h).
-//
-//   * Keep proportions: holding Shift while resizing keeps the overlay's aspect ratio (a 500x500 picture
-//     can no longer be stretched to 1000x200). An overlay with "Keep proportions" ticked does that all the
-//     time, and Shift then releases it (KeepAspect() = lock XOR shift).
-//   * Resizing never pushes an overlay out of the picture (it used to: only moving was clamped, so a corner
-//     could be dragged far past the edge and the overlay "slid under" the preview's border).
-//   * Center snap: dragging an overlay close to the middle of the picture (per axis) locks it exactly
-//     centred; hold Alt to move freely.
 #pragma once
 #include <algorithm>
 #include <cmath>

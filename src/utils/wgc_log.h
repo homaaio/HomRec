@@ -1,16 +1,4 @@
 // wgc_log.h - dedicated log for window capture (logs\wgc.log).
-//
-// "Record one window" (native Windows.Graphics.Capture, the PrintWindow backend, the smart screen-crop
-// mode, window matching/re-acquiring) has cost more debugging time than any other part of HomRec, and
-// its story used to be scattered through homrec.log between unrelated events. Everything about it now
-// goes to its own file as well: which backend was chosen and why, every switch between the cheap and
-// the exact capture, how long each stage takes, window matching decisions, errors.
-//
-// Warn/Error lines are ALSO copied into homrec.log (they are what a bug report needs first); Info and
-// Debug lines stay in wgc.log only unless mirror is requested.
-//
-// Thread-safe, cheap (open/append/close per call, same approach as log.cpp / plugin_log.cpp), size-capped
-// (see HrLogPaths::CapFileSize). Settings > Security > "Window capture logging" switches it off.
 #pragma once
 
 #include <string>

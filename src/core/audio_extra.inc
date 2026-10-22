@@ -1,23 +1,4 @@
 // audio_extra.inc  (2.4)  -  extra Audio Mixer channels.
-//
-// #included at the very end of audio.cpp so it can share that file's statics
-// (WasapiStream, calc_rms, the WAV helpers). Not a separate translation unit on
-// purpose: nothing new to add to the Makefile/CMake source lists.
-//
-// A channel ("extra source") is one of:
-//   kind 0  another microphone / input device          (WASAPI capture of that endpoint)
-//   kind 1  one program's sound - a browser or a window (WASAPI per-process loopback,
-//                                                         Windows 10 2004+)
-//   kind 2  an audio file                                (already decoded to a 44.1kHz
-//                                                         stereo WAV by the caller; it is
-//                                                         mixed into the recording from t=0)
-//
-// While a recording runs, kinds 0/1 stream to "<stem>_x<id>.wav" exactly like the
-// built-in mic/system tracks do (RAM stays flat). When the recording stops,
-// hr_audio_extra_collect() finishes those files, renders the file sources, and hands
-// the list back so RecordingController can mix them into the final audio track.
-//
-// Cost when nothing is added: zero threads, zero allocations.
 
 #include <memory>
 
@@ -126,8 +107,6 @@ bool WasapiStream::open_process(unsigned long pid)
 
     // The completion callback runs on a system thread. If it has not fired within the timeout, do
     // NOT look at h->hr / h->client (the callback may be writing them right now) - just give up;
-    // the activation operation still owns a reference to the handler, so it stays valid and
-    // releases whatever client it receives later.
     if (WaitForSingleObject(h->ev, 4000) != WAIT_OBJECT_0) {
         HrLog::Warn("Audio Mixer: per-process audio capture didn't answer within 4 s (pid " + std::to_string(pid) + ").");
         h->Release();
@@ -331,21 +310,14 @@ static void extra_stop_locked(Extra *s)
 // Public C API
 // ---------------------------------------------------------------------------------
 
-/*  hr_audio_extra_add(kind, target, pid, volume, mute)
-    kind 0: target = WASAPI endpoint id of the input device ("" = default input)
-    kind 1: pid    = root process id whose sound is captured
-    kind 2: target = path of a 44.1kHz/16-bit/stereo WAV
-    Returns the channel handle (> 0) or a negative error:
-      -1 unusable arguments, -2 device unavailable, -3 per-process capture unavailable
-      (needs Windows 10 2004+ / the program has gone), -4 file unreadable. */
+// hr_audio_extra_add(kind, target, pid, volume, mute)
+// kind 0: target = WASAPI endpoint id of the input device ("" = default input)
 static int hr_audio_extra_add_impl(int kind, const wchar_t *target, unsigned long pid, float vol, int mute);
 
 HR_EXPORT int hr_audio_extra_add(int kind, const wchar_t *target, unsigned long pid, float vol, int mute)
 {
-    // std::thread / make_unique / std::wstring can throw (std::system_error when the OS refuses a
-    // thread, bad_alloc...). This function is called straight from the wx UI thread through an
-    // extern "C" boundary, so an escaping exception ended in std::terminate = a crash right after
-    // "select a program as a new audio source". Report it as "device unavailable" instead.
+    // std::thread / make_unique / std::wstring can throw (std::system_error when the OS
+    // refuses a thread, bad_alloc...).
     try {
         return hr_audio_extra_add_impl(kind, target, pid, vol, mute);
     } catch (const std::exception &e) {

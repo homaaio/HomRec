@@ -8,7 +8,7 @@
   #include <emmintrin.h>
 #endif
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-  #include <smmintrin.h>  /* SSE4.1 - _mm_mullo_epi32/_mm_packus_epi32, for the Y-channel fast path below */
+  #include <smmintrin.h>
   #define HR_HAVE_X86_SIMD 1
 #endif
 
@@ -45,7 +45,6 @@ static HR_INLINE uint8_t _clamp8(int v) {
     return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
 }
 
-
 // GB24 -> YUV420p (I420)
 
 HR_EXPORT void hr_rgb_to_yuv420p(
@@ -67,11 +66,7 @@ HR_EXPORT void hr_rgb_to_yuv420p(
                             : row0;
         int y1 = (y + 1 < height) ? y + 1 : y;
 
-        /* hoist the per-row output bases out of the pixel loop below.
-         * y*width/y1*width/(y/2)*(width/2) used to be recomputed (as a
-         * fresh multiply) for every single pixel; each is now the same
-         * value for the whole row, so it's computed once here and the
-         * inner loop just indexes off these row pointers instead. */
+        // hoist the per-row output bases out of the pixel loop below.
         uint8_t *Yrow0 = Y + (size_t)y * width;
         uint8_t *Yrow1 = Y + (size_t)y1 * width;
         size_t crow = (size_t)(y / 2) * (size_t)(width / 2);
@@ -134,31 +129,7 @@ HR_EXPORT void hr_rgb_to_yuv420p(
     }
 }
 
-/* -------------------------------------------------------------------------
- * BGRA -> YUV 4:2:0 (planar I420 or semi-planar NV12)
- *
- * One shared implementation for both output layouts; only the way the
- * chroma samples are stored differs.  Two colour matrices are supported
- * (both BT.601, matching the "-colorspace smpte170m" tag the ffmpeg runner
- * writes):
- *
- *   k_csc_full - full/PC range   (Y 0..255, C 0..255)  -> planar I420,
- *                fed to libx264/libx265 and tagged "-color_range pc".
- *   k_csc_tv   - studio/TV range (Y 16..235, C 16..240) -> NV12, fed to
- *                NVENC/QSV/AMF, tagged "-color_range tv".
- *
- * hr_bgra_to_nv12_band() used to reuse the full-range maths while
- * ffmpeg_runner.cpp already tags hardware-encoder output as limited
- * range ("-color_range tv", see CHANGELOG "hardware-encoded recordings came
- * out dark/dull").  Full-range samples decoded as limited range crush every
- * shadow below Y=16 to pure black and clip highlights above 235 - exactly the
- * "dark/dull picture" that entry describes.  The NV12 path now really emits
- * 16..235 / 16..240 data.
- *
- * Chroma is the average of each 2x2 block.  The four samples are summed
- * (0..1020) and scaled once (>>18) instead of truncating an average first,
- * which is both a little more accurate and cheaper.
- * ---------------------------------------------------------------------- */
+// BGRA -> YUV 4:2:0 (planar I420 or semi-planar NV12)
 typedef struct {
     int yr, yg, yb;     /* luma coefficients, scaled by 65536            */
     int yoff;           /* luma offset added after the shift (0 or 16)   */
@@ -404,10 +375,9 @@ HR_EXPORT void hr_yuv420p_to_rgb(
     const uint8_t *Cr = yuv + frame_sz + frame_sz / 4;
 
     for (int y = 0; y < height; ++y) {
-        /* row bases hoisted out of the x loop (same idea as the
-         * encode-direction functions above) - one multiply per row
-         * instead of one per pixel for both the Y/chroma reads and the
-         * RGB write. */
+        // row bases hoisted out of the x loop (same idea as the encode-direction functions above)
+        // - one multiply per row instead of one per pixel for both the Y/chroma reads and the RGB
+        // write.
         const uint8_t *Yrow  = Y  + (size_t)y * width;
         const uint8_t *Cbrow = Cb + (size_t)(y/2) * (size_t)(width/2);
         const uint8_t *Crrow = Cr + (size_t)(y/2) * (size_t)(width/2);
@@ -425,7 +395,6 @@ HR_EXPORT void hr_yuv420p_to_rgb(
     }
 }
 
-
 HR_EXPORT void hr_gamma_lut_apply(uint8_t *pixels, size_t n_bytes, int gamma_x100)
 {
     if (HR_UNLIKELY(!pixels || n_bytes == 0 || gamma_x100 == 100)) return;
@@ -437,7 +406,6 @@ HR_EXPORT void hr_gamma_lut_apply(uint8_t *pixels, size_t n_bytes, int gamma_x10
     }
     for (size_t i = 0; i < n_bytes; ++i) pixels[i] = lut[pixels[i]];
 }
-
 
 HR_EXPORT int hr_build_thumbnail_lq(
     const uint8_t * HR_RESTRICT src,

@@ -78,9 +78,8 @@ LRESULT CALLBACK MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_COMMAND: {
             int id = LOWORD(wParam);
             if (id == IDC_YES || id == IDC_MSGBOX_NO) {
-                // Capture checkbox state BEFORE destroying the window - once
-                // DestroyWindow runs, this child HWND (and its BM_GETCHECK
-                // state) is gone, so reading it afterward would silently
+                // Capture checkbox state BEFORE destroying the window - once DestroyWindow runs, this
+                // child HWND (and its BM_GETCHECK state) is gone, so reading it afterward would silently
                 // return 0/false instead of the user's actual choice.
                 ctx->result = (id == IDC_YES);
                 ctx->dontshow_result = (SendMessageW(ctx->dontshow_chk, BM_GETCHECK, 0, 0) == BST_CHECKED);

@@ -1,6 +1,4 @@
-// custom_messagebox.h
-//
-// Port of homrec_app/dialogs/custom_messagebox.py - the "recording saved,
+// custom_messagebox.h - Port of homrec_app/dialogs/custom_messagebox.py - the "recording saved,
 // open folder?" confirmation shown after Stop. Themed dialog with an
 // info panel + "Don't show again" checkbox, Yes/No buttons.
 #pragma once

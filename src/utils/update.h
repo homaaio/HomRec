@@ -1,20 +1,5 @@
-// update.h
-//
-// GitHub-releases-based update checker + self-updater for hr.exe. Wired up
+// update.h - GitHub-releases-based update checker + self-updater for hr.exe. Wired up
 // to Help > Check for Updates (ID_HELP_CHECK_UPDATES) in main_frame.cpp.
-//
-// The release flow this is built around:
-//   1. Tag a GitHub release vX.Y.Z on homaaio/HomREC.
-//   2. Attach the Inno Setup output (see installer/HomRec.iss) as a release
-//      asset whose filename ends in .exe (e.g. HomRec-Setup-2.0.3.exe).
-//   3. CheckForUpdate() compares HR_APP_VERSION (version.h) against the
-//      latest release's tag_name and, if newer, returns that asset's
-//      browser_download_url.
-//   4. DownloadAndLaunchInstaller() fetches that asset to %TEMP% and runs
-///     it with silent-install flags the Inno script understands (see
-//      installer/HomRec.iss's [Setup] - AppMutex + /VERYSILENT means the
-//      new installer closes the running app itself and overwrites in
-//      place - this is "auto-update" without any separate updater binary).
 #pragma once
 #include <atomic>
 #include <functional>
@@ -38,10 +23,8 @@ bool VersionGreaterThan(const std::string &a, const std::string &b);
 // blocks on network I/O (WinHTTP), which is why CheckForUpdateAsync exists.
 UpdateInfo CheckForUpdate();
 
-// Runs CheckForUpdate() on a detached background thread and invokes
-// `on_done` with the result. `on_done` is called from that background
-// thread, NOT the UI thread - callers touching UI state from it must hop
-// back themselves (e.g. wxWindow::CallAfter) before touching any widgets.
+// Runs CheckForUpdate() on a detached background thread and invokes `on_done` with the
+// result.
 void CheckForUpdateAsync(std::function<void(UpdateInfo)> on_done);
 
 // Shared between the thread running DownloadInstaller() and the UI thread
@@ -58,24 +41,15 @@ struct DownloadState {
 // BLOCKS until the installer is fully downloaded (or failed / cancelled), so
 // it must NOT be called on the UI thread - a multi-MB download there is what
 // made the whole window "Not responding" during Help > Check for Updates.
-// Run it on a worker thread and poll `state` for progress. On success returns
-// true and sets *out_path to the finished temp file; on failure/cancel returns
-// false and leaves no partial file behind. Always sets state.finished last.
 bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstring *out_path);
 
-// Downloads any https URL that is a Windows executable (starts with "MZ",
-// size matches Content-Length) to `dest_path`, reporting progress/cancel
-// through `state` exactly like DownloadInstaller(). Blocking - run it on a
-// worker thread. Used by the console to re-download a deleted hom.exe.
-// On failure/cancel no partial file is left behind. Unlike DownloadInstaller()
-// this does NOT set state->finished (the caller knows when it returns).
+// Downloads any https URL that is a Windows executable (starts with "MZ", size matches
+// Content-Length) to `dest_path`, reporting progress/cancel through `state` exactly like
+// DownloadInstaller().
 bool DownloadExeFile(const std::wstring &url, const std::wstring &dest_path, DownloadState *state);
 
-// Starts a downloaded installer (from DownloadInstaller) with Inno Setup's
-// silent-upgrade flags and returns immediately. Callers should close the app
-// shortly after a successful call (the new installer can't overwrite hr.exe
-// while it's still running, even with AppMutex set - AppMutex just stops the
-// user launching a *second* copy mid-update). False = nothing was launched.
+// Starts a downloaded installer (from DownloadInstaller) with Inno Setup's silent-upgrade
+// flags and returns immediately.
 bool LaunchInstaller(const std::wstring &installer_path);
 
 // Convenience wrapper: DownloadInstaller() + LaunchInstaller() in one

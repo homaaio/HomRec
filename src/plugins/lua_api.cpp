@@ -22,10 +22,6 @@ extern "C" {
     #include "lualib.h"
 }
 
-// Phase 1 (see commands.md): homrec.get_setting()/set_setting() below now
-// read/write real AppState fields (via RecordingController::state()) and
-// persist through HrcConfig::Save() - the settings.cpp JSON engine this
-// used to round-trip through is no longer touched from here at all.
 #include "../ui/hrc_config.h"
 #include "../core/settings_registry.h"
 #include "../utils/str_convert.h"
@@ -46,12 +42,7 @@ Upvalues *GetUpvalues(lua_State *L) {
     return static_cast<Upvalues *>(lua_touserdata(L, lua_upvalueindex(1)));
 }
 
-// Permission check for the plugin.json "permissions" model (todo2.3.md
-// section 4). `which` picks the flag; an unknown manifest (shouldn't
-// normally happen - GetUpvalues() always comes from a plugin that's
-// already loaded) defaults to allowed, same as PluginPermissions' own
-// defaults, rather than breaking a call over a lookup that failed for an
-// unrelated reason.
+// Permission check for the plugin.json "permissions" model (todo2.3.md section 4).
 enum class Perm { Network, Filesystem, Store };
 bool HasPermission(Upvalues *uv, Perm which) {
     const PluginManifest *m = uv->engine->GetManifest(uv->plugin_id);
@@ -88,10 +79,6 @@ std::string ColorRefToHex(COLORREF c) {
     return buf;
 }
 
-// --- homrec.show_toast(message, color?, duration_ms?) ---------------------
-// Minimal non-blocking corner popup - self-contained since main_window
-// doesn't have a shared toast system to hook into yet (flagged as an
-// integration item, not silently skipped).
 struct ToastState { std::wstring text; };
 
 LRESULT CALLBACK ToastProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -273,11 +260,8 @@ int L_get_colors(lua_State *L) {
     return 1;
 }
 
-// homrec.plugin_info() -- returns {id=, name=, version=, author=} for the
-// calling plugin itself, i.e. whatever plugin.json says. Added so a
-// plugin can display its own "by <author>" without HomRec needing a
-// dedicated plugin-manager UI screen to surface plugin.json's (also new)
-// "author" field anywhere else yet - see bter's "bter" command.
+// homrec.plugin_info() -- returns {id=, name=, version=, author=} for the calling plugin
+// itself, i.e.
 int L_plugin_info(lua_State *L) {
     auto *uv = GetUpvalues(L);
     const PluginManifest *m = uv->engine->GetManifest(uv->plugin_id);
@@ -552,10 +536,9 @@ int L_add_overlay(lua_State *L) {
     }
 
     rec->state().overlays.push_back(ov);
-    // Same lifecycle hook a hand-added overlay fires (see
-    // overlays_dock_panel.h's on_overlay_added, wired in main_frame.cpp) -
-    // a plugin-added overlay never goes through that panel, so it's
-    // fired directly here instead.
+    // Same lifecycle hook a hand-added overlay fires (see overlays_dock_panel.h's
+    // on_overlay_added, wired in main_frame.cpp) - a plugin-added overlay never goes through
+    // that panel, so it's fired directly here instead.
     uv->engine->EmitHook("on_overlay_added");
     lua_pushstring(L, ov.id.c_str());
     return 1;

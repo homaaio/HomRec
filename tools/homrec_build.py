@@ -21,10 +21,8 @@ ALWAYS_SKIP_FILES = {
     "homrec.hrc", "homrec_settings.json", "homrec_overlays.hrc",
 }
 
-
 def section(title):
     print(f"\n=== {title} ===")
-
 
 def ask(prompt, default=None):
     suffix = f" [{default}]" if default not in (None, "") else ""
@@ -36,14 +34,12 @@ def ask(prompt, default=None):
             return default
         print("  (a non-empty answer is required)")
 
-
 def ask_yes_no(prompt, default_yes=True):
     hint = "Y/n" if default_yes else "y/N"
     val = input(f"{prompt} [{hint}]: ").strip().lower()
     if not val:
         return default_yes
     return val in ("y", "yes")
-
 
 def ask_int(prompt, default, lo, hi):
     while True:
@@ -59,7 +55,6 @@ def ask_int(prompt, default, lo, hi):
             return n
         print(f"  enter a number between {lo} and {hi}")
 
-
 def ask_choice(prompt, options):
     """options: list of (key, label). Returns the chosen key."""
     for i, (_key, label) in enumerate(options, 1):
@@ -72,11 +67,9 @@ def ask_choice(prompt, options):
             return options[int(raw) - 1][0]
         print(f"  enter a number between 1 and {len(options)}")
 
-
 def sanitize_label(label):
     label = re.sub(r"[^A-Za-z0-9._-]+", "-", label.strip())
     return label.strip("-") or "build"
-
 
 # ---------------------------------------------------------------------------
 # Step 2: version
@@ -89,7 +82,6 @@ def read_current_version():
         content = f.read()
     m = re.search(r'#define\s+HR_APP_VERSION\s+"([^"]+)"', content)
     return m.group(1) if m else None
-
 
 def write_version(new_version):
     with open(VERSION_H, "r", encoding="utf-8") as f:
@@ -112,7 +104,6 @@ def write_version(new_version):
         f.write(content)
     return True
 
-
 def step_version():
     section("Version")
     current = read_current_version()
@@ -133,32 +124,15 @@ def step_version():
             write_version(version)
     return version
 
-
 # ---------------------------------------------------------------------------
 # Step 3: build + ffmpeg
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
 # MSYS2 MINGW64 discovery
-#
-# `make`/`mingw32-make` found on a plain Windows PATH is *not* the same
-# thing as running inside an "MSYS2 MINGW64" shell: the whole point of that
-# environment is the PATH/MSYSTEM setup its shell profile does, which is
-# what puts the mingw-w64 g++/windres/pkg-config (and, via LUA_CFLAGS/
-# LUA_LDFLAGS below, the matching lua54) in front of `make`. Running plain
-# `make` from a normal `cmd.exe`/PowerShell prompt - which is what this
-# script used to do - either fails outright (no make on PATH at all) or,
-# worse, silently picks up some other make/gcc that isn't set up for this
-# project's wx/Lua/ffmpeg headers and libs. So instead of invoking `make`
-# directly, this shells out to MSYS2's own bash with MSYSTEM=MINGW64 set,
-# which is exactly what launching "MSYS2 MINGW64" from the Start Menu does
-# and is the one environment the Makefile (see its LUA_CFLAGS/LDFLAGS
-# comments) is written against.
 MSYS2_ROOT_CANDIDATES = (
     r"C:\msys64",
     r"C:\tools\msys64",
 )
-
 
 def find_msys2_bash():
     env_root = os.environ.get("MSYS2_ROOT")
@@ -169,7 +143,6 @@ def find_msys2_bash():
             return bash
     return None
 
-
 def to_msys_path(win_path):
     """C:\\foo\\bar -> /c/foo/bar, the way MSYS2's bash expects a path."""
     drive, rest = os.path.splitdrive(win_path)
@@ -178,12 +151,7 @@ def to_msys_path(win_path):
         return f"/{drive[0].lower()}{rest}"
     return rest
 
-
 def run_in_mingw64(shell_cmd, cwd):
-    """Runs `shell_cmd` (a single bash command line) inside an MSYS2 MINGW64
-    login shell, cd'd into `cwd` - i.e. the same environment "MSYS2 MINGW64"
-    from the Start Menu gives you, not whatever `make`/`gcc` a plain Windows
-    PATH happens to resolve to."""
     bash = find_msys2_bash()
     if not bash:
         print("  MSYS2 not found (looked in MSYS2_ROOT and "
@@ -208,7 +176,6 @@ def run_in_mingw64(shell_cmd, cwd):
     except FileNotFoundError:
         print(f"  '{bash}' could not be run.")
         return False
-
 
 def step_build():
     section("Build")
@@ -242,15 +209,11 @@ def step_build():
     return hr_exe if os.path.isfile(hr_exe) else None, \
         hom_exe if os.path.isfile(hom_exe) else None
 
-
 def find_ffmpeg():
     section("ffmpeg")
-    # No more "use this ffmpeg.exe for the full build?" yes/no here - the
-    # 'full' vs 'portable' choice made in step_archives() *is* the "add
-    # ffmpeg or not" decision; asking again here was a second prompt for
-    # the same choice. If an ffmpeg.exe is found (or given), 'full'
-    # archives get it automatically; 'portable' archives never get it
-    # regardless, by definition of the preset - see collect_files().
+    # No more "use this ffmpeg.exe for the full build?" yes/no here - the 'full' vs 'portable'
+    # choice made in step_archives() *is* the "add ffmpeg or not" decision; asking again here
+    # was a second prompt for the same choice.
     candidates = [
         os.path.join(REPO_ROOT, "ffmpeg", "ffmpeg.exe"),
         os.path.join(REPO_ROOT, "ffmpeg.exe"),  # legacy location, still honored if present
@@ -274,53 +237,27 @@ def find_ffmpeg():
         print("  ffmpeg not found - 'full' archives will be built without it (like 'portable').")
     return None
 
-
 # ---------------------------------------------------------------------------
 # Step 4: archives
 # ---------------------------------------------------------------------------
 
-# README.md/LICENSE/CHANGELOG.txt are the only docs actual end users of a
-# release archive need. commands.md (console command reference), SUPPORT.md
-# and CONTRIBUTORS.md are contributor/dev-facing docs that don't belong in
-# a binary release archive; they're still in the repo (and in the
-# 'source' preset below, which packages the repo as-is) for anyone
-# building from source, just not duplicated into every 'full'/'portable'
-# zip. Likewise "plugins" here used to mean *this repo's own*
-# src/plugins (bundled Lua examples, not a user-facing thing) getting
-# copied into every release archive under a top-level plugins/ folder -
-# removed for the same reason; a fresh install's own plugins/ directory
-# (where .hrp packages get installed via File > Import Plugin) is created
-# by the app itself, not shipped pre-populated.
+# README.md/LICENSE/CHANGELOG.txt are the only docs actual end users of a release archive
+# need.
 BASE_DOCS = ["README.md", "LICENSE", "FREE.txt", "CHANGELOG.txt"]
 BASE_DIRS = ["cfg"]
 
-# Archive formats offered in the menu. 7z is always listed - not just when
-# a 7z/7za binary happens to already be on PATH - since "add the .7z build
-# variant" should mean an actual, discoverable menu entry, not one that
-# silently vanishes on a fresh machine. make_archive()'s 7z branch still
-# checks for the binary right before it's actually needed and fails with a
-# clear, actionable message if it's missing, instead of the option just
-# not being there in the first place.
+# Archive formats offered in the menu.
 FORMAT_OPTIONS = [
     ("zip", "zip"),
     ("tar.gz", "tar.gz"),
     ("7z", "7z (needs 7-Zip's 7z/7za on PATH)"),
 ]
 
-
 def discover_root_dlls():
-    """hr.exe is linked dynamically against wxWidgets + the image codec libs
-    it pulls in (see LDFLAGS in the Makefile - only libgcc/libstdc++/pthread
-    are -static, everything else, e.g. libpng/zlib/libwebp/wx*.dll, is a
-    runtime DLL that MinGW drops next to the exe). hom.exe only links
-    system DLLs (-lwinhttp -lshlwapi), so it needs none of these. Without
-    bundling these, hr.exe simply won't launch on a machine that doesn't
-    have the exact same MSYS2/MinGW install."""
     return sorted(
         f for f in os.listdir(REPO_ROOT)
         if f.lower().endswith(".dll") and os.path.isfile(os.path.join(REPO_ROOT, f))
     )
-
 
 def iter_tree(root_dir, arc_prefix=""):
     """Yield (abs_path, arcname) for every file under root_dir, skipping
@@ -333,7 +270,6 @@ def iter_tree(root_dir, arc_prefix=""):
             abs_path = os.path.join(dirpath, fname)
             rel = os.path.relpath(abs_path, root_dir)
             yield abs_path, os.path.join(arc_prefix, rel) if arc_prefix else rel
-
 
 def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
     """Returns list of (abs_path, arcname)."""
@@ -376,7 +312,6 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
 
     return files
 
-
 def make_archive(files, out_path, fmt):
     if fmt == "zip":
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -407,7 +342,6 @@ def make_archive(files, out_path, fmt):
         shutil.rmtree(stage)
     else:
         raise ValueError(f"unknown format {fmt}")
-
 
 def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
     section("Release archives")
@@ -448,7 +382,6 @@ def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
 
     return produced
 
-
 # ---------------------------------------------------------------------------
 # Step 5: other goodies
 # ---------------------------------------------------------------------------
@@ -470,7 +403,6 @@ def write_checksums(produced):
         f.write("\n".join(lines) + "\n")
     print(f"Written to {sums_path}")
     return sums_path
-
 
 def extract_release_notes(version):
     if not os.path.isfile(CHANGELOG):
@@ -499,7 +431,6 @@ def extract_release_notes(version):
         f.write(section_text)
     return notes_path
 
-
 def suggest_git_commands(version):
     section("Git (nothing is run automatically)")
     tag = f"v{version}"
@@ -516,7 +447,6 @@ def suggest_git_commands(version):
     print("(src/hr_update.cpp) looks at the latest release for an asset whose name ends")
     print("in .exe and offers to silently install it; skip this and auto-update simply")
     print("won't find anything to offer.")
-
 
 def main():
     print("=" * 60)
@@ -550,7 +480,6 @@ def main():
         print(f"\nEverything is in {DIST_DIR} - ready to upload to GitHub Releases/mirrors.")
     else:
         print("No archive was built.")
-
 
 if __name__ == "__main__":
     try:

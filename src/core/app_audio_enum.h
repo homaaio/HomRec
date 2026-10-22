@@ -1,9 +1,4 @@
 // app_audio_enum.h - finds programs the Audio Mixer can capture the sound of (2.4).
-//
-// "Browser" and "Window audio" sources use WASAPI per-process loopback: Windows hands
-// back only the sound produced by one program (and the processes it started), so
-// a browser's music can be recorded without the rest of the desktop audio. The
-// functions here only locate the programs; audio.cpp does the capturing.
 #pragma once
 #include <string>
 #include <vector>

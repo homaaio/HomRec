@@ -1,22 +1,5 @@
 #pragma once
-// -----------------------------------------------------------------------------
-// overlay_render.h
-//
-// Bakes configured overlays (text / image / gif / webcam) directly into captured frames.
-//
-// Previously overlays only existed as UI state (src/ui/app_state.h's
-// AppState::overlays, edited via the Overlay Manager dialog / drag-on-preview)
-// and were never actually composited into anything -- recording "with an
-// overlay" produced a plain screen recording with no overlay in it at all.
-// This closes that gap: RecordingController pushes the current overlay list
-// into the pipeline (hr_pl_set_overlays), and the capture thread calls
-// OverlayCompositor::Apply() on every captured frame before it's handed off
-// for YUV conversion/encoding.
-//
-// Deliberately POD (fixed-size char buffers, no std::string/std::vector in
-// the public struct) so it stays consistent with the rest of this file's
-// extern "C" boundary between the UI layer and the capture pipeline.
-// -----------------------------------------------------------------------------
+// overlay_render.h - Bakes configured overlays (text / image / gif / webcam) directly into captured frames.
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -36,35 +19,22 @@ struct HrOverlayDesc {
     char font_name[64] = "Segoe UI"; // for type == "text" - see RenderTextBgra()
     char image_path[260];  // for type == "image" or "gif"
     int  visible;           // 0/1
-    // 0-255, applies on top of whatever per-pixel alpha the rendered
-    // layer already has (text coverage, an image's own alpha channel,
-    // etc.) - see CompositeBgra(). 255 = fully opaque, matching every
-    // overlay's behavior before this field existed.
+    // 0-255, applies on top of whatever per-pixel alpha the rendered layer already has (text
+    // coverage, an image's own alpha channel, etc.) - see CompositeBgra().
     unsigned char opacity = 255;
 
-    // For type == "webcam" -- see webcam_enum.h for how these get set
-    // (device picker) and webcam_capture.h for how they're used to open
-    // the actual device. webcam_name is the primary match key; webcam_index
-    // is the fallback (see webcam_capture.h's Open() for the exact
-    // matching order).
+    // For type == "webcam" -- see webcam_enum.h for how these get set (device picker) and
+    // webcam_capture.h for how they're used to open the actual device.
     char webcam_name[128];
     int  webcam_index;
 
-    // For type == "input_overlay" -- see input_overlay.h. The JSON
-    // layout is parsed (and its parse result cached) inside
-    // OverlayCompositor rather than here, to keep this struct POD/fixed-
-    // size like the rest of it.
+    // For type == "input_overlay" -- see input_overlay.h.
     char input_json_path[260];
     char input_png_path[260];
 
     // 8th pass (Desktop split) - layers that show a piece of the screen or a window:
-    //   "region"         src_x/src_y/src_w/src_h = the rectangle cut out of the monitor picture
-    //                    (monitor-relative pixels), drawn scaled into x/y/w/h.
-    //   "window"         win_method 0: src_* = the window's current rectangle (resolved by the UI thread),
-    //                    cut out of the monitor picture like a region. win_method 1: the window itself is
-    //                    captured (hwnd, wgc_capture.h) - other windows on top of it do not show up.
-    //   "desktop_hidden" present ONLY while the Desktop layer's eye is closed: blanks the monitor picture
-    //                    (the other layers still read it as their source).
+    // "region"         src_x/src_y/src_w/src_h = the rectangle cut out of the monitor picture
+    // (monitor-relative pixels), drawn scaled into x/y/w/h.
     int       src_x = 0, src_y = 0, src_w = 0, src_h = 0;
     int       win_method = 0;       // 0 = cut out of the monitor picture, 1 = the window itself
     int       win_client_only = 0;  // win_method 1: content area only
@@ -73,11 +43,6 @@ struct HrOverlayDesc {
 };
 
 // True when compositing this overlay can change a single pixel of the frame.
-// An overlay at opacity 0 is completely invisible, so it must not count as
-// "something to draw" anywhere: before this test existed, a faded-out overlay
-// still forced the capture loop off the GPU colour-conversion path (full BGRA
-// readback + CPU conversion every tick) and still got rendered every frame
-// just to be thrown away by CompositeBgra()'s opacity-0 early-out.
 inline bool HrOverlayDrawsAnything(const HrOverlayDesc &ov) {
     return ov.visible && ov.w > 0 && ov.h > 0 && ov.opacity > 0;
 }
@@ -98,24 +63,12 @@ public:
     // base_bgra: capture_w x capture_h, 4 bytes/pixel (B,G,R,A), row pitch
     // base_stride bytes (usually capture_w*4). Composites every visible
     // overlay in `overlays` directly onto it, clipped to its bounds.
-    //
-    // 8th pass: `source_bgra` (optional, same size and pitch as the base: base_w*4) is the UNTOUCHED
-    // monitor picture for the region / window layers. The capture loop passes its pristine capture buffer;
-    // without it the compositor takes a copy of the base itself when such a layer needs one (the Desktop
-    // layer's eye may blank the base before they read it).
     void Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
                 const std::vector<HrOverlayDesc> &overlays, double current_fps = 0.0,
                 const uint8_t *source_bgra = nullptr);
 
-    // Same overlays, same cached layers - but blended straight into an NV12
-    // frame (w x h, tightly packed: w*h luma bytes then w*h/2 interleaved
-    // CbCr). This is what lets the GPU colour-conversion path keep running
-    // while overlays are on: only the overlay rectangles are touched (BT.601
-    // limited range, the same matrix hr_bgra_to_nv12_band and
-    // hr_composite_cursor_nv12 use) instead of reading the whole desktop back
-    // as BGRA, copying it, compositing and converting it on the CPU.
-    // Overlay x/y/w/h are in this frame's pixel space (the caller only uses
-    // it when the NV12 frame is not scaled relative to the capture).
+    // Same overlays, same cached layers - but blended straight into an NV12 frame (w x h,
+    // tightly packed: w*h luma bytes then w*h/2 interleaved CbCr).
     void ApplyNv12(uint8_t *nv12, int w, int h,
                    const std::vector<HrOverlayDesc> &overlays, double current_fps = 0.0);
 
@@ -134,22 +87,14 @@ private:
         std::string key;           // what this was rendered from, to detect staleness
     };
 
-    // Snapshot of the HrOverlayDesc fields that affect text/image rendering,
-    // used to skip the (fairly cheap but non-zero) key-string rebuild in
-    // GetOrRenderText/GetOrRenderImage on every single frame. Comparing a
-    // few ints/bytes directly is far cheaper than building a std::string
-    // with several std::to_string() calls and then comparing that -- and
-    // this runs on the capture thread for every visible overlay, every
-    // captured frame, for as long as the overlay is on screen, so for a
-    // static text/image overlay (the overwhelming common case) that string
-    // work was pure waste.
+    // Snapshot of the HrOverlayDesc fields that affect text/image rendering, used to skip the
+    // (fairly cheap but non-zero) key-string rebuild in GetOrRenderText/GetOrRenderImage on
+    // every single frame.
     struct TextImageSnapshot {
         bool  valid = false;
         char  type[16] = {0};     // "text" | "image" -- guards against the cache
-                                   // key at this idx belonging to a different
-                                   // overlay type if the user changes an
-                                   // overlay's type at runtime (same idx,
-                                   // otherwise-matching leftover fields).
+                                   // key at this idx belonging to a different overlay type if the user changes an overlay's
+                                   // type at runtime (same idx, otherwise-matching leftover fields).
         int   w = 0, h = 0;
         unsigned char text_r = 0, text_g = 0, text_b = 0;
         char  text[256] = {0};
@@ -159,60 +104,27 @@ private:
     std::unordered_map<size_t, TextImageSnapshot> snapshots_;
     // Keyed by the overlay's position in the list (stable enough for our
     // purposes -- overlays are edited in place, not frequently reordered).
-    //
-    // Entries here used to live
-    // forever once created -- nothing ever erased them. Every add/remove/
-    // resize of an overlay (especially an image or input_overlay one,
-    // whose CachedLayer/InputOverlayCache/ImageSourceCache entries can each
-    // hold a full decoded bitmap) grew whichever of these maps had a fresh,
-    // never-before-used idx a little further, and removing overlays never
-    // shrank them back down since the *count* of overlays going down
-    // doesn't remove the higher idx entries already sitting in the maps.
-    // Over a session with a lot of overlay editing this is a real, growing
-    // leak -- see PruneStaleCaches(), called at the top of Apply() every
-    // frame with the current overlay count, which is now the single place
-    // responsible for keeping all four of these maps trimmed to it.
     std::unordered_map<size_t, CachedLayer> cache_;
 
-    // Decoded spritesheet + parsed layout for input_overlay entries,
-    // reloaded only when the source paths change (unlike CachedLayer
-    // above, the *composited* result for these is rebuilt every frame --
-    // that's the whole point, it tracks live key state -- so it isn't
-    // stored in `cache_`'s staleness-checked slot the same way).
     struct InputOverlayCache {
         std::string json_path, png_path;
         HrInputOverlayLayout layout;
         std::vector<uint8_t> sheet_bgra; // sheet_w * sheet_h * 4, native resolution
         int sheet_w = 0, sheet_h = 0;
         bool valid = false;
-        // Set alongside json_path/png_path whenever a load is *attempted*
-        // for that path pair (regardless of outcome). Distinct from
-        // `valid` so a decode/parse failure is only retried once the
-        // paths actually change again, instead of every single frame
-        // forever (a real image/spritesheet swap always changes at least
-        // one path, so this never blocks a genuine retry).
+        // Set alongside json_path/png_path whenever a load is *attempted* for that path pair
+        // (regardless of outcome).
         bool attempted = false;
 
-        // Scratch buffer for the
-        // native-resolution composite, reused frame-to-frame instead of a
-        // brand-new std::vector being heap-allocated (and immediately
-        // freed) on every single frame for as long as the overlay is on
-        // screen. Unlike sheet_bgra/layout above, this genuinely does get
-        // rewritten every frame (it tracks live key state) -- the point
-        // here is only to stop re-allocating the *storage* for it each
-        // time, not to skip the redraw.
+        // Scratch buffer for the native-resolution composite, reused frame-to-frame instead of a
+        // brand-new std::vector being heap-allocated (and immediately freed) on every single frame
+        // for as long as the overlay is on screen.
         std::vector<uint8_t> native_scratch;
 
-        // --- per-frame work avoidance (see GetOrRenderInputOverlay) ---
-        // Virtual-key of every layout element, resolved ONCE when the layout
-        // is loaded (0 = not key-driven). Used to be a MapVirtualKeyW() call
-        // per element per frame; a full keyboard preset has ~100 elements.
+        // --- per-frame work avoidance (see GetOrRenderInputOverlay) --- Virtual-key of every
+        // layout element, resolved ONCE when the layout is loaded (0 = not key-driven).
         std::vector<unsigned> vks;
         // Which elements were pressed when `cache_[idx]` was last rebuilt.
-        // If this frame's key state is identical (the usual case: nobody is
-        // pressing anything) the finished layer is reused as-is instead of
-        // being cleared, re-blitted from the spritesheet, re-scaled and
-        // copied again 30+ times a second.
         std::vector<uint8_t> last_pressed;
         std::vector<uint8_t> pressed_scratch;   // this frame's key state (reused, no per-frame allocation)
         std::string layer_key;       // cache_[idx].key this state belongs to
@@ -229,11 +141,6 @@ private:
     };
     std::unordered_map<size_t, ImageSourceCache> image_source_cache_;
 
-    // One decoded animation for a "gif" overlay: every frame is already
-    // composited to the GIF's full logical-screen canvas size (disposal
-    // methods resolved at decode time - see DecodeGifFramesNative() in the
-    // .cpp), so playback only ever has to pick a frame index and scale it,
-    // the same as a plain static image.
     struct GifFrameCache {
         std::vector<uint8_t> bgra; // canvas_w * canvas_h * 4
         int delay_ms = 100;
@@ -245,20 +152,14 @@ private:
         long long total_duration_ms = 0;
         bool valid = false;
         bool attempted = false;
-        // Wall-clock anchor for "what frame is due right now" - set once
-        // when the GIF is (re)loaded, not per Apply() call, so the loop
-        // plays at its authored speed no matter how often frames get
-        // composited.
+        // Wall-clock anchor for "what frame is due right now" - set once when the GIF is
+        // (re)loaded, not per Apply() call, so the loop plays at its authored speed no matter how
+        // often frames get composited.
         std::chrono::steady_clock::time_point start_time;
     };
     std::unordered_map<size_t, GifSourceCache> gif_cache_;
 
-    // One live capture session for a "webcam" overlay -- see
-    // webcam_capture.h. `layer` holds the most recently scaled frame at
-    // the overlay's current size and is deliberately *not* cleared when a
-    // given Apply() call has no new frame yet (camera frame rate is
-    // usually lower than capture frame rate) -- the overlay freezes on its
-    // last good frame rather than flickering blank in between.
+    // One live capture session for a "webcam" overlay -- see webcam_capture.h.
     struct WebcamSourceCache {
         std::string device_name;
         int device_index = -1;
@@ -301,9 +202,6 @@ private:
 
     // Drops every entry in the six idx-keyed caches above whose idx is no
     // longer in range for `overlay_count` -- called at the top of Apply()
-    // every frame so removing/reordering overlays actually frees what they
-    // were holding instead of leaving it cached forever at a now-unused
-    // index (see the maps' own comments for the leak this fixes).
     void PruneStaleCaches(size_t overlay_count);
 
     const CachedLayer *GetOrRenderText(size_t idx, const HrOverlayDesc &ov);

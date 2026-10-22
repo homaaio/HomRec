@@ -236,14 +236,7 @@ void AudioPanel::BuildLayout() {
     Freeze();
     if (scroller_) {
         // BuildLayout() is reached from inside button handlers whose button lives INSIDE the old
-        // scroller (card "..." button -> Remove source). wxWindow::Destroy() on a child window is
-        // an immediate `delete`, so the button (and its parents) were freed while wx was still
-        // unwinding that very event -> use-after-free inside wxEvtHandler::ProcessEvent, which is the
-        // signature of the 2026-10-07 15:48:08 / 2026-10-08 20:35:35 dumps (crash inside wxbase, no
-        // hr.exe frame on the stack). Not proven to be THE cause of those dumps, but a real bug.
-        // Hide it now and delete it from the event loop instead. CallAfter() is bound to this
-        // panel, so if the panel dies first the pending call is dropped together with the
-        // (then already deleted) child.
+        // scroller (card "..." button -> Remove source).
         wxScrolledWindow *old = scroller_;
         // If keyboard focus is inside the card list, move it out first: wx keeps "last focused child"
         // pointers in the ancestors (wxControlContainer::m_winLastFocused) and re-focuses them on
@@ -321,9 +314,6 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
 
     if (!vertical) {
         // Compact card (~70 px):
-        // [icon] Name ............ 100% [Mute] [...]
-        // [================ meter ===============]
-        // [---------------- fader ----------------]
         ch.pct_lbl->SetMinSize(wxSize(40, -1));
         auto *top = new wxBoxSizer(wxHORIZONTAL);
         top->Add(makeIcon(), 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
@@ -341,11 +331,6 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
         // wxALIGN_* trips a wxWidgets debug assertion ("wxEXPAND overrides alignment flags").
         root->Add(ch.fader, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 6);
     } else {
-        //   [icon]
-        //   Name
-        //   [meter][fader]
-        //   100%
-        //   [Mute]  [...]
         ch.card->SetMinSize(wxSize(96, -1));
         root->Add(makeIcon(), 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 10);
         ch.name_lbl->SetMinSize(wxSize(84, -1));
