@@ -1,23 +1,6 @@
-// scripts/tests/test_encoder_helpers.cpp
-//
-// Standalone unit tests for the pure pixel-conversion helpers in
-// src/core/encoder_helpers.c (BGRA<->YUV420p/NV12, gamma LUT, thumbnail
-// downscale). No wxWidgets, no DXGI, no AppState - just the math, so this
-// builds and runs in a couple seconds without the full MSYS2/wx toolchain.
-//
-// One-time setup (doctest is a single MIT-licensed header, not a library):
-//   curl -o scripts/tests/doctest.h \
-//     https://raw.githubusercontent.com/doctest/doctest/master/doctest/doctest.h
-//
-// Build & run (any g++/MinGW works - this file doesn't touch Windows APIs):
-//   g++ -O2 -c src/core/encoder_helpers.c -o /tmp/hr_encoder_helpers.o
-//   g++ -std=c++17 -Iscripts/tests scripts/tests/test_encoder_helpers.cpp \
-//       /tmp/hr_encoder_helpers.o -o /tmp/hr_tests.exe
-//   /tmp/hr_tests.exe
-//
-// One universal file, not one-per-function: add new TEST_CASEs here as
-// more pure logic gets pulled out (settings clamping, console parsing,
-// etc.) rather than starting a second test binary.
+// scripts/tests/test_encoder_helpers.cpp - Standalone unit tests for the pure pixel-
+// conversion helpers in src/core/encoder_helpers.c (BGRA<->YUV420p/NV12, gamma LUT,
+// thumbnail downscale).
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest.h"
@@ -64,16 +47,6 @@ TEST_CASE("hr_bgra_to_yuv420p: solid white -> Y=255 (full range, software x264/x
 }
 
 TEST_CASE("hr_bgra_to_nv12: solid black -> Y should be 16 in limited/tv range (NVENC/QSV/AMF)") {
-    // Per CHANGELOG.txt and ffmpeg/ffmpeg_runner.cpp's "-color_range tv"
-    // for the hardware-encoder path, hr_bgra_to_nv12 is supposed to emit
-    // limited range (16-235), not full range (0-255) - that mismatch was
-    // exactly the earlier "dark/dull, blackness effect" NVENC bug.
-    // If this CHECK fails: hr_bgra_to_nv12_band in encoder_helpers.c is
-    // currently using the same full-range coefficients as
-    // hr_bgra_to_yuv420p (I checked - as of this archive it is), which
-    // means either that fix never made it into this tree, or it got
-    // dropped in a merge. Worth flagging to whoever's on this file, since
-    // ffmpeg_runner's comment says the fix is already in place.
     const int w = 4, h = 4;
     auto bgra = SolidBgra(w, h, 0, 0, 0);
     std::vector<uint8_t> nv12((size_t)w * h * 3 / 2);
@@ -132,12 +105,8 @@ TEST_CASE("hr_build_thumbnail_lq: rejects a non-integer scale factor instead of 
     CHECK(hr_build_thumbnail_lq(src.data(), dst.data(), 5, 5, 2, 2) == 0); // 5 % 2 != 0
 }
 
-// ---------------------------------------------------------------------------
-// Partial re-conversion (capture_loop(): DXGI dirty rows -> re-convert only
-// those rows of the previously converted picture). The result must be
-// byte-identical to converting the whole new frame from scratch, for both
-// output layouts, or the recording would show stale/garbled bands.
-// ---------------------------------------------------------------------------
+// Partial re-conversion (capture_loop(): DXGI dirty rows -> re-convert only those rows of
+// the previously converted picture).
 extern "C" {
     void hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
     void hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *nv12, int w, int h, int y0, int y1);
