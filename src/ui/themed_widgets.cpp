@@ -2,12 +2,73 @@
 #include <wx/dcbuffer.h>
 #include <algorithm>
 #include <cmath>
+#include <wx/combobox.h>
+#include <wx/choice.h>
 #ifdef _WIN32
   #include <uxtheme.h>
+  #include <commctrl.h>
 #endif
 
 wxColour FromColorref(COLORREF c) {
     return wxColour(GetRValue(c), GetGValue(c), GetBValue(c));
+}
+
+// ---------------------------------------------------------------------------
+// Wheel guard (see themed_widgets.h)
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+namespace {
+constexpr UINT_PTR kWheelGuardId = 0x484D5747;   // "HMWG"
+
+bool HrClassIs(HWND h, const wchar_t *name) {
+    wchar_t cls[32] = {};
+    if (!h || !GetClassNameW(h, cls, 31)) return false;
+    return _wcsicmp(cls, name) == 0;
+}
+
+LRESULT CALLBACK HrWheelGuardProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    if (msg == WM_MOUSEWHEEL) {
+        // The edit part of an editable combo box is a child of the combo box itself.
+        HWND combo = h;
+        if (HrClassIs(h, L"Edit") && HrClassIs(GetParent(h), L"ComboBox")) combo = GetParent(h);
+        // An open drop-down list scrolls with the wheel as usual.
+        if (HrClassIs(combo, L"ComboBox") && SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0))
+            return DefSubclassProc(h, msg, wp, lp);
+        // Closed: don't touch the value; let the page behind the control scroll instead.
+        if (HWND page = GetParent(combo)) SendMessageW(page, WM_MOUSEWHEEL, wp, lp);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, HrWheelGuardProc, id);
+    return DefSubclassProc(h, msg, wp, lp);
+}
+
+void HrGuardHwnd(HWND h) {
+    if (h && IsWindow(h)) SetWindowSubclass(h, HrWheelGuardProc, kWheelGuardId, 0);
+}
+
+void HrGuardOne(wxWindow *w) {
+    HWND h = (HWND)w->GetHWND();
+    if (!h) return;
+    HrGuardHwnd(h);
+    if (wxDynamicCast(w, wxSpinCtrl)) {
+        // wxSpinCtrl on MSW = an up-down control plus a separate "buddy" edit box.
+        HrGuardHwnd((HWND)SendMessageW(h, UDM_GETBUDDY, 0, 0));
+    }
+    // Editable combo boxes keep their text field in a child window.
+    for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) HrGuardHwnd(c);
+}
+} // namespace
+#endif
+
+void HrInstallWheelGuard(wxWindow *root) {
+#ifdef _WIN32
+    if (!root) return;
+    if (wxDynamicCast(root, wxSpinCtrl) || wxDynamicCast(root, wxChoice) || wxDynamicCast(root, wxComboBox))
+        HrGuardOne(root);
+    for (wxWindow *child : root->GetChildren()) HrInstallWheelGuard(child);
+#else
+    (void)root;
+#endif
 }
 
 // ---------------------------------------------------------------------------

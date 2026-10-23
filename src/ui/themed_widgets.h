@@ -7,6 +7,14 @@
 
 wxColour FromColorref(COLORREF c);
 
+// Makes the mouse wheel harmless over every number box (wxSpinCtrl) and drop-down (wxChoice /
+// wxComboBox) inside `root`, recursively: scrolling the page with the cursor resting on such a
+// control used to change its value by accident. The wheel is passed on to the page behind the
+// control instead, so the page still scrolls. An OPEN drop-down list keeps its own wheel scrolling,
+// and the sliders / faders that advertise the wheel in their tooltip are not touched.
+// Call it once after the dialog's controls are built.
+void HrInstallWheelGuard(wxWindow *root);
+
 // Flat, explicitly-colored button - used instead of plain wxButton because
 // native-themed wxButton on Windows can silently ignore SetBackgroundColour()
 class ColorButton : public wxPanel {
