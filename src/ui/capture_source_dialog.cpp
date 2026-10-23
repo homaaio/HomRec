@@ -320,6 +320,7 @@ public:
         btnRow->Add(ok, 0, wxALL, 8);
         root->Add(btnRow, 0, wxEXPAND);
         SetSizer(root);
+        HrInstallWheelGuard(this);   // the wheel scrolls the page, never the drop-downs / number boxes
 
         // initial state
         rb_desktop_->SetValue(src_.mode == CaptureMode::Desktop);

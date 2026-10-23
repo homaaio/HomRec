@@ -187,6 +187,7 @@ public:
         root->Add(btnRow, 0, wxEXPAND | wxALL, 16);
 
         SetSizer(root);
+        HrInstallWheelGuard(this);
 
         Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowse, this, IDC_BROWSE);
         Bind(wxEVT_BUTTON, &SettingsDialog::OnSave, this, IDC_SAVE);

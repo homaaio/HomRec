@@ -504,6 +504,7 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
     root->Add(btnRow, 0, wxEXPAND);
 
     dlg.SetSizer(root);
+    HrInstallWheelGuard(&dlg);   // the wheel scrolls the page, never the drop-downs
 
     // Live-update the working copy (and therefore the canvas preview) as soon as each field
     // changes, rather than only reading them back on Save - so what's drawn at the top always
