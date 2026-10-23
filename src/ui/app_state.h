@@ -212,6 +212,7 @@ struct AppState {
                                        // In-app console (console_window.cpp):
     bool console_hom_log      = false;
     bool console_history_save = true;
+    bool cmd_sound            = false; // Windows "ding" when Enter is pressed in the console (terminal/cfg only, not in the Settings window)
     // Live-preview panel (not the recording itself): how big and how often
     // it's redrawn. Lower values cost real CPU/GPU time on weak machines
     // even though they never end up in the actual recording.
