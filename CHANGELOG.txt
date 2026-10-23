@@ -1,5 +1,45 @@
 welcome to changelog :D
 
+[Version 2.4.2] - 2026-10-21
+Version bump, plus diagnostics for the "UI freezes for 10-20 s when recording starts with the preview off" report.
+
+### Fixed
+- A/V sync (audio lagging ~0.5-0.8 s after a CPU spike around minute 3 of a 14-minute recording):
+    * src/core/audio.cpp - the WASAPI capture buffer was 200 ms although every comment said 2 s; a
+      starved capture thread overwrote unread samples. It is now really 2 s.
+    * src/core/audio.cpp - the "keep the track on the wall clock" correction (zeros where samples are
+      missing) only ran for the system-audio loopback. It now runs for every stream (the microphone,
+      the extra mixer channels), and surplus samples of a fast device clock (>250 ms) are dropped.
+    * src/core/tools.cpp - the video was only retimed to real speed when it came out >10% short, so a
+      few dropped frames were never corrected. Now: shorter than the real time by >0.4 s (and >0.05%)
+      -> copy-only retime (no re-encode; if ffmpeg refuses and the correction is <2%, the merge goes
+      ahead without it instead of re-encoding).
+- Mouse wheel over a number box or drop-down in Settings (and the capture-source and overlay-editor
+  dialogs) changed its value. The wheel now scrolls the page instead (src/ui/themed_widgets.cpp
+  HrInstallWheelGuard; applied in settings_dialog.cpp, capture_source_dialog.cpp, overlay_editor_dialog.cpp).
+- Console: the Windows ding on every Enter. New setting `cmd_sound` / `cmd-sound` (default false, console
+  and cfg only - not in the Settings window). (console_window.cpp, app_state.h, settings_registry.cpp)
+
+### Changed
+- Version is now 2.4.2 (src/ui/version.h - the single source of truth; the title bar, About box,
+  update check and tools/homrec_build.py all read it from there).
+- Source cleanup: long explanatory comments in the C/C++ sources, headers, Python tools, Makefile and
+  CMakeLists.txt were removed or cut down to 1-3 lines. Code itself is unchanged.
+- `log clear` accepts flags: `--pc`, `--plugins`, `--wgc`, `--ffmpeg`, `--homrec`, `--all`/`-a` (every
+  *.log in logs\); no flag = homrec.log only, as before. (console_window.cpp, log_paths.cpp/.h)
+- Controls pane: the big "HomRec" caption and the version under it are gone (the title bar and the
+  bottom bar still show both); Start / Pause sit lower. (main_frame.cpp)
+- "mp4 + mkv" recordings: the .mp4 copy is written in the same ffmpeg pass as the audio merge instead of
+  a second full read/write afterwards (falls back to the old separate remux if that pass fails).
+  (tools.cpp hr_merge_av_ex, recording_controller.cpp)
+
+### Added
+- homrec.log: every recording start now writes one line, "Recording: Start() took N ms on the UI thread
+  (preview on/off) - <phase>=<ms> ...", listing every phase that took 5 ms or more (disk check, size
+  resolve, ddagrab probe, ffmpeg launch, replay-stop join, old-pipeline destroy, preview-teardown join,
+  pipeline create/start, audio begin). It is a warning when the whole start took 1 s or longer. Start()
+  runs on the UI thread, so this shows exactly which step freezes the window. (src/ui/recording_controller.cpp)
+
 [Version 2.4.1] - 2026-10-21
 Games record smoother on weak PCs, `hom` learns to use forks and mirrors, and the in-app console
 finally answers back.
