@@ -1037,6 +1037,11 @@ void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
 
     version_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "v" HR_APP_VERSION, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
     version_lbl_->SetFont(BodyFont());
+    // The big "HomRec" caption and the version under it are no longer shown in the Controls pane (the
+    // title bar and the bottom bar already carry both). The widgets are kept, hidden and out of every
+    // sizer, so the theming code that still touches them keeps working.
+    title_lbl_->Hide();
+    version_lbl_->Hide();
 
     start_color_btn_ = new ColorButton(left_panel_, ID_START_BTN, wxString::FromUTF8(lang_.Get("start")));
     start_color_btn_->SetFont(wxFont(wxFontInfo(11).FaceName("Segoe UI").Bold()));
@@ -1096,9 +1101,8 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
 
     if (!horizontal) {
         auto *sizer = new wxBoxSizer(wxVERTICAL);
-        sizer->Add(title_lbl_, 0, wxEXPAND | wxTOP, 20);
-        sizer->Add(version_lbl_, 0, wxEXPAND | wxTOP, 4);
-        sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 25);
+        // Start / Pause sit lower than before: the freed title block is replaced by a larger gap.
+        sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 120);
         sizer->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
         sizer->Add(section_status_lbl_, 0, wxEXPAND | wxTOP, 15);
         sizer->Add(statusRow, 0, wxEXPAND | wxTOP, 8);
@@ -1114,10 +1118,6 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
         left_panel_->SetSizer(padded);
     } else {
         auto *wrap = new wxWrapSizer(wxHORIZONTAL);
-        auto *c1 = new wxBoxSizer(wxVERTICAL);
-        c1->Add(title_lbl_, 0, wxEXPAND);
-        c1->Add(version_lbl_, 0, wxEXPAND | wxTOP, 2);
-        c1->SetMinSize(wxSize(110, -1));
         auto *c2 = new wxBoxSizer(wxVERTICAL);
         c2->Add(start_color_btn_, 0, wxEXPAND);
         c2->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
@@ -1135,7 +1135,6 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
         c5->Add(fps_lbl_, 0, wxEXPAND | wxTOP, 3);
         c5->Add(res_lbl_, 0, wxEXPAND | wxTOP, 2);
         c5->SetMinSize(wxSize(150, -1));
-        wrap->Add(c1, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
         wrap->Add(c2, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
         wrap->Add(c3, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
         wrap->Add(c4, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
