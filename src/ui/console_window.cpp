@@ -592,6 +592,12 @@ void ConsoleWindow::OnCreate(HINSTANCE hInst) {
         if (msg == WM_GETDLGCODE) {
             return DLGC_WANTALLKEYS | DLGC_WANTCHARS | DLGC_WANTARROWS;
         }
+        // A single-line EDIT answers the Enter character (WM_CHAR, VK_RETURN) with the Windows "ding".
+        // WM_KEYDOWN above already ran the command, so eat the character unless the cmd-sound setting
+        // (default false, terminal / cfg only) asks for the sound.
+        if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == L'\n') && self && !self->state_.cmd_sound) {
+            return 0;
+        }
         if (msg == WM_KEYDOWN && self) {
             if (wParam == VK_RETURN) {
                 wchar_t buf[1024] = {};
@@ -1113,9 +1119,58 @@ void ConsoleWindow::CmdLog(const std::wstring &raw) {
         // Truncate rather than delete -- matches rm's convention of being
         // the only command family that actually removes files; "clear"
         // reads as "empty it out", not "get rid of the log file itself".
-        std::wofstream f(log_path.c_str(), std::ios::trunc);
-        if (f) PrintOk(L"log cleared (" + log_path + L")");
-        else   PrintErr(L"couldn't open " + log_path + L" for writing");
+        //
+        //   log clear                 homrec.log only (as before)
+        //   log clear --pc            logs\pc.log
+        //   log clear --plugins       logs\plugins.log
+        //   log clear --wgc           logs\wgc.log
+        //   log clear --ffmpeg        logs\ffmpeg_ddagrab.log (+ its progress file)
+        //   log clear --all | -a      every *.log in the logs folder (incl. plugins' own custom logs)
+        // Flags can be combined: "log clear --pc --plugins" (homrec.log is added by --homrec).
+        std::vector<std::wstring> flags;
+        {
+            std::wistringstream fs(rest);
+            std::wstring w;
+            fs >> w;   // "clear"
+            while (fs >> w) {
+                std::transform(w.begin(), w.end(), w.begin(), ::towlower);
+                flags.push_back(w);
+            }
+        }
+        bool all = false;
+        std::vector<std::wstring> targets;
+        auto add_target = [&](const wchar_t *name) {
+            if (std::find(targets.begin(), targets.end(), name) == targets.end()) targets.push_back(name);
+        };
+        for (const auto &fl : flags) {
+            if (fl == L"--all" || fl == L"-a" || fl == L"all") all = true;
+            else if (fl == L"--homrec" || fl == L"--main" || fl == L"-m") add_target(L"homrec.log");
+            else if (fl == L"--pc" || fl == L"-p") add_target(L"pc.log");
+            else if (fl == L"--plugins" || fl == L"--plugin") add_target(L"plugins.log");
+            else if (fl == L"--wgc" || fl == L"-w") add_target(L"wgc.log");
+            else if (fl == L"--ffmpeg" || fl == L"-f") { add_target(L"ffmpeg_ddagrab.log"); add_target(L"ffmpeg_ddagrab_progress.txt"); }
+            else {
+                PrintWarn(L"log clear: unknown flag '" + fl + L"'");
+                PrintInfo(L"usage: log clear [--all | --homrec --pc --plugins --wgc --ffmpeg]   (no flag = homrec.log only)");
+                return;
+            }
+        }
+        if (all) {
+            std::vector<std::wstring> done;
+            const int n = HrLogPaths::TruncateAllLogs(&done);
+            PrintOk(L"cleared " + std::to_wstring(n) + (n == 1 ? L" log file" : L" log files") + L" in " + HrLogPaths::LogsDir());
+            for (const auto &d : done) PrintInfo(L"  " + d);
+            return;
+        }
+        if (targets.empty()) targets.push_back(L"homrec.log");
+        for (const auto &t : targets) {
+            const std::wstring p = HrLogPaths::LogFilePath(t);
+            switch (HrLogPaths::TruncateLogFile(p)) {
+                case 1:  PrintOk(L"log cleared (" + p + L")"); break;
+                case 0:  PrintInfo(t + L": nothing to clear (file doesn't exist yet)"); break;
+                default: PrintErr(L"couldn't open " + p + L" for writing"); break;
+            }
+        }
         return;
     }
     if (first_word == L"open") {
