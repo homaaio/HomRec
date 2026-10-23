@@ -560,6 +560,8 @@ HR_EXPORT int hr_ff_exit_code(const void *handle) {
     if (!handle) return -1;
 #ifdef _WIN32
     const auto *ctx = static_cast<const FfmpegCtx *>(handle);
+    // 'mu' guards the process handle's lifetime (see hr_ff_wait()/hr_ff_kill()).
+    std::lock_guard<std::mutex> lk(const_cast<FfmpegCtx *>(ctx)->mu);
     if (!ctx->hProcess) return -1;
     DWORD code = STILL_ACTIVE;
     if (!GetExitCodeProcess(ctx->hProcess, &code) || code == STILL_ACTIVE) return -1;
@@ -646,17 +648,27 @@ HR_EXPORT int hr_ff_wait(void *handle, int timeout_ms) {
     if (!ctx->running) return 0;
 
 #ifdef _WIN32
+    HANDLE hp = nullptr;
+    { std::lock_guard<std::mutex> lk(ctx->mu); hp = ctx->hProcess; }
+    if (!hp) return 0;
     DWORD t = (timeout_ms <= 0) ? INFINITE : (DWORD)timeout_ms;
-    DWORD res = WaitForSingleObject(ctx->hProcess, t);
+    DWORD res = WaitForSingleObject(hp, t);     // not under the lock: hr_ff_is_running() is polled from the UI
     if (res != WAIT_OBJECT_0) return -1;
     DWORD code = 0;
-    GetExitCodeProcess(ctx->hProcess, &code);
-    CloseHandle(ctx->hProcess);
-    CloseHandle(ctx->hThread);
-    ctx->hProcess = nullptr;
-    ctx->hThread  = nullptr;
-    ctx->running  = false;
-    ctx->stopping = false;
+    GetExitCodeProcess(hp, &code);
+    {
+        // hr_ff_is_running()/hr_ff_exit_code() run on the UI thread while this runs on the finalize
+        // thread: the handles used to be closed first and nulled afterwards, so a poll in between
+        // called GetExitCodeProcess() on a closed (possibly already re-used) handle value.
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        HANDLE ht = ctx->hThread;
+        ctx->hProcess = nullptr;
+        ctx->hThread  = nullptr;
+        ctx->running  = false;
+        ctx->stopping = false;
+        CloseHandle(hp);
+        if (ht) CloseHandle(ht);
+    }
     return (int)code;
 #else
     /* Simple busy-wait stub for non-Windows */
@@ -684,7 +696,8 @@ HR_EXPORT int hr_ff_is_running(const void *handle) {
     const auto *ctx = static_cast<const FfmpegCtx *>(handle);
     if (!ctx->running) return 0;
 #ifdef _WIN32
-    if (!ctx->hProcess) return 0;
+    std::lock_guard<std::mutex> lk(const_cast<FfmpegCtx *>(ctx)->mu);
+    if (!ctx->running || !ctx->hProcess) return 0;
     DWORD code = STILL_ACTIVE;
     GetExitCodeProcess(ctx->hProcess, &code);
     return (code == STILL_ACTIVE) ? 1 : 0;
@@ -709,19 +722,23 @@ HR_EXPORT void hr_ff_kill(void *handle) {
     auto *ctx = static_cast<FfmpegCtx *>(handle);
     if (!ctx->running) return;
 #ifdef _WIN32
-    if (ctx->hProcess) {
-        TerminateProcess(ctx->hProcess, 1);
-        WaitForSingleObject(ctx->hProcess, 3000);
-        CloseHandle(ctx->hProcess);
-        CloseHandle(ctx->hThread);
+    HANDLE hp = nullptr;
+    { std::lock_guard<std::mutex> lk(ctx->mu); hp = ctx->hProcess; }
+    if (hp) {
+        TerminateProcess(hp, 1);
+        WaitForSingleObject(hp, 3000);          // not under the lock (see hr_ff_wait())
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        HANDLE ht = ctx->hThread;
+        ctx->hProcess = nullptr;
+        ctx->hThread  = nullptr;
+        CloseHandle(hp);
+        if (ht) CloseHandle(ht);
         // BUGFIX: this used to CloseHandle(ctx->hStdin) unconditionally, same as
         // hr_ff_stop_graceful() did before *its* pipe_input fix (see the big comment over there).
         if (ctx->hStdin) {
             if (!ctx->pipe_input) CloseHandle(ctx->hStdin);
             ctx->hStdin = nullptr;
         }
-        ctx->hProcess = nullptr;
-        ctx->hThread  = nullptr;
     }
 #else
     if (ctx->pid > 0) { kill(ctx->pid, SIGKILL); waitpid(ctx->pid, nullptr, 0); ctx->pid = -1; }
