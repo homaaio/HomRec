@@ -105,4 +105,37 @@ void CapFileSize(const std::wstring &path, long long maxBytes) {
     CloseHandle(w);
 }
 
+int TruncateLogFile(const std::wstring &path) {
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return 0;
+    // FILE_SHARE_* on all three so a logger that is writing at this very moment can't block us (and
+    // the next append simply starts at offset 0 of the emptied file).
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    CloseHandle(h);
+    return 1;
+}
+
+int TruncateAllLogs(std::vector<std::wstring> *names) {
+    const std::wstring dir = LogsDir();
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*.log").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return 0;
+    int n = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (TruncateLogFile(dir + L"\\" + fd.cFileName) == 1) {
+            ++n;
+            if (names) names->push_back(fd.cFileName);
+        }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    // Not a *.log name, but it belongs to ffmpeg_ddagrab.log's run and only ever grows with it.
+    if (TruncateLogFile(dir + L"\\ffmpeg_ddagrab_progress.txt") == 1) {
+        ++n;
+        if (names) names->push_back(L"ffmpeg_ddagrab_progress.txt");
+    }
+    return n;
+}
+
 } // namespace HrLogPaths
