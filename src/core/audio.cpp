@@ -198,6 +198,29 @@ struct WasapiStream {
     LARGE_INTEGER         clock_freq{};
     int64_t               frames_total = 0;   // stereo frames delivered (incl. padding) since clock_t0
 
+    // Per-recording diagnostics (reset by reset_stats(), reported by log_stats()): how much silence
+    // was inserted to keep this stream on the wall clock, how much surplus was dropped, how many
+    // times WASAPI itself said "samples were lost" (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY).
+    int64_t               stat_padded_frames  = 0;
+    int64_t               stat_trimmed_frames = 0;
+    int                   stat_pad_events     = 0;
+    int                   stat_trim_events    = 0;
+    int                   stat_discontinuities = 0;
+    void reset_stats() {
+        stat_padded_frames = stat_trimmed_frames = 0;
+        stat_pad_events = stat_trim_events = stat_discontinuities = 0;
+    }
+    void log_stats(const char *who) const {
+        if (!stat_pad_events && !stat_trim_events && !stat_discontinuities) return;
+        const double r = rate > 0 ? (double)rate : 48000.0;
+        HrLog::Info(std::string("Audio sync (") + who + "): kept on the wall clock - " +
+                    std::to_string(stat_pad_events) + " gap(s) filled with " +
+                    std::to_string((long long)(stat_padded_frames * 1000.0 / r)) + " ms of silence, " +
+                    std::to_string(stat_trim_events) + " surplus trim(s) of " +
+                    std::to_string((long long)(stat_trimmed_frames * 1000.0 / r)) + " ms, " +
+                    std::to_string(stat_discontinuities) + " WASAPI discontinuity flag(s).");
+    }
+
     // 2.4: per-process loopback (a browser / one window's sound) - defined in audio_extra.inc
     bool open_process(unsigned long pid);
 
@@ -221,8 +244,11 @@ struct WasapiStream {
         AUDCLNT_SHAREMODE mode = AUDCLNT_SHAREMODE_SHARED;
         DWORD flags = (is_loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0)
                       | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        // 2 s of buffer (units of 100 ns). The value used to be 2000000 = only 200 ms: any stall of the
+        // capture thread longer than that (CPU at 100%, a game hogging the cores) made WASAPI overwrite
+        // unread samples, and the recording silently lost that audio -> A/V drift.
         hr = client->Initialize(mode, flags,
-                                2000000LL, 0, mix_fmt, nullptr);
+                                20000000LL, 0, mix_fmt, nullptr);
         if (FAILED(hr)) { close(); return false; }
 
         data_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -275,6 +301,7 @@ struct WasapiStream {
                 break;
 
             bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+            if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) ++stat_discontinuities;
 
             // mix_fmt is always float (WAVE_FORMAT_IEEE_FLOAT) in WASAPI shared
             // Convert float → int16, down/up-mix channels, resample if needed
@@ -313,7 +340,14 @@ struct WasapiStream {
         // A/V SYNC FIX (system audio "runs ahead" of the video): WASAPI loopback delivers NO
         // packets at all while nothing is playing - the silence is simply absent, not sent as
         // zeros.
-        if (loopback && rate > 0) {
+        // A/V SYNC FIX 2: the same wall-clock bookkeeping now runs for EVERY stream, not only for the
+        // system-audio loopback. A microphone has no "no packets while silent" case, but its samples are
+        // lost when the capture thread is starved or WASAPI overruns, and it used to get no correction
+        // at all: the mic track came out shorter than the video, so everything after the first stall
+        // sat early or late against the picture. Zeros are inserted where samples are missing, and
+        // surplus samples (a device clock running fast) are dropped, so the audio length keeps
+        // matching the video length - which is paced by the same QueryPerformanceCounter.
+        if (rate > 0 && clock_freq.QuadPart > 0) {   // no clock -> no correction (never trim blindly)
             LARGE_INTEGER now{};
             QueryPerformanceCounter(&now);
             if (!clock_started) {
@@ -326,12 +360,27 @@ struct WasapiStream {
                 ? (double)(now.QuadPart - clock_t0.QuadPart) * (double)rate / (double)clock_freq.QuadPart
                 : 0.0;
             const int64_t deficit = (int64_t)elapsed_frames - (frames_total + frames_new);
+            int64_t new_kept = frames_new;
             if (deficit > (int64_t)rate / 20) {
                 out.insert(out.begin() + (ptrdiff_t)start_idx, (size_t)deficit * 2, (int16_t)0);
                 frames_total += deficit;
                 total += (int)(deficit * 2);
+                stat_padded_frames += deficit;
+                ++stat_pad_events;
+            } else if (-deficit > (int64_t)rate / 4 && frames_new > 0) {
+                // More audio than wall-clock time (fast device clock): drop the surplus from the end of
+                // this read, keeping ~20 ms of headroom so it doesn't trim again on the very next read.
+                int64_t trim = -deficit - (int64_t)rate / 50;
+                if (trim > frames_new) trim = frames_new;
+                if (trim > 0) {
+                    out.resize(out.size() - (size_t)trim * 2);
+                    total -= (int)(trim * 2);
+                    new_kept -= trim;
+                    stat_trimmed_frames += trim;
+                    ++stat_trim_events;
+                }
             }
-            frames_total += frames_new;
+            frames_total += new_kept;
         }
         return total;
     }
@@ -747,6 +796,8 @@ HR_EXPORT void hr_audio_reset_buffers(const char* mic_wav_path, const char* sys_
     if (g_state->sys_stream_file) { fclose(g_state->sys_stream_file); g_state->sys_stream_file = nullptr; }
     g_state->mic_stream_bytes = 0;
     g_state->sys_stream_bytes = 0;
+    g_state->mic_stream.reset_stats();
+    g_state->sys_stream.reset_stats();
     g_state->mic_stream_file = wav_stream_open(mic_wav_path);
     g_state->sys_stream_file = wav_stream_open(sys_wav_path);
     // Start buffering PCM again now that an actual recording is underway
@@ -797,6 +848,9 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
     // AudioState::buffering's comment. Set before taking the buffers below so
     // there's no window where a worker thread could sneak in one more insert().
     g_state->buffering.store(false);
+
+    g_state->mic_stream.log_stats("mic");
+    g_state->sys_stream.log_stats("system");
 
     hr_audio_flush_buffered();
 
