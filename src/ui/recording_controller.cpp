@@ -32,6 +32,10 @@ extern "C" {
                                 wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
     int hr_merge_av(const wchar_t *ffpath, const wchar_t *video_file, const wchar_t *audio_file,
                      double real_elapsed_sec, double av_start_skew_sec);
+    // Same as hr_merge_av, plus (mp4_copy_path != null) writes the .mp4 copy in the same ffmpeg pass.
+    int hr_merge_av_ex(const wchar_t *ffpath, const wchar_t *video_file, const wchar_t *audio_file,
+                        double real_elapsed_sec, double av_start_skew_sec,
+                        const wchar_t *mp4_copy_path, int *mp4_done);
     int hr_export_mp3(const wchar_t *ffpath, const wchar_t *wav_path, const wchar_t *mp3_path);
     int hr_concat_segments(const wchar_t *ffpath, const wchar_t *list_path, const wchar_t *out_path);
     // 2.4
@@ -1128,6 +1132,12 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_ff_destroy(ffproc_);
             ffproc_ = nullptr;
             if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
+            else if (ff_stdin != 0 && ff_stdin != -1) {
+                // No pipeline was ever created, so nothing owns ffmpeg's stdin write end (the
+                // ffmpeg runner deliberately leaves it to the pipeline) - close it here instead
+                // of leaking one pipe handle per failed Start().
+                CloseHandle(reinterpret_cast<HANDLE>(ff_stdin));
+            }
             if (retry_with_crop) {
                 HrLog::Warn("Window capture: Windows.Graphics.Capture couldn't start for this window - "
                             "retrying the recording with the screen-crop method (anything on top of the "
@@ -1216,12 +1226,19 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // moment Stop() runs instead of leaving it live.
     bool keep_for_preview = pipeline_ && !state_.disable_preview;
 
+    // Sample the real recording time NOW. The finalize thread below spends seconds (up to ~30 s)
+    // waiting for ffmpeg and mixing audio while hr_ctl is still in RECORDING state, so reading
+    // elapsed_seconds() there returned "recording time + finalize time" - which made short
+    // recordings look "too long" for their video and got them wrongly slow-motion-stretched
+    // by hr_merge_av(), and inflated the duration shown in the summary.
+    const double recorded_sec = elapsed_seconds();
+
     // hr_pl_stop() itself waits (with a timeout) for the capture thread and then the writer
     // thread to each signal that they've actually stopped - up to ~1s per thread, by design
     // (see its own comment in pipeline.cpp).
     hr_ff_stop_graceful(ffproc_);
 
-    finalize_thread_ = std::thread([this, keep_for_preview, on_done]() {
+    finalize_thread_ = std::thread([this, keep_for_preview, recorded_sec, on_done]() {
     // Everything below (stopping the pipeline, mixing/merging audio, the mkv->mp4 copy) is not time-critical, and the
     // user is usually back in the game by now: keep this thread out of the game's way.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -1230,6 +1247,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
         // recording segment to close; the graceful "q" sent above is all it needs.
         if (!keep_for_preview) hr_pl_stop(pipeline_);
     } else if (!keep_for_preview) {
+        if (pipeline_) hr_pl_end_recording_segment(pipeline_, 3000);
         hr_pl_stop(pipeline_);
     } else {
         // (recordings always took ~30s to "finalize" and came out
@@ -1238,7 +1256,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
         hr_pl_end_recording_segment(pipeline_, 3000);
     }
     FinishPipelineAfterStop(keep_for_preview);
-    StopFinalizeTail(keep_for_preview);
+    StopFinalizeTail(keep_for_preview, recorded_sec);
     finalizing_ = false;
     if (on_done) on_done();
     });
@@ -1275,7 +1293,18 @@ void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
     }
 }
 
-void RecordingController::StopFinalizeTail(bool keep_for_preview) {
+void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorded_sec) {
+    // Where does the wait after Stop go? One summary line at the end of this function (homrec.log).
+    const auto fin_t0 = std::chrono::steady_clock::now();
+    auto fin_lap = fin_t0;
+    auto fin_ms = [&fin_lap]() {
+        const auto now = std::chrono::steady_clock::now();
+        const long long ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(now - fin_lap).count();
+        fin_lap = now;
+        return ms;
+    };
+    long long ms_ffwait = 0, ms_audio = 0, ms_merge = 0, ms_mp3 = 0, ms_mp4 = 0;
+
     JoinPendingInstantReplayStop();
 
     // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second budget for ffmpeg to
@@ -1288,8 +1317,12 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         if (hr_ff_wait(ffproc_, 20000) != 0 && hr_ff_is_running(ffproc_)) {
             HrLog::Error("Recording: ffmpeg didn't finish on its own after 30s total -- "
                         "force-stopping it now. The output file may be incomplete/corrupt.");
+            // The message above used to be all that happened: ffmpeg kept running (and kept the
+            // output file open) while the audio was merged into / remuxed from that very file.
+            hr_ff_kill(ffproc_);
         }
     }
+    ms_ffwait = fin_ms();
 
     // mic/system audio were captured into separate temp WAVs (unless muted); mix them into one
     // file, then remux that into the finished video via hr_merge_av, the native fast path used
@@ -1363,14 +1396,24 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         }
     }
 
+    ms_audio = fin_ms();
+
     bool merged = false;
+    bool mp4_done_in_merge = false;   // "Both": the .mp4 copy was written by the merge pass itself
+    const std::string mp4_path_both = stem + ".mp4";
     if (have_audio_file && state_.audio_out_channels > 0 && ffmpeg_found_ &&
         hr_path_exists(base.c_str())) {
-        const double merge_elapsed = (crash_video_elapsed_sec_ > 0.0) ? 0.0 : elapsed_seconds();
-        merged = hr_merge_av(ffmpeg_path_.c_str(), current_output_path_.c_str(),
-                              WideFromNarrow(audio_wav).c_str(),
-                              merge_elapsed,
-                              av_start_skew_sec_) != 0;
+        const double merge_elapsed = (crash_video_elapsed_sec_ > 0.0) ? 0.0 : recorded_sec;
+        const bool want_mp4_now = state_.video_format == VideoFormat::Both;
+        const std::wstring mp4_w = WideFromNarrow(mp4_path_both);
+        int mp4_flag = 0;
+        merged = hr_merge_av_ex(ffmpeg_path_.c_str(), current_output_path_.c_str(),
+                                 WideFromNarrow(audio_wav).c_str(),
+                                 merge_elapsed,
+                                 av_start_skew_sec_,
+                                 want_mp4_now ? mp4_w.c_str() : nullptr,
+                                 &mp4_flag) != 0;
+        mp4_done_in_merge = merged && mp4_flag != 0;
         if (!merged) {
             HrLog::Error("Recording: merging the captured audio into the video failed -- "
                         "keeping '" + audio_wav + "' next to the (silent) video instead "
@@ -1381,6 +1424,8 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
                     "(ffmpeg wasn't found, or audio is disabled) -- keeping '" +
                     audio_wav + "' next to the video.");
     }
+
+    ms_merge = fin_ms();
 
     // "Also save audio as a separate MP3" (Settings) was persisted (see hrc_config.cpp) and
     // shown in the dialog, but nothing anywhere ever read state_.separate_audio_mp3 or
@@ -1400,9 +1445,14 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
         }
     }
 
+    ms_mp3 = fin_ms();
+
     // 2.4 - Container "mp4 + mkv": the recording itself was written as .mkv;
-    // stream-copy an .mp4 next to it now that audio is merged (no re-encode).
-    if (state_.video_format == VideoFormat::Both && ffmpeg_found_ && hr_path_exists(base.c_str())) {
+    // stream-copy an .mp4 next to it now that audio is merged (no re-encode). When audio was merged
+    // in the same pass as the .mp4 (see hr_merge_av_ex above) there is nothing left to copy.
+    if (state_.video_format == VideoFormat::Both && mp4_done_in_merge) {
+        HrLog::Info("Recording: also saved an .mp4 copy (same pass as the audio merge) -> " + mp4_path_both);
+    } else if (state_.video_format == VideoFormat::Both && ffmpeg_found_ && hr_path_exists(base.c_str())) {
         const std::string mp4_path = stem + ".mp4";
         if (hr_remux_copy(ffmpeg_path_.c_str(), WideFromNarrow(base).c_str(),
                            WideFromNarrow(mp4_path).c_str())) {
@@ -1411,10 +1461,20 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview) {
             HrLog::Warn("Recording: couldn't create the .mp4 copy - the .mkv is intact.");
         }
     }
+    ms_mp4 = fin_ms();
+    HrLog::Info("Recording: finalize took " +
+                std::to_string((long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - fin_t0).count()) +
+                " ms (encoder flush " + std::to_string(ms_ffwait) + ", audio files/mix " + std::to_string(ms_audio) +
+                ", A/V merge " + std::to_string(ms_merge) + ", mp3 " + std::to_string(ms_mp3) +
+                ", mp4 copy " + std::to_string(ms_mp4) + ").");
 
     // hr_ctl_stop()'s return value is "elapsed seconds for final summary" per its own doc
     // comment, but this used to be called as a bare statement that threw the result away.
-    last_duration_sec_ = hr_ctl_stop(ctl_);
+    // hr_ctl_stop() still has to run (it flips the session back to IDLE), but its return value now
+    // includes the finalize time - the duration sampled at Stop is the real one.
+    const double ctl_elapsed = hr_ctl_stop(ctl_);
+    last_duration_sec_ = recorded_sec > 0.0 ? recorded_sec : ctl_elapsed;
     last_output_path_ = current_output_path_;
     last_output_size_mb_ = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
 

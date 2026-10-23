@@ -58,7 +58,10 @@ private:
     // The actual slow work described in StopAsync()'s comment above - waiting for ffmpeg to
     // finish, mixing/merging/exporting audio, switching pipeline_ out of recording mode (or
     // destroying it), and flipping state_.recording back to false.
-    void StopFinalizeTail(bool keep_for_preview);
+    // `recorded_sec` = how long the recording really ran, sampled the moment Stop was requested
+    // (BEFORE the slow finalize work below) - used for the A/V merge's real-time check and for the
+    // summary duration.
+    void StopFinalizeTail(bool keep_for_preview, double recorded_sec);
 
     // "Hook after recording" (todo2.3.md section 3): runs once StopFinalizeTail() above has a
     // finished output file, per AppState::post_record_hook_type.
