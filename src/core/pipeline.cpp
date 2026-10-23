@@ -664,6 +664,7 @@ struct Pipeline {
 #endif
 
         writer_running.store(true, std::memory_order_relaxed);
+        bool logged_write_fail = false;   // edge-trigger for the write-failure diagnostic below
 
         try {
         while (writer_running.load(std::memory_order_relaxed)) {
@@ -686,10 +687,16 @@ struct Pipeline {
             {
                 std::unique_lock<std::mutex> lock(pipe_queue_mtx);
 
-                // Wait for frames or shutdown signal
-                pipe_queue_cv.wait_for(lock, std::chrono::milliseconds(10), [this]() {
+                // Wait for frames, a shutdown signal or a request to close the pipe. Every one of
+                // those is signalled through pipe_queue_cv (enqueue_frame(), hr_pl_stop(),
+                // hr_pl_destroy(), hr_pl_end_recording_segment()), so the timeout is only a safety
+                // net against a missed wake-up. It used to be 10 ms with a predicate that ignored
+                // pending_close_requested: an idle preview-only pipeline woke the writer 100x per
+                // second forever, and closing a segment always cost up to a full poll interval.
+                pipe_queue_cv.wait_for(lock, std::chrono::milliseconds(50), [this]() {
                     return !pipe_queue.empty() ||
-                           !writer_running.load(std::memory_order_relaxed);
+                           !writer_running.load(std::memory_order_relaxed) ||
+                           pending_close_requested.load(std::memory_order_acquire);
                 });
 
                 // Exit if shutting down and queue is empty
@@ -739,8 +746,15 @@ struct Pipeline {
                         free_bufs.push(std::move(frame));
                 }
 
-                if (!ok) {
-
+                // A failed write used to be swallowed without a trace, so "the recording just stops
+                // growing" (ffmpeg died / disk full / pipe broken) left nothing in the log.
+                if (!ok && !logged_write_fail && recording.load(std::memory_order_relaxed) &&
+                    writer_running.load(std::memory_order_relaxed)) {
+                    logged_write_fail = true;
+                    HrLog::Warn("Writer thread: writing a frame to the encoder's stdin pipe failed (the encoder "
+                                "process has probably exited, or the disk is full) - frames are being discarded.");
+                } else if (ok) {
+                    logged_write_fail = false;
                 }
             }
         }
@@ -1838,6 +1852,12 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     }
 
     // Cleanup resources
+    // The writer thread closes the pipe on its way out. If it never ran (pipeline created but never
+    // started) the handle is still open here - close it so ffmpeg's stdin write end isn't leaked.
+    {
+        const intptr_t ph = pl->pipe_handle.exchange(0, std::memory_order_acq_rel);
+        if (ph != 0 && ph != -1) CloseHandle(reinterpret_cast<HANDLE>(ph));
+    }
     if (pl->dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(pl->dx_ctx);
     if (pl->sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(pl->sw_ctx);
     if (pl->write_evt) { CloseHandle(pl->write_evt); pl->write_evt = nullptr; }
@@ -2049,7 +2069,19 @@ HR_EXPORT void hr_pl_set_recording(void* handle, int active, intptr_t pipe_fd) {
 #ifdef _WIN32
     auto* pl = static_cast<Pipeline*>(handle);
     // A close request that timed out earlier (see hr_pl_end_recording_segment())
-    if (active != 0) pl->pending_close_requested.store(false, std::memory_order_release);
+    if (active != 0) {
+        pl->pending_close_requested.store(false, std::memory_order_release);
+        // A frame the capture thread queued just after the previous segment's pipe was closed (it can
+        // be mid-iteration when end_recording_segment() flips `recording`) would otherwise be written
+        // into the NEXT recording's pipe - at the old size, if the resolution changed in between,
+        // which shifts every following frame of the raw stream. Start every segment on an empty queue.
+        // Only when the target pipe actually changes, so a repeated call with the same handle can't
+        // throw away frames that are legitimately queued.
+        if (pl->pipe_handle.load(std::memory_order_acquire) != pipe_fd) {
+            std::lock_guard<std::mutex> lock(pl->pipe_queue_mtx);
+            std::queue<Pipeline::QueuedFrame>().swap(pl->pipe_queue);
+        }
+    }
     pl->pipe_handle.store(pipe_fd, std::memory_order_release);
     pl->recording.store((active != 0) && (pipe_fd != 0) && (pipe_fd != -1), std::memory_order_release);
     // YUV conversion buffers are lazily sized from the free-list pool.
