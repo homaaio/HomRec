@@ -299,14 +299,21 @@ static double probe_duration_sec(const std::wstring& ffpath, const std::wstring&
 }
 
 // -------------------------------------------------------------
-// hr_merge_av
+// hr_merge_av / hr_merge_av_ex
 // -------------------------------------------------------------
-HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
-                           const wchar_t* video_file,
-                           const wchar_t* audio_file,
-                           double real_elapsed_sec,
-                           double av_start_skew_sec)
+// hr_merge_av_ex() = hr_merge_av() + optionally writing the .mp4 copy of "Both" recordings in the SAME
+// ffmpeg pass (one read of the video instead of two, no separate remux afterwards - the second full
+// read+write of a long recording was a big part of the multi-second "saving" wait after Stop).
+// mp4_copy_path may be null; *mp4_done tells the caller whether that copy now exists.
+HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
+                              const wchar_t* video_file,
+                              const wchar_t* audio_file,
+                              double real_elapsed_sec,
+                              double av_start_skew_sec,
+                              const wchar_t* mp4_copy_path,
+                              int* mp4_done)
 {
+    if (mp4_done) *mp4_done = 0;
     if (!ffpath || !video_file || !audio_file) return 0;
 
     std::wstring vf(video_file);
@@ -318,9 +325,30 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
     else
         tmp += L"_mrgtmp.mp4";
 
+    std::wstring tmp_mp4;
+    if (mp4_copy_path && *mp4_copy_path) {
+        tmp_mp4 = mp4_copy_path;
+        size_t d2 = tmp_mp4.rfind(L'.');
+        tmp_mp4 = (d2 == std::wstring::npos) ? tmp_mp4 + L"_rmxtmp.mp4"
+                                              : tmp_mp4.substr(0, d2) + L"_rmxtmp" + tmp_mp4.substr(d2);
+    }
+
     double video_dur = probe_duration_sec(ffpath, vf);
-    bool stretch = real_elapsed_sec > 0.5 && video_dur > 0.05 &&
-                   video_dur < real_elapsed_sec * 0.9;
+    double audio_dur = probe_duration_sec(ffpath, std::wstring(audio_file));
+
+    // A video that is only a little shorter than the real recording time (a few dropped frames during
+    // a CPU spike) used to be left alone - the old rule only retimed when it was >10% short - and the
+    // audio, which follows the wall clock, then ran late against the picture by exactly that much.
+    const bool have_real = real_elapsed_sec > 0.5 && video_dur > 0.05;
+    bool stretch = have_real && video_dur < real_elapsed_sec * 0.9995 && (real_elapsed_sec - video_dur) > 0.4;
+
+    if (have_real || audio_dur > 0.0) {
+        wchar_t lb[160];
+        swprintf_s(lb, L"%.3f / %.3f / %.3f", video_dur, audio_dur, real_elapsed_sec);
+        std::wstring w = lb;
+        std::string n(w.begin(), w.end());   // ASCII digits only
+        HrLog::Info("Recording: lengths before merge (video / audio / real, seconds) = " + n);
+    }
 
     std::wstring audio_pre;   // goes right before "-i audio_file"
     if (av_start_skew_sec > 0.02) {
@@ -333,54 +361,46 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
         audio_pre = L" -ss " + std::wstring(buf);
     }
 
-    std::wstring cmd;
-    std::wstring cmd_reencode;   // only set on the stretch path: slow fallback, see below
+    // (The audio track is kept on the wall clock while it is captured - see WasapiStream::read() - and its
+    // tail legitimately runs a moment past the Stop click, so it is NOT tempo-corrected here. The line
+    // logged above is what to look at if a recording ever still drifts.)
+    const std::wstring af = L" -af aresample=async=1000";
+
+    wchar_t ratio_buf[64] = L"1";
+    const double stretch_ratio = (stretch && video_dur > 0.0) ? real_elapsed_sec / video_dur : 1.0;
     if (stretch) {
-        double ratio = real_elapsed_sec / video_dur;
-        wchar_t ratio_buf[64];
-        swprintf_s(ratio_buf, L"%.6f", ratio);
-        HrLog::Warn("Recording: the encoded video came out much shorter than the "
+        swprintf_s(ratio_buf, L"%.6f", stretch_ratio);
+        HrLog::Warn("Recording: the encoded video came out shorter than the "
                     "real recording time (likely dropped frames from an overloaded "
                     "machine) - stretching it back to real speed before merging "
                     "audio, instead of cutting the audio down to match.");
-        // 2.4 fix pass 2: the retime used to RE-ENCODE the whole video with libx264 -- on the very
-        // machine that was already too overloaded to keep up while recording (that is why the
-        // video is short in the first place), i.e.
-        cmd =
-            L"\"" + std::wstring(ffpath) + L"\""
-            L" -i \"" + vf + L"\""
-            + audio_pre +
-            L" -i \"" + std::wstring(audio_file) + L"\""
-            L" -bsf:v \"setts=ts=TS*" + std::wstring(ratio_buf) +
-            L":duration=DURATION*" + std::wstring(ratio_buf) + L"\""
-            L" -c:v copy -c:a aac"
-            L" -af aresample=async=1000"
-            L" -map 0:v:0 -map 1:a:0"
-            L" -shortest -y"
-            L" \"" + tmp + L"\"";
-        cmd_reencode =
-            L"\"" + std::wstring(ffpath) + L"\""
-            L" -i \"" + vf + L"\""
-            + audio_pre +
-            L" -i \"" + std::wstring(audio_file) + L"\""
-            L" -vf \"setpts=" + std::wstring(ratio_buf) + L"*PTS\""
-            L" -c:v libx264 -preset veryfast -crf 20 -c:a aac"
-            L" -af aresample=async=1000"
-            L" -map 0:v:0 -map 1:a:0"
-            L" -shortest -y"
-            L" \"" + tmp + L"\"";
-    } else {
-        cmd =
-            L"\"" + std::wstring(ffpath) + L"\""
-            L" -i \"" + vf + L"\""
-            + audio_pre +
-            L" -i \"" + std::wstring(audio_file) + L"\""
-            L" -c:v copy -c:a aac"
-            L" -af aresample=async=1000"
-            L" -map 0:v:0 -map 1:a:0"
-            L" -shortest -y"
-            L" \"" + tmp + L"\"";
     }
+
+    const std::wstring inputs =
+        L"\"" + std::wstring(ffpath) + L"\""
+        L" -i \"" + vf + L"\""
+        + audio_pre +
+        L" -i \"" + std::wstring(audio_file) + L"\"";
+
+    // One output = stream-copied video + AAC audio. With `with_setts` the video timestamps are
+    // rescaled by the copy-only "setts" bitstream filter (fast: no re-encode).
+    auto output_part = [&](const std::wstring &out, bool faststart, bool with_setts) {
+        std::wstring o = L" -map 0:v:0 -map 1:a:0";
+        if (with_setts)
+            o += L" -bsf:v \"setts=ts=TS*" + std::wstring(ratio_buf) + L":duration=DURATION*" + std::wstring(ratio_buf) + L"\"";
+        o += L" -c:v copy -c:a aac" + af + L" -shortest";
+        if (faststart) o += L" -movflags +faststart";
+        o += L" -y \"" + out + L"\"";
+        return o;
+    };
+
+    // The retime used to RE-ENCODE the whole video with libx264 -- on the very machine that was already
+    // too overloaded to keep up while recording. Copy-retime is tried first; this is only the fallback.
+    const std::wstring cmd_reencode =
+        inputs +
+        L" -vf \"setpts=" + std::wstring(ratio_buf) + L"*PTS\""
+        L" -c:v libx264 -preset veryfast -crf 20 -c:a aac" + af +
+        L" -map 0:v:0 -map 1:a:0 -shortest -y \"" + tmp + L"\"";
 
     // The fixed 180 s timeout killed ffmpeg mid-write on long recordings (the stretch path re-
     // encodes the WHOLE video), and the code below then replaced the finished recording with
@@ -393,22 +413,46 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
     if (timeout_sec > 6.0 * 3600.0) timeout_sec = 6.0 * 3600.0;
 
     RunResult rr;
-    run_cmd_ex(cmd, (DWORD)(timeout_sec * 1000.0), &rr);
+    bool mp4_in_pass = !tmp_mp4.empty();
+    {
+        std::wstring cmd = inputs + output_part(tmp, false, stretch);
+        if (mp4_in_pass) cmd += output_part(tmp_mp4, true, stretch);
+        run_cmd_ex(cmd, (DWORD)((mp4_in_pass ? timeout_sec * 2.0 : timeout_sec) * 1000.0), &rr);
+    }
+    // A problem with the extra .mp4 output must never cost the .mkv its audio: redo the merge without it
+    // (the caller then falls back to the separate remux).
+    if (mp4_in_pass && (!rr.ok() || !fexists(tmp) || !fexists(tmp_mp4))) {
+        HrLog::Warn("Recording: writing the .mkv and the .mp4 in one pass failed - redoing the merge for the .mkv alone.");
+        DeleteFileW(tmp.c_str());
+        DeleteFileW(tmp_mp4.c_str());
+        mp4_in_pass = false;
+        rr = RunResult{};
+        run_cmd_ex(inputs + output_part(tmp, false, stretch), (DWORD)(timeout_sec * 1000.0), &rr);
+    }
 
     // Stretch path only: if the copy-retime was refused (an old ffmpeg without "setts", an
     // odd container...) fall back to the original full re-encode so the recording still ends
-    // up with correct timing -- that is the only case where the heavy path runs now.
+    // up with correct timing -- that is the only case where the heavy path runs now. A tiny
+    // correction (<2%) isn't worth a full re-encode: merge without the retime instead.
     if (stretch && (!rr.ok() || !fexists(tmp))) {
-        HrLog::Warn("Recording: fast timestamp retime wasn't accepted by ffmpeg - falling back to a full re-encode.");
         DeleteFileW(tmp.c_str());
-        double re_timeout = 180.0;
-        if (video_dur > 0.0 && video_dur * 2.0 > re_timeout) re_timeout = video_dur * 2.0;
-        if (re_timeout > 6.0 * 3600.0) re_timeout = 6.0 * 3600.0;
-        rr = RunResult{};
-        run_cmd_ex(cmd_reencode, (DWORD)(re_timeout * 1000.0), &rr);
+        if (stretch_ratio < 1.02) {
+            HrLog::Warn("Recording: fast timestamp retime wasn't accepted by ffmpeg - merging without it (the correction was under 2%).");
+            rr = RunResult{};
+            run_cmd_ex(inputs + output_part(tmp, false, false), (DWORD)(timeout_sec * 1000.0), &rr);
+        } else {
+            HrLog::Warn("Recording: fast timestamp retime wasn't accepted by ffmpeg - falling back to a full re-encode.");
+            double re_timeout = 180.0;
+            if (video_dur > 0.0 && video_dur * 2.0 > re_timeout) re_timeout = video_dur * 2.0;
+            if (re_timeout > 6.0 * 3600.0) re_timeout = 6.0 * 3600.0;
+            rr = RunResult{};
+            run_cmd_ex(cmd_reencode, (DWORD)(re_timeout * 1000.0), &rr);
+        }
+        mp4_in_pass = false;   // the .mp4 written alongside (if any) was made by the failed command
+        if (!tmp_mp4.empty()) DeleteFileW(tmp_mp4.c_str());
     }
 
-    if (!fexists(tmp)) return 0;
+    if (!fexists(tmp)) { if (!tmp_mp4.empty()) DeleteFileW(tmp_mp4.c_str()); return 0; }
     if (!rr.ok()) {
         HrLog::Error(rr.timed_out
             ? "Recording: merging audio into the video timed out - keeping the video without audio "
@@ -416,6 +460,7 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
             : "Recording: ffmpeg reported an error while merging audio - keeping the video without audio "
               "(the separate audio file is kept so nothing is lost).");
         DeleteFileW(tmp.c_str());
+        if (!tmp_mp4.empty()) DeleteFileW(tmp_mp4.c_str());
         return 0;
     }
 
@@ -424,9 +469,28 @@ HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
     if (!MoveFileExW(tmp.c_str(), video_file, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
         HrLog::Error("Recording: couldn't replace the video with the merged file - keeping the original.");
         DeleteFileW(tmp.c_str());
+        if (!tmp_mp4.empty()) DeleteFileW(tmp_mp4.c_str());
         return 0;
     }
+    if (mp4_in_pass && fexists(tmp_mp4)) {
+        if (MoveFileExW(tmp_mp4.c_str(), mp4_copy_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+            if (mp4_done) *mp4_done = 1;
+        } else {
+            DeleteFileW(tmp_mp4.c_str());
+        }
+    } else if (!tmp_mp4.empty()) {
+        DeleteFileW(tmp_mp4.c_str());
+    }
     return fexists(vf) ? 1 : 0;
+}
+
+HR_EXPORT int hr_merge_av(const wchar_t* ffpath,
+                           const wchar_t* video_file,
+                           const wchar_t* audio_file,
+                           double real_elapsed_sec,
+                           double av_start_skew_sec)
+{
+    return hr_merge_av_ex(ffpath, video_file, audio_file, real_elapsed_sec, av_start_skew_sec, nullptr, nullptr);
 }
 
 HR_EXPORT int hr_export_mp3(const wchar_t* ffpath, const wchar_t* wav_path, const wchar_t* mp3_path)
