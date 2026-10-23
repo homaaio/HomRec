@@ -731,7 +731,13 @@ env --unset #name="mode"
 > **The commands actually implemented today** (`console_window.cpp`'s real `CmdLog`): `log clear`, `log open`, and `log <message>` (appends `message` to `homrec.log`). The flag-based `log --tail`/`--search`/`--since`/`open --log`/`connect --log` forms documented below are the older, unimplemented syntax noted at the top of this file.
 
 ```
-log clear     # truncates homrec.log
+log clear                 # truncates homrec.log (same as before)
+log clear --pc            # truncates logs\pc.log
+log clear --plugins       # truncates logs\plugins.log
+log clear --wgc           # truncates logs\wgc.log
+log clear --ffmpeg        # truncates logs\ffmpeg_ddagrab.log (+ its progress file)
+log clear --homrec        # explicit form of the default; combine freely: log clear --pc --plugins
+log clear --all           # truncates EVERY *.log in the logs folder (also plugins' own custom logs); short: -a
 log open      # opens homrec.log in the default editor
 log something happened   # appends "[console] something happened" to homrec.log
 ```

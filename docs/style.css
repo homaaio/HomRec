@@ -1,5 +1,6 @@
 /* HomRec docs — shared stylesheet.
-   Pure CSS, no JS, no webfonts: fast on weak PCs. */
+   No webfonts, no frameworks: fast on weak PCs.
+   The only script is releases.js (live GitHub Releases sync). */
 
 :root {
     --accent: #0047ab;
@@ -380,6 +381,11 @@ pre code {
     background: none;
     padding: 0;
     color: inherit;
+}
+
+.muted-note {
+    color: var(--muted);
+    font-size: 12.5px;
 }
 
 /* ---------- footer ---------- */

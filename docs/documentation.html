@@ -19,7 +19,7 @@
         <a href="support.html">Support</a>
         <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
         <div class="spacer"></div>
-        <div class="version-badge">v2.4</div>
+        <div class="version-badge" data-latest-version>v2.4.2</div>
     </aside>
 
     <div class="content">
@@ -81,7 +81,7 @@
             <tr><th>Form</th><th>Effect</th></tr>
             <tr><td><code>log &lt;message&gt;</code></td><td>Appends <code>[console] &lt;message&gt;</code> to <code>homrec.log</code>.</td></tr>
             <tr><td><code>log open</code></td><td>Opens <code>homrec.log</code> in your default text editor.</td></tr>
-            <tr><td><code>log clear</code></td><td>Truncates (empties) <code>homrec.log</code> — the file itself stays, only its contents are wiped.</td></tr>
+            <tr><td><code>log clear [flags]</code></td><td>Truncates (empties) <code>homrec.log</code> — the file itself stays, only its contents are wiped. Flags: <code>--pc</code>, <code>--plugins</code>, <code>--wgc</code>, <code>--ffmpeg</code>, <code>--homrec</code> (combine them), or <code>--all</code> / <code>-a</code> for every <code>*.log</code> in the logs folder.</td></tr>
         </table>
 
         <h3>Console utilities</h3>
@@ -346,5 +346,6 @@ hom: plugin removed. Its saved settings (if any) were kept -- use 'hom purge inp
 
     </div>
 
+<script src="releases.js"></script>
 </body>
 </html>

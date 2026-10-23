@@ -17,75 +17,27 @@
 
     <h2>Downloads</h2>
     <table>
-        <tr>
-            <th>Version</th>
-            <th>Date</th>
-            <th>File</th>
-            <th>Size</th>
-            <th>Links</th>
-        </tr>
-        <tr>
-            <td>2.4</td>
-            <td>2026-10-18</td>
-            <td>homrec-setup-win64-2.4.exe</td>
-            <td>61 MB</td>
-            <td>
-                <a href="https://github.com/homaaio/HomRec/releases/download/v2.4/homrec-setup-win64-2.4.0.exe">[github]</a>
-                <a href="https://github.com/homaaio/HomRec/releases/download/v2.4/homrec-2.4.0-win64-portable.7z">[.7z portable (github)]</a>
-                <span class="soon">[google-drive — coming soon]</span>
-                <span class="soon">[mega — coming soon]</span>
-            </td>
-        </tr>
-        <tr>
-        <tr>
-            <td>2.2</td>
-            <td>2026-09-12</td>
-            <td>homrec-setup-win64-2.2.exe</td>
-            <td>61 MB</td>
-            <td>
-                <a href="https://github.com/homaaio/HomRec/releases/download/v2.2/homrec-setup-win64-2.2.exe">[github]</a>
-                <a href="https://github.com/homaaio/HomRec/releases/download/v2.2/homrec-2.2-win64-portable.7z">[.7z portable (github)]</a>
-                <span class="soon">[google-drive — coming soon]</span>
-                <span class="soon">[mega — coming soon]</span>
-            </td>
-        </tr>
-        <tr>
-            <td>2.1</td>
-            <td>2026-09-12</td>
-            <td>homrec-setup-win64-2.1.exe</td>
-            <td>60.8 MB</td>
-            <td>
-                <a href="https://github.com/homaaio/HomRec/releases/download/v2.1/homrec-setup-win64-2.1.exe">[github]</a>
-                <span class="soon">[catbox — coming soon]</span>
-                <span class="soon">[google-drive — coming soon]</span>
-                <span class="soon">[mega — coming soon]</span>
-            </td>
-        </tr>
-        <tr>
-            <td>2.0</td>
-            <td>2026-08-09</td>
-            <td>homrec-v2.0-win64.zip</td>
-            <td>88 MB</td>
-            <td>
-                <a href="https://github.com/homaaio/HomRec/releases/download/v2.0/HomRec-2.0-win64.zip">[github]</a>
-                <span class="soon">[catbox — coming soon]</span>
-                <a href="https://drive.google.com/file/d/1SwhsZrVgYfBkjeZY4fM4P4B5eizT3Di9/view?usp=sharing">[google-drive]</a>
-                <span class="soon">[mega — coming soon]</span>
-            </td>
-        </tr>
-        <tr>
-            <td>2.0</td>
-            <td>2026-08-09</td>
-            <td>homrec-v2.0-win64.tar.gz</td>
-            <td>85 MB</td>
-            <td>
-                <a href="https://github.com/homaaio/HomRec/releases/download/v2.0/HomRec-2.0-win64.tar.gz">[github]</a>
-                <span class="soon">[catbox — coming soon]</span>
-                <a href="https://drive.google.com/file/d/15YLW-gSxpmCHu7zW2wWLN7OLuHQRcPiD/view?usp=sharing">[google-drive]</a>
-                <span class="soon">[mega — coming soon]</span>
-            </td>
-        </tr>
+        <thead>
+            <tr>
+                <th>Version</th>
+                <th>Date</th>
+                <th>File</th>
+                <th>Size</th>
+                <th>Links</th>
+            </tr>
+        </thead>
+        <tbody id="releases-body">
+            <tr>
+                <td colspan="5">Loading releases from GitHub…</td>
+            </tr>
+        </tbody>
     </table>
+    <noscript>
+        <p>This table is filled in automatically from GitHub Releases and needs JavaScript.
+        Without it, get every version from the
+        <a href="https://github.com/homaaio/HomRec/releases">releases page</a>.</p>
+    </noscript>
+    <p class="muted-note">The list updates by itself whenever a new release is published on GitHub.</p>
 
     <p><a href="https://github.com/homaaio/HomRec/blob/main/CHANGELOG.txt">[changelog]</a> · <a href="https://github.com/homaaio/HomRec/releases">[all releases]</a></p>
 
@@ -104,5 +56,6 @@
 
 </div>
 
+<script src="releases.js"></script>
 </body>
 </html>
