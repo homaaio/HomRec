@@ -149,7 +149,6 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     /* Register hotkeys (configurable - see hr_hk_configure()) */
     _RegisterHotkeyChecked(ctx->hwnd, HK_START_STOP, ctx->mod_start_stop, ctx->vk_start_stop);
     _RegisterHotkeyChecked(ctx->hwnd, HK_PAUSE,      ctx->mod_pause,      ctx->vk_pause);
-    _RegisterHotkeyChecked(ctx->hwnd, HK_FULLSCREEN, ctx->mod_fullscreen, ctx->vk_fullscreen);
     _RegisterHotkeyChecked(ctx->hwnd, HK_SAVE_REPLAY, ctx->mod_save_replay, ctx->vk_save_replay);
     for (const auto &c : ctx->customs) _RegisterHotkeyChecked(ctx->hwnd, c.id, c.mod, c.vk);
 
@@ -165,7 +164,6 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     /* Unregister on exit */
     UnregisterHotKey(ctx->hwnd, HK_START_STOP);
     UnregisterHotKey(ctx->hwnd, HK_PAUSE);
-    UnregisterHotKey(ctx->hwnd, HK_FULLSCREEN);
     UnregisterHotKey(ctx->hwnd, HK_SAVE_REPLAY);
     for (const auto &c : ctx->customs) UnregisterHotKey(ctx->hwnd, c.id);
     DestroyWindow(ctx->hwnd);
@@ -318,7 +316,8 @@ HR_EXPORT void hr_hk_configure(void *handle,
 }
 
 // hr_hk_start
-// Registers F9/F10/F11 system-wide and starts the message loop.
+// Registers the global hotkeys (F9/F10/F8 by default; fullscreen is window-local, see above)
+// and starts the message loop.
 // Non-blocking: spawns a background thread.
 HR_EXPORT int hr_hk_start(void *handle) {
     if (!handle) return 0;
