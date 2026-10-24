@@ -78,6 +78,31 @@ std::wstring ExtractSettingValue(const std::wstring &raw) {
     return Trim(raw.substr(i));
 }
 
+// Everything after the command word, trimmed ("" when the line is just the command).
+// Used to reject stray arguments on commands that take none ("clear asdf" must not clear).
+std::wstring RestAfterCommand(const std::wstring &raw) {
+    size_t i = raw.find_first_not_of(L" \t\r\n");
+    if (i == std::wstring::npos) return L"";
+    size_t j = raw.find_first_of(L" \t\r\n", i);
+    if (j == std::wstring::npos) return L"";
+    return Trim(raw.substr(j));
+}
+
+// Value of an on/off command (sec / secui / secp). Anything that isn't a clear 0/1 is Invalid -
+// before, "sec banana" silently counted as "on" and "sec 0 junk" ignored the junk.
+enum class SwitchArg { Query, On, Off, Invalid };
+SwitchArg ParseSwitchArg(const std::wstring &raw) {
+    std::wistringstream iss(raw);
+    std::wstring cmd, val, extra;
+    iss >> cmd >> val >> extra;
+    if (!extra.empty()) return SwitchArg::Invalid;
+    if (val.empty())    return SwitchArg::Query;
+    std::transform(val.begin(), val.end(), val.begin(), ::towlower);
+    if (val == L"0" || val == L"off" || val == L"false") return SwitchArg::Off;
+    if (val == L"1" || val == L"on"  || val == L"true")  return SwitchArg::On;
+    return SwitchArg::Invalid;
+}
+
 // Should this resolved (post-alias-expansion) command require the
 // "inwid" confirmation prefix before RunCommand() actually runs it? See
 // the class comment at the top of console_window.h for the concept.
@@ -834,6 +859,24 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
         // ordinary command word, i.e.
     }
 
+    // Commands that take no arguments: "clear asdf" used to just clear, "ping --x" just pong, etc.
+    // Anything typed after the command word is now refused instead of silently ignored.
+    {
+        static const wchar_t *const kNoArgCommands[] = {
+            L"version", L"ver", L"ping", L"clear", L"info",
+            L"status", L"hide", L"pwd", L"whoami"
+        };
+        for (const wchar_t *name : kNoArgCommands) {
+            if (cmd != name) continue;
+            const std::wstring extra = RestAfterCommand(raw);
+            if (!extra.empty()) {
+                PrintWarn(cmd + L": takes no arguments (got '" + extra + L"') - not run. usage: " + cmd);
+                return;
+            }
+            break;
+        }
+    }
+
     if (cmd == L"version") CmdVersion(raw);
     else if (cmd == L"ver") CmdVer(raw);
     else if (cmd == L"ping") CmdPing(raw);
@@ -1063,9 +1106,10 @@ void ConsoleWindow::CmdAlias(const std::wstring &raw) {
 
 void ConsoleWindow::CmdHistory(const std::wstring &raw) {
     std::wistringstream iss(raw);
-    std::wstring cmd, arg;
-    iss >> cmd >> arg;
+    std::wstring cmd, arg, extra;
+    iss >> cmd >> arg >> extra;
     std::transform(arg.begin(), arg.end(), arg.begin(), ::towlower);
+    if (!extra.empty()) { PrintWarn(L"usage: history   |   history clear"); return; }
     if (arg == L"clear" || arg == L"-c" || arg == L"--clear") {
         size_t n = history_.size();
         ClearHistory();
@@ -1114,6 +1158,12 @@ void ConsoleWindow::CmdLog(const std::wstring &raw) {
     std::wstring first_word = rest;
     size_t sp2 = rest.find(L' ');
     if (sp2 != std::wstring::npos) first_word = rest.substr(0, sp2);
+
+    if (rest.empty()) {
+        // Used to append an empty "[console] " line and say "logged".
+        PrintWarn(L"usage: log <message>  |  log -- <message>  |  log clear [flags]  |  log open");
+        return;
+    }
 
     if (first_word == L"clear") {
         // Truncate rather than delete -- matches rm's convention of being
@@ -1174,9 +1224,21 @@ void ConsoleWindow::CmdLog(const std::wstring &raw) {
         return;
     }
     if (first_word == L"open") {
+        if (rest.size() > first_word.size()) { PrintWarn(L"usage: log open   (takes no arguments)"); return; }
         HINSTANCE r = ShellExecuteW(main_window_, L"open", log_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         if ((INT_PTR)r > 32) PrintOk(L"opened " + log_path);
         else PrintErr(L"couldn't open " + log_path + L" (no default text editor associated with .log?)");
+        return;
+    }
+
+    // "log -- <text>" logs <text> verbatim, even when it starts with '-'.
+    if (first_word == L"--") {
+        rest = (sp2 == std::wstring::npos) ? std::wstring() : Trim(rest.substr(sp2 + 1));
+        if (rest.empty()) { PrintWarn(L"usage: log -- <message>"); return; }
+    } else if (first_word[0] == L'-') {
+        // "log --asasasasa" used to be written to homrec.log as if it were a message.
+        PrintWarn(L"log: unknown option '" + first_word + L"'");
+        PrintInfo(L"usage: log <message>  |  log -- <message>  |  log clear [flags]  |  log open");
         return;
     }
 
@@ -1217,8 +1279,12 @@ void ConsoleWindow::CmdPreset(const std::wstring &raw) {
     static const wchar_t kPresetsDir[] = L"presets";
 
     std::wistringstream iss(raw);
-    std::wstring cmd, name;
-    iss >> cmd >> name;
+    std::wstring cmd, name, extra;
+    iss >> cmd >> name >> extra;
+    if (!extra.empty()) {
+        PrintWarn(L"usage: preset <name>  (one name, no extra arguments; a bare \"preset\" lists them)");
+        return;
+    }
 
     std::vector<std::wstring> names;
     std::error_code ec;
@@ -1285,15 +1351,20 @@ void ConsoleWindow::CmdPreset(const std::wstring &raw) {
 
 void ConsoleWindow::CmdSetHrc(const std::wstring &raw) {
     std::wistringstream iss(raw);
-    std::wstring cmd, path, flag;
-    iss >> cmd >> path >> flag;
+    std::wstring cmd, path, flag, extra;
+    iss >> cmd >> path >> flag >> extra;
 
-    if (path.empty()) {
+    if (path.empty() || !extra.empty()) {
         PrintWarn(L"usage: sethrc <path> <1|true|0|false>  (e.g. \"sethrc homrec.hrc 1\" as the "
                    L"first line of cfg/config.cfg to seed it from an .hrc profile - see commands.md)");
         return;
     }
     bool enable = (flag == L"1" || flag == L"true" || flag == L"yes");
+    const bool disable = (flag.empty() || flag == L"0" || flag == L"false" || flag == L"no");
+    if (!enable && !disable) {
+        PrintWarn(L"sethrc: '" + flag + L"' isn't a valid flag - use 1/true or 0/false");
+        return;
+    }
     if (!enable) {
         PrintInfo(L"sethrc " + path + L": flag not set (1/true) - nothing imported");
         return;
@@ -1345,6 +1416,7 @@ void ConsoleWindow::CmdClip(const std::wstring &raw) {
         CloseClipboard();
         PrintOk(L"copied to clipboard");
     } else if (sub == L"--paste") {
+        { std::wstring extra; iss >> extra; if (!extra.empty()) { PrintWarn(L"usage: clip --paste   (takes no arguments)"); return; } }
         if (!OpenClipboard(hwnd_)) { PrintErr(L"couldn't open the clipboard"); return; }
         HANDLE hData = GetClipboardData(CF_UNICODETEXT);
         if (hData) {
@@ -1355,6 +1427,7 @@ void ConsoleWindow::CmdClip(const std::wstring &raw) {
         }
         CloseClipboard();
     } else if (sub == L"--clear") {
+        { std::wstring extra; iss >> extra; if (!extra.empty()) { PrintWarn(L"usage: clip --clear   (takes no arguments)"); return; } }
         if (!OpenClipboard(hwnd_)) { PrintErr(L"couldn't open the clipboard"); return; }
         EmptyClipboard();
         CloseClipboard();
@@ -1620,8 +1693,10 @@ void ConsoleWindow::CmdSec(const std::wstring &raw) {
     std::wistringstream iss(raw);
     std::wstring cmd, val;
     iss >> cmd >> val;
-    if (val.empty()) { PrintInfo(sec_core_ ? L"1 (protected)" : L"0 (ALL protections disabled)"); return; }
-    sec_core_ = !(val == L"0" || val == L"off" || val == L"false");
+    const SwitchArg arg = ParseSwitchArg(raw);
+    if (arg == SwitchArg::Invalid) { PrintWarn(L"usage: sec [0|1]   (no value shows the current state)"); return; }
+    if (arg == SwitchArg::Query) { PrintInfo(sec_core_ ? L"1 (protected)" : L"0 (ALL protections disabled)"); return; }
+    sec_core_ = (arg == SwitchArg::On);
     PrintWarn(L"sec " + val + L": MASTER fuse " + (sec_core_ ? L"ENABLED" : L"DISABLED (everything unlocked)"));
 }
 
@@ -1629,8 +1704,10 @@ void ConsoleWindow::CmdSecUi(const std::wstring &raw) {
     std::wistringstream iss(raw);
     std::wstring cmd, val;
     iss >> cmd >> val;
-    if (val.empty()) { PrintInfo(sec_ui_ ? L"1 (protected)" : L"0 (UI protection disabled)"); return; }
-    sec_ui_ = !(val == L"0" || val == L"off" || val == L"false");
+    const SwitchArg arg = ParseSwitchArg(raw);
+    if (arg == SwitchArg::Invalid) { PrintWarn(L"usage: secui [0|1]   (no value shows the current state)"); return; }
+    if (arg == SwitchArg::Query) { PrintInfo(sec_ui_ ? L"1 (protected)" : L"0 (UI protection disabled)"); return; }
+    sec_ui_ = (arg == SwitchArg::On);
     PrintWarn(L"secui " + val + L": UI protection " + (sec_ui_ ? L"ENABLED" : L"DISABLED"));
 }
 
@@ -1638,8 +1715,10 @@ void ConsoleWindow::CmdSecP(const std::wstring &raw) {
     std::wistringstream iss(raw);
     std::wstring cmd, val;
     iss >> cmd >> val;
-    if (val.empty()) { PrintInfo(sec_plugin_ ? L"1 (protected)" : L"0 (plugin checks disabled)"); return; }
-    sec_plugin_ = !(val == L"0" || val == L"off" || val == L"false");
+    const SwitchArg arg = ParseSwitchArg(raw);
+    if (arg == SwitchArg::Invalid) { PrintWarn(L"usage: secp [0|1]   (no value shows the current state)"); return; }
+    if (arg == SwitchArg::Query) { PrintInfo(sec_plugin_ ? L"1 (protected)" : L"0 (plugin checks disabled)"); return; }
+    sec_plugin_ = (arg == SwitchArg::On);
     PrintWarn(L"secp " + val + L": plugin version-check / RAM watchdog " + (sec_plugin_ ? L"ENABLED" : L"DISABLED"));
 }
 
