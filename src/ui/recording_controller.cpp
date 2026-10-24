@@ -102,6 +102,7 @@ extern "C" {
     uint64_t hr_pl_get_preview_seq(void *handle);
     int hr_pl_get_native_size(void *handle, int *out_w, int *out_h);
     void hr_pl_set_recording(void *handle, int active, intptr_t pipe_fd);
+    void hr_pl_set_timestamped_pipe(void *handle, int fps);
     void hr_pl_set_priority_boost(void *handle, int flag);
     void hr_pl_stats(void *handle, long long *out_frames, long long *out_drops, double *out_fps);
     void hr_pl_set_overlays(void *handle, const HrOverlayDesc *items, int count);
@@ -275,12 +276,22 @@ void RecordingController::Initialize() {
 // One line with the "weak PC" switches that are really in effect for THIS recording. The benchmark run "(c) with
 // gpu_low_priority=0" still logged "GPU priority lowered", i.e. it ran with the setting ON and the A/B test compared
 // two identical runs - this line makes such a mix-up visible in homrec.log at a glance.
+static int HrPipeInputMode(const AppState &st) {
+    if (!st.skip_static_frames) return 1;
+    const std::string c = " " + st.custom_ffmpeg_args + " ";
+    static const char *const kConflicts[] = {" -vf ", " -vf=", "-filter", " -r ", "-fps_mode", "-vsync", " -f nut"};
+    for (const char *k : kConflicts)
+        if (c.find(k) != std::string::npos) return 1;
+    return 2;
+}
+
 static std::string HrLowImpactFlagsLine(const AppState &st) {
     auto onoff = [](bool v) { return v ? "ON" : "off"; };
     return std::string("Recording: weak-PC switches in effect: gpu_low_priority=") + onoff(st.gpu_low_priority) +
            ", game_friendly_priority=" + onoff(st.game_friendly_priority) +
            ", qsv_low_power=" + onoff(st.qsv_low_power) +
            ", gpu_convert=" + onoff(st.gpu_convert) +
+           ", skip_static_frames=" + onoff(HrPipeInputMode(st) == 2) +
            ", ddagrab=" + onoff(st.gpu_capture_ddagrab) + ".";
 }
 
@@ -1048,7 +1059,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         int pipe_h = output_h_;
         hr_ff_set_video_params(ffproc_, pipe_w, pipe_h, state_.target_fps);
         hr_ff_set_output_size(ffproc_, pipe_w, pipe_h);
-        hr_ff_set_pipe_input(ffproc_, 1);
+        hr_ff_set_pipe_input(ffproc_, HrPipeInputMode(state_));
 
         if (hr_ff_start(ffproc_) != 0) {
             error_out = L"Failed to start the ffmpeg process.";
@@ -1090,6 +1101,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             // A reused preview pipeline keeps whatever fps it was created with, but ffmpeg above was
             // just told state_.target_fps - if they differ (e.g.
             hr_pl_set_fps(pipeline_, state_.target_fps);
+            hr_pl_set_timestamped_pipe(pipeline_, HrPipeInputMode(state_) == 2 ? state_.target_fps : 0);
             hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
             reused_preview_pipeline = true;
         } else {
@@ -1148,6 +1160,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             return false;
         }
 
+        hr_pl_set_timestamped_pipe(pipeline_, HrPipeInputMode(state_) == 2 ? state_.target_fps : 0);
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         t_video_go = std::chrono::steady_clock::now();
 
@@ -1863,7 +1876,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     hr_ff_set_codec_args(replay_ff_, NarrowFromWide(codec_args).c_str());
     hr_ff_set_video_params(replay_ff_, output_w_, output_h_, state_.target_fps);
     hr_ff_set_output_size(replay_ff_, output_w_, output_h_);
-    hr_ff_set_pipe_input(replay_ff_, 1);
+    hr_ff_set_pipe_input(replay_ff_, HrPipeInputMode(state_));
     std::string seg_args = "-f segment -segment_time " + std::to_string(kReplaySegmentSec) +
                             " -segment_wrap " + std::to_string(wrap) + " -reset_timestamps 1";
     hr_ff_set_extra_output_args(replay_ff_, seg_args.c_str());
@@ -1885,6 +1898,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
         return false;
     }
     hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
+    hr_pl_set_timestamped_pipe(pipeline_, HrPipeInputMode(state_) == 2 ? state_.target_fps : 0);
     hr_pl_set_recording(pipeline_, /*active=*/1, stdin_h);
 
     if (state_.audio_out_channels > 0 && !state_.recording) {
@@ -2385,6 +2399,7 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
         return false;
     }
     hr_pl_set_output_pixfmt(qt_pipeline_, codec_is_hw ? 1 : 0);
+    hr_pl_set_timestamped_pipe(qt_pipeline_, 0);   // benchmark: must measure real, unskipped frames
     hr_pl_set_recording(qt_pipeline_, /*active=*/1, ff_stdin);
 
     qt_fps_sum_ = 0.0;
