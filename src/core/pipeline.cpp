@@ -33,6 +33,7 @@
 #include "../utils/log.h"
 #include "overlay_render.h"
 #include "wgc_capture.h"   // 2.4: Windows.Graphics.Capture window source
+#include "nut_mux.h"       // timestamped pipe to ffmpeg (see hr_pl_set_timestamped_pipe)
 
 static constexpr int HR_DX_OK      =  0;
 static constexpr int HR_DX_TIMEOUT =  1;
@@ -60,6 +61,10 @@ extern "C" {
     void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
     void  hr_composite_cursor_nv12(uint8_t *nv12, int width, int height, int origin_x, int origin_y,
                                     float scale_x, float scale_y);
+    void  hr_composite_cursor_yuv(uint8_t *yuv, int width, int height, int origin_x, int origin_y,
+                                   float scale_x, float scale_y, int nv12);
+    void  hr_composite_cursor_rgb24(uint8_t *rgb, int width, int height, int origin_x, int origin_y,
+                                     float scale_x, float scale_y);
     int   hr_cursor_state(int *visible, int *x, int *y, unsigned long long *handle);
     int   hr_dx_get_dirty_rows(void *handle, int *y0, int *y1);
     void  hr_dx_get_stats(void *handle, unsigned long long *acquired, unsigned long long *skipped,
@@ -295,6 +300,37 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
     if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
 
     if ((sw % dw) == 0 && (sh % dh) == 0) {
+        // Integer ratio. The full box filter below reads EVERY source pixel (8 MB at 1080p, scalar, on
+        // the capture thread, every Preview-FPS tick - a measurable share of a weak CPU while the
+        // preview is on). A thumbnail does not need that: average at most 2x2 samples per block
+        // (spread over it), which touches ~1/(rx*ry/4) of the memory for the same picture.
+        const int rx0 = sw / dw, ry0 = sh / dh;
+        if (rx0 * ry0 > 4) {
+            const int nx = std::min(rx0, 2), ny = std::min(ry0, 2);
+            const int ox[2] = {rx0 / 4, (rx0 * 3) / 4};
+            const int oy[2] = {ry0 / 4, (ry0 * 3) / 4};
+            const uint32_t cnt = (uint32_t)(nx * ny);
+            for (int y = 0; y < dh; ++y) {
+                uint8_t* orow = dst + (size_t)y * dw * 3;
+                const int sy0 = y * ry0;
+                for (int x = 0; x < dw; ++x) {
+                    uint32_t r = 0, g = 0, b = 0;
+                    const int sx0 = x * rx0;
+                    for (int j = 0; j < ny; ++j) {
+                        const uint8_t* row = bgra + ((size_t)(sy0 + oy[j]) * sw + sx0) * 4;
+                        for (int i = 0; i < nx; ++i) {
+                            const uint8_t* px = row + (size_t)ox[i] * 4;
+                            b += px[0]; g += px[1]; r += px[2];
+                        }
+                    }
+                    uint8_t* o = orow + (size_t)x * 3;
+                    o[0] = (uint8_t)(r / cnt);
+                    o[1] = (uint8_t)(g / cnt);
+                    o[2] = (uint8_t)(b / cnt);
+                }
+            }
+            return;
+        }
         // Fast integer-ratio box filter
         int rx = sw / dw, ry = sh / dh;
         int bsz = rx * ry;
@@ -494,6 +530,10 @@ struct Pipeline {
     // bgra_buf.data() (no crop/overlay/cursor -- zero extra cost) or
     // work_buf.data(). Set each tick in capture_loop(); read by update_preview().
     const uint8_t* frame_ptr = nullptr;
+    // The CPU path no longer bakes the pointer into the capture buffer (it is blended into the
+    // converted YUV frame), so the live preview stamps it onto its own small thumbnail instead.
+    bool pv_cursor = false;
+    int  pv_cursor_ox = 0, pv_cursor_oy = 0;   // thumbnail source's top-left on the virtual desktop
 
     // Overlays configured from the UI (RecordingController pushes the
     // current list in via hr_pl_set_overlays whenever it changes -- drag,
@@ -562,8 +602,22 @@ struct Pipeline {
     // plus how many consecutive times it must be written to the pipe.
     struct QueuedFrame {
         std::vector<uint8_t> data;
-        int repeat = 1;
+        int repeat = 1;          // raw pipe: how many times the writer sends `data`
+        // Timestamped pipe (ts_fps > 0): slot on the constant-fps timeline this picture starts at, or
+        // -1 for the raw pipe. `repeat` is always 1 then - ffmpeg fills the gap to the next frame.
+        int64_t pts = -1;
+        int  w = 0, h = 0;       // size / layout of `data` (needed for the NUT stream header)
+        bool nv12 = false;
     };
+    // ---- timestamped pipe (static-screen frames are not sent at all) ----
+    // > 0: frames go to ffmpeg inside a NUT stream (1/ts_fps time base) with explicit slot numbers
+    // instead of as back-to-back raw frames; a frame is only sent when the picture changed.
+    // Set by hr_pl_set_timestamped_pipe() BEFORE hr_pl_set_recording(.., 1, ..).
+    std::atomic<int>     ts_fps{0};
+    // Capture thread -> writer: first timeline slot that has NOT elapsed yet. The writer uses it to
+    // finish the stream with the last picture held until the real end, and as a once-a-second
+    // heartbeat on a static screen (see writer_loop()).
+    std::atomic<int64_t> ts_end_slot{0};
     std::queue<QueuedFrame> pipe_queue;
     std::mutex pipe_queue_mtx;
     std::condition_variable pipe_queue_cv;
@@ -587,7 +641,8 @@ struct Pipeline {
     int  gpu_fail_count = 0;                  // runtime GPU errors so far (retry limit 3)
     std::chrono::steady_clock::time_point gpu_retry_at{};
     bool logged_gpu_scale_ = false;           // "desktop size changed, GPU path scales" logged once
-    bool nv12_valid = false;                  // nv12_buf holds a complete GPU-converted frame
+    bool nv12_valid = false;                  // a complete GPU-converted frame has been received at least once
+    bool nv12_clean = false;                  // ...and nv12_buf still holds it (false after a zero-copy hand-over to the writer)
     std::vector<uint8_t> nv12_buf;            // latest clean GPU-converted frame
     const uint8_t* frame_nv12 = nullptr;      // set on GPU ticks so update_preview() can use it
     std::vector<uint8_t> pv_nv12;             // GPU ticks with overlays: preview copy that has them baked in
@@ -666,6 +721,41 @@ struct Pipeline {
         writer_running.store(true, std::memory_order_relaxed);
         bool logged_write_fail = false;   // edge-trigger for the write-failure diagnostic below
 
+        // ------ timestamped (NUT) pipe state, only touched by this thread ------
+        std::vector<uint8_t> nut_prefix;    // sync point + frame header scratch
+        std::vector<uint8_t> nut_last;      // the picture most recently written (kept for the tail/heartbeat)
+        int64_t  nut_last_pts = -1;
+        bool     nut_header_done = false;
+        intptr_t nut_pipe = 0;              // the pipe handle the header went to
+        auto nut_write = [&](const uint8_t *data, size_t n, int64_t pts) -> bool {
+            hrnut::make_frame_prefix(nut_prefix, pts, n);
+            return write_pipe(nut_prefix.data(), nut_prefix.size()) && write_pipe(data, n);
+        };
+        auto nut_reset = [&]() {
+            nut_header_done = false;
+            nut_last_pts = -1;
+            nut_last.clear();
+        };
+        // Hold the last picture until the end of the timeline: a frame lasts until the next one, so
+        // without this the final stretch of a static screen would be cut off at the last change.
+        auto nut_finish = [&]() {
+            if (nut_header_done && !nut_last.empty() && nut_last_pts >= 0) {
+                const int64_t end_slot = ts_end_slot.load(std::memory_order_acquire);
+                if (end_slot - 1 > nut_last_pts && nut_write(nut_last.data(), nut_last.size(), end_slot - 1))
+                    nut_last_pts = end_slot - 1;
+            }
+            nut_reset();
+        };
+        // On a static screen nothing is queued, and ffmpeg only emits a frame once it sees the next one.
+        // Repeat the last picture about once a second so the encoder / Instant Replay segments never lag
+        // further behind than that.
+        auto nut_heartbeat_due = [&]() -> bool {
+            const int tf = ts_fps.load(std::memory_order_relaxed);
+            if (tf <= 0 || !nut_header_done || nut_last.empty() || nut_last_pts < 0) return false;
+            if (!recording.load(std::memory_order_relaxed)) return false;
+            return ts_end_slot.load(std::memory_order_acquire) - 1 - nut_last_pts >= tf;
+        };
+
         try {
         while (writer_running.load(std::memory_order_relaxed)) {
 #ifdef _WIN32
@@ -683,6 +773,10 @@ struct Pipeline {
 #endif
             std::vector<uint8_t> frame;
             int frame_repeat = 1;
+            int64_t frame_pts = -1;
+            int  frame_w = 0, frame_h = 0;
+            bool frame_nv12 = false;
+            bool heartbeat = false;
 
             {
                 std::unique_lock<std::mutex> lock(pipe_queue_mtx);
@@ -706,6 +800,7 @@ struct Pipeline {
 
                 if (pipe_queue.empty()) {
                     if (pending_close_requested.load(std::memory_order_acquire)) {
+                        nut_finish();     // timestamped pipe: flush the held tail picture before EOF
                         const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
                         if (ph != 0 && ph != -1) {
 #ifdef _WIN32
@@ -721,26 +816,58 @@ struct Pipeline {
                         }
                         finish_cv.notify_all();
                     }
-                    continue;
-                }
-
+                    if (!nut_heartbeat_due()) continue;
+                    heartbeat = true;
+                } else {
                 // Move frame out of queue (no copy)
                 frame = std::move(pipe_queue.front().data);
                 frame_repeat = pipe_queue.front().repeat;
+                frame_pts = pipe_queue.front().pts;
+                frame_w = pipe_queue.front().w;
+                frame_h = pipe_queue.front().h;
+                frame_nv12 = pipe_queue.front().nv12;
                 pipe_queue.pop();
+                }
+            }
+
+            if (heartbeat) {
+                const int64_t hb_pts = ts_end_slot.load(std::memory_order_acquire) - 1;
+                if (hb_pts > nut_last_pts && nut_write(nut_last.data(), nut_last.size(), hb_pts))
+                    nut_last_pts = hb_pts;
+                continue;
             }
 
             // Write to pipe outside the lock
             if (!frame.empty()) {
                 bool ok = true;
-                for (int rep = 0; rep < frame_repeat && ok; ++rep) {
-                    ok = write_pipe(frame.data(), frame.size());
+                if (frame_pts >= 0) {
+                    // Timestamped pipe: stream header once per pipe, then one packet per picture.
+                    const intptr_t cur_pipe = pipe_handle.load(std::memory_order_acquire);
+                    if (nut_header_done && cur_pipe != nut_pipe) nut_reset();   // a new recording's pipe
+                    if (!nut_header_done) {
+                        const std::vector<uint8_t> hdr = hrnut::make_header(
+                            frame_w, frame_h, frame_nv12 ? "NV12" : "I420",
+                            ts_fps.load(std::memory_order_relaxed));
+                        ok = write_pipe(hdr.data(), hdr.size());
+                        nut_header_done = true;       // even on failure: don't re-send into a dead pipe
+                        nut_pipe = cur_pipe;
+                    }
+                    if (ok) ok = nut_write(frame.data(), frame.size(), frame_pts);
+                    if (ok) {
+                        // keep this picture for the tail / heartbeat; recycle the one it replaces
+                        nut_last.swap(frame);
+                        nut_last_pts = frame_pts;
+                    }
+                } else {
+                    for (int rep = 0; rep < frame_repeat && ok; ++rep) {
+                        ok = write_pipe(frame.data(), frame.size());
+                    }
                 }
 
                 // Hand the buffer back to the free-list instead of letting
                 // it fall out of scope and get freed - the capture thread
                 // will reuse it for the next frame (no realloc/memcpy).
-                {
+                if (!frame.empty()) {
                     std::lock_guard<std::mutex> lock(free_bufs_mtx);
                     if (free_bufs.size() < MAX_FREE_BUFS)
                         free_bufs.push(std::move(frame));
@@ -768,6 +895,10 @@ struct Pipeline {
 
         // pipe_handle is the same OS
         // handle as ffmpeg's stdin. hr_ff_stop_graceful() (ffmpeg_runner.cpp)
+        if (writer_running.load(std::memory_order_relaxed) == false && nut_header_done) {
+            try { nut_finish(); }     // normal shutdown with a pipe still open (not after a crash)
+            catch (...) {}
+        }
         {
             const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
             if (ph != 0 && ph != -1) {
@@ -809,8 +940,14 @@ struct Pipeline {
 
         if (frame_nv12 && nv12_w > 0 && nv12_h > 0)
             nv12_to_thumb(frame_nv12, pv_buf.data(), nv12_w, nv12_h, tw, th);
-        else
+        else {
             bgra_to_thumb(frame_ptr ? frame_ptr : bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
+#ifdef _WIN32
+            if (pv_cursor && eff_w > 0 && eff_h > 0)
+                hr_composite_cursor_rgb24(pv_buf.data(), tw, th, pv_cursor_ox, pv_cursor_oy,
+                                          (float)tw / (float)eff_w, (float)th / (float)eff_h);
+#endif
+        }
         pv_actual_w = tw;
         pv_actual_h = th;
         pv_native_w = eff_w;
@@ -880,7 +1017,7 @@ struct Pipeline {
         int64_t fps_acc_frames = 0, fps_acc_start_ns = 0;
 
 #ifdef _WIN32
-        if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
+        if (sw_ctx && g_libs.sw_start) { g_libs.sw_start(sw_ctx); last_preview_ns = 0; }  // the clock restarts at 0: a preview stamp from the OLD clock would freeze the preview until the new one caught up
 #endif
         int64_t next_frame_ns = frame_ns;
 
@@ -915,9 +1052,29 @@ struct Pipeline {
                             std::chrono::steady_clock::now().time_since_epoch()).count() / 100;
             return sg;
         };
-        CursorSig last_yuv_sig;      // pointer state baked into last_yuv
         CursorSig gpu_emit_sig;      // pointer state baked into the last GPU-path frame we queued
         bool gpu_emit_valid = false; // the picture at the back of the queue came from the GPU path
+        CursorSig cpu_emit_sig;
+        bool cpu_emit_valid = false;
+        int  cpu_emit_w = 0, cpu_emit_h = 0;
+
+        // ---- timestamped pipe bookkeeping (capture thread only) ----
+        // Every recording tick owns one slot on the constant-fps timeline (plus the catch-up slots
+        // when the loop ran late). A picture that changed is queued with its slot; an unchanged tick
+        // queues nothing and ffmpeg repeats the previous picture across the gap.
+        int64_t ts_next_slot = 0;
+        bool    ts_have_frame = false;   // at least one picture was queued in this recording
+        auto ts_on = [&]() -> bool {
+            return ts_fps.load(std::memory_order_relaxed) > 0 && recording.load(std::memory_order_acquire);
+        };
+        auto ts_take_slot = [&](int extra) -> int64_t {
+            // The picture is "now": the `extra` slots the loop was late by still show the previous one.
+            const int64_t pts = ts_next_slot + extra;
+            ts_next_slot = pts + 1;
+            ts_end_slot.store(ts_next_slot, std::memory_order_release);
+            return pts;
+        };
+        bool preview_suppressed = false;   // GPU zero-copy hand-over moved the buffer the preview reads
 
         // Make the frame at the back of the queue last `1 + extra` slots longer.
         auto try_merge_last = [&](int extra) -> bool {
@@ -959,7 +1116,8 @@ struct Pipeline {
             }
         };
         // Hand a finished frame to the writer thread (moved, not copied).
-        auto enqueue_frame = [&](std::vector<uint8_t> &yuv_frame, int extra_slots_) {
+        auto enqueue_frame = [&](std::vector<uint8_t> &yuv_frame, int extra_slots_,
+                                 int fw, int fh, bool fnv12, int64_t pts) {
             std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
             int carried_repeat = 0;        // timeline slots owned by an evicted entry
             {
@@ -968,7 +1126,9 @@ struct Pipeline {
                 // Backpressure: the queue is capped at MAX_QUEUE_SIZE entries.
                 if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
                     dropped = std::move(pipe_queue.front().data);
-                    carried_repeat = pipe_queue.front().repeat;
+                    // Raw pipe: the evicted picture's slots move to the new one. Timestamped pipe: its
+                    // slots are simply covered by the picture before it (ffmpeg fills the gap).
+                    carried_repeat = (pts < 0) ? pipe_queue.front().repeat : 0;
                     pipe_queue.pop();
                     frames_dropped.fetch_add(1, std::memory_order_relaxed);
                     frames_stalled.fetch_add(1, std::memory_order_relaxed);
@@ -976,7 +1136,9 @@ struct Pipeline {
 
                 QueuedFrame qf;
                 qf.data   = std::move(yuv_frame);
-                qf.repeat = std::min(1 + extra_slots_ + carried_repeat, 240);
+                qf.repeat = (pts < 0) ? std::min(1 + extra_slots_ + carried_repeat, 240) : 1;
+                qf.pts    = pts;
+                qf.w = fw; qf.h = fh; qf.nv12 = fnv12;
                 pipe_queue.push(std::move(qf));
                 pipe_queue_cv.notify_one();
             }
@@ -1000,13 +1162,34 @@ struct Pipeline {
         // everything before the capture call (GPU path size/enable checks), the DXGI reset, and - by subtraction - the rest.
         double last_prep_ms = 0.0, last_reset_ms = 0.0;
 
+        // Preview tick (Preview FPS setting). A lambda so the GPU zero-copy branch can run it BEFORE it
+        // hands nv12_buf over to the writer - the thumbnail reads that buffer.
+        auto preview_if_due = [&]() {
+#ifdef _WIN32
+            if (preview_suppressed) return;
+            int64_t now_ns = (sw_ctx && g_libs.sw_elapsed_ns)
+                                  ? g_libs.sw_elapsed_ns(sw_ctx)
+                                  : next_frame_ns; // fallback: still monotonic
+            int want_fps = preview_fps.load(std::memory_order_relaxed);
+            if (want_fps < 1) want_fps = 1;
+            int64_t preview_interval_ns = 1'000'000'000LL / want_fps;
+            if (preview_needed.load(std::memory_order_relaxed) &&
+                now_ns - last_preview_ns >= preview_interval_ns) {
+                last_preview_ns = now_ns;
+                update_preview();
+            }
+#endif
+        };
+
         try {
         while (running.load(std::memory_order_relaxed)) {
+            preview_suppressed = false;
             if (paused.load(std::memory_order_relaxed)) {
                 hitch_last_valid = false;   // a pause is not a stall
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                fps_acc_frames = 0; fps_acc_start_ns = 0;   // same stale-clock problem for the measured-fps stat
 #ifdef _WIN32
-                if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
+                if (sw_ctx && g_libs.sw_start) { g_libs.sw_start(sw_ctx); last_preview_ns = 0; }  // the clock restarts at 0: a preview stamp from the OLD clock would freeze the preview until the new one caught up
 #endif
                 next_frame_ns = frame_ns;
                 continue;
@@ -1040,6 +1223,11 @@ struct Pipeline {
                     }
                     hitch_count = 0; hitch_logged = 0; hitch_worst_ms = 0.0; hitch_last_valid = false;
                     last_yuv_valid = false;   // pixel format / size may differ next recording
+                    cpu_emit_valid = false;
+                    gpu_emit_valid = false;
+                    ts_next_slot = 0;         // a new recording starts a new timeline
+                    ts_have_frame = false;
+                    ts_end_slot.store(0, std::memory_order_release);
                     gpu_fail_count = 0;       // a new recording gets a fresh GPU-path retry budget
                     if (gpu_fail_transient) { gpu_failed = false; gpu_fail_transient = false; }
                     if (!is_recording_now) frame_ns_idle = compute_frame_ns_idle();
@@ -1050,7 +1238,7 @@ struct Pipeline {
                     fps_acc_frames = 0;
                     fps_acc_start_ns = 0;
 #ifdef _WIN32
-                    if (sw_ctx && g_libs.sw_start) g_libs.sw_start(sw_ctx);
+                    if (sw_ctx && g_libs.sw_start) { g_libs.sw_start(sw_ctx); last_preview_ns = 0; }  // the clock restarts at 0: a preview stamp from the OLD clock would freeze the preview until the new one caught up
 #endif
                 }
             }
@@ -1226,7 +1414,7 @@ struct Pipeline {
                                     "processor cannot do BGRA->NV12) -- using the CPU converter.");
                     } else if (hr_dx_gpu_ready(dx_ctx)) {
                         const size_t nv_need = (size_t)gpu_enc_w * gpu_enc_h * 3 / 2;
-                        if (nv12_buf.size() != nv_need) { nv12_buf.assign(nv_need, 0); nv12_valid = false; }
+                        if (nv12_buf.size() != nv_need) { nv12_buf.assign(nv_need, 0); nv12_valid = false; nv12_clean = false; }
                         gpu_tick = true;
                     }
                 }
@@ -1327,12 +1515,13 @@ struct Pipeline {
                 // ====== GPU PATH: the frame is already a finished NV12 picture ======
                 eff_w = do_crop ? c_w : src_w;
                 eff_h = do_crop ? c_h : src_h;
-                if (ret == HR_DX_OK) nv12_valid = true;
+                if (ret == HR_DX_OK) { nv12_valid = true; nv12_clean = true; }
                 if (!nv12_valid) continue;           // nothing to send yet
                 frame_ptr  = nullptr;
                 frame_nv12 = nv12_buf.data();        // live preview reads this
                 nv12_w = gpu_enc_w; nv12_h = gpu_enc_h;
                 last_yuv_valid = false;              // classic path's cached picture is now stale
+                cpu_emit_valid = false;
 #ifdef _WIN32
                 if (sw_ctx && g_libs.sw_elapsed_ns) {
                     static constexpr int kMaxCatchupFrames = 90;
@@ -1349,13 +1538,32 @@ struct Pipeline {
                 const size_t needed = (size_t)gpu_enc_w * gpu_enc_h * 3 / 2;
                 // Nothing changed on screen AND the pointer looks the same as in the
                 // picture already queued -> just hold that picture one slot longer.
+                const bool tsm = ts_on();
                 bool merged = false;
                 if (ret != HR_DX_OK && gpu_emit_valid && !overlays_active &&
                     (!cur_on || cur_now == gpu_emit_sig))
-                    merged = try_merge_last(extra_slots);
+                    merged = tsm ? ts_have_frame : try_merge_last(extra_slots);
+                else if (ret != HR_DX_OK && !nv12_clean && tsm && ts_have_frame)
+                    merged = true;    // the clean picture went to the writer (see hand_over): keep showing it
+                const int64_t pts = tsm ? ts_take_slot(extra_slots) : -1;
                 if (!merged) {
-                    std::vector<uint8_t> yuv_frame = take_free_buf(needed);
-                    std::memcpy(yuv_frame.data(), nv12_buf.data(), needed);
+                    std::vector<uint8_t> yuv_frame;
+                    // Zero-copy hand-over: with nothing to draw on it (no pointer, no overlays) the readback
+                    // buffer IS the outgoing frame - no 3 MB nv12_buf -> yuv_frame copy. Only with the
+                    // timestamped pipe: the raw pipe may need to re-send the clean picture on a later static
+                    // tick, and a handed-over buffer is gone.
+                    const bool hand_over = tsm && ret == HR_DX_OK && !overlays_active && !cur_on;
+                    if (hand_over) {
+                        preview_if_due();                 // the thumbnail reads nv12_buf, which leaves now
+                        preview_suppressed = true;
+                        yuv_frame = std::move(nv12_buf);
+                        nv12_buf = take_free_buf(needed); // next readback lands in a recycled buffer
+                        nv12_clean = false;
+                        frame_nv12 = nullptr;
+                    } else {
+                        yuv_frame = take_free_buf(needed);
+                        std::memcpy(yuv_frame.data(), nv12_buf.data(), needed);
+                    }
 #ifdef _WIN32
                     if (overlays_active) {
                         // Same try/catch rationale as the classic path's Apply()
@@ -1391,7 +1599,8 @@ struct Pipeline {
                                                   (float)gpu_enc_h / (float)std::max(1, gpu_sb - gpu_st));
                     }
 #endif
-                    enqueue_frame(yuv_frame, extra_slots);
+                    enqueue_frame(yuv_frame, extra_slots, gpu_enc_w, gpu_enc_h, true, pts);
+                    if (pts >= 0) ts_have_frame = true;
                 }
                 gpu_emit_valid = true;
                 gpu_emit_sig   = cur_now;
@@ -1455,17 +1664,15 @@ struct Pipeline {
                 }
             }
 
-            // ====== CURSOR COMPOSITING ("Cursor" setting) ====== Drawn after overlays so the pointer
-            // stays visually on top, matching what a viewer would actually see on the real screen.
-            if (include_cursor.load(std::memory_order_relaxed)) {
-                ensure_work_copy(frame);
-                // This used the raw crop_x/crop_y members - read without crop_mtx while the UI thread may
-                // be rewriting them (window tracking now does that ~20x/s), and not the clamped values the
-                // frame was actually cropped with (c_x/c_y).
-                hr_composite_cursor(frame, eff_w, eff_h,
-                                     cap_origin_x + (do_crop ? c_x : 0),
-                                     cap_origin_y + (do_crop ? c_y : 0));
-            }
+            // ====== CURSOR ("Cursor" setting) ====== The pointer is NOT drawn into this BGRA frame any
+            // more: that forced an 8 MB copy of the whole capture buffer every tick and turned every
+            // conversion into a full-frame one. It is blended into the converted YUV frame below (after
+            // overlays, so it stays on top as before) and onto the preview thumbnail (update_preview()).
+            // The origin uses the clamped crop values the frame was actually cropped with (c_x/c_y), not
+            // the raw crop_x/crop_y members the UI thread may be rewriting.
+            pv_cursor    = cursor_on_now;
+            pv_cursor_ox = cap_origin_x + (do_crop ? c_x : 0);
+            pv_cursor_oy = cap_origin_y + (do_crop ? c_y : 0);
             frame_ptr = frame;
 #ifdef _WIN32
             if (recording.load(std::memory_order_acquire) && sw_ctx && g_libs.sw_elapsed_ns) {
@@ -1490,28 +1697,31 @@ struct Pipeline {
                 const bool overlays_on = overlays_active;
                 // `frame` still IS bgra_buf: no crop, overlay or pointer was
                 // baked in, and (below) no scaling -> the converted picture is a
-                // pure function of bgra_buf, so DXGI's changed-rows hint applies.
+                // pure function of bgra_buf, so DXGI's changed-rows hint applies. (The pointer is no
+                // longer baked in, so this now holds with the cursor on as well.)
                 const bool direct = (frame == bgra_buf.data()) && !scaling;
 
-                // PERF: static desktop (DXGI timeout) -> the picture is identical to the last one we
-                // converted.
-                const bool reuse_last = (ret == HR_DX_TIMEOUT) && last_yuv_valid &&
-                                        !overlays_on &&
-                                        (!cursor_on_now || cur_sig_now == last_yuv_sig) &&
-                                        last_yuv_w == enc_w && last_yuv_h == enc_h;
+                // PERF: static desktop (DXGI timeout) -> last_yuv (pointer-free) is still the right base.
+                const bool same_base = (ret == HR_DX_TIMEOUT) && last_yuv_valid && !overlays_on &&
+                                       last_yuv_w == enc_w && last_yuv_h == enc_h;
+                // ...and the frame we queued last already shows the pointer exactly as it is now.
+                const bool same_emit = cpu_emit_valid && cpu_emit_w == enc_w && cpu_emit_h == enc_h &&
+                                       (!cursor_on_now || cur_sig_now == cpu_emit_sig);
+                const bool tsm = ts_on();
                 bool merged_into_queue = false;
-                if (reuse_last) {
-                    // Cheapest: the previous frame is still waiting in the queue ->
-                    // just make it last one slot longer, no copy at all.
-                    merged_into_queue = try_merge_last(extra_slots);
+                if (same_base && same_emit) {
+                    // Nothing to send. Timestamped pipe: just let the timeline run (ffmpeg repeats the last
+                    // picture). Raw pipe: make the frame still waiting in the queue last one slot longer.
+                    merged_into_queue = tsm ? ts_have_frame : try_merge_last(extra_slots);
                 }
+                const int64_t pts = tsm ? ts_take_slot(extra_slots) : -1;
 
                 std::vector<uint8_t> yuv_frame;
                 if (!merged_into_queue) {
                     const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
                     yuv_frame = take_free_buf(needed);
 
-                    if (reuse_last) {
+                    if (same_base) {
                         std::memcpy(yuv_frame.data(), last_yuv.data(), needed);   // 3MB copy vs full convert
                     } else {
                         // PERF: DXGI reported exactly which rows changed since the
@@ -1531,7 +1741,6 @@ struct Pipeline {
                             // Keep the cached picture current with just the touched rows.
                             copy_yuv_rows(last_yuv.data(), yuv_frame.data(), enc_w, enc_h, dy0, dy1,
                                           yuv_pool.IsNv12());
-                            last_yuv_sig = cur_sig_now;
                         } else {
                             if (scaling) {
                                 const size_t scaled_needed = (size_t)req_w * req_h * 4;
@@ -1542,22 +1751,36 @@ struct Pipeline {
                                 enc_src = scaled_buf.data();
                             }
                             yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
-                            // Keep a private copy so a following static tick can reuse
-                            // it - for ANY conversion whose result depends only on
-                            // bgra_buf + the pointer (i.e. no overlays: those animate).
+                            // Keep a private (pointer-free) copy so a following static tick can reuse
+                            // it - for ANY conversion whose result depends only on bgra_buf (i.e. no
+                            // overlays: those animate).
                             if (!overlays_on) {
                                 last_yuv.assign(yuv_frame.begin(), yuv_frame.end());
                                 last_yuv_valid = true;
                                 last_yuv_w = enc_w; last_yuv_h = enc_h;
                                 last_yuv_direct = direct;
-                                last_yuv_sig = cur_sig_now;
                             } else {
                                 last_yuv_valid = false;
                             }
                         }
                     }
+                    // Pointer: blended into the outgoing copy only, so last_yuv stays clean. Scale maps the
+                    // capture area's pixels onto the encoded size (Settings > Resolution).
+                    if (cursor_on_now) {
+                        hr_composite_cursor_yuv(yuv_frame.data(), enc_w, enc_h,
+                                                 cap_origin_x + (do_crop ? c_x : 0),
+                                                 cap_origin_y + (do_crop ? c_y : 0),
+                                                 (float)enc_w / (float)std::max(1, eff_w),
+                                                 (float)enc_h / (float)std::max(1, eff_h),
+                                                 yuv_pool.IsNv12() ? 1 : 0);
+                    }
+                    enqueue_frame(yuv_frame, extra_slots, enc_w, enc_h, yuv_pool.IsNv12(), pts);
+                    if (pts >= 0) ts_have_frame = true;
                 }
-                if (!merged_into_queue) enqueue_frame(yuv_frame, extra_slots);
+                // What the newest queued picture shows (overlays animate, so they never match).
+                cpu_emit_valid = !overlays_on;
+                cpu_emit_sig = cur_sig_now;
+                cpu_emit_w = enc_w; cpu_emit_h = enc_h;
             }
 #endif
             }   // else (classic BGRA path)
@@ -1569,21 +1792,7 @@ struct Pipeline {
 
             // Preview: dynamic frequency, driven by the Preview FPS setting
             // (see last_preview_ns's declaration above for why time-based).
-#ifdef _WIN32
-            {
-                int64_t now_ns = (sw_ctx && g_libs.sw_elapsed_ns)
-                                      ? g_libs.sw_elapsed_ns(sw_ctx)
-                                      : next_frame_ns; // fallback: still monotonic
-                int want_fps = preview_fps.load(std::memory_order_relaxed);
-                if (want_fps < 1) want_fps = 1;
-                int64_t preview_interval_ns = 1'000'000'000LL / want_fps;
-                if (preview_needed.load(std::memory_order_relaxed) &&
-                    now_ns - last_preview_ns >= preview_interval_ns) {
-                    last_preview_ns = now_ns;
-                    update_preview();
-                }
-            }
-#endif
+            preview_if_due();
 
             // FPS tracking
 #ifdef _WIN32
@@ -2061,6 +2270,15 @@ HR_EXPORT void hr_pl_set_gpu_convert(void* handle, int enabled) {
     static_cast<Pipeline*>(handle)->gpu_convert.store(enabled != 0, std::memory_order_relaxed);
 #else
     (void)enabled;
+#endif
+}
+
+HR_EXPORT void hr_pl_set_timestamped_pipe(void* handle, int fps) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->ts_fps.store(fps > 0 ? fps : 0, std::memory_order_relaxed);
+#else
+    (void)fps;
 #endif
 }
 
