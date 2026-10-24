@@ -1,4 +1,9 @@
 #include "capture_source_dialog.h"
+#include <wx/dcscreen.h>
+#include <wx/dcmemory.h>
+#include <wx/statbmp.h>
+#include <vector>
+#include <algorithm>
 #include "window_picker_dialog.h"
 #include "themed_widgets.h"
 #include "../core/wgc_capture.h"
@@ -181,6 +186,17 @@ public:
             monitor_choice_->SetSelection(sel);
             row->Add(monitor_choice_, 1, wxALIGN_CENTRE_VERTICAL);
             col->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
+
+            if (fixed_ == CaptureMode::Desktop) {
+                BuildMonitorThumbs(mons);
+                monitor_preview_ = new wxStaticBitmap(scroll_, wxID_ANY, wxNullBitmap, wxDefaultPosition,
+                                                      wxSize(kThumbW, kThumbH));
+                monitor_preview_->SetBackgroundColour(wxColour(0, 0, 0));
+                col->AddSpacer(10);
+                col->Add(monitor_preview_, 0, wxALIGN_CENTRE_HORIZONTAL | wxLEFT | wxRIGHT, 16);
+                UpdateMonitorPreview();
+                monitor_choice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) { UpdateMonitorPreview(); });
+            }
         }
 
         // ---- window (and how it is recorded) ----------------------------------------------------
@@ -346,18 +362,67 @@ public:
         retry_btn_->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { OnRetryNative(); });
         Bind(wxEVT_BUTTON, &SourceDialog::OnOk, this, wxID_OK);
 
-        // size: content height, but never taller than the screen
+        // size: content height, but never taller than the screen. The Desktop layer only has the monitor
+        // row + its picture, so it gets a compact window instead of the 700x520 minimum the (long)
+        // window / region pages need.
         scroll_->FitInside();
         wxSize best = GetBestSize();
         const wxRect disp = wxGetClientDisplayRect();
-        best.x = std::max(best.x, 700);
-        best.y = std::min(std::max(best.y, 520), std::max(420, disp.height - 80));
+        if (fixed_ == CaptureMode::Desktop) {
+            best.x = std::max(best.x, kThumbW + 80);
+            best.y = std::min(std::max(best.y, 260), std::max(260, disp.height - 80));
+        } else {
+            best.x = std::max(best.x, 700);
+            best.y = std::min(std::max(best.y, 520), std::max(420, disp.height - 80));
+        }
         SetClientSize(best);
         CentreOnParent();
     }
 
     // The values the controls hold right now (also what a picker run starts from).
     const Src &Collected() const { return src_; }
+
+    static constexpr int kThumbW = 360, kThumbH = 203;   // 16:9 box; the picture is letterboxed into it
+
+    // One scaled screenshot per monitor (index = monitor number - 1), black bars where the aspect differs.
+    void BuildMonitorThumbs(const std::vector<HrMonitorInfo> &mons) {
+        mon_thumbs_.clear();
+        try {
+            wxScreenDC sdc;
+            for (const HrMonitorInfo &m : mons) {
+                wxBitmap out(kThumbW, kThumbH);
+                wxMemoryDC odc(out);
+                odc.SetBackground(*wxBLACK_BRUSH);
+                odc.Clear();
+                if (m.w > 0 && m.h > 0) {
+                    wxBitmap shot(m.w, m.h);
+                    {
+                        wxMemoryDC mdc(shot);
+                        mdc.Blit(0, 0, m.w, m.h, &sdc, m.x, m.y);
+                    }
+                    wxImage img = shot.ConvertToImage();
+                    if (img.IsOk()) {
+                        const double k = std::min((double)kThumbW / m.w, (double)kThumbH / m.h);
+                        const int tw = std::max(1, (int)(m.w * k)), th = std::max(1, (int)(m.h * k));
+                        img.Rescale(tw, th, wxIMAGE_QUALITY_BILINEAR);
+                        odc.DrawBitmap(wxBitmap(img), (kThumbW - tw) / 2, (kThumbH - th) / 2);
+                    }
+                }
+                odc.SelectObject(wxNullBitmap);
+                mon_thumbs_.push_back(out);
+            }
+        } catch (...) {
+            mon_thumbs_.clear();     // no preview is better than no dialog
+        }
+    }
+
+    void UpdateMonitorPreview() {
+        if (!monitor_preview_ || !monitor_choice_) return;
+        const int sel = monitor_choice_->GetSelection();
+        if (sel >= 0 && sel < (int)mon_thumbs_.size()) monitor_preview_->SetBitmap(mon_thumbs_[(size_t)sel]);
+        else monitor_preview_->SetBitmap(wxNullBitmap);
+        monitor_preview_->Refresh();
+    }
 
     void Collect() {
         src_.mode = fixed_;
@@ -528,6 +593,8 @@ private:
     wxColour bg_, text_, dim_, accent_;
     wxScrolledWindow *scroll_ = nullptr;
     wxRadioButton *rb_desktop_ = nullptr, *rb_window_ = nullptr, *rb_region_ = nullptr;
+    wxStaticBitmap *monitor_preview_ = nullptr;
+    std::vector<wxBitmap> mon_thumbs_;
     wxChoice *monitor_choice_ = nullptr, *title_mode_choice_ = nullptr, *method_choice_ = nullptr, *area_choice_ = nullptr;
     wxStaticText *window_lbl_ = nullptr, *test_lbl_ = nullptr, *live_lbl_ = nullptr, *region_lbl_ = nullptr;
     wxButton *pick_window_btn_ = nullptr, *pick_region_btn_ = nullptr, *test_btn_ = nullptr, *retry_btn_ = nullptr;
