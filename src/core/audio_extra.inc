@@ -170,7 +170,8 @@ struct Extra {
     // kinds 0/1
     WasapiStream        stream;
     std::thread         th;
-    std::vector<int16_t> buf;
+    PcmRing             buf;            // lock: mu (see pcm_ring.h)
+    std::vector<int16_t> scratch;       // flush staging, reused (lock: g_extras_mu)
     std::mutex          mu;
     FILE               *out_file = nullptr;
     uint64_t            out_bytes = 0;
@@ -251,7 +252,7 @@ static void extra_worker(Extra *s)
 
             if (s->buffering.load()) {
                 std::lock_guard<std::mutex> lk(s->mu);
-                s->buf.insert(s->buf.end(), tmp.begin(), tmp.end());
+                s->buf.push(tmp.data(), tmp.size());
             }
         }
     } catch (const std::exception &e) {
@@ -485,10 +486,10 @@ static void extra_flush()
     for (auto &p : g_extras) {
         Extra *s = p.get();
         if (s->kind == 2 || !s->out_file) continue;
-        std::vector<int16_t> chunk;
+        std::vector<int16_t> &chunk = s->scratch;   // reused: no allocation per flush
         {
             std::lock_guard<std::mutex> bl(s->mu);
-            chunk.swap(s->buf);
+            s->buf.drain(chunk);
         }
         if (!chunk.empty()) {
             wav_stream_append(s->out_file, chunk.data(), chunk.size());
@@ -520,10 +521,10 @@ HR_EXPORT int hr_audio_extra_collect(char *out, int cap)
         if (s->kind != 2) {
             s->buffering.store(false);
             if (s->out_file) {
-                std::vector<int16_t> tail;
+                std::vector<int16_t> &tail = s->scratch;
                 {
                     std::lock_guard<std::mutex> bl(s->mu);
-                    tail.swap(s->buf);
+                    s->buf.drain(tail);
                 }
                 if (!tail.empty()) {
                     wav_stream_append(s->out_file, tail.data(), tail.size());
