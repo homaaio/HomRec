@@ -187,6 +187,8 @@ public:
         root->Add(btnRow, 0, wxEXPAND | wxALL, 16);
 
         SetSizer(root);
+
+        // Scrolling a page with the cursor over a number box / drop-down must not change it.
         HrInstallWheelGuard(this);
 
         Bind(wxEVT_BUTTON, &SettingsDialog::OnBrowse, this, IDC_BROWSE);
@@ -635,7 +637,7 @@ private:
         AddLabel(page, hkGrid, text, bg, "Pause:");
         hk_pause_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_pause));
         hkGrid->Add(hk_pause_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
-        AddLabel(page, hkGrid, text, bg, "Fullscreen:");
+        AddLabel(page, hkGrid, text, bg, "Fullscreen (HomRec window only):");
         hk_fullscreen_btn_ = new HotkeyButton(page, wxID_ANY, wxString::FromUTF8(state_.hotkey_fullscreen));
         hkGrid->Add(hk_fullscreen_btn_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
         AddLabel(page, hkGrid, text, bg, "Save Replay:");
