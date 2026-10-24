@@ -35,6 +35,8 @@
 #include <vector>
 #include <mutex>
 
+#include "cursor_blend.h"
+
 /* --------------------------------------------------------------------------- */
 /*  Monotonic clock                                                             */
 /* --------------------------------------------------------------------------- */
@@ -935,10 +937,16 @@ HR_EXPORT int hr_cursor_state(int *visible, int *x, int *y, unsigned long long *
     return ok ? 1 : 0;
 }
 
-HR_EXPORT void hr_composite_cursor_nv12(uint8_t *nv12, int width, int height,
-                                         int origin_x, int origin_y,
-                                         float scale_x, float scale_y) {
-    if (!nv12 || width < 2 || height < 2) return;
+namespace {
+// Shared front half of the YUV / RGB24 pointer compositors: reads the live pointer, refreshes the
+// rasterized-bitmap cache if needed and works out where (and how big) the pointer lands in a
+// frame that is `scale_x` / `scale_y` times the capture area's pixel grid. The blit itself runs
+// under the cache lock (the bitmap vectors are rebuilt in place) - see cursor_blend.h.
+template <class Blit>
+void WithCursorInFrame(int width, int height, int origin_x, int origin_y,
+                       float scale_x, float scale_y, Blit &&blit)
+{
+    if (width < 1 || height < 1) return;
     if (scale_x <= 0.0f) scale_x = 1.0f;
     if (scale_y <= 0.0f) scale_y = 1.0f;
 
@@ -960,74 +968,49 @@ HR_EXPORT void hr_composite_cursor_nv12(uint8_t *nv12, int width, int height,
     }
     if (!cache.valid || cache.bgra.empty()) return;
 
-    const int cw = cache.cw, ch = cache.ch;
-    int dw = (int)(cw * scale_x + 0.5f); if (dw < 1) dw = 1;
-    int dh = (int)(ch * scale_y + 0.5f); if (dh < 1) dh = 1;
+    hrcursor::Bitmap bm;
+    bm.bgra = cache.bgra.data();
+    bm.inv  = (cache.has_inv && cache.inv.size() >= (size_t)cache.cw * (size_t)cache.ch) ? cache.inv.data() : nullptr;
+    bm.cw = cache.cw; bm.ch = cache.ch;
+
+    int dw = (int)(bm.cw * scale_x + 0.5f); if (dw < 1) dw = 1;
+    int dh = (int)(bm.ch * scale_y + 0.5f); if (dh < 1) dh = 1;
     const int lx = (int)(((float)(ci.ptScreenPos.x - origin_x - cache.hotspot_x)) * scale_x + 0.5f);
     const int ly = (int)(((float)(ci.ptScreenPos.y - origin_y - cache.hotspot_y)) * scale_y + 0.5f);
-    if (lx + dw <= 0 || ly + dh <= 0 || lx >= width || ly >= height) return; // fully off-frame
+    blit(bm, lx, ly, dw, dh);
+}
+} // namespace
 
-    uint8_t *Yp  = nv12;
-    uint8_t *UVp = nv12 + (size_t)width * (size_t)height;
+// Pointer into a finished 4:2:0 frame. nv12 != 0: Y + interleaved UV (hardware-encoder path, studio
+// range); nv12 == 0: planar I420 (software-encoder path, full range) - the same layouts and
+// matrices hr_bgra_to_nv12_band / hr_bgra_to_yuv420p write, so the result is the same picture the
+// converter would have made from a BGRA frame with the pointer already in it (+-1 level).
+HR_EXPORT void hr_composite_cursor_yuv(uint8_t *yuv, int width, int height,
+                                        int origin_x, int origin_y,
+                                        float scale_x, float scale_y, int nv12) {
+    if (!yuv) return;
+    WithCursorInFrame(width, height, origin_x, origin_y, scale_x, scale_y,
+        [&](const hrcursor::Bitmap &bm, int lx, int ly, int dw, int dh) {
+            hrcursor::blend_yuv420(yuv, width, height, nv12 != 0, /*full_range=*/nv12 == 0,
+                                   bm, lx, ly, dw, dh);
+        });
+}
 
-    const int bx0 = std::max(lx, 0) & ~1;
-    const int by0 = std::max(ly, 0) & ~1;
-    const int bx1 = std::min(lx + dw, width);
-    const int by1 = std::min(ly + dh, height);
+HR_EXPORT void hr_composite_cursor_nv12(uint8_t *nv12, int width, int height,
+                                         int origin_x, int origin_y,
+                                         float scale_x, float scale_y) {
+    hr_composite_cursor_yuv(nv12, width, height, origin_x, origin_y, scale_x, scale_y, 1);
+}
 
-    auto clamp8 = [](int v) -> int { return v < 0 ? 0 : (v > 255 ? 255 : v); };
-    const bool has_inv = cache.has_inv && cache.inv.size() >= (size_t)cw * (size_t)ch;
-
-    for (int by = by0; by < by1; by += 2) {
-        for (int bx = bx0; bx < bx1; bx += 2) {
-            int sum_a = 0, rs = 0, gs = 0, bs = 0;   // alpha-weighted colour of this 2x2 block
-            int inv_cnt = 0;                          // XOR "invert" pixels in this block
-            for (int j = 0; j < 2; ++j) {
-                const int py = by + j;
-                if (py < ly || py >= ly + dh || py >= height) continue;
-                const int sy = (int)((int64_t)(py - ly) * ch / dh);
-                for (int i = 0; i < 2; ++i) {
-                    const int px = bx + i;
-                    if (px < lx || px >= lx + dw || px >= width) continue;
-                    const int sx = (int)((int64_t)(px - lx) * cw / dw);
-                    const size_t sidx = (size_t)sy * cw + sx;
-                    const uint8_t *sp = cache.bgra.data() + sidx * 4;
-                    const int a = sp[3];
-                    if (a == 0) {                         // fully transparent... or an invert pixel
-                        if (has_inv && cache.inv[sidx]) {
-                            uint8_t &yi = Yp[(size_t)py * width + px];
-                            yi = (uint8_t)clamp8(251 - (int)yi);   // 16..235 studio range mirror
-                            if (yi < 16) yi = 16; else if (yi > 235) yi = 235;
-                            ++inv_cnt;
-                        }
-                        continue;
-                    }
-                    const int b = sp[0], g = sp[1], r = sp[2];
-                    const int yc = (16829 * r + 33039 * g + 6416 * b + 32768 + (16 << 16)) >> 16;
-                    uint8_t &yd = Yp[(size_t)py * width + px];
-                    yd = (uint8_t)((yc * a + (int)yd * (255 - a) + 127) / 255);   // straight-alpha blend
-                    rs += r * a; gs += g * a; bs += b * a; sum_a += a;
-                }
-            }
-            if (inv_cnt >= 2) {                       // chroma of an inverted area mirrors around 128
-                uint8_t *uvi = UVp + (size_t)(by / 2) * width + bx;
-                uvi[0] = (uint8_t)clamp8(256 - (int)uvi[0]);
-                uvi[1] = (uint8_t)clamp8(256 - (int)uvi[1]);
-            }
-            if (sum_a == 0) continue;
-            // Mean cursor colour of the block, scaled to a 4-pixel sum exactly like
-            // the 2x2 sums hr_bgra_to_nv12_band feeds its chroma coefficients.
-            const int r4 = rs * 4 / sum_a, g4 = gs * 4 / sum_a, b4 = bs * 4 / sum_a;
-            const int cb = clamp8(((-9714 * r4 - 19071 * g4 + 28785 * b4 + (1 << 17)) >> 18) + 128);
-            const int cr = clamp8(((28785 * r4 - 24103 * g4 - 4682 * b4 + (1 << 17)) >> 18) + 128);
-            // Coverage of the block (0..1020 => 4 pixels * 255): keep the rest of the
-            // underlying chroma where the pointer is transparent or only partly covers.
-            const int cov = std::min(sum_a, 1020);
-            uint8_t *uv = UVp + (size_t)(by / 2) * width + bx;
-            uv[0] = (uint8_t)((uv[0] * (1020 - cov) + cb * cov + 510) / 1020);
-            uv[1] = (uint8_t)((uv[1] * (1020 - cov) + cr * cov + 510) / 1020);
-        }
-    }
+// Pointer into the packed RGB24 live-preview thumbnail (the capture buffer no longer carries it).
+HR_EXPORT void hr_composite_cursor_rgb24(uint8_t *rgb, int width, int height,
+                                          int origin_x, int origin_y,
+                                          float scale_x, float scale_y) {
+    if (!rgb) return;
+    WithCursorInFrame(width, height, origin_x, origin_y, scale_x, scale_y,
+        [&](const hrcursor::Bitmap &bm, int lx, int ly, int dw, int dh) {
+            hrcursor::blend_rgb24(rgb, width, height, bm, lx, ly, dw, dh);
+        });
 }
 #else
 HR_EXPORT void hr_composite_cursor(uint8_t *, int, int, int, int) {}
@@ -1035,4 +1018,6 @@ HR_EXPORT int hr_cursor_state(int *visible, int *x, int *y, unsigned long long *
     if (visible) *visible = 0; if (x) *x = 0; if (y) *y = 0; if (handle) *handle = 0; return 0;
 }
 HR_EXPORT void hr_composite_cursor_nv12(uint8_t *, int, int, int, int, float, float) {}
+HR_EXPORT void hr_composite_cursor_yuv(uint8_t *, int, int, int, int, float, float, int) {}
+HR_EXPORT void hr_composite_cursor_rgb24(uint8_t *, int, int, int, int, float, float) {}
 #endif
