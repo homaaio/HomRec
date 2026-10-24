@@ -230,6 +230,8 @@ private:
     // this ports from. state_.show_summary (the actual settings toggle)
     bool summary_dont_show_again_ = false;
     bool recording_crashed_pending_notice_ = false;
+    // Stop was pressed (or the encoder died) and the recording is being finalized in the background
+    bool stop_pending_ = false;
     // The crash was the full-GPU (ddagrab) ffmpeg dying (e.g. a game changed the display mode): once the
     // interrupted recording is finalized, a new one is started right away with the normal pipeline.
     bool recording_restart_after_crash_ = false;

@@ -21,6 +21,7 @@
 #include "../utils/wgc_log.h"
 #include "../utils/update.h"
 #include <wx/dcbuffer.h>
+#include <wx/accel.h>
 #include <wx/msw/private.h>
 #include <wx/filedlg.h>
 #include <wx/display.h>
@@ -942,6 +943,17 @@ void HomRecMainFrame::PersistSettings() {
     if (target != HrcConfig::kDefaultSettingsPath) HrcConfig::Save(state_, HrcConfig::kDefaultSettingsPath);
 }
 
+static wxString HrFullscreenMenuText(const wxString &label, const std::string &keys) {
+    std::string k;
+    for (char c : keys)
+        if (!std::isspace(static_cast<unsigned char>(c))) k += c;
+    if (k.empty()) return label;
+    const wxString wk = wxString::FromUTF8(k);
+    wxAcceleratorEntry probe;
+    if (!probe.FromString(wk)) return label;
+    return label + "\t" + wk;
+}
+
 void HomRecMainFrame::BuildMenuBar() {
     // Every label below now comes from lang_ instead of being a hardcoded
     // English literal - previously this was the single biggest reason a
@@ -970,7 +982,7 @@ void HomRecMainFrame::BuildMenuBar() {
 
     auto *viewMenu = new wxMenu();
     viewMenu->Append(ID_VIEW_ALWAYS_ON_TOP, wxString::FromUTF8(lang_.Get("always_on_top")));
-    viewMenu->Append(ID_VIEW_FULLSCREEN, wxString::FromUTF8(lang_.Get("fullscreen")) + "\tF11");
+    viewMenu->Append(ID_VIEW_FULLSCREEN, HrFullscreenMenuText(wxString::FromUTF8(lang_.Get("fullscreen")), state_.hotkey_fullscreen));
     viewMenu->AppendCheckItem(ID_VIEW_OVERLAYS_PANEL, wxString::FromUTF8(lang_.Get("layers_panel")));
     viewMenu->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
     viewMenu->AppendCheckItem(ID_VIEW_AUDIO_PANEL, wxString::FromUTF8(lang_.Get("audio_mixer")));
@@ -1690,6 +1702,12 @@ void HomRecMainFrame::ConfigureHotkeysFromState() {
                      state_.hotkey_pause.c_str(), state_.hotkey_fullscreen.c_str(),
                      state_.hotkey_save_replay.c_str());
 
+    // Fullscreen is not a global hotkey any more - re-point the View-menu accelerator instead.
+    if (wxMenuBar *mb = GetMenuBar()) {
+        if (wxMenuItem *it = mb->FindItem(ID_VIEW_FULLSCREEN))
+            it->SetItemLabel(HrFullscreenMenuText(wxString::FromUTF8(lang_.Get("fullscreen")), state_.hotkey_fullscreen));
+    }
+
     // Custom action hotkeys (Settings > Hotkeys > "Add Hotkey").
     hr_hk_clear_custom(hotkey_handle_);
     g_custom_hotkey_actions.clear();
@@ -1807,6 +1825,7 @@ void HomRecMainFrame::DoStart() {
                               audio_panel_->mic_muted(), audio_panel_->sys_muted());
     }
     std::wstring err;
+    stop_pending_ = false;
     if (!rec_->Start(err)) {
         wxMessageBox(wxString(err.c_str()), "HomRec", wxOK | wxICON_WARNING, this);
         return;
@@ -1822,6 +1841,7 @@ void HomRecMainFrame::DoStart() {
 }
 
 void HomRecMainFrame::DoStop() {
+    stop_pending_ = true;     // OnStatsTimer must not keep ticking the Time label while finalizing
     SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
@@ -1843,6 +1863,7 @@ void HomRecMainFrame::HandleRecordingCrashed() {
     // Same UI-side sequence DoStop() runs - the status dot/time/file label otherwise stay
     // stuck on whatever they last showed (see rec_-> crashed()'s doc comment for why that used
     // to happen forever, not just until the next tick).
+    stop_pending_ = true;
     SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
     if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
@@ -1858,6 +1879,7 @@ void HomRecMainFrame::HandleRecordingCrashed() {
 }
 
 void HomRecMainFrame::OnRecordingFinalized() {
+    stop_pending_ = false;
     start_color_btn_->Enable2(true);
     start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
     start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
@@ -2563,7 +2585,7 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
                                         state_.video_codec.find("amf")   != std::string::npos),
                                state_.output_folder);
 
-    if (state_.recording) {
+    if (state_.recording && !stop_pending_) {
         // Only touch a label whose text really changed (every SetLabel invalidates + re-fits the
         // control) and only re-layout the Controls pane when something did.
         bool changed = false;
