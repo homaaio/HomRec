@@ -65,6 +65,7 @@ struct FfmpegCtx {
     // no scale filter needed".
     int output_width{0}, output_height{0};
     bool pipe_input{false};  /* true → read raw BGRA from stdin */
+    bool pipe_ts{false};     /* with pipe_input: stdin carries a NUT stream (frame timestamps) instead of back-to-back raw frames */
 
     bool gpu_capture{false};
     int  grab_output_idx{0};
@@ -331,7 +332,13 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         return ss.str();
     }
 
-    if (ctx->pipe_input) {
+    if (ctx->pipe_input && ctx->pipe_ts) {
+        /* Timestamped pipe: size, pixel format and every frame's time come from the NUT stream (see
+           core/nut_mux.h). A frame is only sent when the picture changed; the `fps` filter below repeats
+           the previous one across the gaps, so the OUTPUT is still constant frame rate and everything
+           downstream (audio mux, retime check, Instant Replay segments) is unchanged. */
+        ss << L" -f nut -i pipe:0";
+    } else if (ctx->pipe_input) {
         /* Pipe mode: read raw BGRA from stdin */
         ss << L" -f rawvideo"
            << L" -pixel_format " << raw_pixfmt
@@ -358,9 +365,20 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
           L" -color_primaries smpte170m -color_trc smpte170m";
 
     // Encode-time downscale (AppState's Settings > Resolution, e.g.
-    if (ctx->output_width > 0 && ctx->output_height > 0 &&
-        (ctx->output_width != ctx->width || ctx->output_height != ctx->height)) {
-        ss << L" -vf scale=" << ctx->output_width << L":" << ctx->output_height;
+    // Filter chain: scale (only when the size differs) first so it runs once per REAL frame, then `fps`
+    // (timestamped pipe only) which turns the sparse timestamps back into constant frame rate by
+    // repeating the previous frame - a repeat is a reference, not another scale/convert.
+    {
+        std::wstring vf;
+        if (ctx->output_width > 0 && ctx->output_height > 0 &&
+            (ctx->output_width != ctx->width || ctx->output_height != ctx->height)) {
+            vf += L"scale=" + std::to_wstring(ctx->output_width) + L":" + std::to_wstring(ctx->output_height);
+        }
+        if (ctx->pipe_input && ctx->pipe_ts) {
+            if (!vf.empty()) vf += L",";
+            vf += L"fps=" + std::to_wstring(ctx->fps > 0 ? ctx->fps : 30);
+        }
+        if (!vf.empty()) ss << L" -vf " << vf;
     }
 
     // Extra output-side flags (Instant Replay's segment muxer, etc.) - must land after
@@ -560,7 +578,7 @@ HR_EXPORT int hr_ff_exit_code(const void *handle) {
     if (!handle) return -1;
 #ifdef _WIN32
     const auto *ctx = static_cast<const FfmpegCtx *>(handle);
-    // 'mu' guards the process handle's lifetime (see hr_ff_wait()/hr_ff_kill()).
+    // `mu` guards the process handle's lifetime (see hr_ff_wait()/hr_ff_kill()).
     std::lock_guard<std::mutex> lk(const_cast<FfmpegCtx *>(ctx)->mu);
     if (!ctx->hProcess) return -1;
     DWORD code = STILL_ACTIVE;
@@ -571,9 +589,14 @@ HR_EXPORT int hr_ff_exit_code(const void *handle) {
 #endif
 }
 
+// enable: 0 = no pipe, 1 = raw frames on stdin (every timeline slot is a full frame),
+//         2 = timestamped (NUT) frames on stdin - the pipeline must be switched to the same mode with
+//             hr_pl_set_timestamped_pipe(pl, fps) and only sends frames whose picture changed.
 HR_EXPORT void hr_ff_set_pipe_input(void *h, int enable) {
     if (!h) return;
-    static_cast<FfmpegCtx *>(h)->pipe_input = (enable != 0);
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    ctx->pipe_input = (enable != 0);
+    ctx->pipe_ts    = (enable == 2);
 }
 
 // hr_ff_get_stdin_handle Returns the write end of ffmpeg's stdin pipe (valid only once
