@@ -29,6 +29,14 @@
             "HomRec-2.0-win64.tar.gz": [
                 ["google-drive", "https://drive.google.com/file/d/15YLW-gSxpmCHu7zW2wWLN7OLuHQRcPiD/view?usp=sharing"]
             ]
+        },
+        "v2.4.1": {
+            "homrec-2.4.1-win64-portable-full.7z": [
+                ["google-drive", "https://drive.google.com/uc?export=download&id=1f2hjB4WgMqTdRJALcCW3is_idMDx6pgO"]
+            ],
+            "homrec-2.4.1-win64-portable.7z": [
+                ["google-drive", "https://drive.google.com/uc?export=download&id=1sa-z-DrQYdSW8he8wR8IA3jrsGVfKjIl"]
+            ]
         }
     };
 
