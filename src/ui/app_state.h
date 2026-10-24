@@ -123,6 +123,10 @@ struct AppState {
     // the CPU, crop/scale/BGRA->NV12 run on the GPU via the D3D11 video processor and only 1.5
     // bytes/pixel are read back.
     bool        gpu_convert        = true;
+    // Static screen = no frame traffic: the capture pipeline sends ffmpeg a frame only when the picture
+    // changed, stamped with its slot on the constant-fps timeline (NUT stream), and ffmpeg repeats the
+    // previous one across the gap. Output is still constant frame rate. Terminal / cfg only
+    bool        skip_static_frames = true;
     // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg captures AND
     // encodes entirely on the GPU.
     bool        gpu_capture_ddagrab = false;
