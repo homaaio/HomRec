@@ -22,6 +22,7 @@
 #include <memory>
 
 #include "../utils/log.h"
+#include "pcm_ring.h"
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
@@ -475,14 +476,16 @@ struct AudioState {
     // Mic
     WasapiStream        mic_stream;
     std::thread         mic_thread;
-    std::vector<int16_t> mic_buf;
+    PcmRing              mic_buf;      // lock: mic_mutex. Ring, not a vector: no realloc-copy, no front-erase memmove
+    std::vector<int16_t> mic_scratch;  // flush/stop staging, reused (lock: stream_mutex)
     std::mutex          mic_mutex;
     std::atomic<int>    mic_level{0};
 
     // Sys
     WasapiStream        sys_stream;
     std::thread         sys_thread;
-    std::vector<int16_t> sys_buf;
+    PcmRing              sys_buf;      // lock: sys_mutex
+    std::vector<int16_t> sys_scratch;  // lock: stream_mutex
     std::mutex          sys_mutex;
     std::atomic<int>    sys_level{0};
 
@@ -516,6 +519,7 @@ static void mic_worker(AudioState* st)
 {
     try {
     const int SLEEP_MS = 10;
+    std::vector<int16_t> tmp;          // reused every iteration (was a fresh vector per 10 ms)
     while (st->running.load()) {
         if (st->paused.load()) {
             st->mic_stream.drain_and_rebase();
@@ -526,7 +530,7 @@ static void mic_worker(AudioState* st)
             WaitForSingleObject(st->mic_stream.data_event, SLEEP_MS);
         else
             Sleep(SLEEP_MS);  // fallback poll if event setup failed
-        std::vector<int16_t> tmp;
+        tmp.clear();                       // keeps capacity: no allocation per 10 ms chunk
         st->mic_stream.read(tmp);
 
         if (!tmp.empty()) {
@@ -555,15 +559,13 @@ static void mic_worker(AudioState* st)
             }
             st->mic_level.store(mute ? 0 : calc_rms(tmp.data(), tmp.size()));
             if (st->buffering.load()) {
+                const int cap_sec = st->max_buffer_sec.load();
                 std::lock_guard<std::mutex> lk(st->mic_mutex);
-                st->mic_buf.insert(st->mic_buf.end(), tmp.begin(), tmp.end());
-                int cap_sec = st->max_buffer_sec.load();
-                if (cap_sec > 0 && st->mic_stream.rate > 0) {
-                    size_t max_samples = (size_t)cap_sec * st->mic_stream.rate * 2; // stereo int16
-                    // PERF: trim in ~1s chunks, not on every 10ms read.
-                    if (st->mic_buf.size() > max_samples + (size_t)st->mic_stream.rate * 2)
-                        st->mic_buf.erase(st->mic_buf.begin(), st->mic_buf.end() - (ptrdiff_t)max_samples);
-                }
+                // Instant Replay window: the ring drops the oldest samples itself (index move, no memmove).
+                st->mic_buf.set_limit((cap_sec > 0 && st->mic_stream.rate > 0)
+                                         ? (size_t)cap_sec * st->mic_stream.rate * 2   // stereo int16
+                                         : 0);
+                st->mic_buf.push(tmp.data(), tmp.size());
             }
         }
         // No trailing Sleep here anymore -- the wait at the top of the loop
@@ -581,6 +583,7 @@ static void sys_worker(AudioState* st)
 {
     try {
     const int SLEEP_MS = 10;
+    std::vector<int16_t> tmp;          // reused every iteration (was a fresh vector per 10 ms)
     while (st->running.load()) {
         if (st->paused.load()) {
             st->sys_stream.drain_and_rebase();
@@ -591,7 +594,7 @@ static void sys_worker(AudioState* st)
             WaitForSingleObject(st->sys_stream.data_event, SLEEP_MS);
         else
             Sleep(SLEEP_MS);  // fallback poll if event setup failed
-        std::vector<int16_t> tmp;
+        tmp.clear();                       // keeps capacity: no allocation per 10 ms chunk
         st->sys_stream.read(tmp);
 
         if (!tmp.empty()) {
@@ -618,15 +621,13 @@ static void sys_worker(AudioState* st)
             }
             st->sys_level.store(mute ? 0 : calc_rms(tmp.data(), tmp.size()));
             if (st->buffering.load()) {
+                const int cap_sec = st->max_buffer_sec.load();
                 std::lock_guard<std::mutex> lk(st->sys_mutex);
-                st->sys_buf.insert(st->sys_buf.end(), tmp.begin(), tmp.end());
-                int cap_sec = st->max_buffer_sec.load();
-                if (cap_sec > 0 && st->sys_stream.rate > 0) {
-                    size_t max_samples = (size_t)cap_sec * st->sys_stream.rate * 2; // stereo int16
-                    // PERF: trim in ~1s chunks, not on every 10ms read.
-                    if (st->sys_buf.size() > max_samples + (size_t)st->sys_stream.rate * 2)
-                        st->sys_buf.erase(st->sys_buf.begin(), st->sys_buf.end() - (ptrdiff_t)max_samples);
-                }
+                // Instant Replay window: the ring drops the oldest samples itself (index move, no memmove).
+                st->sys_buf.set_limit((cap_sec > 0 && st->sys_stream.rate > 0)
+                                         ? (size_t)cap_sec * st->sys_stream.rate * 2   // stereo int16
+                                         : 0);
+                st->sys_buf.push(tmp.data(), tmp.size());
             }
         }
         // See matching comment in mic_worker() above.
@@ -760,14 +761,16 @@ HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
 
     if (mic_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->mic_mutex);
-        if (!g_state->mic_buf.empty() &&
-            wav_write(mic_wav_path, g_state->mic_buf, 2, g_state->mic_stream.rate))
+        g_state->mic_buf.drain(g_state->mic_scratch);
+        if (!g_state->mic_scratch.empty() &&
+            wav_write(mic_wav_path, g_state->mic_scratch, 2, g_state->mic_stream.rate))
             result |= 0x1;
     }
     if (sys_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
-        if (!g_state->sys_buf.empty() &&
-            wav_write(sys_wav_path, g_state->sys_buf, 2, g_state->sys_stream.rate))
+        g_state->sys_buf.drain(g_state->sys_scratch);
+        if (!g_state->sys_scratch.empty() &&
+            wav_write(sys_wav_path, g_state->sys_scratch, 2, g_state->sys_stream.rate))
             result |= 0x2;
     }
 
@@ -814,10 +817,10 @@ HR_EXPORT void hr_audio_flush_buffered()
     if (!g_state) return;
     std::lock_guard<std::mutex> slk(g_state->stream_mutex);
     if (g_state->mic_stream_file) {
-        std::vector<int16_t> chunk;
+        std::vector<int16_t> &chunk = g_state->mic_scratch;   // reused: no allocation per flush
         {
             std::lock_guard<std::mutex> lk(g_state->mic_mutex);
-            chunk.swap(g_state->mic_buf);
+            g_state->mic_buf.drain(chunk);
         }
         if (!chunk.empty()) {
             wav_stream_append(g_state->mic_stream_file, chunk.data(), chunk.size());
@@ -825,10 +828,10 @@ HR_EXPORT void hr_audio_flush_buffered()
         }
     }
     if (g_state->sys_stream_file) {
-        std::vector<int16_t> chunk;
+        std::vector<int16_t> &chunk = g_state->sys_scratch;   // reused: no allocation per flush
         {
             std::lock_guard<std::mutex> lk(g_state->sys_mutex);
-            chunk.swap(g_state->sys_buf);
+            g_state->sys_buf.drain(chunk);
         }
         if (!chunk.empty()) {
             wav_stream_append(g_state->sys_stream_file, chunk.data(), chunk.size());
@@ -863,10 +866,10 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
         g_state->mic_stream_bytes = 0;
     } else if (mic_wav_path) {
         // Fallback for a caller that never opened streaming (e.g.
-        std::vector<int16_t> mic_out;
+        std::vector<int16_t> &mic_out = g_state->mic_scratch;
         {
             std::lock_guard<std::mutex> lk(g_state->mic_mutex);
-            mic_out.swap(g_state->mic_buf);
+            g_state->mic_buf.drain(mic_out);
         }
         if (!mic_out.empty() && wav_write(mic_wav_path, mic_out, 2, g_state->mic_stream.rate))
             result |= 0x1;
@@ -878,10 +881,10 @@ HR_EXPORT int hr_audio_capture_to_wav(const char* mic_wav_path,
         if (sys_wav_path && g_state->sys_stream_bytes > 0) result |= 0x2;
         g_state->sys_stream_bytes = 0;
     } else if (sys_wav_path) {
-        std::vector<int16_t> sys_out;
+        std::vector<int16_t> &sys_out = g_state->sys_scratch;
         {
             std::lock_guard<std::mutex> lk(g_state->sys_mutex);
-            sys_out.swap(g_state->sys_buf);
+            g_state->sys_buf.drain(sys_out);
         }
         if (!sys_out.empty() && wav_write(sys_wav_path, sys_out, 2, g_state->sys_stream.rate))
             result |= 0x2;
@@ -897,14 +900,12 @@ HR_EXPORT void hr_audio_set_max_buffer_sec(int seconds)
 }
 
 // hr_audio_snapshot_to_wav(mic_wav_path, sys_wav_path)
-// First sample index of the window a rolling buffer should expose: the last
-// max_buffer_sec seconds (the worker threads only trim in ~1s chunks now).
-// Always even, so stereo frames stay aligned. Caller holds the stream's mutex.
-static size_t ring_window_start(size_t size, int cap_sec, int rate)
+// Number of newest samples a rolling buffer exposes: the last max_buffer_sec seconds (0 = all).
+// Always even, so stereo frames stay aligned.
+static size_t window_samples(int cap_sec, int rate)
 {
     if (cap_sec <= 0 || rate <= 0) return 0;
-    const size_t max_samples = (size_t)cap_sec * (size_t)rate * 2;
-    return size > max_samples ? size - max_samples : 0;
+    return (size_t)cap_sec * (size_t)rate * 2;
 }
 
 HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
@@ -912,23 +913,18 @@ HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
 {
     if (!g_state) return 0;
     int result = 0;
-    // PERF: copy the window under the lock, write to disk after releasing it,
-    // so saving a replay no longer stalls the capture threads (audible as a
-    // glitch in the still-running buffer) for the duration of the file write.
     const int cap_sec = g_state->max_buffer_sec.load();
     std::vector<int16_t> mic_copy, sys_copy;
     int mic_rate = 0, sys_rate = 0;
     if (mic_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->mic_mutex);
         mic_rate = g_state->mic_stream.rate;
-        const size_t st = ring_window_start(g_state->mic_buf.size(), cap_sec, mic_rate);
-        mic_copy.assign(g_state->mic_buf.begin() + (ptrdiff_t)st, g_state->mic_buf.end());
+        g_state->mic_buf.copy_tail(mic_copy, window_samples(cap_sec, mic_rate));
     }
     if (sys_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
         sys_rate = g_state->sys_stream.rate;
-        const size_t st = ring_window_start(g_state->sys_buf.size(), cap_sec, sys_rate);
-        sys_copy.assign(g_state->sys_buf.begin() + (ptrdiff_t)st, g_state->sys_buf.end());
+        g_state->sys_buf.copy_tail(sys_copy, window_samples(cap_sec, sys_rate));
     }
     if (!mic_copy.empty() && wav_write(mic_wav_path, mic_copy, 2, mic_rate)) result |= 0x1;
     if (!sys_copy.empty() && wav_write(sys_wav_path, sys_copy, 2, sys_rate)) result |= 0x2;
