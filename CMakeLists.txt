@@ -1,17 +1,12 @@
 cmake_minimum_required(VERSION 3.15)
 project(HomRec LANGUAGES C CXX)
 
-# This file is a 1:1 port of the existing ./Makefile - same source list,
-# same compiler flags, same libraries. It does NOT try to "improve" or
-# reorganize anything. If you later add/remove a .cpp file, add/remove it
-# in BOTH this file and Makefile until you decide to retire one of them.
+# This file is a 1:1 port of the existing ./Makefile - same source list, same compiler
+# flags, same libraries.
 
-# ---------------------------------------------------------------------------
 # Paths that were hardcoded in the Makefile (LUA_CFLAGS/LUA_LDFLAGS, wx
 # include/lib dirs). Kept as cache variables here so you can override them
 # on the command line instead of editing the file, e.g.:
-#   cmake -B build -G "MinGW Makefiles" -DLUA_INCLUDE_DIR=D:/lua54/include
-# ---------------------------------------------------------------------------
 set(LUA_INCLUDE_DIR "C:/lua54/include" CACHE PATH "Lua headers")
 set(LUA_LIB_DIR     "C:/lua54/lib"     CACHE PATH "Lua import lib dir")
 set(WX_INCLUDE_DIR  "C:/msys64/mingw64/lib/wx/include/msw-unicode-3.2" CACHE PATH "wx build-specific headers")
@@ -20,10 +15,8 @@ set(WX_LIB_DIR      "C:/msys64/mingw64/lib" CACHE PATH "wx/mingw64 lib dir")
 
 enable_language(RC)
 
-# ---------------------------------------------------------------------------
 # hr.exe - the main app. Source list copied verbatim from Makefile's $(OBJS),
 # just with .o -> .cpp/.c and stripping the src/ prefix duplication.
-# ---------------------------------------------------------------------------
 set(HR_SOURCES
     src/win_main.cpp
     src/commands/ls.cpp
@@ -74,6 +67,7 @@ set(HR_SOURCES
     src/utils/ui_utils.cpp
     src/core/audio.cpp
     src/core/dxgi_capture.cpp
+    src/core/mf_encoder.cpp
     src/core/wgc_capture.cpp
     src/utils/stopwatch.cpp
     src/core/settings.cpp
@@ -126,11 +120,9 @@ target_link_libraries(hr PRIVATE
     wx_mswu_core-3.2 wx_baseu_xml-3.2 wx_baseu_net-3.2 wx_baseu-3.2
 )
 
-# ---------------------------------------------------------------------------
 # hom.exe - standalone plugin-manager CLI tool. Deliberately NOT municode
 # (plain `main`, not `wWinMain`) and does NOT link wx/Lua - see the comment
 # in the original Makefile explaining why it has its own flag set.
-# ---------------------------------------------------------------------------
 add_executable(hom tools/hom/hom.cpp)
 
 target_compile_features(hom PRIVATE cxx_std_17)

@@ -9,11 +9,6 @@ LUA_LDFLAGS ?= -LC:/lua54/lib
 # hom (tools/hom/hom.cpp) is a separate standalone tool (the HomRec
 # plugin package manager) - NOT linked into hr.exe, doesn't need
 # wxWidgets or Lua, and its main() is a plain narrow int main(argc, argv)
-# rather than hr.exe's wWinMain/wmain. Because of that last point it must
-# NOT get -municode: with -municode the linker looks for a wide entry
-# point (wWinMainCRTStartup/wmainCRTStartup) that a plain main() doesn't
-# provide, and the link fails. So hom gets its own flag variables instead
-# of reusing CXXFLAGS/LDFLAGS above.
 HOM_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++
 HOM_LDLIBS   := -lwinhttp -lshlwapi -ldbghelp
 
@@ -79,6 +74,7 @@ OBJS := \
 	src/utils/ui_utils.o \
 	src/core/audio.o \
 	src/core/dxgi_capture.o \
+	src/core/mf_encoder.o \
 	src/core/wgc_capture.o \
 	src/utils/stopwatch.o \
 	src/core/settings.o \
