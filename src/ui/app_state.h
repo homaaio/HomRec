@@ -126,12 +126,14 @@ struct AppState {
     // Static screen = no frame traffic: the capture pipeline sends ffmpeg a frame only when the picture
     // changed, stamped with its slot on the constant-fps timeline (NUT stream), and ffmpeg repeats the
     // previous one across the gap. Output is still constant frame rate. Terminal / cfg only
+    // (`skip_static_frames=0` falls back to the raw pipe that writes every slot in full).
     bool        skip_static_frames = true;
     // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg captures AND
     // encodes entirely on the GPU.
     bool        gpu_capture_ddagrab = false;
     // In-process hardware encoder (Windows Media Foundation, no ffmpeg process / pipe) for H.264 on
     // NVENC / QSV / AMF with the .mp4 container. Experimental: terminal / cfg only (`mf_encoder=1`).
+    // Falls back to the ffmpeg pipe by itself when it cannot start. Audio is still merged by ffmpeg.
     bool        mf_encoder = false;
     // With mf_encoder: hand the finished NV12 GPU texture to the encoder (no GPU->CPU->GPU round trip).
     // Used only while the pointer is not drawn and no overlays are active; `mf_gpu_texture=0` turns it off.
