@@ -126,6 +126,15 @@ struct DxCapCtx {
     bool nv_rect_valid   = false;
     RECT nv_last_rect{0, 0, 0, 0};
     uint64_t st_gpu_frames = 0;
+    static constexpr int kMfPool = 10;
+    ComPtr<ID3D11Texture2D> mf_pool[kMfPool];
+    int  mf_pool_count = 0;
+    int  mf_pool_next  = 0;
+    bool mf_picture_pending = false;    // nv12_tex holds a picture that could not be handed out yet (pool busy)
+    bool mf_have_picture    = false;    // nv12_tex holds at least one finished picture
+    int  pv_slot = 0, pv_pending = -1;
+    bool pv_have_pending = false;
+    bool mt_protected = false;
 
     int  adapter_idx;
     int  output_idx;
@@ -209,6 +218,10 @@ struct DxCapCtx {
         desk_valid = false;
         nv_have_pending = false; nv_pending = -1; nv_write = 0;
         nv_out_valid = false;    nv_rect_valid = false;
+        for (auto &t : mf_pool) t.Reset();
+        mf_pool_count = 0; mf_pool_next = 0;
+        mf_picture_pending = false; mf_have_picture = false;
+        pv_slot = 0; pv_pending = -1; pv_have_pending = false;
     }
 
     // (Re)creates every GPU-side object for the current desktop size and NV12 output size.
@@ -313,8 +326,8 @@ struct DxCapCtx {
     }
 
     /* Runs the video processor: crop `src` out of desk_tex, scale it to
-     * nv_w x nv_h, convert to NV12, and queue a copy into nv_stage[slot]. */
-    bool nv_blit(const RECT &src_in, int slot) {
+     * nv_w x nv_h and convert to NV12 into nv12_tex. */
+    bool vp_blt(const RECT &src_in) {
         if (!vp_ready || !desk_valid) return false;
         RECT src = src_in;
         if (src.left < 0) src.left = 0;
@@ -333,9 +346,51 @@ struct DxCapCtx {
         st.Enable = TRUE;
         st.pInputSurface = vin.Get();
         HRESULT hr = vctx->VideoProcessorBlt(vproc.Get(), vout.Get(), 0, 1, &st);
-        if (FAILED(hr)) return false;
+        return SUCCEEDED(hr);
+    }
+
+    // vp_blt() + queue a copy into nv_stage[slot] (CPU read-back path).
+    bool nv_blit(const RECT &src_in, int slot) {
+        if (!vp_blt(src_in)) return false;
         context->CopyResource(nv_stage[slot].Get(), nv12_tex.Get());
         return true;
+    }
+
+    // Creates the texture pool (lazily, on first use).
+    bool mf_pool_make() {
+        if (mf_pool_count > 0) return true;
+        if (!device || nv_w < 2 || nv_h < 2) return false;
+        D3D11_TEXTURE2D_DESC nd{};
+        nd.Width = (UINT)nv_w; nd.Height = (UINT)nv_h;
+        nd.MipLevels = 1; nd.ArraySize = 1;
+        nd.Format = DXGI_FORMAT_NV12;
+        nd.SampleDesc = {1, 0};
+        nd.Usage = D3D11_USAGE_DEFAULT;
+        // The flags an encoder MFT accepts differ between drivers: try the richest set first.
+        const UINT binds[3] = { D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_RENDER_TARGET, 0 };
+        for (UINT b : binds) {
+            nd.BindFlags = b;
+            int made = 0;
+            for (int i = 0; i < kMfPool; ++i) {
+                if (FAILED(device->CreateTexture2D(&nd, nullptr, &mf_pool[i]))) break;
+                ++made;
+            }
+            if (made >= 3) { mf_pool_count = made; mf_pool_next = 0; return true; }
+            for (auto &t : mf_pool) t.Reset();
+        }
+        return false;
+    }
+    // A pool texture nobody else references (see kMfPool), or null when all are still in use.
+    ID3D11Texture2D *mf_pool_take() {
+        if (!mf_pool_make()) return nullptr;
+        for (int k = 0; k < mf_pool_count; ++k) {
+            const int i = (mf_pool_next + k) % mf_pool_count;
+            ID3D11Texture2D *t = mf_pool[i].Get();
+            t->AddRef();
+            const ULONG rc = t->Release();      // references held by everybody else + this pool's one
+            if (rc == 1) { mf_pool_next = (i + 1) % mf_pool_count; return t; }
+        }
+        return nullptr;
     }
 
     /* Re-acquire duplication interface (needed after HR_DX_LOST) */
@@ -415,6 +470,30 @@ struct DxCapCtx {
 #endif
 
 /* -------------------------------------------------------------------------
+ * Multithread protection (needed once the in-process encoder shares this device)
+ * ---------------------------------------------------------------------- */
+#ifdef _WIN32
+struct HrD3D10Multithread : public IUnknown {
+    virtual void  STDMETHODCALLTYPE Enter() = 0;
+    virtual void  STDMETHODCALLTYPE Leave() = 0;
+    virtual BOOL  STDMETHODCALLTYPE SetMultithreadProtected(BOOL protect) = 0;
+    virtual BOOL  STDMETHODCALLTYPE GetMultithreadProtected() = 0;
+};
+static const GUID kIID_HrD3D10Multithread =
+    {0x9b7e4e00, 0x342c, 0x4106, {0xa1, 0x9f, 0x4f, 0x27, 0x04, 0xf6, 0x89, 0xf0}};
+
+
+static volatile LONG g_mt_protect_req = 0;
+#endif
+HR_EXPORT void hr_dx_set_mt_protect(int enabled) {
+#ifdef _WIN32
+    InterlockedExchange(&g_mt_protect_req, enabled ? 1 : 0);
+#else
+    (void)enabled;
+#endif
+}
+
+/* -------------------------------------------------------------------------
  * hr_dx_create
  * ---------------------------------------------------------------------- */
 HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
@@ -466,6 +545,14 @@ HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
     {
         ComPtr<IDXGIDevice> gpu_dev;
         if (SUCCEEDED(ctx->device.As(&gpu_dev))) gpu_dev->SetGPUThreadPriority(kCaptureGpuPriority);
+    }
+    if (g_mt_protect_req) {
+        HrD3D10Multithread *mt = nullptr;
+        if (SUCCEEDED(ctx->device->QueryInterface(kIID_HrD3D10Multithread, reinterpret_cast<void **>(&mt))) && mt) {
+            mt->SetMultithreadProtected(TRUE);
+            mt->Release();
+            ctx->mt_protected = true;
+        }
     }
 
     hr = ctx->reset();
@@ -791,7 +878,11 @@ HR_EXPORT int hr_dx_capture(void *handle, uint8_t *out_bgra, int timeout_ms) {
     /* Keep the GPU-side desktop copy current (no-op unless the GPU path is
      * enabled) and tell the NV12 ring that the frame went elsewhere. */
     ctx->update_desktop_copy(tex.Get(), box);
-    if (ctx->gpu_enabled) { ctx->nv_have_pending = false; ctx->nv_out_valid = false; }
+    if (ctx->gpu_enabled) {
+        ctx->nv_have_pending = false; ctx->nv_out_valid = false;
+        /* ...and nv12_tex is no longer the latest picture (texture path: re-render it from the desktop copy). */
+        ctx->mf_have_picture = false; ctx->mf_picture_pending = false; ctx->pv_have_pending = false;
+    }
 
     return cpu_new_frame(ctx, tex.Get(), box, out_bgra, timeout_ms);
 #else
@@ -884,12 +975,20 @@ HR_EXPORT int hr_dx_gpu_ready(void *handle) {
 #endif
 }
 
-/* Hand staging NV12 texture `slot` to the caller (tightly packed: Y plane
- * nv_w*nv_h, then interleaved UV plane nv_w*nv_h/2). */
-static int nv_deliver(DxCapCtx *c, int slot, uint8_t *out, bool wait, int timeout_ms) {
+/* Copy an NV12 staging texture into the caller's tightly packed buffer (Y plane nv_w*nv_h, then the
+ * interleaved UV plane nv_w*nv_h/2). single_try: one non-blocking Map, HR_DX_TIMEOUT if the GPU is
+ * still working on it (used by the preview read-back, which must never stall the capture loop). */
+static int nv_read_stage(DxCapCtx *c, ID3D11Texture2D *stage, uint8_t *out, bool wait, int timeout_ms,
+                          bool single_try) {
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    int mr = dx_map(c, c->nv_stage[slot].Get(), wait, timeout_ms, mapped);
-    if (mr != HR_DX_OK) return mr;
+    if (single_try) {
+        HRESULT hr = c->context->Map(stage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return HR_DX_TIMEOUT;
+        if (FAILED(hr)) return HR_DX_ERROR;
+    } else {
+        int mr = dx_map(c, stage, wait, timeout_ms, mapped);
+        if (mr != HR_DX_OK) return mr;
+    }
 
     const uint8_t *src = reinterpret_cast<const uint8_t *>(mapped.pData);
     const size_t   pitch = mapped.RowPitch;
@@ -910,7 +1009,14 @@ static int nv_deliver(DxCapCtx *c, int slot, uint8_t *out, bool wait, int timeou
             memcpy(uv_out + (size_t)y * c->nv_w, uv + (size_t)y * pitch, (size_t)c->nv_w);
     }
 
-    c->context->Unmap(c->nv_stage[slot].Get(), 0);
+    c->context->Unmap(stage, 0);
+    return HR_DX_OK;
+}
+
+/* Hand staging NV12 texture `slot` to the caller. */
+static int nv_deliver(DxCapCtx *c, int slot, uint8_t *out, bool wait, int timeout_ms) {
+    int r = nv_read_stage(c, c->nv_stage[slot].Get(), out, wait, timeout_ms, false);
+    if (r != HR_DX_OK) return r;
     c->nv_out_valid = true;
     ++c->st_gpu_frames;
     return HR_DX_OK;
@@ -964,6 +1070,8 @@ HR_EXPORT int hr_dx_capture_nv12(void *handle, uint8_t *out_nv12, int timeout_ms
     if (!ctx->duplication) return HR_DX_LOST;
     /* Refuse BEFORE acquiring so a frame is never taken and then thrown away. */
     if (!ctx->gpu_enabled || !ctx->vp_ready) return HR_DX_ERROR;
+    ctx->pv_have_pending = false;   /* the texture path's preview ring shares nv_stage: forget it */
+    ctx->mf_picture_pending = false;
 
     const RECT rect{src_l, src_t, src_r, src_b};
     ComPtr<ID3D11Texture2D> tex;
@@ -991,6 +1099,121 @@ HR_EXPORT int hr_dx_capture_nv12(void *handle, uint8_t *out_nv12, int timeout_ms
     (void)handle; (void)out_nv12; (void)timeout_ms;
     (void)src_l; (void)src_t; (void)src_r; (void)src_b;
     return HR_DX_ERROR;
+#endif
+}
+
+/* -------------------------------------------------------------------------
+ * In-process encoder hand-off (Media Foundation) - GPU texture instead of a CPU read-back
+ * ---------------------------------------------------------------------- */
+#ifdef _WIN32
+static int mf_hand_out(DxCapCtx *c, void **out_tex) {
+    ID3D11Texture2D *t = c->mf_pool_take();
+    if (!t) { c->mf_picture_pending = true; return HR_DX_TIMEOUT; }
+    c->context->CopyResource(t, c->nv12_tex.Get());
+    t->AddRef();                       // the reference the caller owns (released by whoever consumes it)
+    *out_tex = t;
+    c->mf_picture_pending = false;
+    ++c->st_gpu_frames;
+    return HR_DX_OK;
+}
+
+static int mf_idle(DxCapCtx *c, const RECT &rect, void **out_tex) {
+    if (c->mf_picture_pending && c->mf_have_picture) return mf_hand_out(c, out_tex);
+    const bool rect_changed = !c->nv_rect_valid || memcmp(&rect, &c->nv_last_rect, sizeof(RECT)) != 0;
+    if ((rect_changed || !c->mf_have_picture) && c->desk_valid) {
+        // Static desktop, but the picture we owe the caller changed (its crop rectangle moved) or none
+        // was produced yet: render it again from the persistent desktop copy.
+        if (!c->vp_blt(rect)) return HR_DX_ERROR;
+        c->nv_last_rect = rect; c->nv_rect_valid = true;
+        c->mf_have_picture = true;
+        return mf_hand_out(c, out_tex);
+    }
+    return HR_DX_TIMEOUT;
+}
+#endif
+
+HR_EXPORT void *hr_dx_get_d3d_device(void *handle) {
+#ifdef _WIN32
+    if (!handle) return nullptr;
+    auto *ctx = static_cast<DxCapCtx *>(handle);
+    /* Only a device that was created multithread-protected may be shared (see g_mt_protect_req). */
+    if (!ctx->device || !ctx->mt_protected) return nullptr;
+    return ctx->device.Get();
+#else
+    (void)handle;
+    return nullptr;
+#endif
+}
+
+// Like hr_dx_capture_nv12(), but the finished NV12 picture is NOT read back: on HR_DX_OK *out_tex is an
+// ID3D11Texture2D* (AddRef'd - the caller must Release() it) that holds the picture. HR_DX_TIMEOUT = no
+// new picture (static desktop, or all pool textures busy), HR_DX_LOST / HR_DX_ERROR as usual.
+HR_EXPORT int hr_dx_capture_nv12_tex(void *handle, int timeout_ms,
+                                      int src_l, int src_t, int src_r, int src_b, void **out_tex) {
+#ifdef _WIN32
+    if (!handle || !out_tex) return HR_DX_ERROR;
+    *out_tex = nullptr;
+    auto *ctx = static_cast<DxCapCtx *>(handle);
+    if (!ctx->duplication) return HR_DX_LOST;
+    if (!ctx->gpu_enabled || !ctx->vp_ready) return HR_DX_ERROR;
+    ctx->nv_out_valid = false;
+    ctx->nv_have_pending = false;
+    ctx->nv_pending = -1;
+
+    const RECT rect{src_l, src_t, src_r, src_b};
+    ComPtr<ID3D11Texture2D> tex;
+    DxBox box;
+    switch (dx_acquire(ctx, timeout_ms, tex, box)) {
+        case DxAcq::Timeout:
+        case DxAcq::Idle:  return mf_idle(ctx, rect, out_tex);
+        case DxAcq::Lost:  return HR_DX_LOST;
+        case DxAcq::Error: return HR_DX_ERROR;
+        case DxAcq::New:   break;
+    }
+
+    ctx->update_desktop_copy(tex.Get(), box);
+    dx_release(ctx);
+
+    // Same bookkeeping as hr_dx_capture_nv12(): the CPU BGRA ring did not see this frame.
+    ctx->stale[0].add(box);
+    ctx->stale[1].add(box);
+    ctx->have_pending = false;
+    ctx->out_carry.set_full(ctx->width, ctx->height);
+
+    if (!ctx->vp_blt(rect)) return HR_DX_ERROR;
+    ctx->nv_last_rect = rect; ctx->nv_rect_valid = true;
+    ctx->mf_have_picture = true;
+    return mf_hand_out(ctx, out_tex);
+#else
+    (void)handle; (void)timeout_ms; (void)src_l; (void)src_t; (void)src_r; (void)src_b;
+    if (out_tex) *out_tex = nullptr;
+    return HR_DX_ERROR;
+#endif
+}
+
+HR_EXPORT int hr_dx_nv12_preview(void *handle, uint8_t *out_nv12, int queue_new) {
+#ifdef _WIN32
+    if (!handle || !out_nv12) return 0;
+    auto *ctx = static_cast<DxCapCtx *>(handle);
+    if (!ctx->gpu_enabled || !ctx->vp_ready || !ctx->nv_stage[0] || !ctx->nv_stage[1]) return 0;
+    int got = 0;
+    if (ctx->pv_have_pending && ctx->pv_pending >= 0) {
+        if (nv_read_stage(ctx, ctx->nv_stage[ctx->pv_pending].Get(), out_nv12, false, 0, /*single_try=*/true) == HR_DX_OK) {
+            ctx->pv_have_pending = false;
+            got = 1;
+        }
+    }
+    if (queue_new && ctx->mf_have_picture && !ctx->pv_have_pending) {
+        const int w = ctx->pv_slot;
+        ctx->context->CopyResource(ctx->nv_stage[w].Get(), ctx->nv12_tex.Get());
+        ctx->pv_pending = w;
+        ctx->pv_have_pending = true;
+        ctx->pv_slot ^= 1;
+    }
+    return got;
+#else
+    (void)handle; (void)out_nv12; (void)queue_new;
+    return 0;
 #endif
 }
 
