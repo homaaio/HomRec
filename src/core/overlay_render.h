@@ -10,6 +10,7 @@
 #include <vector>
 #include "input_overlay.h"
 #include "webcam_capture.h"
+#include "gpu_overlay.h"     // item 9: HrGpuLayer (overlay layers blended on the GPU)
 
 struct HrOverlayDesc {
     char type[16];        // "text" | "image" | "gif" | "webcam" | "input_overlay"
@@ -72,6 +73,15 @@ public:
     void ApplyNv12(uint8_t *nv12, int w, int h,
                    const std::vector<HrOverlayDesc> &overlays, double current_fps = 0.0);
 
+    // Item 9: the same layers ApplyNv12() would draw, but NOT drawn - handed out so the GPU can blend them.
+    // `out` receives one entry per drawn layer (bottom to top), in OVERLAY space (dst_x/dst_y = the overlay's
+    // x/y, dst_w/dst_h = the bitmap size); the caller maps them to the space of the texture they go onto.
+    // `bgra` points into this object's caches and stays valid only until the next call on this object.
+    // Layers that need the monitor picture itself (region / window / hidden desktop) are NOT handled here -
+    // callers keep those on the CPU path (see HrOverlayNeedsBgraBase()).
+    void CollectGpuLayers(const std::vector<HrOverlayDesc> &overlays, double current_fps,
+                          std::vector<HrGpuLayer> &out);
+
 private:
     struct CachedLayer;   // defined below; ForEachLayer() hands them to a callback
     // Shared by Apply()/ApplyNv12(): prunes stale caches, skips overlays that
@@ -85,7 +95,10 @@ private:
         std::vector<uint8_t> bgra; // w*h*4
         int w = 0, h = 0;
         std::string key;           // what this was rendered from, to detect staleness
+        // Item 9: set from layer_gen_ every time `bgra` is (re)written, so the GPU copy knows when to re-upload.
+        unsigned long long gen = 0;
     };
+    unsigned long long layer_gen_ = 0;   // source of CachedLayer::gen (never reused)
 
     // Snapshot of the HrOverlayDesc fields that affect text/image rendering, used to skip the
     // (fairly cheap but non-zero) key-string rebuild in GetOrRenderText/GetOrRenderImage on

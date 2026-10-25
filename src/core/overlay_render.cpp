@@ -525,6 +525,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderText(size_t 
     CachedLayer layer;
     layer.w = ov.w; layer.h = ov.h; layer.key = key;
     if (!RenderTextBgra(wtext, ov.w, ov.h, RGB(ov.text_r, ov.text_g, ov.text_b), wfont, layer.bgra)) return nullptr;
+    layer.gen = ++layer_gen_;
     cache_[idx] = std::move(layer);
     snap.valid = true; _scopy_local(snap.type, sizeof(snap.type), "text");
     snap.w = ov.w; snap.h = ov.h;
@@ -583,6 +584,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderImage(size_t
     } else {
         ScaleBgraNearest(src.native_bgra, src.native_w, src.native_h, layer.bgra, ov.w, ov.h);
     }
+    layer.gen = ++layer_gen_;
     cache_[idx] = std::move(layer);
     snap.valid = true; _scopy_local(snap.type, sizeof(snap.type), "image");
     snap.w = ov.w; snap.h = ov.h;
@@ -658,6 +660,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderGif(size_t i
     } else {
         ScaleBgraNearest(native_frame.bgra, src.canvas_w, src.canvas_h, layer.bgra, ov.w, ov.h);
     }
+    layer.gen = ++layer_gen_;
     cache_[idx] = std::move(layer);
     return &cache_[idx];
 #else
@@ -705,6 +708,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderWebcam(size_
     } else {
         ScaleBgraNearest(frame_bgra, fw, fh, src.layer.bgra, ov.w, ov.h);
     }
+    src.layer.gen = ++layer_gen_;
     src.have_layer = true;
     return &src.layer;
 #else
@@ -730,6 +734,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::CropFromSource(size_t i
         std::fill(layer.bgra.begin(), layer.bgra.end(), (uint8_t)0);    // partly outside: keep the rest clear
     }
     layer.key = "src";
+    layer.gen = ++layer_gen_;
 
     const double fx = (double)ov.w / ov.src_w, fy = (double)ov.h / ov.src_h;
     int dx0 = (int)((cx0 - ov.src_x) * fx + 0.5), dy0 = (int)((cy0 - ov.src_y) * fy + 0.5);
@@ -811,6 +816,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderWindow(size_
                 src.layer.bgra.assign((size_t)ov.w * ov.h * 4, 0);
                 ScaleRectBox(src.frame.data(), (size_t)src.canvas_w * 4, 0, 0, src.canvas_w, src.canvas_h,
                              src.layer.bgra.data(), ov.w, ov.h);
+                src.layer.gen = ++layer_gen_;
                 src.have_layer = true;
             } else if (rc == 2) {
                 HrWgcReset(src.handle);
@@ -825,6 +831,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderWindow(size_
                 ScaleRectBox(src.frame.data(), (size_t)src.canvas_w * 4, 0, 0, src.canvas_w, src.canvas_h,
                              src.layer.bgra.data(), ov.w, ov.h);
                 src.layer.w = ov.w; src.layer.h = ov.h;
+                src.layer.gen = ++layer_gen_;
             }
             if (src.have_layer) return &src.layer;
         }
@@ -953,6 +960,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderInputOverlay
     c.last_pressed = pressed_now;
     c.last_ov_w = ov.w; c.last_ov_h = ov.h;
     c.layer_valid = true;
+    layer.gen = ++layer_gen_;
 
     return &cache_[idx];
 #else
@@ -1085,5 +1093,24 @@ void OverlayCompositor::ApplyNv12(uint8_t *nv12, int w, int h,
     if (!nv12 || w < 2 || h < 2) return;
     ForEachLayer(overlays, current_fps, [&](const CachedLayer &layer, const HrOverlayDesc &ov) {
         CompositeBgraNv12(nv12, w, h, layer.bgra.data(), layer.w, layer.h, ov.x, ov.y, ov.opacity);
+    });
+}
+
+void OverlayCompositor::CollectGpuLayers(const std::vector<HrOverlayDesc> &overlays, double current_fps,
+                                         std::vector<HrGpuLayer> &out)
+{
+    out.clear();
+    ForEachLayer(overlays, current_fps, [&](const CachedLayer &layer, const HrOverlayDesc &ov) {
+        if (layer.bgra.empty() || layer.w <= 0 || layer.h <= 0 ||
+            layer.bgra.size() < (size_t)layer.w * (size_t)layer.h * 4) return;
+        HrGpuLayer g;
+        g.key     = (int)(&ov - overlays.data());   // ov is an element of `overlays`
+        g.bgra    = layer.bgra.data();
+        g.w       = layer.w;  g.h = layer.h;
+        g.gen     = layer.gen;
+        g.dst_x   = ov.x;     g.dst_y = ov.y;
+        g.dst_w   = layer.w;  g.dst_h = layer.h;
+        g.opacity = ov.opacity;
+        out.push_back(g);
     });
 }
