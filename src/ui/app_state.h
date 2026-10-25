@@ -130,6 +130,12 @@ struct AppState {
     // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg captures AND
     // encodes entirely on the GPU.
     bool        gpu_capture_ddagrab = false;
+    // In-process hardware encoder (Windows Media Foundation, no ffmpeg process / pipe) for H.264 on
+    // NVENC / QSV / AMF with the .mp4 container. Experimental: terminal / cfg only (`mf_encoder=1`).
+    bool        mf_encoder = false;
+    // With mf_encoder: hand the finished NV12 GPU texture to the encoder (no GPU->CPU->GPU round trip).
+    // Used only while the pointer is not drawn and no overlays are active; `mf_gpu_texture=0` turns it off.
+    bool        mf_gpu_texture = true;
     bool        game_friendly_priority = false;
     bool        qsv_low_power          = false;
     bool        gpu_low_priority       = false;
