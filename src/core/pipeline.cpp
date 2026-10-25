@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cmath>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -80,6 +81,8 @@ extern "C" {
     int   hr_dx_capture_nv12_tex(void *handle, int timeout_ms, int src_l, int src_t, int src_r, int src_b,
                                   void **out_tex);
     int   hr_dx_nv12_preview(void *handle, uint8_t *out_nv12, int queue_new);
+    // Item 9: overlay layers blended on the GPU (dxgi_capture.cpp / gpu_overlay.cpp)
+    int   hr_dx_gpu_overlay_set(void *handle, const HrGpuLayer *layers, int count);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
     void  hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
@@ -606,6 +609,8 @@ struct Pipeline {
 
     // ====== FRAME QUEUE FOR ASYNC WRITING ====== One queue entry = one converted YUV frame
     // plus how many consecutive times it must be written to the pipe.
+    // A GPU picture travelling through the queue instead of `data` (in-process encoder, texture path):
+    // owns one COM reference to an ID3D11Texture2D, released when the frame is consumed or dropped.
     struct TexRef {
         void *p = nullptr;       // IUnknown* of an ID3D11Texture2D (opaque here)
         TexRef() = default;
@@ -624,7 +629,7 @@ struct Pipeline {
     };
     struct QueuedFrame {
         std::vector<uint8_t> data;
-        TexRef tex;
+        TexRef tex;              // texture path: the picture IS this texture and `data` stays empty
         int repeat = 1;          // raw pipe: how many times the writer sends `data`
         // Timestamped pipe (ts_fps > 0): slot on the constant-fps timeline this picture starts at, or
         // -1 for the raw pipe. `repeat` is always 1 then - ffmpeg fills the gap to the next frame.
@@ -637,8 +642,16 @@ struct Pipeline {
     // instead of as back-to-back raw frames; a frame is only sent when the picture changed.
     // Set by hr_pl_set_timestamped_pipe() BEFORE hr_pl_set_recording(.., 1, ..).
     std::atomic<int>     ts_fps{0};
+    // In-process encoder (mf_encoder.cpp). != nullptr: the writer thread submits frames to it instead of
+    // writing them to a pipe (pipe_handle then only holds a non-zero token so the rest of the pipeline
+    // treats the segment as "open"). Requires the timestamped mode (ts_fps > 0). Cleared by the writer
+    // thread when it ends the segment.
     std::atomic<void*>   mf_sink{nullptr};
+    // The non-zero "pipe handle" value the controller passes in MF mode (see hr_pl_set_mf_sink()): never a
+    // real HANDLE (those are multiples of 4), so the code that closes pipes must skip it.
     static constexpr intptr_t kMfPipeToken = 1;
+    // The capture thread may hand finished NV12 GPU textures to mf_sink (no read-back). Cleared when the
+    // encoder rejects textures, and only used while nothing is drawn on the picture by the CPU.
     std::atomic<bool>    mf_tex_ok{false};
     // Capture thread -> writer: first timeline slot that has NOT elapsed yet. The writer uses it to
     // finish the stream with the last picture held until the real end, and as a once-a-second
@@ -662,6 +675,12 @@ struct Pipeline {
     bool last_yuv_direct = false;
 
     std::atomic<bool> gpu_convert{false};
+    // Item 9: blend the overlays on the GPU (before the NV12 conversion) instead of on the CPU (ApplyNv12).
+    std::atomic<bool> gpu_overlay{true};
+    bool gpu_ov_failed_ = false;              // capture thread only: GPU overlays failed -> CPU compositor for good
+    bool gpu_ov_pushed_ = false;              // capture thread only: the DXGI context holds a non-empty layer list
+    bool logged_gpu_ov_ = false;              // "overlays are drawn on the GPU" logged once
+    std::vector<HrGpuLayer> gpu_layers_;      // scratch for OverlayCompositor::CollectGpuLayers()
     bool gpu_failed = false;                  // capture thread only: give up for this pipeline
     bool gpu_fail_transient = false;          // gpu_failed came from a runtime error that is worth retrying
     int  gpu_fail_count = 0;                  // runtime GPU errors so far (retry limit 3)
@@ -1505,7 +1524,12 @@ struct Pipeline {
                 // Overlays are blended into the finished NV12 frame (OverlayCompositor::ApplyNv12), which
                 // only works when that frame is the same size as the space overlay coordinates live in (no
                 // GPU downscale).
-                const bool ov_blocks_gpu = overlays_active && (gpu_enc_w != src_rw || gpu_enc_h != src_rh);
+                // With GPU overlays (item 9) the layers are drawn BEFORE the video processor scales the picture,
+                // so a scaled output no longer blocks the GPU path; only the CPU compositor needs equal sizes.
+                const bool gpu_ov_possible = overlays_active && gpu_overlay.load(std::memory_order_relaxed) &&
+                                             !gpu_ov_failed_;
+                const bool ov_blocks_gpu = overlays_active && !gpu_ov_possible &&
+                                           (gpu_enc_w != src_rw || gpu_enc_h != src_rh);
                 // DISPLAY MODE CHANGED MID-RECORDING (typical: a game switches the desktop to its own
                 // resolution right after Start): the buffers and the encoder were sized for src_w x src_h,
                 // but DXGI now delivers real_w x real_h.
@@ -1559,10 +1583,67 @@ struct Pipeline {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
+            // ====== ITEM 9: overlays blended on the GPU ======
+            // The layers go to the DXGI context now; the capture below draws them onto the desktop copy
+            // before the video processor converts it (no CPU ApplyNv12 pass, no per-frame blending work).
+            bool gpu_ov_tick = false;
+            if (!wgc_mode && dx_ctx) {
+                if (gpu_tick && overlays_active && !gpu_ov_failed_ && gpu_overlay.load(std::memory_order_relaxed)) {
+                    bool collected = false;
+                    try {
+                        overlay_compositor.CollectGpuLayers(overlays_snapshot,
+                                                            fps_actual.load(std::memory_order_relaxed), gpu_layers_);
+                        collected = true;
+                    } catch (const std::exception &e) {
+                        HrLog::Error(std::string("Overlay layer collection threw (") + e.what() + ") -- using the CPU compositor.");
+                    } catch (...) {
+                        HrLog::Error("Overlay layer collection threw an unknown exception -- using the CPU compositor.");
+                    }
+                    if (collected) {
+                        int real_w = 0, real_h = 0;
+                        g_libs.dx_get_size(dx_ctx, &real_w, &real_h);
+                        // Overlay coordinates live in the (cropped) frame of the size recording started at;
+                        // the desktop texture is real_w x real_h (different only after a display mode change).
+                        const double fx = (src_w > 0 && real_w > 0) ? (double)real_w / src_w : 1.0;
+                        const double fy = (src_h > 0 && real_h > 0) ? (double)real_h / src_h : 1.0;
+                        for (auto &g : gpu_layers_) {
+                            g.dst_x = gpu_sl + (int)std::lround(g.dst_x * fx);
+                            g.dst_y = gpu_st + (int)std::lround(g.dst_y * fy);
+                            g.dst_w = std::max(1, (int)std::lround(g.dst_w * fx));
+                            g.dst_h = std::max(1, (int)std::lround(g.dst_h * fy));
+                        }
+                        if (hr_dx_gpu_overlay_set(dx_ctx, gpu_layers_.data(), (int)gpu_layers_.size())) {
+                            gpu_ov_tick = true;
+                            gpu_ov_pushed_ = !gpu_layers_.empty();
+                            if (!logged_gpu_ov_) {
+                                logged_gpu_ov_ = true;
+                                HrLog::Info("Overlays: blended on the GPU (" + std::to_string(gpu_layers_.size()) +
+                                            " layer(s), before the NV12 conversion) - no CPU compositing per frame.");
+                            }
+                        }
+                    }
+                    if (!gpu_ov_tick) {
+                        // Not available (no shader compiler / driver refusal / error): from now on the CPU
+                        // compositor draws them. This tick is skipped so the GPU-path conditions above are
+                        // re-evaluated with the overlays on the CPU (they need the unscaled frame size).
+                        gpu_ov_failed_ = true;
+                        gpu_ov_pushed_ = false;
+                        hr_dx_gpu_overlay_set(dx_ctx, nullptr, 0);
+                        HrLog::Warn("GPU overlay blending unavailable - overlays are composited on the CPU instead.");
+                        continue;
+                    }
+                } else if (gpu_ov_pushed_) {
+                    hr_dx_gpu_overlay_set(dx_ctx, nullptr, 0);     // overlays gone / CPU tick: clear the GPU list
+                    gpu_ov_pushed_ = false;
+                }
+            }
+            // Overlays that still have to be drawn by the CPU on this tick's picture.
+            const bool ov_cpu_tick = overlays_active && !gpu_ov_tick;
+
             // In-process encoder with GPU textures: only while nothing has to be drawn on the picture by the CPU
             // (pointer / overlays), otherwise the picture is read back as before.
             tex_tick = gpu_tick && !wgc_mode && mf_sink.load(std::memory_order_acquire) != nullptr &&
-                       mf_tex_ok.load(std::memory_order_acquire) && !overlays_active &&
+                       mf_tex_ok.load(std::memory_order_acquire) && !ov_cpu_tick &&
                        !include_cursor.load(std::memory_order_relaxed) && ts_on();
             int ret;
             const auto t_cap0 = hitch_clock::now();
@@ -1686,7 +1767,7 @@ struct Pipeline {
                 bool merged = false;
                 if (tex_tick) {
                     merged = !tex_hold.p;             // no new picture: the encoder repeats the previous one
-                } else if (ret != HR_DX_OK && gpu_emit_valid && !overlays_active &&
+                } else if (ret != HR_DX_OK && gpu_emit_valid && !ov_cpu_tick &&
                     (!cur_on || cur_now == gpu_emit_sig))
                     merged = tsm ? ts_have_frame : try_merge_last(extra_slots);
                 else if (ret != HR_DX_OK && !nv12_clean && tsm && ts_have_frame)
@@ -1704,7 +1785,7 @@ struct Pipeline {
                     // buffer IS the outgoing frame - no 3 MB nv12_buf -> yuv_frame copy. Only with the
                     // timestamped pipe: the raw pipe may need to re-send the clean picture on a later static
                     // tick, and a handed-over buffer is gone.
-                    const bool hand_over = tsm && ret == HR_DX_OK && !overlays_active && !cur_on;
+                    const bool hand_over = tsm && ret == HR_DX_OK && !ov_cpu_tick && !cur_on;
                     if (hand_over) {
                         preview_if_due();                 // the thumbnail reads nv12_buf, which leaves now
                         preview_suppressed = true;
@@ -1717,7 +1798,7 @@ struct Pipeline {
                         std::memcpy(yuv_frame.data(), nv12_buf.data(), needed);
                     }
 #ifdef _WIN32
-                    if (overlays_active) {
+                    if (ov_cpu_tick) {
                         // Same try/catch rationale as the classic path's Apply()
                         // call: this is a bare std::thread, an escaping throw
                         // would terminate the process mid-recording.
@@ -2420,6 +2501,17 @@ HR_EXPORT void hr_pl_set_gpu_convert(void* handle, int enabled) {
     if (!handle) return;
 #ifdef _WIN32
     static_cast<Pipeline*>(handle)->gpu_convert.store(enabled != 0, std::memory_order_relaxed);
+#else
+    (void)enabled;
+#endif
+}
+
+// Item 9 (setting gpu_overlay): overlays are blended on the GPU, before the NV12 conversion, whenever the GPU
+// colour-conversion path is used. 0 = always composite them on the CPU like before. Safe to change while running.
+HR_EXPORT void hr_pl_set_gpu_overlay(void* handle, int enabled) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->gpu_overlay.store(enabled != 0, std::memory_order_relaxed);
 #else
     (void)enabled;
 #endif
