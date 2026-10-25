@@ -1,9 +1,133 @@
 welcome to changelog :D
 
-[Version 2.4.2] - 2026-10-21
-Version bump, plus diagnostics for the "UI freezes for 10-20 s when recording starts with the preview off" report.
+[Version 3.0] - 2026-10-25
+Performance release: an in-process hardware encoder (opt-in), fewer copies and allocations on the capture path,
+no duplicate frames on a static screen, A/V sync and preview fixes, console / hotkey fixes, and start-up
+diagnostics. Version bumped from 2.4.2 to 3.0.
+Also: console commands no longer swallow stray arguments, F11 no longer hijacks other programs, audio no longer
+drifts against the video after a CPU spike, the mouse wheel can't change settings by accident, the console stops
+beeping, `log clear` learns flags, the Controls pane loses its title, and the wait after Stop gets shorter and measurable.
+
+### Build status
+- NOT COMPILED OR RUN ON WINDOWS - written without a compiler or a GPU. Checked for the in-process encoder [11]:
+  mf_encoder.cpp and pipeline.cpp with stub Windows/COM/Media Foundation headers (-fsyntax-only, no errors in
+  the new code); the stubs only catch typos / type mistakes, NOT mismatches with the real SDK.
+  dxgi_capture.cpp and recording_controller.cpp were reviewed by reading only. The codec property GUIDs in
+  mf_encoder.cpp were typed from memory (see the file).
+- Checked for the performance batch [1, 3, 4, 5]: nut_mux.h against ffmpeg 6.1 (real pipe -> fps filter ->
+  rawvideo / x264, incl. 1080p frames and a 100 000-slot gap), pcm_ring.h against a std::deque model (fuzz,
+  ASan+UBSan), cursor_blend.h against the old "draw into BGRA, then convert" result (max difference 1 level,
+  NV12 and I420), and pipeline.cpp with a stub windows.h (-fsyntax-only, no errors). Everything else was only
+  read, not built.
+
+### Performance
+- Video encoded inside the HomRec process: pipeline -> Media Foundation Sink Writer -> hardware H.264 MFT -> .mp4.
+    No ffmpeg child process and no pipe for the video; with a GPU texture hand-over also no GPU->CPU->GPU round trip.
+    Audio is still merged afterwards by the unchanged ffmpeg step (that is item 10, not done).
+    Used only when ALL of: mf_encoder=1, hardware H.264 (h264_nvenc / h264_qsv / h264_amf), container MP4, no custom
+    ffmpeg args, not ddagrab. Anything else, and any failure to start, uses the ffmpeg path exactly as before.
+    * src/core/mf_encoder.h / mf_encoder.cpp - NEW. C API hr_mf_*: sink writer + encoder setup (bitrate, peak = 2x,
+      GOP = 2 s, no B-frames, low latency, BT.601 limited-range tags like the pipe path), system-memory and D3D11-texture
+      input, constant frame rate (skipped timeline slots are filled by re-submitting the last picture), finalize in a
+      background thread, stale-handle-safe registry. Refuses a software-only H.264 MFT (ffmpeg's NVENC is better).
+      MFCreateDXGIDeviceManager / MFCreateDXGISurfaceBuffer are loaded with GetProcAddress (exe still starts on Win7).
+    * src/core/dxgi_capture.cpp - hr_dx_capture_nv12_tex(): same capture/desktop-copy/video-processor work as
+      hr_dx_capture_nv12() but the NV12 picture is copied GPU->GPU into a pooled texture (10, reused once nobody else
+      references them) and handed out instead of being read back. hr_dx_nv12_preview(): small async read-back at
+      preview rate so the live thumbnail keeps working. hr_dx_get_d3d_device() + hr_dx_set_mt_protect(): the capture
+      device is created multithread-protected when mf_encoder is on (a running device is never switched).
+      nv_blit() split into vp_blt() + copy; nv_deliver() into nv_read_stage() (no behaviour change).
+    * src/core/pipeline.cpp - hr_pl_set_mf_sink() / hr_pl_get_d3d_device(). Writer thread submits to the encoder instead
+      of a pipe (the "pipe handle" is a non-zero token that is never closed), repeats the last picture while idle, ends the
+      encoder with the segment. Capture thread hands over textures only while the pointer is not drawn and no overlay is
+      active (the CPU would have to draw on the picture); otherwise the usual NV12 buffer goes to the encoder.
+      QueuedFrame can carry a texture (TexRef, released on use or drop).
+    * src/ui/recording_controller.cpp / .h - StartMfEncoder(), MfEncoderWanted(); Start() skips ffmpeg for the video;
+      a start failure falls back to ffmpeg (and disables MF for the session); stop waits for the file to be finalized;
+      an encoder failure mid-recording is handled like an ffmpeg crash; size readout.
+    * src/ui/app_state.h, src/core/settings_registry.cpp - settings mf_encoder (default OFF), mf_gpu_texture (default ON).
+    * CMakeLists.txt, Makefile - mf_encoder added to the build.
+- Audio ring buffer, no per-chunk allocations.
+    * src/core/pcm_ring.h - NEW. Circular int16 FIFO: grows geometrically then keeps its storage, push =
+      memcpy into <=2 spans, dropping the oldest samples (Instant Replay window) just moves the read index.
+    * src/core/audio.cpp - mic_buf / sys_buf are PcmRing instead of std::vector (no realloc-copy of the whole
+      recording-so-far under the mutex, no front-erase memmove in the replay trim); the worker's per-10 ms
+      `tmp` vector is declared once outside the loop; flush / stop / capture_to_wav / snapshot drain into
+      reusable mic_scratch / sys_scratch; ring_window_start() replaced by window_samples() + copy_tail().
+    * src/core/audio_extra.inc - the extra mixer channels use the same ring + a reusable scratch vector.
+- Remove the extra nv12_buf -> yuv_frame memcpy on the GPU path.
+    * src/core/pipeline.cpp - when the timestamped pipe is on AND nothing has to be drawn on the frame (cursor
+      capture off, no overlays), the readback buffer itself is moved into the queue and nv12_buf is refilled
+      from the free list: no 3 MB copy. NOT done when the cursor or an overlay is drawn: the clean picture
+      must stay in nv12_buf for later ticks, so that copy is unavoidable there (and the raw pipe keeps it
+      too). New nv12_clean flag; the preview thumbnail runs BEFORE the hand-over (preview_if_due()).
+- Cursor blended into the YUV frame instead of copying 8 MB per frame (CPU path).
+    * src/utils/cursor_blend.h - NEW. blend_yuv420() (NV12 studio range / I420 full range, same matrices as
+      encoder_helpers.c) and blend_rgb24() (preview thumbnail).
+    * src/utils/ui_utils.cpp - hr_composite_cursor_yuv() / hr_composite_cursor_rgb24() added;
+      hr_composite_cursor_nv12() is now a wrapper (the GPU path is unchanged).
+    * src/core/pipeline.cpp - the CPU path no longer draws the pointer into the BGRA frame, so
+      ensure_work_copy() is skipped for it, the frame stays "direct" and DXGI dirty-row partial conversion
+      now works with the cursor on. last_yuv stays pointer-free; the pointer is blended into each outgoing
+      copy (cpu_emit_sig tracks what the last queued frame shows). Preview thumbnail gets the pointer from
+      update_preview() (pv_cursor*). Scaled output (Settings > Resolution) scales the pointer like the GPU path.
+- Stop writing duplicate frames on a static screen (VFR with timestamps), setting skip_static_frames (default ON).
+    * src/core/nut_mux.h - NEW. Minimal NUT muxer (header, sync point, frame header with CRC) so the pipe
+      carries a timestamp per frame.
+    * src/core/pipeline.cpp - hr_pl_set_timestamped_pipe(); every recording tick owns a slot on the
+      constant-fps timeline, an unchanged tick queues nothing (before: a full copy was queued or merged);
+      writer: NUT header per pipe, one packet per picture, the last picture is held to the real end on
+      close, and re-sent about once a second on a static screen (keeps the encoder / replay segments from
+      lagging behind). Eviction under back-pressure no longer carries repeat counts in this mode.
+    * ffmpeg/ffmpeg_runner.cpp - hr_ff_set_pipe_input(h, 2) = `-f nut -i pipe:0` and `-vf [scale,]fps=N`, so
+      the OUTPUT stays constant frame rate (audio mux, retime check, replay segments are unchanged).
+      Note: the encoder still encodes the repeated frames; real VFR output was deliberately not done.
+    * src/ui/recording_controller.cpp - HrPipeInputMode(); main recording and Instant Replay use it. Custom
+      ffmpeg args containing -vf / -filter / -r / -fps_mode / -vsync keep the raw pipe. The quick-take
+      benchmark always uses the raw pipe. skip_static_frames shows in the "weak-PC switches" log line.
+    * src/ui/app_state.h, src/core/settings_registry.cpp - skip_static_frames (alias vfr_pipe); terminal / cfg
+      only, not in the Settings window.
 
 ### Fixed
+- 1. Preview frozen after Stop / at Start (once for ~1.5 minutes) / after Pause: the capture loop restarts
+  its stopwatch (hr_sw_start) on every recording transition and every 20 ms while paused, but
+  last_preview_ns kept a stamp from the old clock, so "now - last >= interval" stayed false until the new
+  clock caught up with it (= as long as the pipeline had run before). It is reset with the stopwatch now;
+  the measured-fps accumulators too while paused.
+    * src/core/pipeline.cpp
+- 2. Time kept running after Stop: the label is no longer updated while the recording is being finalized.
+    * src/ui/main_frame.h (stop_pending_), src/ui/main_frame.cpp (DoStop, HandleRecordingCrashed,
+      OnRecordingFinalized, DoStart, OnStatsTimer)
+- 3. Desktop layer window: no longer the 700x520 minimum with one tiny row; compact window with a screenshot
+  of the chosen monitor (taken before the dialog opens) like OBS. NOT done: deleting / adding the Desktop
+  layer - it is the base layer (row 0) and the row logic assumes it exists; use the eye to hide it.
+    * src/ui/capture_source_dialog.cpp
+- 4. High resource use with the preview on (not profiled - see below): the preview thumbnail downscaler read
+  every pixel of the 8 MB capture buffer on every preview tick; it now averages at most 2x2 samples per block.
+    * src/core/pipeline.cpp (bgra_to_thumb). Lower Preview FPS still lowers the cost proportionally.
+- F11 (the default fullscreen key) turned HomRec fullscreen while another program had focus: it was
+  registered with RegisterHotKey, i.e. system-wide. Fullscreen is now a window-local accelerator on
+  the View menu entry, so it only reacts while HomRec itself is focused; the key is still taken from
+  the hotkey_fullscreen setting and the menu text follows it (the label in Settings > Hotkeys now
+  says "Fullscreen (HomRec window only)"). A binding wx can't use as an accelerator (e.g. with Win)
+  leaves the menu item without a shortcut. F8/F9/F10 and custom hotkeys stay global.
+    * src/core/hotkey.cpp - HK_FULLSCREEN is no longer registered / unregistered (API unchanged)
+    * src/ui/main_frame.cpp - HrFullscreenMenuText(), used by BuildMenuBar() and
+      ConfigureHotkeysFromState(); new #include <wx/accel.h>
+    * src/ui/settings_dialog.cpp - hotkey label text
+- Console: "clear <anything>" cleared, "ping --x" answered, etc. Arguments after a command that takes
+  none are now refused with "<cmd>: takes no arguments ... - not run": version, ver, ping, clear,
+  info, status, hide, pwd, whoami (console_window.cpp, RunCommand()).
+- Console: other commands ignored junk too. Now usage messages instead:
+    * sec / secui / secp: only 0|1|on|off|true|false (any case) and nothing after it; before,
+      "sec banana" counted as "on" and "sec OFF" also enabled protection
+    * log: bare "log" no longer writes an empty line; "log --typo" is an unknown option (use
+      "log -- <text>" to log text starting with "-"); "log open <x>" refused
+    * history <x> <y>, clip --paste <x>, clip --clear <x>, preset <a> <b>, sethrc <path> <flag> <x>
+      refused; sethrc with a flag that isn't 1/true/0/false is now an error, not "nothing imported"
+- Items 1 (slow save after a long recording) and 2 (audio lag in a 14 min recording) were already
+  worked on in the previous pass (see the A/V sync entry further down); nothing new was changed for them. They are unverified
+  until a new long recording is made - check homrec.log for "finalize took" and "Audio sync (...)".
 - A/V sync (audio lagging ~0.5-0.8 s after a CPU spike around minute 3 of a 14-minute recording):
     * src/core/audio.cpp - the WASAPI capture buffer was 200 ms although every comment said 2 s; a
       starved capture thread overwrote unread samples. It is now really 2 s.
@@ -21,10 +145,6 @@ Version bump, plus diagnostics for the "UI freezes for 10-20 s when recording st
   and cfg only - not in the Settings window). (console_window.cpp, app_state.h, settings_registry.cpp)
 
 ### Changed
-- Version is now 2.4.2 (src/ui/version.h - the single source of truth; the title bar, About box,
-  update check and tools/homrec_build.py all read it from there).
-- Source cleanup: long explanatory comments in the C/C++ sources, headers, Python tools, Makefile and
-  CMakeLists.txt were removed or cut down to 1-3 lines. Code itself is unchanged.
 - `log clear` accepts flags: `--pc`, `--plugins`, `--wgc`, `--ffmpeg`, `--homrec`, `--all`/`-a` (every
   *.log in logs\); no flag = homrec.log only, as before. (console_window.cpp, log_paths.cpp/.h)
 - Controls pane: the big "HomRec" caption and the version under it are gone (the title bar and the
@@ -32,13 +152,24 @@ Version bump, plus diagnostics for the "UI freezes for 10-20 s when recording st
 - "mp4 + mkv" recordings: the .mp4 copy is written in the same ffmpeg pass as the audio merge instead of
   a second full read/write afterwards (falls back to the old separate remux if that pass fails).
   (tools.cpp hr_merge_av_ex, recording_controller.cpp)
+- Version is now 3.0, previously 2.4.2 (src/ui/version.h - the single source of truth; the title bar, About box,
+  update check and tools/homrec_build.py all read it from there).
+- Source cleanup: long explanatory comments in the C/C++ sources, headers, Python tools, Makefile and
+  CMakeLists.txt were removed or cut down to 1-3 lines. Code itself is unchanged.
 
 ### Added
+- homrec.log: "Recording: lengths before merge (video / audio / real, seconds) = ..." and
+  "Recording: finalize took N ms (encoder flush, audio files/mix, A/V merge, mp3, mp4 copy)" after every
+  recording, and "Audio sync (mic|system): ..." when gaps were filled / trimmed - so the next
+  "saving took ages" or "audio is late" report shows where the time or the offset went.
 - homrec.log: every recording start now writes one line, "Recording: Start() took N ms on the UI thread
   (preview on/off) - <phase>=<ms> ...", listing every phase that took 5 ms or more (disk check, size
   resolve, ddagrab probe, ffmpeg launch, replay-stop join, old-pipeline destroy, preview-teardown join,
   pipeline create/start, audio begin). It is a warning when the whole start took 1 s or longer. Start()
   runs on the UI thread, so this shows exactly which step freezes the window. (src/ui/recording_controller.cpp)
+
+### Docs
+- README.md (F11 note), docs/documentation.html (log / clear rows).
 
 [Version 2.4.1] - 2026-10-21
 Games record smoother on weak PCs, `hom` learns to use forks and mirrors, and the in-app console
