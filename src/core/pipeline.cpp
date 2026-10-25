@@ -34,6 +34,7 @@
 #include "overlay_render.h"
 #include "wgc_capture.h"   // 2.4: Windows.Graphics.Capture window source
 #include "nut_mux.h"       // timestamped pipe to ffmpeg (see hr_pl_set_timestamped_pipe)
+#include "mf_encoder.h"   // in-process hardware encoder (see hr_pl_set_mf_sink)
 
 static constexpr int HR_DX_OK      =  0;
 static constexpr int HR_DX_TIMEOUT =  1;
@@ -74,6 +75,11 @@ extern "C" {
     int   hr_dx_gpu_ready(void *handle);
     int   hr_dx_capture_nv12(void *handle, uint8_t *out_nv12, int timeout_ms,
                               int src_l, int src_t, int src_r, int src_b);
+    // In-process (Media Foundation) encoder hand-off - see dxgi_capture.cpp (hr_mf_* come from mf_encoder.h).
+    void *hr_dx_get_d3d_device(void *handle);
+    int   hr_dx_capture_nv12_tex(void *handle, int timeout_ms, int src_l, int src_t, int src_r, int src_b,
+                                  void **out_tex);
+    int   hr_dx_nv12_preview(void *handle, uint8_t *out_nv12, int queue_new);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
     void  hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
@@ -600,8 +606,25 @@ struct Pipeline {
 
     // ====== FRAME QUEUE FOR ASYNC WRITING ====== One queue entry = one converted YUV frame
     // plus how many consecutive times it must be written to the pipe.
+    struct TexRef {
+        void *p = nullptr;       // IUnknown* of an ID3D11Texture2D (opaque here)
+        TexRef() = default;
+        explicit TexRef(void *x) : p(x) {}
+        TexRef(TexRef &&o) noexcept : p(o.p) { o.p = nullptr; }
+        TexRef &operator=(TexRef &&o) noexcept { if (this != &o) { reset(); p = o.p; o.p = nullptr; } return *this; }
+        TexRef(const TexRef &) = delete;
+        TexRef &operator=(const TexRef &) = delete;
+        ~TexRef() { reset(); }
+        void reset() {
+#ifdef _WIN32
+            if (p) static_cast<IUnknown *>(p)->Release();
+#endif
+            p = nullptr;
+        }
+    };
     struct QueuedFrame {
         std::vector<uint8_t> data;
+        TexRef tex;
         int repeat = 1;          // raw pipe: how many times the writer sends `data`
         // Timestamped pipe (ts_fps > 0): slot on the constant-fps timeline this picture starts at, or
         // -1 for the raw pipe. `repeat` is always 1 then - ffmpeg fills the gap to the next frame.
@@ -614,6 +637,9 @@ struct Pipeline {
     // instead of as back-to-back raw frames; a frame is only sent when the picture changed.
     // Set by hr_pl_set_timestamped_pipe() BEFORE hr_pl_set_recording(.., 1, ..).
     std::atomic<int>     ts_fps{0};
+    std::atomic<void*>   mf_sink{nullptr};
+    static constexpr intptr_t kMfPipeToken = 1;
+    std::atomic<bool>    mf_tex_ok{false};
     // Capture thread -> writer: first timeline slot that has NOT elapsed yet. The writer uses it to
     // finish the stream with the last picture held until the real end, and as a once-a-second
     // heartbeat on a static screen (see writer_loop()).
@@ -720,13 +746,19 @@ struct Pipeline {
 
         writer_running.store(true, std::memory_order_relaxed);
         bool logged_write_fail = false;   // edge-trigger for the write-failure diagnostic below
+#ifdef _WIN32
+        // The in-process encoder (Media Foundation) is called from this thread.
+        const bool writer_com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+#endif
+        int64_t mf_raw_slot = 0;          // only used if the encoder is fed without timeline slots (never in practice)
+        bool    logged_mf_fail = false;
 
-        // ------ timestamped (NUT) pipe state, only touched by this thread ------
-        std::vector<uint8_t> nut_prefix;    // sync point + frame header scratch
-        std::vector<uint8_t> nut_last;      // the picture most recently written (kept for the tail/heartbeat)
+        // ---- timestamped (NUT) pipe state; only touched by this thread ----
+        std::vector<uint8_t> nut_prefix;       // sync point + frame header scratch
+        std::vector<uint8_t> nut_last;         // the picture most recently written (kept for the tail/heartbeat)
         int64_t  nut_last_pts = -1;
         bool     nut_header_done = false;
-        intptr_t nut_pipe = 0;              // the pipe handle the header went to
+        intptr_t nut_pipe = 0;                 // the pipe handle the header went to
         auto nut_write = [&](const uint8_t *data, size_t n, int64_t pts) -> bool {
             hrnut::make_frame_prefix(nut_prefix, pts, n);
             return write_pipe(nut_prefix.data(), nut_prefix.size()) && write_pipe(data, n);
@@ -777,6 +809,7 @@ struct Pipeline {
             int  frame_w = 0, frame_h = 0;
             bool frame_nv12 = false;
             bool heartbeat = false;
+            TexRef frame_tex;
 
             {
                 std::unique_lock<std::mutex> lock(pipe_queue_mtx);
@@ -800,14 +833,23 @@ struct Pipeline {
 
                 if (pipe_queue.empty()) {
                     if (pending_close_requested.load(std::memory_order_acquire)) {
+                        // In-process encoder: hold the last picture to the end of the timeline and let it
+                        // finalize the file in the background (the "pipe" is only a token - nothing to close).
+                        void *mf_seg = mf_sink.exchange(nullptr, std::memory_order_acq_rel);
+                        if (mf_seg) {
+                            hr_mf_end(mf_seg, ts_end_slot.load(std::memory_order_acquire));
+                            pipe_handle.exchange(0, std::memory_order_acq_rel);
+                            mf_raw_slot = 0;
+                        } else {
                         nut_finish();     // timestamped pipe: flush the held tail picture before EOF
                         const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
-                        if (ph != 0 && ph != -1) {
+                        if (ph != 0 && ph != -1 && ph != kMfPipeToken) {
 #ifdef _WIN32
                             CloseHandle(reinterpret_cast<HANDLE>(ph));
 #else
                             ::close(static_cast<int>(ph));
 #endif
+                        }
                         }
                         pending_close_requested.store(false, std::memory_order_release);
                         {
@@ -815,6 +857,13 @@ struct Pipeline {
                             pending_close_done.store(true, std::memory_order_release);
                         }
                         finish_cv.notify_all();
+                    }
+                    if (void *mf_idle_sink = mf_sink.load(std::memory_order_acquire)) {
+                        // Keep the encoder's timeline moving on a static screen (re-submits the last picture; no
+                        // capture / conversion / copy work behind it).
+                        if (recording.load(std::memory_order_relaxed))
+                            hr_mf_hold_until(mf_idle_sink, ts_end_slot.load(std::memory_order_acquire) - 1);
+                        continue;
                     }
                     if (!nut_heartbeat_due()) continue;
                     heartbeat = true;
@@ -826,6 +875,7 @@ struct Pipeline {
                 frame_w = pipe_queue.front().w;
                 frame_h = pipe_queue.front().h;
                 frame_nv12 = pipe_queue.front().nv12;
+                frame_tex = std::move(pipe_queue.front().tex);
                 pipe_queue.pop();
                 }
             }
@@ -836,6 +886,37 @@ struct Pipeline {
                     nut_last_pts = hb_pts;
                 continue;
             }
+
+            // In-process encoder: submit instead of writing to a pipe.
+            if (void *mfw = mf_sink.load(std::memory_order_acquire)) {
+                if (frame_tex.p || !frame.empty()) {
+                    int64_t slot = frame_pts;
+                    if (slot < 0) { slot = mf_raw_slot; mf_raw_slot += std::max(1, frame_repeat); }
+                    bool ok;
+                    if (frame_tex.p) {
+                        ok = hr_mf_write_texture(mfw, frame_tex.p, slot) != 0;
+                        // The encoder refused textures: tell the capture thread to read pictures back instead.
+                        if (!ok && !hr_mf_textures_enabled(mfw)) mf_tex_ok.store(false, std::memory_order_release);
+                        frame_tex.reset();
+                    } else {
+                        ok = hr_mf_write_sysmem(mfw, frame.data(), frame_w, frame_h, slot) != 0;
+                    }
+                    if (!frame.empty()) {
+                        std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                        if (free_bufs.size() < MAX_FREE_BUFS) free_bufs.push(std::move(frame));
+                    }
+                    if (!ok && !logged_mf_fail && recording.load(std::memory_order_relaxed) &&
+                        writer_running.load(std::memory_order_relaxed)) {
+                        logged_mf_fail = true;
+                        HrLog::Warn("Writer thread: the in-process encoder did not accept a frame (see the \"MF encoder\" "
+                                    "lines above) - that picture is skipped.");
+                    } else if (ok) {
+                        logged_mf_fail = false;
+                    }
+                }
+                continue;
+            }
+            frame_tex.reset();   // a texture that arrived after its segment closed: just drop it
 
             // Write to pipe outside the lock
             if (!frame.empty()) {
@@ -901,7 +982,11 @@ struct Pipeline {
         }
         {
             const intptr_t ph = pipe_handle.exchange(0, std::memory_order_acq_rel);
-            if (ph != 0 && ph != -1) {
+            void *mf_left = mf_sink.exchange(nullptr, std::memory_order_acq_rel);
+            if (mf_left) {
+                // The pipeline is stopping with the in-process encoder still open: close the file properly.
+                try { hr_mf_end(mf_left, ts_end_slot.load(std::memory_order_acquire)); } catch (...) {}
+            } else if (ph != 0 && ph != -1 && ph != kMfPipeToken) {
 #ifdef _WIN32
                 CloseHandle(reinterpret_cast<HANDLE>(ph));
 #else
@@ -909,6 +994,9 @@ struct Pipeline {
 #endif
             }
         }
+#ifdef _WIN32
+        if (writer_com) CoUninitialize();
+#endif
 
         // Portable completion signal - see writer_thread_done's declaration
         // for why this replaced a WaitForSingleObject-on-native_handle()
@@ -1054,6 +1142,8 @@ struct Pipeline {
         };
         CursorSig gpu_emit_sig;      // pointer state baked into the last GPU-path frame we queued
         bool gpu_emit_valid = false; // the picture at the back of the queue came from the GPU path
+        // CPU path: last_yuv is the converted picture WITHOUT the pointer (it is blended into each
+        // outgoing copy), so what the last queued frame shows is tracked separately.
         CursorSig cpu_emit_sig;
         bool cpu_emit_valid = false;
         int  cpu_emit_w = 0, cpu_emit_h = 0;
@@ -1075,6 +1165,7 @@ struct Pipeline {
             return pts;
         };
         bool preview_suppressed = false;   // GPU zero-copy hand-over moved the buffer the preview reads
+        bool tex_pv_tick = false;          // this tick hands GPU textures to the encoder: the thumbnail needs its own read-back
 
         // Make the frame at the back of the queue last `1 + extra` slots longer.
         auto try_merge_last = [&](int extra) -> bool {
@@ -1150,6 +1241,31 @@ struct Pipeline {
             }
         };
 
+        // Texture twin of enqueue_frame(): the queue entry owns one reference to the NV12 texture.
+        auto enqueue_tex = [&](void *tex_ptr, int fw, int fh, int64_t pts) {
+            std::vector<uint8_t> dropped;
+            {
+                std::lock_guard<std::mutex> lock(pipe_queue_mtx);
+                if (pipe_queue.size() >= MAX_QUEUE_SIZE) {
+                    dropped = std::move(pipe_queue.front().data);
+                    pipe_queue.pop();            // an evicted texture entry releases its reference here
+                    frames_dropped.fetch_add(1, std::memory_order_relaxed);
+                    frames_stalled.fetch_add(1, std::memory_order_relaxed);
+                }
+                QueuedFrame qf;
+                qf.tex    = TexRef(tex_ptr);
+                qf.repeat = 1;
+                qf.pts    = pts;
+                qf.w = fw; qf.h = fh; qf.nv12 = true;
+                pipe_queue.push(std::move(qf));
+                pipe_queue_cv.notify_one();
+            }
+            if (!dropped.empty()) {
+                std::lock_guard<std::mutex> lock(free_bufs_mtx);
+                if (free_bufs.size() < MAX_FREE_BUFS) free_bufs.push(std::move(dropped));
+            }
+        };
+
         // ---- stall diagnostics ------------------------------------------------- A benchmark of
         // a game with the recorder running showed a 0.1 FPS minimum that the logs could not
         // attribute to anything.
@@ -1176,7 +1292,16 @@ struct Pipeline {
             if (preview_needed.load(std::memory_order_relaxed) &&
                 now_ns - last_preview_ns >= preview_interval_ns) {
                 last_preview_ns = now_ns;
-                update_preview();
+                if (tex_pv_tick) {
+                    // Texture path: nothing was read back for the encoder, so fetch the thumbnail source
+                    // separately (small, async, at preview rate - see hr_dx_nv12_preview()).
+                    if (hr_dx_nv12_preview(dx_ctx, nv12_buf.data(), 1)) {
+                        frame_nv12 = nv12_buf.data();
+                        update_preview();
+                    }
+                } else {
+                    update_preview();
+                }
             }
 #endif
         };
@@ -1184,6 +1309,7 @@ struct Pipeline {
         try {
         while (running.load(std::memory_order_relaxed)) {
             preview_suppressed = false;
+            tex_pv_tick = false;
             if (paused.load(std::memory_order_relaxed)) {
                 hitch_last_valid = false;   // a pause is not a stall
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -1350,6 +1476,8 @@ struct Pipeline {
                                  c_x + c_w <= src_w && c_y + c_h <= src_h;
 
             bool gpu_tick = false;
+            bool tex_tick = false;           // GPU path, and the picture goes to the in-process encoder as a texture
+            TexRef tex_hold;                 // the texture of this tick (released at the end of the iteration if unused)
             int  gpu_enc_w = 0, gpu_enc_h = 0;
             // Source rectangle in the DESKTOP's CURRENT pixel space (see the mode-change
             // note below) and the size of the region it covers - used for the capture
@@ -1431,12 +1559,23 @@ struct Pipeline {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
+            // In-process encoder with GPU textures: only while nothing has to be drawn on the picture by the CPU
+            // (pointer / overlays), otherwise the picture is read back as before.
+            tex_tick = gpu_tick && !wgc_mode && mf_sink.load(std::memory_order_acquire) != nullptr &&
+                       mf_tex_ok.load(std::memory_order_acquire) && !overlays_active &&
+                       !include_cursor.load(std::memory_order_relaxed) && ts_on();
             int ret;
             const auto t_cap0 = hitch_clock::now();
             last_prep_ms  = std::chrono::duration<double, std::milli>(t_cap0 - hitch_last_tick).count();
             last_reset_ms = 0.0;
             if (gpu_tick) {
-                ret = hr_dx_capture_nv12(dx_ctx, nv12_buf.data(), timeout_ms, gpu_sl, gpu_st, gpu_sr, gpu_sb);
+                if (tex_tick) {
+                    void *tex_new = nullptr;
+                    ret = hr_dx_capture_nv12_tex(dx_ctx, timeout_ms, gpu_sl, gpu_st, gpu_sr, gpu_sb, &tex_new);
+                    if (tex_new) tex_hold = TexRef(tex_new);
+                } else {
+                    ret = hr_dx_capture_nv12(dx_ctx, nv12_buf.data(), timeout_ms, gpu_sl, gpu_st, gpu_sr, gpu_sb);
+                }
                 if (ret == HR_DX_ERROR) {
                     // Not fatal for the pipeline: stop using the GPU path and let
                     // the classic one (which resyncs from the GPU-side desktop copy)
@@ -1515,10 +1654,15 @@ struct Pipeline {
                 // ====== GPU PATH: the frame is already a finished NV12 picture ======
                 eff_w = do_crop ? c_w : src_w;
                 eff_h = do_crop ? c_h : src_h;
-                if (ret == HR_DX_OK) { nv12_valid = true; nv12_clean = true; }
+                if (tex_tick) {
+                    // Texture path: `nv12_valid` only says "a picture was handed to the encoder at least once".
+                    if (tex_hold.p) nv12_valid = true;
+                    nv12_clean = false;              // nv12_buf is not a picture here (preview scratch only)
+                } else if (ret == HR_DX_OK) { nv12_valid = true; nv12_clean = true; }
                 if (!nv12_valid) continue;           // nothing to send yet
                 frame_ptr  = nullptr;
-                frame_nv12 = nv12_buf.data();        // live preview reads this
+                frame_nv12 = tex_tick ? nullptr : nv12_buf.data();   // live preview reads this
+                tex_pv_tick = tex_tick;
                 nv12_w = gpu_enc_w; nv12_h = gpu_enc_h;
                 last_yuv_valid = false;              // classic path's cached picture is now stale
                 cpu_emit_valid = false;
@@ -1540,13 +1684,21 @@ struct Pipeline {
                 // picture already queued -> just hold that picture one slot longer.
                 const bool tsm = ts_on();
                 bool merged = false;
-                if (ret != HR_DX_OK && gpu_emit_valid && !overlays_active &&
+                if (tex_tick) {
+                    merged = !tex_hold.p;             // no new picture: the encoder repeats the previous one
+                } else if (ret != HR_DX_OK && gpu_emit_valid && !overlays_active &&
                     (!cur_on || cur_now == gpu_emit_sig))
                     merged = tsm ? ts_have_frame : try_merge_last(extra_slots);
                 else if (ret != HR_DX_OK && !nv12_clean && tsm && ts_have_frame)
                     merged = true;    // the clean picture went to the writer (see hand_over): keep showing it
                 const int64_t pts = tsm ? ts_take_slot(extra_slots) : -1;
-                if (!merged) {
+                if (tex_tick && !merged) {
+                    // Hand the GPU texture itself to the writer thread (ownership moves into the queue).
+                    void *tp = tex_hold.p;
+                    tex_hold.p = nullptr;
+                    enqueue_tex(tp, gpu_enc_w, gpu_enc_h, pts);
+                    ts_have_frame = true;
+                } else if (!merged) {
                     std::vector<uint8_t> yuv_frame;
                     // Zero-copy hand-over: with nothing to draw on it (no pointer, no overlays) the readback
                     // buffer IS the outgoing frame - no 3 MB nv12_buf -> yuv_frame copy. Only with the
@@ -2065,7 +2217,7 @@ HR_EXPORT void hr_pl_destroy(void* handle) {
     // started) the handle is still open here - close it so ffmpeg's stdin write end isn't leaked.
     {
         const intptr_t ph = pl->pipe_handle.exchange(0, std::memory_order_acq_rel);
-        if (ph != 0 && ph != -1) CloseHandle(reinterpret_cast<HANDLE>(ph));
+        if (ph != 0 && ph != -1 && ph != Pipeline::kMfPipeToken) CloseHandle(reinterpret_cast<HANDLE>(ph));
     }
     if (pl->dx_ctx && g_libs.dx_destroy) g_libs.dx_destroy(pl->dx_ctx);
     if (pl->sw_ctx && g_libs.sw_destroy) g_libs.sw_destroy(pl->sw_ctx);
@@ -2273,12 +2425,49 @@ HR_EXPORT void hr_pl_set_gpu_convert(void* handle, int enabled) {
 #endif
 }
 
+// Timestamped pipe (Settings: skip_static_frames). fps > 0: from the next hr_pl_set_recording(.., 1, ..)
+// on, frames are written to the pipe inside a NUT stream (1/fps time base) and a frame is only sent
+// when the picture changed; ffmpeg must be started with hr_ff_set_pipe_input(h, 2) and the same fps.
+// fps <= 0: the classic raw pipe where every timeline slot is written as a full frame. Call BEFORE
+// hr_pl_set_recording(.., 1, ..); it is not meant to be changed while a recording is running.
 HR_EXPORT void hr_pl_set_timestamped_pipe(void* handle, int fps) {
     if (!handle) return;
 #ifdef _WIN32
     static_cast<Pipeline*>(handle)->ts_fps.store(fps > 0 ? fps : 0, std::memory_order_relaxed);
 #else
     (void)fps;
+#endif
+}
+
+// In-process encoder (mf_encoder.cpp). mf != null: from now on the writer thread submits the recording's
+// frames to that encoder instead of writing them to a pipe. Call it BEFORE hr_pl_set_recording(.., 1, token)
+// with any non-zero, non-(-1) token as the "pipe" (it is never opened or closed), and only together with
+// hr_pl_set_timestamped_pipe(fps > 0): the encoder is driven by timeline slots. use_textures != 0 lets the
+// capture thread pass finished NV12 GPU textures straight in (no read-back) while nothing is drawn on the
+// picture by the CPU. The writer thread detaches the sink itself when the segment ends; mf == null detaches it
+// right away. The caller keeps ownership of `mf` (destroy it after the segment has ended).
+HR_EXPORT void hr_pl_set_mf_sink(void* handle, void* mf, int use_textures) {
+    if (!handle) return;
+#ifdef _WIN32
+    auto* pl = static_cast<Pipeline*>(handle);
+    pl->mf_tex_ok.store(mf != nullptr && use_textures != 0, std::memory_order_release);
+    pl->mf_sink.store(mf, std::memory_order_release);
+#else
+    (void)mf; (void)use_textures;
+#endif
+}
+
+// The D3D11 device this pipeline captures with, for building the in-process encoder on the same device.
+// null in window-capture (WGC) mode, or when the device was not created multithread-protected - see
+// hr_dx_set_mt_protect(). No reference is added; valid until the pipeline is destroyed.
+HR_EXPORT void* hr_pl_get_d3d_device(void* handle) {
+    if (!handle) return nullptr;
+#ifdef _WIN32
+    auto* pl = static_cast<Pipeline*>(handle);
+    if (pl->wgc_mode || !pl->dx_ctx) return nullptr;
+    return hr_dx_get_d3d_device(pl->dx_ctx);
+#else
+    return nullptr;
 #endif
 }
 
