@@ -19,7 +19,7 @@
         <a href="support.html">Support</a>
         <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
         <div class="spacer"></div>
-        <div class="version-badge" data-latest-version>v2.4.2</div>
+        <div class="version-badge" data-latest-version>v3.0</div>
     </aside>
 
     <div class="content">
@@ -79,7 +79,7 @@
         <h3 id="log-cmd">The <code>log</code> command</h3>
         <table>
             <tr><th>Form</th><th>Effect</th></tr>
-            <tr><td><code>log &lt;message&gt;</code></td><td>Appends <code>[console] &lt;message&gt;</code> to <code>homrec.log</code>.</td></tr>
+            <tr><td><code>log &lt;message&gt;</code></td><td>Appends <code>[console] &lt;message&gt;</code> to <code>homrec.log</code>. A message that starts with <code>-</code> needs the <code>--</code> form: <code>log -- -text</code> (otherwise it is reported as an unknown option).</td></tr>
             <tr><td><code>log open</code></td><td>Opens <code>homrec.log</code> in your default text editor.</td></tr>
             <tr><td><code>log clear [flags]</code></td><td>Truncates (empties) <code>homrec.log</code> — the file itself stays, only its contents are wiped. Flags: <code>--pc</code>, <code>--plugins</code>, <code>--wgc</code>, <code>--ffmpeg</code>, <code>--homrec</code> (combine them), or <code>--all</code> / <code>-a</code> for every <code>*.log</code> in the logs folder.</td></tr>
         </table>
@@ -88,7 +88,7 @@
         <table>
             <tr><th>Command</th><th>What it does</th></tr>
             <tr><td><code>echo [--ok|--warn|--err] &lt;text&gt;</code></td><td>Prints text, optionally styled as success/warning/error.</td></tr>
-            <tr><td><code>clear</code></td><td>Clears the console output pane (not the same as <code>log clear</code>).</td></tr>
+            <tr><td><code>clear</code></td><td>Clears the console output pane (not the same as <code>log clear</code>). Commands that take no arguments (<code>clear</code>, <code>ping</code>, <code>version</code>, <code>ver</code>, <code>info</code>, <code>status</code>, <code>hide</code>, <code>pwd</code>, <code>whoami</code>) refuse to run if anything follows them.</td></tr>
             <tr><td><code>history</code></td><td>Lists every command run this session, numbered.</td></tr>
             <tr><td><code>env</code></td><td>No args: lists session env vars. <code>env NAME</code>: prints its value. <code>env NAME=value</code>: sets it. Vars live only for the current session.</td></tr>
             <tr><td><code>alias</code></td><td>No args: lists aliases. <code>alias name=target</code>: defines one (names are lower-cased).</td></tr>
