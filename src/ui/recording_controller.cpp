@@ -6,6 +6,7 @@
 #include "../utils/log_paths.h"    // logs\ffmpeg_ddagrab.log (+ progress file)
 #include "../core/overlay_render.h"
 #include "../utils/str_convert.h"   // HrVideoFormatExt() (2.4 container choice)
+#include "../core/mf_encoder.h"      // in-process Media Foundation encoder (AppState::mf_encoder)
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
                       // QueryFullProcessImageNameA (kernel32) - ResolveCaptureAppName()'s {app} lookup
 #include <shellapi.h> // ShellExecuteW - RunPostRecordHook()'s "open_folder" mode
@@ -103,6 +104,9 @@ extern "C" {
     int hr_pl_get_native_size(void *handle, int *out_w, int *out_h);
     void hr_pl_set_recording(void *handle, int active, intptr_t pipe_fd);
     void hr_pl_set_timestamped_pipe(void *handle, int fps);
+    void hr_pl_set_mf_sink(void *handle, void *mf, int use_textures);
+    void *hr_pl_get_d3d_device(void *handle);
+    void hr_dx_set_mt_protect(int enabled);   // dxgi_capture.cpp
     void hr_pl_set_priority_boost(void *handle, int flag);
     void hr_pl_stats(void *handle, long long *out_frames, long long *out_drops, double *out_fps);
     void hr_pl_set_overlays(void *handle, const HrOverlayDesc *items, int count);
@@ -241,11 +245,15 @@ RecordingController::~RecordingController() {
     if (ctl_) hr_ctl_destroy(ctl_);
     if (ffproc_) hr_ff_destroy(ffproc_);
     if (pipeline_) hr_pl_destroy(pipeline_);
+    if (mfenc_) { hr_mf_destroy(mfenc_); mfenc_ = nullptr; }
     hr_audio_extra_shutdown();   // 2.4: extra mixer channels (their threads must stop before the streams go)
     hr_audio_stop(nullptr, nullptr);
 }
 
 void RecordingController::Initialize() {
+    // Capture devices created from now on (the live-preview pipeline included) can be shared with the in-process
+    // encoder - see Start() / dxgi_capture.cpp.
+    hr_dx_set_mt_protect((state_.mf_encoder && state_.mf_gpu_texture) ? 1 : 0);
     wchar_t path_buf[MAX_PATH] = {};
     ffmpeg_found_ = hr_check_ffmpeg(state_.ffmpeg_path.empty() ? nullptr : WideFromNarrow(state_.ffmpeg_path).c_str(),
                                     path_buf, MAX_PATH) != 0;
@@ -276,6 +284,10 @@ void RecordingController::Initialize() {
 // One line with the "weak PC" switches that are really in effect for THIS recording. The benchmark run "(c) with
 // gpu_low_priority=0" still logged "GPU priority lowered", i.e. it ran with the setting ON and the A/B test compared
 // two identical runs - this line makes such a mix-up visible in homrec.log at a glance.
+// How the capture pipeline feeds ffmpeg's stdin: 1 = raw frames, every timeline slot is written in full;
+// 2 = timestamped (NUT) frames - a frame is only sent when the picture changed and ffmpeg repeats the previous one
+// (AppState::skip_static_frames). Custom ffmpeg args that touch the filter chain / frame rate keep the raw pipe,
+// because the timestamped pipe adds its own `-vf fps=...`.
 static int HrPipeInputMode(const AppState &st) {
     if (!st.skip_static_frames) return 1;
     const std::string c = " " + st.custom_ffmpeg_args + " ";
@@ -283,6 +295,17 @@ static int HrPipeInputMode(const AppState &st) {
     for (const char *k : kConflicts)
         if (c.find(k) != std::string::npos) return 1;
     return 2;
+}
+
+// Target bitrate (kbps) for the in-process encoder, from the same bits-per-pixel curve the QSV path already uses
+// (the other hardware encoders get a constant QP from ffmpeg; Media Foundation takes a bitrate instead).
+static int HrMfBitrateKbps(int w, int h, int fps, int quality) {
+    const int q = quality < 0 ? 0 : (quality > 100 ? 100 : quality);
+    const double bpp = 0.04 + 0.14 * (q / 100.0);
+    long long kbps = (long long)((double)w * h * (fps > 0 ? fps : 30) * bpp / 1000.0);
+    if (kbps < 1500)  kbps = 1500;
+    if (kbps > 60000) kbps = 60000;
+    return (int)kbps;
 }
 
 static std::string HrLowImpactFlagsLine(const AppState &st) {
@@ -306,6 +329,46 @@ static void HrLogFfmpegGpuPriorityStart(bool applied_now) {
     std::snprintf(st_hex, sizeof(st_hex), "0x%08lX", (unsigned long)hr_gpu_sched_last_status());
     HrLog::Info(std::string("Recording: ffmpeg GPU priority not accepted right after launch (NTSTATUS ") + st_hex +
                 ") - retrying in the background for up to 8 s; the result follows in this log.");
+}
+
+bool RecordingController::MfEncoderWanted(const std::wstring &codec, bool codec_is_hw) const {
+    if (!state_.mf_encoder || mf_blocked_ || !codec_is_hw) return false;
+    // Only the H.264 hardware encoders (h264_nvenc / h264_qsv / h264_amf): HEVC/AV1 in an MP4 written by
+    // Media Foundation depends on codec extensions that are not always installed.
+    if (codec.compare(0, 5, L"h264_") != 0) return false;
+    // The Media Foundation file writer produces .mp4 only; custom ffmpeg args are meant for ffmpeg.
+    if (state_.video_format != VideoFormat::Mp4) return false;
+    if (!state_.custom_ffmpeg_args.empty()) return false;
+    return true;
+}
+
+// Creates the Media Foundation encoder for current_output_path_ and attaches it to pipeline_ (the pipeline is
+// not recording yet). On failure everything is released again and false is returned.
+bool RecordingController::StartMfEncoder() {
+    if (!pipeline_) return false;
+    mfenc_ = hr_mf_create();
+    if (!mfenc_) {
+        HrLog::Warn("Recording: Media Foundation could not be initialised - using ffmpeg.");
+        return false;
+    }
+    const int kbps = HrMfBitrateKbps(output_w_, output_h_, state_.target_fps, state_.quality);
+    bool ok = hr_mf_configure(mfenc_, NarrowFromWide(current_output_path_).c_str(),
+                              output_w_, output_h_, state_.target_fps, kbps) != 0;
+    void *dev = nullptr;
+    if (ok && state_.mf_gpu_texture) dev = hr_pl_get_d3d_device(pipeline_);
+    if (ok) ok = hr_mf_start(mfenc_, dev, dev ? 1 : 0) != 0;
+    if (!ok) {
+        char err[256] = {};
+        hr_mf_last_error(mfenc_, err, (int)sizeof(err));
+        HrLog::Warn(std::string("Recording: the in-process (Media Foundation) encoder could not start: ") +
+                    (err[0] ? err : "unknown error") + " - using the ffmpeg encoder instead.");
+        hr_mf_destroy(mfenc_);
+        mfenc_ = nullptr;
+        RemoveFileUtf8(NarrowFromWide(current_output_path_));   // a half-created empty .mp4 must not stay behind
+        return false;
+    }
+    hr_pl_set_mf_sink(pipeline_, mfenc_, hr_mf_textures_enabled(mfenc_));
+    return true;
 }
 
 std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
@@ -1026,6 +1089,9 @@ bool RecordingController::Start(std::wstring &error_out) {
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
     HrLog::Info("Recording: encoding with " + NarrowFromWide(codec) +
                 (codec_is_hw ? " (hardware)" : " (software)"));
+    // The in-process encoder shares the capture device with its own threads: every capture device created from
+    // now on is made multithread-protected (a device already in use is never switched - see dxgi_capture.cpp).
+    hr_dx_set_mt_protect((state_.mf_encoder && state_.mf_gpu_texture) ? 1 : 0);
 
     // ---- optional full-GPU path: ffmpeg's own "ddagrab" capture ------------- Settings >
     // Video > GPU acceleration.
@@ -1049,6 +1115,14 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
     } else {
+        // In-process Media Foundation encoder instead of an ffmpeg process + pipe (see mf_encoder.h). ffmpeg is
+        // then only needed afterwards, to merge the audio.
+        const bool use_mf = MfEncoderWanted(codec, codec_is_hw);
+        // Non-zero "pipe" token for the pipeline in MF mode: it is never opened or closed, it only marks the
+        // recording segment as open (see hr_pl_set_mf_sink()).
+        constexpr intptr_t kMfPipeToken = 1;
+        intptr_t ff_stdin = use_mf ? kMfPipeToken : 0;
+        if (!use_mf) {
         ffproc_ = hr_ff_create();
         hr_ff_set_ffmpeg_path(ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
         hr_ff_set_output_path(ffproc_, NarrowFromWide(current_output_path_).c_str());
@@ -1075,7 +1149,7 @@ bool RecordingController::Start(std::wstring &error_out) {
 
         // The pipeline writes captured frames straight into ffmpeg's stdin pipe, so it needs the
         // real write-end HANDLE ffmpeg was launched with - not a placeholder.
-        intptr_t ff_stdin = hr_ff_get_stdin_handle(ffproc_);
+        ff_stdin = hr_ff_get_stdin_handle(ffproc_);
         if (ff_stdin == 0) {
             error_out = L"Failed to start the ffmpeg process.";
             HrLog::Error("Start failed: ffmpeg stdin pipe handle unavailable");
@@ -1084,13 +1158,18 @@ bool RecordingController::Start(std::wstring &error_out) {
             ffproc_ = nullptr;
             return false;
         }
+        }   // !use_mf
 
         // Pipeline handles the actual DXGI capture + frame conversion + piping
         // frames into ffmpeg's stdin. pv_w/pv_h come from AppState's preview
         // panel size (set by main_window on layout).
         bool reused_preview_pipeline = false;
+        // With the GPU-texture path the capture device must be one that was created multithread-protected; a
+        // preview pipeline created before that was switched on is rebuilt once (window capture has no such device).
+        const bool mf_needs_shared_device = use_mf && state_.mf_gpu_texture && !use_wgc_;
         if (pipeline_ && capture_w_ == prev_w && capture_h_ == prev_h &&
-            pipeline_output_idx_ == capture_output_idx_ && PipelineMatchesTarget()) {
+            pipeline_output_idx_ == capture_output_idx_ && PipelineMatchesTarget() &&
+            (!mf_needs_shared_device || hr_pl_get_d3d_device(pipeline_) != nullptr)) {
             hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
             hr_pl_set_output_size(pipeline_, output_w_, output_h_);
             // The pixel format used to be set only AFTER recording had already been switched on, so
@@ -1101,7 +1180,13 @@ bool RecordingController::Start(std::wstring &error_out) {
             // A reused preview pipeline keeps whatever fps it was created with, but ffmpeg above was
             // just told state_.target_fps - if they differ (e.g.
             hr_pl_set_fps(pipeline_, state_.target_fps);
-            hr_pl_set_timestamped_pipe(pipeline_, HrPipeInputMode(state_) == 2 ? state_.target_fps : 0);
+            hr_pl_set_timestamped_pipe(pipeline_, (use_mf || HrPipeInputMode(state_) == 2) ? state_.target_fps : 0);
+            if (use_mf && !StartMfEncoder()) {
+                // Could not start: record this one with ffmpeg and do not try the in-process encoder again
+                // this session. The pipeline is not recording yet, so there is nothing to undo.
+                mf_blocked_ = true;
+                return Start(error_out);
+            }
             hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
             reused_preview_pipeline = true;
         } else {
@@ -1115,7 +1200,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             start_timer.mark("join_preview_teardown");
             int pvw = 0, pvh = 0;
             ScaledPreviewSize(pvw, pvh);
-            pipeline_ = CreatePipelineForTarget(ff_stdin, pvw, pvh);
+            pipeline_ = CreatePipelineForTarget(use_mf ? 0 : ff_stdin, pvw, pvh);   // MF: not recording until the encoder is attached
             start_timer.mark("create_pipeline");
             pipeline_output_idx_ = capture_output_idx_;
             last_overlays_sent_valid_ = false;
@@ -1144,7 +1229,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_ff_destroy(ffproc_);
             ffproc_ = nullptr;
             if (pipeline_) { hr_pl_destroy(pipeline_); pipeline_ = nullptr; }
-            else if (ff_stdin != 0 && ff_stdin != -1) {
+            else if (!use_mf && ff_stdin != 0 && ff_stdin != -1) {
                 // No pipeline was ever created, so nothing owns ffmpeg's stdin write end (the
                 // ffmpeg runner deliberately leaves it to the pipeline) - close it here instead
                 // of leaking one pipe handle per failed Start().
@@ -1160,9 +1245,17 @@ bool RecordingController::Start(std::wstring &error_out) {
             return false;
         }
 
-        hr_pl_set_timestamped_pipe(pipeline_, HrPipeInputMode(state_) == 2 ? state_.target_fps : 0);
+        hr_pl_set_timestamped_pipe(pipeline_, (use_mf || HrPipeInputMode(state_) == 2) ? state_.target_fps : 0);
+        if (use_mf && !reused_preview_pipeline && !StartMfEncoder()) {
+            // Could not start: drop this pipeline and record again through ffmpeg (this session only).
+            mf_blocked_ = true;
+            hr_pl_destroy(pipeline_);
+            pipeline_ = nullptr;
+            return Start(error_out);
+        }
         hr_pl_set_recording(pipeline_, /*active=*/1, ff_stdin);
         t_video_go = std::chrono::steady_clock::now();
+        if (use_mf) HrLog::Info("Recording: in-process Media Foundation encoder (no ffmpeg process for the video).");
 
         hr_pl_set_priority_boost(pipeline_, state_.game_friendly_priority ? 0 : 1);
         if (state_.game_friendly_priority)
@@ -1260,6 +1353,11 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
         // recording segment to close; the graceful "q" sent above is all it needs.
         if (!keep_for_preview) hr_pl_stop(pipeline_);
     } else if (!keep_for_preview) {
+        // hr_pl_stop() abandons whatever is still queued for ffmpeg (the writer thread's loop ends
+        // as soon as writer_running goes false), so the last <=8 queued frames - and the timeline
+        // slots they carry for a static screen - were lost from the end of every recording made
+        // with the live preview disabled. Close the segment first (the writer drains the queue
+        // and closes ffmpeg's stdin), exactly like the preview-on path does, then stop the threads.
         if (pipeline_) hr_pl_end_recording_segment(pipeline_, 3000);
         hr_pl_stop(pipeline_);
     } else {
@@ -1281,6 +1379,9 @@ void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
     // recording reused a paused pipeline and captured nothing.
     if (pipeline_) hr_pl_pause(pipeline_, 0);
     hr_audio_pause(0);
+    // In-process encoder: the writer thread detaches it by itself when the segment ends; this only matters when
+    // that timed out (the encoder object stays alive until StopFinalizeTail() ends and destroys it).
+    if (pipeline_ && mfenc_) hr_pl_set_mf_sink(pipeline_, nullptr, 0);
     if (pipeline_) hr_pl_set_priority_boost(pipeline_, 0);
     // Back to the normal GPU class once the recording is over (live preview / idle capture are cheap).
     if (gpu_self_lowered_) {
@@ -1320,6 +1421,30 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
 
     JoinPendingInstantReplayStop();
 
+    if (mfenc_) {
+        // In-process encoder: the pipeline's writer thread ended it when the recording segment closed (see
+        // hr_pl_end_recording_segment() above); this call only matters if that never happened (segment-close
+        // timeout) and is a no-op otherwise. Then wait for the file to be finalized (moov atom written).
+        hr_mf_end(mfenc_, 0);
+        int mw = hr_mf_wait(mfenc_, 10000);
+        if (mw == -1) {
+            HrLog::Warn("Recording: the Media Foundation encoder is still finalizing the output after 10s -- "
+                        "waiting longer before giving up.");
+            mw = hr_mf_wait(mfenc_, 20000);
+        }
+        if (mw == -1) {
+            HrLog::Error("Recording: the Media Foundation encoder didn't finish after 30s total -- the output "
+                         "file may be incomplete/corrupt.");
+        } else if (mw == -2 || hr_mf_failed(mfenc_)) {
+            char err[256] = {};
+            hr_mf_last_error(mfenc_, err, (int)sizeof(err));
+            HrLog::Error(std::string("Recording: the Media Foundation encoder reported an error: ") +
+                         (err[0] ? err : "unknown") + " -- the output file may be incomplete/corrupt.");
+        } else {
+            HrLog::Info("Recording: Media Foundation encoder finished (" +
+                        std::to_string((long long)hr_mf_frames_written(mfenc_)) + " frames written).");
+        }
+    }
     // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second budget for ffmpeg to
     // receive EOF on stdin, flush libx264's internal frame buffer, and write the moov atom
     // (mp4) / cues (mkv) that make the file actually playable.
@@ -1489,10 +1614,12 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
     const double ctl_elapsed = hr_ctl_stop(ctl_);
     last_duration_sec_ = recorded_sec > 0.0 ? recorded_sec : ctl_elapsed;
     last_output_path_ = current_output_path_;
-    last_output_size_mb_ = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
+    last_output_size_mb_ = mfenc_ ? hr_mf_output_size_mb(mfenc_)
+                                  : (ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0);
 
     hr_ff_destroy(ffproc_);
     ffproc_ = nullptr;
+    if (mfenc_) { hr_mf_destroy(mfenc_); mfenc_ = nullptr; }
 
     state_.recording = false;
     state_.paused = false;
@@ -1600,6 +1727,18 @@ void RecordingController::TogglePause() {
 
 void RecordingController::PollStats() {
     if (!state_.recording) return;
+    if (mfenc_ && !finalizing_ && hr_mf_failed(mfenc_)) {
+        char err[256] = {};
+        hr_mf_last_error(mfenc_, err, (int)sizeof(err));
+        HrLog::Error(std::string("Recording: the in-process (Media Foundation) encoder stopped mid-recording: ") +
+                     (err[0] ? err : "unknown error") + " - flagging this as a crash so the UI can stop and "
+                     "finalize what was captured.");
+        mf_blocked_ = true;   // the next recording uses ffmpeg
+        crash_was_ddagrab_ = false;
+        crash_video_elapsed_sec_ = elapsed_seconds();
+        crashed_ = true;
+        return;
+    }
     if (ffproc_ && !finalizing_ && !hr_ff_is_running(ffproc_)) {
         HrLog::Error("Recording: the ffmpeg process ended unexpectedly mid-recording "
                      "(crashed, was closed externally, or hit a fatal error) - flagging "
@@ -1667,7 +1806,7 @@ void RecordingController::PollStats() {
         }
     }
 
-    double size_mb = ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
+    double size_mb = mfenc_ ? hr_mf_output_size_mb(mfenc_) : (ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0);
     hr_ctl_update_stats(ctl_, (long long)(size_mb * 1024.0 * 1024.0));
 
     hr_audio_get_levels(&mic_level_, &sys_level_);
@@ -2650,6 +2789,7 @@ std::wstring RecordingController::elapsed_formatted() const {
 }
 
 double RecordingController::output_size_mb() const {
+    if (mfenc_) return hr_mf_output_size_mb(mfenc_);
     return ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
 }
 

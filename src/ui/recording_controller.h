@@ -204,6 +204,11 @@ private:
     void StopInstantReplayEncoder();
     void StopInstantReplayEncoderAsync();
     std::wstring BuildCodecArgs(const std::wstring &codec);
+    // In-process hardware encoder (Settings: mf_encoder, see mf_encoder.h). True when THIS recording should go
+    // through it instead of an ffmpeg process.
+    bool MfEncoderWanted(const std::wstring &codec, bool codec_is_hw) const;
+    // Builds + starts the encoder for the current output file and attaches it to pipeline_ (not yet recording).
+    bool StartMfEncoder();
     // Resolves capture_w_/capture_h_ from the selected monitor + scale
     // factor (was inline in Start() only; EnsurePreview() needs the same
     // logic to size its preview-only pipeline).
@@ -277,6 +282,10 @@ private:
 
     void *ctl_ = nullptr;        // hr_ctl_create() handle
     void *ffproc_ = nullptr;     // hr_ff_create() handle
+    // In-process Media Foundation encoder of the CURRENT recording (hr_mf_create() handle) - used INSTEAD of
+    // ffproc_ when AppState::mf_encoder applies. ffmpeg is then only run afterwards, to merge the audio.
+    void *mfenc_ = nullptr;
+    bool mf_blocked_ = false;    // the encoder failed to start / died once: not tried again this session
 
     // ffmpeg "ddagrab" fast path (Settings > Video > GPU acceleration): true while
     // the CURRENT recording is captured + encoded entirely by ffmpeg on the GPU
