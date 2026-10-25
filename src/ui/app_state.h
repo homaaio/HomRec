@@ -123,6 +123,10 @@ struct AppState {
     // the CPU, crop/scale/BGRA->NV12 run on the GPU via the D3D11 video processor and only 1.5
     // bytes/pixel are read back.
     bool        gpu_convert        = true;
+    // Item 9: with the GPU path, overlays (text / image / gif / webcam / input) are alpha-blended by a D3D11 pixel
+    // shader BEFORE the NV12 conversion instead of per frame on the CPU. Falls back to the CPU compositor by itself
+    // (no shader compiler, driver refusal, error). Terminal / cfg only (`gpu_overlay=0` = always CPU).
+    bool        gpu_overlay        = true;
     // Static screen = no frame traffic: the capture pipeline sends ffmpeg a frame only when the picture
     // changed, stamped with its slot on the constant-fps timeline (NUT stream), and ffmpeg repeats the
     // previous one across the gap. Output is still constant frame rate. Terminal / cfg only
@@ -136,7 +140,8 @@ struct AppState {
     // Falls back to the ffmpeg pipe by itself when it cannot start. Audio is still merged by ffmpeg.
     bool        mf_encoder = false;
     // With mf_encoder: hand the finished NV12 GPU texture to the encoder (no GPU->CPU->GPU round trip).
-    // Used only while the pointer is not drawn and no overlays are active; `mf_gpu_texture=0` turns it off.
+    // Used only while the pointer is not drawn and no overlay is drawn by the CPU (GPU-blended overlays, item 9, are fine);
+    // `mf_gpu_texture=0` turns it off.
     bool        mf_gpu_texture = true;
     bool        game_friendly_priority = false;
     bool        qsv_low_power          = false;

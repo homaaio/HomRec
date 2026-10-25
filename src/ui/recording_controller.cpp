@@ -115,6 +115,7 @@ extern "C" {
     void hr_pl_set_output_size(void *handle, int w, int h);
     void hr_pl_set_output_pixfmt(void *handle, int nv12);
     void hr_pl_set_gpu_convert(void *handle, int enabled);
+    void hr_pl_set_gpu_overlay(void *handle, int enabled);   // item 9
     void hr_pl_set_preview_fps(void *handle, int fps);
     void hr_pl_set_preview_size(void *handle, int pw, int ph);
     void hr_pl_set_fps(void *handle, int fps);
@@ -314,6 +315,7 @@ static std::string HrLowImpactFlagsLine(const AppState &st) {
            ", game_friendly_priority=" + onoff(st.game_friendly_priority) +
            ", qsv_low_power=" + onoff(st.qsv_low_power) +
            ", gpu_convert=" + onoff(st.gpu_convert) +
+           ", gpu_overlay=" + onoff(st.gpu_overlay) +
            ", skip_static_frames=" + onoff(HrPipeInputMode(st) == 2) +
            ", ddagrab=" + onoff(st.gpu_capture_ddagrab) + ".";
 }
@@ -1868,6 +1870,8 @@ void RecordingController::SyncOverlays() {
     // GPU colour conversion (Settings > Video): only ever takes effect for NV12
     // output, i.e. hardware encoders - the capture loop checks that itself.
     hr_pl_set_gpu_convert(pipeline_, state_.gpu_convert ? 1 : 0);
+    // Item 9: overlays blended on the GPU when the GPU path is in use (falls back to the CPU by itself).
+    hr_pl_set_gpu_overlay(pipeline_, state_.gpu_overlay ? 1 : 0);
 
     // "#RRGGBB" -> (r,g,b); falls back to white on anything malformed
     // (missing '#', wrong length, non-hex digits) so a bad/empty value never
