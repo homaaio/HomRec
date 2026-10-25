@@ -29,6 +29,32 @@ jobs:
         with:
           fetch-depth: 0  # full history, so changelog/tag lookups below work
 
+      - name: Check the tag matches the version baked into the sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # "v2.4.3" -> "2.4.3"; "v2.5-rc1" -> "2.5" (a -rc/-beta suffix is
+          # not part of the version number in the sources).
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${TAG_VERSION%%-*}"
+
+          SRC_VERSION="$(sed -n 's/^#define[[:space:]]*HR_APP_VERSION[[:space:]]*"\(.*\)".*/\1/p' src/ui/version.h | head -n1)"
+          ISS_VERSION="$(sed -n 's/^[[:space:]]*#define[[:space:]]*MyAppVersion[[:space:]]*"\(.*\)".*/\1/p' installer/HomRec.iss | head -n1)"
+
+          echo "tag: $TAG_VERSION | src/ui/version.h: $SRC_VERSION | installer/HomRec.iss: $ISS_VERSION"
+
+          FAIL=0
+          if [ "$SRC_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error file=src/ui/version.h::Tag is $TAG_VERSION but HR_APP_VERSION is $SRC_VERSION - bump version.h, commit, then re-create the tag."
+            FAIL=1
+          fi
+          if [ "$ISS_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error file=installer/HomRec.iss::Tag is $TAG_VERSION but the MyAppVersion default is $ISS_VERSION - bump it, commit, then re-create the tag."
+            FAIL=1
+          fi
+          exit $FAIL
+
       - name: Extract this version's notes from CHANGELOG.txt
         id: notes
         shell: bash
