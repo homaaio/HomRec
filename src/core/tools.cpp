@@ -500,7 +500,7 @@ HR_EXPORT int hr_export_mp3(const wchar_t* ffpath, const wchar_t* wav_path, cons
     std::wstring cmd =
         L"\"" + std::wstring(ffpath) + L"\""
         L" -i \"" + std::wstring(wav_path) + L"\""
-        L" -c:a libmp3lame -q:a 2 -y"
+        L" -vn -c:a libmp3lame -q:a 2 -y"
         L" \"" + std::wstring(mp3_path) + L"\"";
 
     RunResult rr;
