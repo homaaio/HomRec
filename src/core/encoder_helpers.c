@@ -214,7 +214,7 @@ __attribute__((target("sse4.1")))
 static void hr_csc_band_sse41(
     const uint8_t * HR_RESTRICT bgra,
     uint8_t       * HR_RESTRICT out,
-    int width, int height, int y0, int y1, int nv12, const HrCsc *k)
+    int width, int height, int y0, int y1, int xs, int nv12, const HrCsc *k)
 {
     size_t frame_sz = (size_t)width * (size_t)height;
     uint8_t *Y  = out;
@@ -241,7 +241,7 @@ static void hr_csc_band_sse41(
         uint8_t *Yrow1 = Y + (size_t)y1r * width;
         size_t cbase = (size_t)(y / 2) * (size_t)(nv12 ? width : width / 2);
 
-        for (int x = 0; x < vec_w; x += 8) {
+        for (int x = xs; x < vec_w; x += 8) {
             __m128i a0 = _mm_loadu_si128((const __m128i *)(row0 + (size_t)x * 4));
             __m128i a1 = _mm_loadu_si128((const __m128i *)(row0 + (size_t)x * 4 + 16));
             __m128i b0 = _mm_loadu_si128((const __m128i *)(row1 + (size_t)x * 4));
@@ -296,9 +296,127 @@ static void hr_csc_band_sse41(
 
     /* Columns beyond the last full group of 8 (only when width % 8 != 0). */
     if (vec_w < width)
-        hr_csc_band_scalar(bgra, out, width, height, y0, y1, vec_w, nv12, k);
+        hr_csc_band_scalar(bgra, out, width, height, y0, y1, vec_w > xs ? vec_w : xs, nv12, k);
 }
-#endif /* HR_HAVE_X86_SIMD */
+
+/* AVX2 band converter: 16 pixels x 2 rows per iteration, same arithmetic as the SSE4.1 one (so the
+ * output is bit-identical). 256-bit pack / hadd work per 128-bit lane, hence the 0xD8 qword permutes
+ * that put the results back in pixel order. Columns after the last full group of 16 go to the
+ * SSE4.1 / scalar code. */
+__attribute__((target("avx2")))
+static void hr_csc_band_avx2(
+    const uint8_t * HR_RESTRICT bgra,
+    uint8_t       * HR_RESTRICT out,
+    int width, int height, int y0, int y1, int nv12, const HrCsc *k)
+{
+    size_t frame_sz = (size_t)width * (size_t)height;
+    uint8_t *Y  = out;
+    uint8_t *C0 = out + frame_sz;
+    uint8_t *C1 = out + frame_sz + frame_sz / 4;
+
+    const __m256i mask  = _mm256_set1_epi32(0xFF);
+    const __m256i c_yr  = _mm256_set1_epi32(k->yr),  c_yg  = _mm256_set1_epi32(k->yg),  c_yb  = _mm256_set1_epi32(k->yb);
+    const __m256i c_yrd = _mm256_set1_epi32(32768 + (k->yoff << 16));
+    const __m256i c_cbr = _mm256_set1_epi32(k->cbr), c_cbg = _mm256_set1_epi32(k->cbg), c_cbb = _mm256_set1_epi32(k->cbb);
+    const __m256i c_crr = _mm256_set1_epi32(k->crr), c_crg = _mm256_set1_epi32(k->crg), c_crb = _mm256_set1_epi32(k->crb);
+    const __m256i c_crd = _mm256_set1_epi32(1 << 17);
+    const __m256i c_128 = _mm256_set1_epi32(128);
+    const __m256i c_0   = _mm256_setzero_si256();
+    const __m256i c_255 = _mm256_set1_epi32(255);
+
+#define HR_AVX2_LUMA(r, g, b) \
+    _mm256_srli_epi32(_mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32((r), c_yr), _mm256_mullo_epi32((g), c_yg)), \
+                                       _mm256_add_epi32(_mm256_mullo_epi32((b), c_yb), c_yrd)), 16)
+#define HR_AVX2_CHROMA(s_r, s_g, s_b, kr, kg, kb) \
+    _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(_mm256_srai_epi32(_mm256_add_epi32( \
+        _mm256_add_epi32(_mm256_mullo_epi32((s_r), (kr)), _mm256_mullo_epi32((s_g), (kg))), \
+        _mm256_add_epi32(_mm256_mullo_epi32((s_b), (kb)), c_crd)), 18), c_128), c_0), c_255)
+
+    const int vec_w = width & ~15;
+
+    for (int y = y0; y < y1; y += 2) {
+        const uint8_t *row0 = bgra + (size_t)y * width * 4;
+        const uint8_t *row1 = (y + 1 < height) ? bgra + (size_t)(y + 1) * width * 4 : row0;
+        int y1r = (y + 1 < height) ? y + 1 : y;
+        uint8_t *Yrow0 = Y + (size_t)y   * width;
+        uint8_t *Yrow1 = Y + (size_t)y1r * width;
+        size_t cbase = (size_t)(y / 2) * (size_t)(nv12 ? width : width / 2);
+
+        for (int x = 0; x < vec_w; x += 16) {
+            __m256i a0 = _mm256_loadu_si256((const __m256i *)(row0 + (size_t)x * 4));
+            __m256i a1 = _mm256_loadu_si256((const __m256i *)(row0 + (size_t)x * 4 + 32));
+            __m256i b0 = _mm256_loadu_si256((const __m256i *)(row1 + (size_t)x * 4));
+            __m256i b1 = _mm256_loadu_si256((const __m256i *)(row1 + (size_t)x * 4 + 32));
+
+            __m256i a0b = _mm256_and_si256(a0, mask), a0g = _mm256_and_si256(_mm256_srli_epi32(a0, 8), mask), a0r = _mm256_and_si256(_mm256_srli_epi32(a0, 16), mask);
+            __m256i a1b = _mm256_and_si256(a1, mask), a1g = _mm256_and_si256(_mm256_srli_epi32(a1, 8), mask), a1r = _mm256_and_si256(_mm256_srli_epi32(a1, 16), mask);
+            __m256i b0b = _mm256_and_si256(b0, mask), b0g = _mm256_and_si256(_mm256_srli_epi32(b0, 8), mask), b0r = _mm256_and_si256(_mm256_srli_epi32(b0, 16), mask);
+            __m256i b1b = _mm256_and_si256(b1, mask), b1g = _mm256_and_si256(_mm256_srli_epi32(b1, 8), mask), b1r = _mm256_and_si256(_mm256_srli_epi32(b1, 16), mask);
+
+            /* ---- luma: 16 px of row0 and 16 px of row1 ---- */
+            __m256i ya = _mm256_permute4x64_epi64(_mm256_packus_epi32(HR_AVX2_LUMA(a0r, a0g, a0b), HR_AVX2_LUMA(a1r, a1g, a1b)), 0xD8);
+            __m256i yb = _mm256_permute4x64_epi64(_mm256_packus_epi32(HR_AVX2_LUMA(b0r, b0g, b0b), HR_AVX2_LUMA(b1r, b1g, b1b)), 0xD8);
+            _mm_storeu_si128((__m128i *)(Yrow0 + x), _mm_packus_epi16(_mm256_castsi256_si128(ya), _mm256_extracti128_si256(ya, 1)));
+            _mm_storeu_si128((__m128i *)(Yrow1 + x), _mm_packus_epi16(_mm256_castsi256_si128(yb), _mm256_extracti128_si256(yb, 1)));
+
+            /* ---- chroma: vertical sum, horizontal pair sum -> 8 samples ---- */
+            __m256i rs = _mm256_permute4x64_epi64(_mm256_hadd_epi32(_mm256_add_epi32(a0r, b0r), _mm256_add_epi32(a1r, b1r)), 0xD8);
+            __m256i gs = _mm256_permute4x64_epi64(_mm256_hadd_epi32(_mm256_add_epi32(a0g, b0g), _mm256_add_epi32(a1g, b1g)), 0xD8);
+            __m256i bs = _mm256_permute4x64_epi64(_mm256_hadd_epi32(_mm256_add_epi32(a0b, b0b), _mm256_add_epi32(a1b, b1b)), 0xD8);
+
+            __m256i cb = HR_AVX2_CHROMA(rs, gs, bs, c_cbr, c_cbg, c_cbb);
+            __m256i cr = HR_AVX2_CHROMA(rs, gs, bs, c_crr, c_crg, c_crb);
+
+            if (nv12) {
+                /* U0 V0 ... U7 V7 */
+                __m256i uv = _mm256_or_si256(cb, _mm256_slli_epi32(cr, 8));
+                __m256i p  = _mm256_permute4x64_epi64(_mm256_packus_epi32(uv, uv), 0x08);
+                _mm_storeu_si128((__m128i *)(C0 + cbase + (size_t)x), _mm256_castsi256_si128(p));
+            } else {
+                __m128i cb16 = _mm256_castsi256_si128(_mm256_permute4x64_epi64(_mm256_packus_epi32(cb, cb), 0x08));
+                __m128i cr16 = _mm256_castsi256_si128(_mm256_permute4x64_epi64(_mm256_packus_epi32(cr, cr), 0x08));
+                _mm_storel_epi64((__m128i *)(C0 + cbase + (size_t)(x / 2)), _mm_packus_epi16(cb16, cb16));
+                _mm_storel_epi64((__m128i *)(C1 + cbase + (size_t)(x / 2)), _mm_packus_epi16(cr16, cr16));
+            }
+        }
+    }
+#undef HR_AVX2_LUMA
+#undef HR_AVX2_CHROMA
+
+    if (vec_w < width) {
+        // up to 15 leftover columns: SSE4.1 for the next group(s) of 8, scalar for the rest.
+        // (_mm256_zeroupper() is emitted by the compiler on return from an AVX2 function.)
+        hr_csc_band_sse41(bgra, out, width, height, y0, y1, vec_w, nv12, k);
+    }
+}
+#endif // HR_HAVE_X86_SIMD
+
+#if defined(HR_HAVE_X86_SIMD)
+// 0 = scalar, 1 = SSE4.1, 2 = AVX2 (CPU and OS support, detected once).
+static int g_csc_simd_cap = -1;   // -1 = no cap; set by hr_csc_set_max_simd() (tests, troubleshooting)
+static int hr_csc_simd_level(void)
+{
+    static int detected = -1;
+    if (HR_UNLIKELY(detected < 0)) {
+        __builtin_cpu_init();
+        detected = __builtin_cpu_supports("avx2") ? 2 : (__builtin_cpu_supports("sse4.1") ? 1 : 0);
+    }
+    return (g_csc_simd_cap >= 0 && g_csc_simd_cap < detected) ? g_csc_simd_cap : detected;
+}
+#endif
+
+// Limits the BGRA->YUV converters to scalar (0), SSE4.1 (1) or AVX2 (2); -1 removes the limit. Used by
+// the unit test to compare every implementation against the scalar one. Returns the level now in use.
+HR_EXPORT int hr_csc_set_max_simd(int cap)
+{
+#if defined(HR_HAVE_X86_SIMD)
+    g_csc_simd_cap = cap;
+    return hr_csc_simd_level();
+#else
+    (void)cap;
+    return 0;
+#endif
+}
 
 static void hr_csc_band(
     const uint8_t *bgra, uint8_t *out,
@@ -307,23 +425,23 @@ static void hr_csc_band(
     if (HR_UNLIKELY(!bgra || !out || width <= 0 || height <= 0)) return;
     if (y0 < 0) y0 = 0;
     if (y1 > height) y1 = height;
-    y0 &= ~1;                       /* chroma rows come in pairs */
+    y0 &= ~1;                       // chroma rows come in pairs
     if (y0 >= y1) return;
 #if defined(HR_HAVE_X86_SIMD)
-    static int has_sse41 = -1;
-    if (HR_UNLIKELY(has_sse41 < 0)) {
-        __builtin_cpu_init();
-        has_sse41 = __builtin_cpu_supports("sse4.1") ? 1 : 0;
+    const int level = hr_csc_simd_level();
+    if (level >= 2) {
+        hr_csc_band_avx2(bgra, out, width, height, y0, y1, nv12, k);
+        return;
     }
-    if (has_sse41) {
-        hr_csc_band_sse41(bgra, out, width, height, y0, y1, nv12, k);
+    if (level == 1) {
+        hr_csc_band_sse41(bgra, out, width, height, y0, y1, 0, nv12, k);
         return;
     }
 #endif
     hr_csc_band_scalar(bgra, out, width, height, y0, y1, 0, nv12, k);
 }
 
-/* Planar I420, full/PC range - software encoders (libx264/libx265). */
+// Planar I420, full/PC range - software encoders (libx264/libx265).
 HR_EXPORT void hr_bgra_to_yuv420p_band(
     const uint8_t * HR_RESTRICT bgra,
     uint8_t       * HR_RESTRICT yuv_out,
