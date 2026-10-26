@@ -73,6 +73,7 @@ OBJS := \
 	src/core/tools.o \
 	src/utils/ui_utils.o \
 	src/core/audio.o \
+	src/core/audio_pipe.o \
 	src/core/dxgi_capture.o \
 	src/core/gpu_overlay.o \
 	src/core/mf_encoder.o \
