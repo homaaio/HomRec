@@ -7,6 +7,7 @@
 #include "../core/overlay_render.h"
 #include "../utils/str_convert.h"   // HrVideoFormatExt() (2.4 container choice)
 #include "../core/mf_encoder.h"      // in-process Media Foundation encoder (AppState::mf_encoder)
+#include <cstdlib>                    // atoi() - AAC bitrate setting
 #include <windows.h>  // Sleep() - CaptureSnapshotFrame()'s short wait for the first frame; also
                       // QueryFullProcessImageNameA (kernel32) - ResolveCaptureAppName()'s {app} lookup
 #include <shellapi.h> // ShellExecuteW - RunPostRecordHook()'s "open_folder" mode
@@ -177,6 +178,25 @@ extern "C" {
     void hr_audio_extra_begin(const char *stem);
     int  hr_audio_extra_collect(char *out, int cap);
     void hr_audio_extra_shutdown();
+
+    // Item 10 - in-process audio (audio.cpp / audio_pipe.cpp / ffmpeg_runner.cpp)
+    int  hr_audio_live_prepare();
+    int  hr_audio_live_start(void (*sink)(void *, const int16_t *, size_t), void *user, int out_rate, int head_ms);
+    long long hr_audio_live_stop();
+    int  hr_audio_live_active();
+    void hr_audio_extra_begin_live();
+    void hr_audio_extra_end_live();
+    void hr_ff_set_audio_pipe(void *h, int rate_hz, int kbps);
+    int  hr_ff_audio_pipe_active(const void *h);
+    intptr_t hr_ff_take_audio_pipe(void *h);
+    void *hr_apipe_open(intptr_t pipe_handle, int rate_hz);
+    void hr_apipe_write(void *user, const int16_t *stereo, size_t frames);
+    void hr_apipe_end_input(void *h);
+    int  hr_apipe_finish(void *h, int timeout_ms);
+    int  hr_apipe_failed(const void *h);
+    int  hr_apipe_connected(const void *h);
+    long long hr_apipe_frames_in(const void *h);
+    void hr_apipe_destroy(void *h);
 }
 
 #include <cstdio> // remove()/rename() for temp WAV cleanup in Stop()
@@ -246,6 +266,8 @@ RecordingController::~RecordingController() {
     if (ctl_) hr_ctl_destroy(ctl_);
     if (ffproc_) hr_ff_destroy(ffproc_);
     if (pipeline_) hr_pl_destroy(pipeline_);
+    if (live_audio_) { hr_audio_live_stop(); live_audio_ = false; }
+    if (apipe_) { hr_apipe_destroy(apipe_); apipe_ = nullptr; }
     if (mfenc_) { hr_mf_destroy(mfenc_); mfenc_ = nullptr; }
     hr_audio_extra_shutdown();   // 2.4: extra mixer channels (their threads must stop before the streams go)
     hr_audio_stop(nullptr, nullptr);
@@ -309,6 +331,23 @@ static int HrMfBitrateKbps(int w, int h, int fps, int quality) {
     return (int)kbps;
 }
 
+// AAC bitrate (kbps) from Settings > Audio ("192k", "192", ...); 160 when it is empty or nonsense.
+static int HrAacKbps(const std::string &s) {
+    const int v = std::atoi(s.c_str());
+    return (v >= 32 && v <= 512) ? v : 160;
+}
+
+// Custom ffmpeg arguments that choose streams / audio codecs would fight with the audio input and the -map the
+// in-process audio path adds: such a recording keeps the old WAV + merge way.
+static bool HrCustomArgsTouchAudio(const AppState &st) {
+    if (st.custom_ffmpeg_args.empty()) return false;
+    const std::string c = " " + st.custom_ffmpeg_args + " ";
+    static const char *const kConflicts[] = {" -map", " -c:a", " -acodec", " -an ", " -b:a", " -i ", "-filter_complex", "-lavfi"};
+    for (const char *k : kConflicts)
+        if (c.find(k) != std::string::npos) return true;
+    return false;
+}
+
 static std::string HrLowImpactFlagsLine(const AppState &st) {
     auto onoff = [](bool v) { return v ? "ON" : "off"; };
     return std::string("Recording: weak-PC switches in effect: gpu_low_priority=") + onoff(st.gpu_low_priority) +
@@ -316,6 +355,7 @@ static std::string HrLowImpactFlagsLine(const AppState &st) {
            ", qsv_low_power=" + onoff(st.qsv_low_power) +
            ", gpu_convert=" + onoff(st.gpu_convert) +
            ", gpu_overlay=" + onoff(st.gpu_overlay) +
+           ", inproc_audio=" + onoff(st.inproc_audio) +
            ", skip_static_frames=" + onoff(HrPipeInputMode(st) == 2) +
            ", ddagrab=" + onoff(st.gpu_capture_ddagrab) + ".";
 }
@@ -358,6 +398,8 @@ bool RecordingController::StartMfEncoder() {
                               output_w_, output_h_, state_.target_fps, kbps) != 0;
     void *dev = nullptr;
     if (ok && state_.mf_gpu_texture) dev = hr_pl_get_d3d_device(pipeline_);
+    // Item 10: AAC stream in the same .mp4 writer (the audio mixer feeds it live).
+    if (ok && live_audio_rate_ > 0) hr_mf_audio_configure(mfenc_, live_audio_rate_, HrAacKbps(state_.audio_aac_bitrate));
     if (ok) ok = hr_mf_start(mfenc_, dev, dev ? 1 : 0) != 0;
     if (!ok) {
         char err[256] = {};
@@ -369,8 +411,65 @@ bool RecordingController::StartMfEncoder() {
         RemoveFileUtf8(NarrowFromWide(current_output_path_));   // a half-created empty .mp4 must not stay behind
         return false;
     }
+    if (live_audio_rate_ > 0 && !hr_mf_audio_enabled(mfenc_)) {
+        live_audio_rate_ = 0;   // no AAC encoder here: the audio is merged after Stop (needs ffmpeg), the video is fine
+        HrLog::Warn("Recording: the Media Foundation writer has no AAC audio stream - audio will be merged after Stop.");
+    }
     hr_pl_set_mf_sink(pipeline_, mfenc_, hr_mf_textures_enabled(mfenc_));
     return true;
+}
+
+// Item 10. Builds the sink for the encoder of THIS recording and starts the live mixer. Called right after the audio
+// buffers were reset (the audio timeline starts there); head_ms = how much later than the video's start that was.
+bool RecordingController::StartLiveAudio(int head_ms) {
+    live_audio_ = false;
+    void (*fn)(void *, const int16_t *, size_t) = nullptr;
+    void *user = nullptr;
+    if (mfenc_) {
+        if (hr_mf_audio_enabled(mfenc_)) { fn = hr_mf_write_audio; user = mfenc_; }
+    } else if (ffproc_ && hr_ff_audio_pipe_active(ffproc_)) {
+        const intptr_t ph = hr_ff_take_audio_pipe(ffproc_);
+        if (ph) {
+            apipe_ = hr_apipe_open(ph, live_audio_rate_);
+            if (!apipe_) CloseHandle(reinterpret_cast<HANDLE>(ph));
+        }
+        if (apipe_) { fn = hr_apipe_write; user = apipe_; }
+    }
+    if (fn && hr_audio_live_start(fn, user, live_audio_rate_, head_ms) != 0) {
+        live_audio_ = true;
+        HrLog::Info(std::string("Recording: audio is mixed live (") + std::to_string(live_audio_rate_) + " Hz) and " +
+                    (mfenc_ ? "written as AAC by the in-process encoder" : "muxed by ffmpeg over a pipe") +
+                    " - no temp WAV files, no merge after Stop.");
+        return true;
+    }
+    // Nothing started. An ffmpeg that was launched with the audio input must still see its end (EOF), otherwise it
+    // would wait for audio forever: the sink (if it exists) closes the pipe by itself once told there is no more.
+    if (apipe_) hr_apipe_end_input(apipe_);
+    hr_audio_extra_end_live();
+    live_audio_rate_ = 0;
+    HrLog::Warn("Recording: the live audio mixer could not start - audio will be merged after Stop instead.");
+    return false;
+}
+
+void RecordingController::StopLiveAudio() {
+    if (live_audio_) {
+        const long long frames = hr_audio_live_stop();    // mixes the last buffered audio into the sink
+        live_audio_ = false;
+        HrLog::Info("Recording: live audio ended (" + std::to_string(frames) + " frames mixed" +
+                    (live_audio_rate_ > 0 ? ", " + std::to_string((double)frames / live_audio_rate_) + " s" : std::string()) + ").");
+    }
+    if (apipe_) hr_apipe_end_input(apipe_);
+}
+
+void RecordingController::FinishAudioSink() {
+    if (!apipe_) return;
+    const bool ff_alive = ffproc_ && hr_ff_is_running(ffproc_);
+    const bool ok = hr_apipe_finish(apipe_, ff_alive ? 10000 : 500) != 0;
+    if (!ok)
+        HrLog::Warn("Recording: the audio did not reach ffmpeg completely (ffmpeg stopped reading it) - the end of the "
+                    "recording's sound may be missing.");
+    hr_apipe_destroy(apipe_);
+    apipe_ = nullptr;
 }
 
 std::wstring RecordingController::BuildCodecArgs(const std::wstring &codec) {
@@ -1098,6 +1197,8 @@ bool RecordingController::Start(std::wstring &error_out) {
     // ---- optional full-GPU path: ffmpeg's own "ddagrab" capture ------------- Settings >
     // Video > GPU acceleration.
     ddagrab_active_ = false;
+    live_audio_ = false;          // item 10: decided below, per recording
+    live_audio_rate_ = 0;
     crash_was_ddagrab_ = false;
     crash_video_elapsed_sec_ = 0.0;
     ddagrab_last_frames_ = -1;
@@ -1120,6 +1221,11 @@ bool RecordingController::Start(std::wstring &error_out) {
         // In-process Media Foundation encoder instead of an ffmpeg process + pipe (see mf_encoder.h). ffmpeg is
         // then only needed afterwards, to merge the audio.
         const bool use_mf = MfEncoderWanted(codec, codec_is_hw);
+        // Item 10: mix the audio while recording and give it to the encoder live (no WAV files, no merge after Stop).
+        // Needs at least one capture stream; the Media Foundation path needs no ffmpeg at all, the ffmpeg path needs
+        // an ffmpeg command line without custom stream / audio options.
+        if (state_.inproc_audio && state_.audio_out_channels > 0 && (use_mf || !HrCustomArgsTouchAudio(state_)))
+            live_audio_rate_ = hr_audio_live_prepare();
         // Non-zero "pipe" token for the pipeline in MF mode: it is never opened or closed, it only marks the
         // recording segment as open (see hr_pl_set_mf_sink()).
         constexpr intptr_t kMfPipeToken = 1;
@@ -1136,6 +1242,8 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_ff_set_video_params(ffproc_, pipe_w, pipe_h, state_.target_fps);
         hr_ff_set_output_size(ffproc_, pipe_w, pipe_h);
         hr_ff_set_pipe_input(ffproc_, HrPipeInputMode(state_));
+        if (live_audio_rate_ > 0)
+            hr_ff_set_audio_pipe(ffproc_, live_audio_rate_, HrAacKbps(state_.audio_aac_bitrate));
 
         if (hr_ff_start(ffproc_) != 0) {
             error_out = L"Failed to start the ffmpeg process.";
@@ -1145,6 +1253,8 @@ bool RecordingController::Start(std::wstring &error_out) {
             return false;
         }
         start_timer.mark("ffmpeg_launch");
+        // The audio pipe could not be created: this recording merges its audio after Stop, as before.
+        if (live_audio_rate_ > 0 && !hr_ff_audio_pipe_active(ffproc_)) live_audio_rate_ = 0;
         HrLog::Info(HrLowImpactFlagsLine(state_));
         if (state_.gpu_low_priority)
             HrLogFfmpegGpuPriorityStart(hr_ff_gpu_priority_applied(ffproc_) != 0);
@@ -1284,15 +1394,31 @@ bool RecordingController::Start(std::wstring &error_out) {
         std::string audio_base = NarrowFromWide(current_output_path_);
         size_t audio_dot = audio_base.find_last_of('.');
         std::string audio_stem = (audio_dot == std::string::npos) ? audio_base : audio_base.substr(0, audio_dot);
-        std::string mic_wav_path = audio_stem + "_mic_tmp.wav";
-        std::string sys_wav_path = audio_stem + "_sys.wav";
-        hr_audio_reset_buffers(mic_wav_path.c_str(), sys_wav_path.c_str());
-        hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
-        hr_audio_extra_begin(audio_stem.c_str());   // 2.4: extra mixer channels start collecting too
-        const auto t_audio_go = std::chrono::steady_clock::now();
-        av_start_skew_sec_ = std::chrono::duration<double>(t_audio_go - t_video_go).count();
-        HrLog::Info("Recording: measured video/audio start skew = " +
-                    std::to_string(av_start_skew_sec_) + "s (applied at merge time)");
+        bool live_started = false;
+        if (live_audio_rate_ > 0) {
+            // Item 10: no WAV files. The audio timeline starts at the buffer reset below; the video started
+            // `skew` earlier, so that much silence goes in front (same measurement the merge step used).
+            hr_audio_reset_buffers(nullptr, nullptr);
+            hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
+            hr_audio_extra_begin_live();
+            const auto t_audio_go = std::chrono::steady_clock::now();
+            av_start_skew_sec_ = std::chrono::duration<double>(t_audio_go - t_video_go).count();
+            live_started = StartLiveAudio((int)std::lround(av_start_skew_sec_ * 1000.0));
+            if (live_started)
+                HrLog::Info("Recording: measured video/audio start skew = " + std::to_string(av_start_skew_sec_) +
+                            "s (put in front of the audio as silence)");
+        }
+        if (!live_started) {
+            std::string mic_wav_path = audio_stem + "_mic_tmp.wav";
+            std::string sys_wav_path = audio_stem + "_sys.wav";
+            hr_audio_reset_buffers(mic_wav_path.c_str(), sys_wav_path.c_str());
+            hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
+            hr_audio_extra_begin(audio_stem.c_str());   // 2.4: extra mixer channels start collecting too
+            const auto t_audio_go = std::chrono::steady_clock::now();
+            av_start_skew_sec_ = std::chrono::duration<double>(t_audio_go - t_video_go).count();
+            HrLog::Info("Recording: measured video/audio start skew = " +
+                        std::to_string(av_start_skew_sec_) + "s (applied at merge time)");
+        }
     } else {
         av_start_skew_sec_ = 0.0;
     }
@@ -1350,6 +1476,10 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // Everything below (stopping the pipeline, mixing/merging audio, the mkv->mp4 copy) is not time-critical, and the
     // user is usually back in the game by now: keep this thread out of the game's way.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    // Item 10: the live mixer hands its last audio to the encoder BEFORE the video side is ended (the in-process
+    // encoder is finalized by the pipeline's writer thread when the recording segment closes below, and ffmpeg only
+    // opens its audio input after the video input is done).
+    StopLiveAudio();
     if (ddagrab_active_) {
         // ffmpeg captured by itself (no pipe was ever attached to this recording), so there is no
         // recording segment to close; the graceful "q" sent above is all it needs.
@@ -1420,6 +1550,8 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
         return ms;
     };
     long long ms_ffwait = 0, ms_audio = 0, ms_merge = 0, ms_mp3 = 0, ms_mp4 = 0;
+    // Item 10: this recording's audio went to the encoder live - there are no WAVs to mix and nothing to merge.
+    const bool live_rec = live_audio_rate_ > 0;
 
     JoinPendingInstantReplayStop();
 
@@ -1447,6 +1579,8 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
                         std::to_string((long long)hr_mf_frames_written(mfenc_)) + " frames written).");
         }
     }
+    // Item 10: ffmpeg reads the tail of the audio pipe once its video input has ended (the segment is closed by now).
+    FinishAudioSink();
     // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second budget for ffmpeg to
     // receive EOF on stdin, flush libx264's internal frame buffer, and write the moov atom
     // (mp4) / cues (mkv) that make the file actually playable.
@@ -1476,8 +1610,9 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
 
     bool want_mic = !mic_muted_;
     bool want_sys = !sys_muted_;
-    int audio_result = hr_audio_capture_to_wav(want_mic ? mic_wav.c_str() : nullptr,
-                                                want_sys ? sys_wav.c_str() : nullptr);
+    int audio_result = live_rec ? 0
+                                : hr_audio_capture_to_wav(want_mic ? mic_wav.c_str() : nullptr,
+                                                          want_sys ? sys_wav.c_str() : nullptr);
     // Incremental streaming (see hr_audio_reset_buffers()) always opens both
     // WAVs at Start(), so a channel that's muted here still left a silent
     // file behind - remove it so no stray *_mic_tmp.wav/_sys.wav remains.
@@ -1509,7 +1644,7 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
 
     // 2.4 - extra Audio Mixer channels (another mic, a browser / window, audio files):
     // finish their WAVs and fold them into the audio track with the streaming mixer.
-    if (state_.audio_out_channels > 0) {
+    if (!live_rec && state_.audio_out_channels > 0) {
         std::vector<char> xbuf(32768, '\0');
         const int xn = hr_audio_extra_collect(xbuf.data(), (int)xbuf.size());
         if (xn > 0) {
@@ -1570,7 +1705,18 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
     // "Also save audio as a separate MP3" (Settings) was persisted (see hrc_config.cpp) and
     // shown in the dialog, but nothing anywhere ever read state_.separate_audio_mp3 or
     // produced an .mp3 -- the checkbox did nothing at all.
-    if (merged) {
+    if (live_rec) {
+        // The sound is already inside the video: the separate MP3 is cut out of the finished file (no WAV exists).
+        if (state_.separate_audio_mp3 && ffmpeg_found_ && hr_path_exists(base.c_str())) {
+            const std::string mp3_path = stem + ".mp3";
+            if (hr_export_mp3(ffmpeg_path_.c_str(), WideFromNarrow(base).c_str(),
+                              WideFromNarrow(mp3_path).c_str())) {
+                HrLog::Info("Recording: separate audio saved -> " + mp3_path);
+            } else {
+                HrLog::Warn("Recording: couldn't export a separate MP3 from the recording.");
+            }
+        }
+    } else if (merged) {
         if (state_.separate_audio_mp3 && ffmpeg_found_) {
             std::string mp3_path = stem + ".mp3";
             if (hr_export_mp3(ffmpeg_path_.c_str(), WideFromNarrow(audio_wav).c_str(),
@@ -1622,6 +1768,7 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
     hr_ff_destroy(ffproc_);
     ffproc_ = nullptr;
     if (mfenc_) { hr_mf_destroy(mfenc_); mfenc_ = nullptr; }
+    live_audio_rate_ = 0;
 
     state_.recording = false;
     state_.paused = false;

@@ -287,6 +287,21 @@ private:
     void *mfenc_ = nullptr;
     bool mf_blocked_ = false;    // the encoder failed to start / died once: not tried again this session
 
+    // Item 10 - in-process audio. live_audio_rate_ > 0 while THIS recording is set up for it (Hz of the live mix, the
+    // encoder was built for that rate); live_audio_ = the mixer is really running and feeds the encoder (so there is no
+    // WAV and no merge after Stop). apipe_ = the named-pipe sink when the encoder is ffmpeg (nullptr with the MF encoder).
+    int   live_audio_rate_ = 0;
+    bool  live_audio_ = false;
+    void *apipe_ = nullptr;
+    // Starts the live mixer + its sink for the recording that has just been set up; false = use the WAV + merge path.
+    bool StartLiveAudio(int head_ms);
+    // Stop, step 1 (BEFORE the video side is ended): the live mixer hands its last audio to the sink and the sink is told
+    // there is no more. Does not block. No-op if this recording is not live.
+    void StopLiveAudio();
+    // Stop, step 2 (after the video segment has been closed): waits until the ffmpeg audio pipe has delivered everything
+    // and closes it. No-op without a pipe sink.
+    void FinishAudioSink();
+
     // ffmpeg "ddagrab" fast path (Settings > Video > GPU acceleration): true while
     // the CURRENT recording is captured + encoded entirely by ffmpeg on the GPU
     // (no HomRec pipeline attached, so no overlays/pause). See TryStartDdagrab().
