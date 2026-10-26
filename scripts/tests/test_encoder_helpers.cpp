@@ -16,6 +16,9 @@ extern "C" {
     void hr_gamma_lut_apply(uint8_t *pixels, size_t n_bytes, int gamma_x100);
     int  hr_build_thumbnail_lq(const uint8_t *src, uint8_t *dst,
                                 int sw, int sh, int dw, int dh);
+    int  hr_csc_set_max_simd(int cap);
+    void hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *nv12, int w, int h, int y0, int y1);
+    void hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
 }
 
 namespace {
@@ -173,4 +176,41 @@ TEST_CASE("partial re-conversion of dirty rows == full conversion (NV12)") {
 
 TEST_CASE("partial re-conversion of dirty rows == full conversion (planar I420)") {
     CheckPartialMatchesFull(false);
+}
+
+// Every SIMD level must give EXACTLY the scalar result (bit for bit), for any width / height / band.
+TEST_CASE("BGRA->YUV: SSE4.1 and AVX2 are bit-identical to the scalar converter") {
+    const int best = hr_csc_set_max_simd(-1);
+    MESSAGE("highest SIMD level on this CPU: " << best << " (0 scalar, 1 SSE4.1, 2 AVX2)");
+
+    uint32_t rng = 12345u;
+    auto next = [&rng]() { rng = rng * 1664525u + 1013904223u; return (uint8_t)(rng >> 24); };
+
+    const int widths[]  = {2, 6, 8, 14, 16, 18, 30, 32, 34, 46, 64, 70, 130, 1366, 1920};
+    const int heights[] = {2, 4, 6, 8, 18, 36};   // even: encoders need even sizes
+    for (int w : widths) {
+        for (int h : heights) {
+            std::vector<uint8_t> src((size_t)w * h * 4);
+            for (auto &b : src) b = next();
+            // saturated / extreme pixels too (clamping paths)
+            for (size_t i = 0; i + 3 < src.size() && i < 4096; i += 64) { src[i] = 255; src[i + 1] = 0; src[i + 2] = 255; }
+
+            const size_t out_sz = (size_t)w * h * 3 / 2 + 64;
+            for (int nv12 = 0; nv12 < 2; ++nv12) {
+                auto run = [&](int cap, int y0, int y1) {
+                    hr_csc_set_max_simd(cap);
+                    std::vector<uint8_t> out(out_sz, 0xCD);
+                    if (nv12) hr_bgra_to_nv12_band(src.data(), out.data(), w, h, y0, y1);
+                    else      hr_bgra_to_yuv420p_band(src.data(), out.data(), w, h, y0, y1);
+                    return out;
+                };
+                const int y0 = (h > 4) ? 2 : 0;   // a band that doesn't start at row 0
+                for (int level = 1; level <= best; ++level) {
+                    CHECK(run(level, 0, h) == run(0, 0, h));
+                    CHECK(run(level, y0, h) == run(0, y0, h));
+                }
+            }
+        }
+    }
+    hr_csc_set_max_simd(-1);
 }
