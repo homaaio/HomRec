@@ -333,6 +333,19 @@ HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
                                               : tmp_mp4.substr(0, d2) + L"_rmxtmp" + tmp_mp4.substr(d2);
     }
 
+    // An (almost) empty audio file must never reach the merge: ffmpeg "succeeds" with it, "-shortest"
+    // cuts the video down to a stub and the code below then replaces the recording with that stub.
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(audio_file, GetFileExInfoStandard, &fad)) {
+            const unsigned long long asz = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            if (asz <= 1024ull) {
+                HrLog::Error("Recording: the captured audio file is empty -- not merging it, the video is kept as it is.");
+                return 0;
+            }
+        }
+    }
+
     double video_dur = probe_duration_sec(ffpath, vf);
     double audio_dur = probe_duration_sec(ffpath, std::wstring(audio_file));
 
@@ -364,7 +377,9 @@ HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
     // (The audio track is kept on the wall clock while it is captured - see WasapiStream::read() - and its
     // tail legitimately runs a moment past the Stop click, so it is NOT tempo-corrected here. The line
     // logged above is what to look at if a recording ever still drifts.)
-    const std::wstring af = L" -af aresample=async=1000";
+    // apad: audio that is SHORTER than the video (a truncated / damaged track) is padded with silence, so
+    // "-shortest" ends at the end of the video instead of cutting the video down to the audio's length.
+    const std::wstring af = L" -af aresample=async=1000,apad";
 
     wchar_t ratio_buf[64] = L"1";
     const double stretch_ratio = (stretch && video_dur > 0.0) ? real_elapsed_sec / video_dur : 1.0;
@@ -462,6 +477,25 @@ HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
         DeleteFileW(tmp.c_str());
         if (!tmp_mp4.empty()) DeleteFileW(tmp_mp4.c_str());
         return 0;
+    }
+
+    // Last line of defence before the original recording is replaced: the merged file must be about as
+    // long as the video it was made from (or the retimed length). Anything much shorter means the merge
+    // lost footage - keep the original.
+    if (video_dur > 5.0) {
+        const double expect = stretch ? real_elapsed_sec : video_dur;
+        const double got = probe_duration_sec(ffpath, tmp);
+        if (got >= 0.0 && got < expect * 0.9) {
+            wchar_t lb[160];
+            swprintf_s(lb, L"%.1f s instead of ~%.1f s", got, expect);
+            std::wstring w = lb;
+            HrLog::Error("Recording: the merged file came out much shorter than the video (" +
+                         std::string(w.begin(), w.end()) + ") -- keeping the original video without the audio "
+                         "(the separate audio file is kept so nothing is lost).");
+            DeleteFileW(tmp.c_str());
+            if (!tmp_mp4.empty()) DeleteFileW(tmp_mp4.c_str());
+            return 0;
+        }
     }
 
     // Replace in one step - the old delete-then-move left NO video at all if the
