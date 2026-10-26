@@ -195,6 +195,7 @@ static LARGE_INTEGER                       g_extra_freq{};
 static double                              g_extra_paused_accum = 0.0;
 static LARGE_INTEGER                       g_extra_pause_start{};
 static bool                                g_extra_in_pause = false;
+static std::atomic<bool>                   g_extra_live{false};
 
 static double rec_elapsed_sec()
 {
@@ -454,9 +455,34 @@ HR_EXPORT void hr_audio_extra_begin(const char *stem)
         s->out_bytes = 0;
         if (!g_extra_stem.empty())
             s->out_file = wav_stream_open((g_extra_stem + "_x" + std::to_string(s->id) + ".wav").c_str());
-        s->buffering.store(s->out_file != nullptr);
+        s->buffering.store(s->out_file != nullptr || g_extra_live.load());
     }
     g_extra_recording.store(true);
+}
+
+/*  Item 10: same as hr_audio_extra_begin(), but the channels only collect into RAM (no _x<id>.wav files) -
+    the live mixer (hr_audio_live_start in audio.cpp) drains them. Pair with hr_audio_extra_end_live(). */
+HR_EXPORT void hr_audio_extra_begin_live()
+{
+    hrx::g_extra_live.store(true);
+    hr_audio_extra_begin(nullptr);
+}
+
+//  Ends a live recording of the extras: they stop collecting and whatever is left is discarded.
+HR_EXPORT void hr_audio_extra_end_live()
+{
+    using namespace hrx;
+    std::lock_guard<std::mutex> lk(g_extras_mu);
+    g_extra_live.store(false);
+    g_extra_recording.store(false);
+    g_extra_in_pause = false;
+    for (auto &p : g_extras) {
+        Extra *s = p.get();
+        if (s->kind == 2) continue;
+        s->buffering.store(false);
+        std::lock_guard<std::mutex> bl(s->mu);
+        s->buf.clear();
+    }
 }
 
 /*  Mirrors hr_audio_pause(): extras stop collecting (and the file timeline stops advancing). */
