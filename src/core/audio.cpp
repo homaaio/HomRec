@@ -23,6 +23,7 @@
 
 #include "../utils/log.h"
 #include "pcm_ring.h"
+#include "audio_mixer.h"   // item 10: live mixer + resampler (portable, unit-tested)
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
@@ -744,10 +745,13 @@ HR_EXPORT void hr_audio_pause(int paused)
     extra_on_pause(paused != 0);
 }
 
+static void live_shutdown();                // end of this file (item 10)
+
 HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
                              const char* sys_wav_path)
 {
     if (!g_state) return 0;
+    live_shutdown();   // the live mixer thread reads g_state: it must be gone before g_state is
     g_state->running.store(false);
 
     // Join the capture threads BEFORE releasing the WASAPI objects they're using.
@@ -913,6 +917,9 @@ HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
 {
     if (!g_state) return 0;
     int result = 0;
+    // PERF: copy the window under the lock, write to disk after releasing it,
+    // so saving a replay no longer stalls the capture threads (audible as a
+    // glitch in the still-running buffer) for the duration of the file write.
     const int cap_sec = g_state->max_buffer_sec.load();
     std::vector<int16_t> mic_copy, sys_copy;
     int mic_rate = 0, sys_rate = 0;
@@ -1137,3 +1144,208 @@ HR_EXPORT int hr_audio_rms(const void* buf, int n_bytes)
 
 // 2.4: extra Audio Mixer channels (another mic, a browser / window, an audio file)
 #include "audio_extra.inc"
+
+typedef void (*HrAudioSinkFn)(void *user, const int16_t *stereo, size_t frames);
+
+namespace {
+
+// An audio-file channel (Audio Mixer kind 2): read from the start of the file, at the pace the mixer asks.
+struct FilePull {
+    int      id = 0;
+    uint64_t next_in = 0;                  // next frame of the file to read
+    hrlive::StereoResampler rs;
+    std::vector<int16_t> ready;            // resampled, not yet consumed
+    size_t   ready_rd = 0;
+    std::vector<int16_t> raw;
+    bool     eof = false;
+};
+
+void file_pull(void *ctx, int32_t *acc, size_t frames)
+{
+    FilePull *c = static_cast<FilePull *>(ctx);
+    std::lock_guard<std::mutex> lk(hrx::g_extras_mu);      // the meter (hr_audio_extra_level) shares the FILE*
+    hrx::Extra *s = hrx::find_extra_locked(c->id);
+    if (!s || !s->rf) return;                               // removed meanwhile: silence
+    const float g = s->mute.load() ? 0.0f : s->vol.load();
+    const uint64_t total = s->data_bytes / 4;
+
+    while (!c->eof && (c->ready.size() - c->ready_rd) / 2 < frames) {
+        if (c->next_in >= total) { c->eof = true; break; }
+        const size_t want = (size_t)std::min<uint64_t>(2048, total - c->next_in);
+        c->raw.resize(want * 2);
+        if (_fseeki64(s->rf, (long long)s->data_off + (long long)(c->next_in * 4), SEEK_SET) != 0) { c->eof = true; break; }
+        const size_t got = fread(c->raw.data(), 4, want, s->rf);
+        if (got == 0) { c->eof = true; break; }
+        c->next_in += got;
+        c->rs.process(c->raw.data(), got, c->ready);
+    }
+    const size_t have = (c->ready.size() - c->ready_rd) / 2;
+    const size_t take = std::min(have, frames);
+    const int16_t *p = c->ready.data() + c->ready_rd;
+    if (g == 1.0f) { for (size_t i = 0; i < take * 2; ++i) acc[i] += p[i]; }
+    else if (g != 0.0f) { for (size_t i = 0; i < take * 2; ++i) acc[i] += (int32_t)((float)p[i] * g); }
+    c->ready_rd += take * 2;
+    if (c->ready_rd >= c->ready.size()) { c->ready.clear(); c->ready_rd = 0; }
+}
+
+struct LiveSession {
+    hrlive::LiveMixer mixer;
+    std::thread       th;
+    HANDLE            stop_ev = nullptr;
+    HrAudioSinkFn     sink = nullptr;
+    void             *user = nullptr;
+    uint32_t          rate = 48000;
+    int               mic_idx = -1, sys_idx = -1;
+    std::vector<std::pair<int, int>>        extra_idx;     // (extra id, mixer source index)
+    std::vector<std::unique_ptr<FilePull>>  files;
+    std::vector<int16_t> scratch, out;
+    ~LiveSession() { if (stop_ev) CloseHandle(stop_ev); }
+};
+
+LiveSession *g_live = nullptr;
+
+void live_tick(LiveSession *L, bool final_flush)
+{
+    AudioState *st = g_state;
+    if (!st) return;
+    if (L->mic_idx >= 0) {
+        { std::lock_guard<std::mutex> lk(st->mic_mutex); st->mic_buf.drain(L->scratch); }
+        if (!L->scratch.empty()) L->mixer.push(L->mic_idx, L->scratch.data(), L->scratch.size());
+    }
+    if (L->sys_idx >= 0) {
+        { std::lock_guard<std::mutex> lk(st->sys_mutex); st->sys_buf.drain(L->scratch); }
+        if (!L->scratch.empty()) L->mixer.push(L->sys_idx, L->scratch.data(), L->scratch.size());
+    }
+    if (!L->extra_idx.empty()) {
+        std::lock_guard<std::mutex> lk(hrx::g_extras_mu);   // same order as extra_flush(): g_extras_mu -> Extra::mu
+        for (const auto &e : L->extra_idx) {
+            hrx::Extra *s = hrx::find_extra_locked(e.first);
+            if (!s) continue;                               // removed while recording: its source just stays silent
+            { std::lock_guard<std::mutex> bl(s->mu); s->buf.drain(L->scratch); }
+            if (!L->scratch.empty()) L->mixer.push(e.second, L->scratch.data(), L->scratch.size());
+        }
+    }
+    L->out.clear();
+    const size_t n = L->mixer.mix(L->out, final_flush);
+    if (n && L->sink) L->sink(L->user, L->out.data(), n);
+}
+
+void live_thread(LiveSession *L)
+{
+    try {
+        while (WaitForSingleObject(L->stop_ev, 20) == WAIT_TIMEOUT) live_tick(L, false);
+        live_tick(L, true);                                 // everything still buffered goes out
+    } catch (const std::exception &e) {
+        HrLog::Error(std::string("Audio live mixer: uncaught exception (") + e.what() + ")");
+    } catch (...) {
+        HrLog::Error("Audio live mixer: uncaught unknown exception");
+    }
+}
+
+// Ends the session (if any) and returns the frames it produced.
+long long live_end()
+{
+    LiveSession *L = g_live;
+    if (!L) return 0;
+    g_live = nullptr;
+    SetEvent(L->stop_ev);
+    if (L->th.joinable()) L->th.join();
+    const long long frames = (long long)L->mixer.frames_out();
+    if (L->mixer.frames_padded() || L->mixer.frames_dropped()) {
+        const double r = L->rate ? (double)L->rate : 48000.0;
+        HrLog::Info("Audio live mixer: a source fell behind - " +
+                    std::to_string((long long)(L->mixer.frames_padded() * 1000.0 / r)) + " ms of silence inserted, " +
+                    std::to_string((long long)(L->mixer.frames_dropped() * 1000.0 / r)) + " ms of late audio dropped.");
+    }
+    delete L;
+    return frames;
+}
+
+} // namespace
+
+static void live_shutdown() { live_end(); }
+
+// Rate (Hz) the live mix will have, or 0 when nothing can be captured (then the caller uses the WAV path).
+// All sources on the same 44.1 / 48 kHz -> that rate (no resampling); otherwise 48 kHz.
+HR_EXPORT int hr_audio_live_prepare()
+{
+    if (!g_state) return 0;
+    std::vector<uint32_t> rates;
+    if (g_state->mic_thread.joinable() && g_state->mic_stream.rate) rates.push_back(g_state->mic_stream.rate);
+    if (g_state->sys_thread.joinable() && g_state->sys_stream.rate) rates.push_back(g_state->sys_stream.rate);
+    {
+        std::lock_guard<std::mutex> lk(hrx::g_extras_mu);
+        for (auto &p : hrx::g_extras)
+            if (p->kind != 2 && p->ok.load() && p->run.load() && p->stream.rate) rates.push_back(p->stream.rate);
+    }
+    if (rates.empty()) return 0;
+    bool same = true;
+    for (uint32_t r : rates) if (r != rates[0]) same = false;
+    if (same && (rates[0] == 44100 || rates[0] == 48000)) return (int)rates[0];
+    return 48000;
+}
+
+// Starts mixing. out_rate: what hr_audio_live_prepare() returned (the sink was built for it). head_ms: how much
+// LATER than the video's first frame the audio started (>0: silence is put in front; <0: that much is cut).
+// Returns 1 on success.
+HR_EXPORT int hr_audio_live_start(HrAudioSinkFn sink, void *user, int out_rate, int head_ms)
+{
+    if (!g_state || g_live || !sink) return 0;
+    try {
+        auto L = std::make_unique<LiveSession>();
+        L->rate = (out_rate == 44100 || out_rate == 48000) ? (uint32_t)out_rate : 48000u;
+        L->mixer.init(L->rate);
+        if (g_state->mic_thread.joinable() && g_state->mic_stream.rate)
+            L->mic_idx = L->mixer.add_push(g_state->mic_stream.rate);
+        if (g_state->sys_thread.joinable() && g_state->sys_stream.rate)
+            L->sys_idx = L->mixer.add_push(g_state->sys_stream.rate);
+        {
+            std::lock_guard<std::mutex> lk(hrx::g_extras_mu);
+            for (auto &p : hrx::g_extras) {
+                if (p->kind != 2) {
+                    // buffering == hr_audio_extra_begin_live() ran for this channel (channels added later stay out, as before).
+                    if (p->ok.load() && p->run.load() && p->buffering.load() && p->stream.rate)
+                        L->extra_idx.emplace_back(p->id, L->mixer.add_push(p->stream.rate));
+                } else if (p->rf && hrx::g_extra_recording.load()) {
+                    auto f = std::make_unique<FilePull>();
+                    f->id = p->id;
+                    f->rs.init(p->file_rate ? p->file_rate : 44100, L->rate);
+                    L->mixer.add_pull(file_pull, f.get());
+                    L->files.push_back(std::move(f));
+                }
+            }
+        }
+        if (L->mixer.push_sources() == 0) return 0;
+        L->mixer.set_head((int64_t)head_ms * (int64_t)L->rate / 1000);
+        L->sink = sink;
+        L->user = user;
+        L->stop_ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!L->stop_ev) return 0;
+        L->th = std::thread(live_thread, L.get());
+        g_live = L.release();
+        return 1;
+    } catch (const std::exception &e) {
+        HrLog::Error(std::string("Audio live mixer: could not start (") + e.what() + ")");
+    } catch (...) {
+        HrLog::Error("Audio live mixer: could not start (unknown exception)");
+    }
+    return 0;
+}
+
+HR_EXPORT int hr_audio_live_active() { return g_live ? 1 : 0; }
+
+// Ends the live mix: the last buffered audio is mixed and handed to the sink, then buffering stops (the
+// counterpart of hr_audio_capture_to_wav()). Returns how many frames were produced.
+HR_EXPORT long long hr_audio_live_stop()
+{
+    const long long frames = live_end();
+    if (g_state) {
+        g_state->buffering.store(false);
+        g_state->mic_stream.log_stats("mic");
+        g_state->sys_stream.log_stats("system");
+        { std::lock_guard<std::mutex> lk(g_state->mic_mutex); g_state->mic_buf.clear(); }
+        { std::lock_guard<std::mutex> lk(g_state->sys_mutex); g_state->sys_buf.clear(); }
+    }
+    hr_audio_extra_end_live();
+    return frames;
+}
