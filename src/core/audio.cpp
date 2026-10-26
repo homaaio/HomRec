@@ -23,6 +23,7 @@
 
 #include "../utils/log.h"
 #include "pcm_ring.h"
+#include "wav_util.h"
 #include "audio_mixer.h"   // item 10: live mixer + resampler (portable, unit-tested)
 
 #ifdef _WIN32
@@ -103,8 +104,13 @@ static void wav_stream_close(FILE* f, uint16_t channels, uint32_t rate, uint64_t
     h.bits_per_smp = 16;
     h.block_align  = (uint16_t)(channels * 2);
     h.byte_rate    = rate * channels * 2;
-    h.data_size    = (uint32_t)data_bytes;
-    h.chunk_size   = 36 + (uint32_t)data_bytes;
+    // Above 4 GiB (~6.2 h of 48 kHz stereo) the 32-bit size fields can't hold the length: they used to
+    // wrap around silently. 0xFFFFFFFF = "until end of file" (ffmpeg reads that fine); HomRec's own
+    // readers take the length from the file size (hrwav::EffectiveDataBytes).
+    uint32_t riff_sz = 0, data_sz = 0;   // locals: can't bind a reference to a packed field
+    hrwav::SizeFields(data_bytes, riff_sz, data_sz);
+    h.chunk_size = riff_sz;
+    h.data_size  = data_sz;
     fseek(f, 0, SEEK_SET);
     fwrite(&h, sizeof(h), 1, f);
     fclose(f);
@@ -121,9 +127,16 @@ static bool wav_read(const char* path,
     if (fread(&h, sizeof(h), 1, f) != 1) { fclose(f); return false; }
     channels = h.num_channels;
     rate     = h.sample_rate;
-    size_t n = h.data_size / 2;
+    // Whole-file read: only sane for short files. Refuse anything that wouldn't fit comfortably in RAM
+    // instead of allocating gigabytes (or, for a bad header, reading nothing and reporting success).
+    uint64_t fsz = 0;
+    if (!hrwav::FileSize64(f, fsz) || fsz < sizeof(h)) { fclose(f); return false; }
+    const uint64_t bytes = hrwav::EffectiveDataBytes(h.data_size, fsz - sizeof(h));
+    if (bytes == 0 || bytes > (1ull << 30)) { fclose(f); return false; }
+    size_t n = (size_t)(bytes / 2);
     pcm.resize(n);
-    fread(pcm.data(), 2, n, f);
+    n = fread(pcm.data(), 2, n, f);
+    pcm.resize(n);
     fclose(f);
     return true;
 }
@@ -951,6 +964,7 @@ static int mix_wav_inmemory(const char* mic_path,
 
     if (!wav_read(mic_path, mic_pcm, mic_ch, mic_rate)) return -1;
     if (!wav_read(sys_path, sys_pcm, sys_ch, sys_rate)) return -2;
+    if (mic_pcm.empty() && sys_pcm.empty()) return -4;
 
     // Make both stereo if needed (simple duplication)
     auto to_stereo = [](std::vector<int16_t>& buf, uint16_t ch) {
@@ -1015,13 +1029,13 @@ struct MixIn {
         rate = h.sample_rate ? h.sample_rate : 44100;
         // The header's size field is patched when a stream closes; if a crash left it 0,
         // fall back to the real file length.
-        uint64_t bytes = h.data_size;
-        long here = ftell(f);
-        fseek(f, 0, SEEK_END);
-        long endp = ftell(f);
-        fseek(f, here, SEEK_SET);
-        if (endp > here && (bytes == 0 || bytes > (uint64_t)(endp - here))) bytes = (uint64_t)(endp - here);
+        // ftell() is 32-bit on Windows (-1 above 2 GB) and the header's size field wraps at 4 GiB, so the
+        // length comes from the 64-bit file size whenever the header can't be trusted (see wav_util.h).
+        uint64_t fsz = 0;
+        if (!hrwav::FileSize64(f, fsz) || fsz < sizeof(h)) { fclose(f); f = nullptr; return false; }
+        const uint64_t bytes = hrwav::EffectiveDataBytes(h.data_size, fsz - sizeof(h));
         total = bytes / 4;
+        if (total == 0) { fclose(f); f = nullptr; }
         return total > 0;
     }
     bool pull(int16_t o[2])
