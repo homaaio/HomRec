@@ -143,6 +143,7 @@ struct AppState {
     // Used only while the pointer is not drawn and no overlay is drawn by the CPU (GPU-blended overlays, item 9, are fine);
     // `mf_gpu_texture=0` turns it off.
     bool        mf_gpu_texture = true;
+    bool        inproc_audio       = true;
     bool        game_friendly_priority = false;
     bool        qsv_low_power          = false;
     bool        gpu_low_priority       = false;

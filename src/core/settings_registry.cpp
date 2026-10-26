@@ -167,6 +167,7 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("gpu_capture_ddagrab", "video", &AppState::gpu_capture_ddagrab));
         v.push_back(BoolField("mf_encoder", "video", &AppState::mf_encoder, {"media_foundation"}));
         v.push_back(BoolField("mf_gpu_texture", "video", &AppState::mf_gpu_texture));
+        v.push_back(BoolField("inproc_audio", "audio", &AppState::inproc_audio, {"live_audio"}));
         v.push_back(BoolField("game_friendly_priority", "video", &AppState::game_friendly_priority,
                               {"game_priority"}));
         v.push_back(BoolField("qsv_low_power", "video", &AppState::qsv_low_power, {"low_power"}));
