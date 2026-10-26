@@ -153,6 +153,17 @@ struct MfEnc {
     ComPtr<IMFMediaBuffer> last_buf;            // the picture repeats re-submit
     long long real_pictures = 0;                // pictures (not repeats) accepted by the writer
 
+    // audio (item 10)
+    int      audio_rate = 0;                    // 0 = no audio requested
+    int      audio_kbps = 160;
+    bool     audio_ok = false;                  // the writer really has the AAC stream
+    DWORD    audio_stream = 1;
+    uint64_t audio_frames = 0;                  // PCM frames handed to the writer (-> sample time)
+    uint64_t audio_skip = 0;                    // leading frames to drop (video's first picture came at slot > 0)
+    int      audio_fail = 0;
+    bool     pre_flushed = false;               // the first picture has fixed the video's time zero
+    std::vector<int16_t> pre_audio;             // audio that arrived before that picture (lock: wmu)
+
     // reusable system-memory buffers (a buffer is free again once nobody but this pool references it)
     std::vector<ComPtr<IMFMediaBuffer>> pool;
 
@@ -204,12 +215,42 @@ HRESULT make_type(const MfEnc &e, const GUID &subtype, bool output, UINT32 profi
     return S_OK;
 }
 
+// AAC output / PCM input types for the audio stream (the Windows AAC encoder: 44.1 / 48 kHz, 16 bit, 96-192 kbps).
+HRESULT make_audio_types(const MfEnc &e, IMFMediaType **out_aac, IMFMediaType **in_pcm) {
+    ComPtr<IMFMediaType> a, p;
+    HRESULT hr = MFCreateMediaType(&a);
+    if (FAILED(hr)) return hr;
+    hr = MFCreateMediaType(&p);
+    if (FAILED(hr)) return hr;
+    a->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    a->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+    a->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    a->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, (UINT32)e.audio_rate);
+    a->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+    a->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, (UINT32)e.audio_kbps * 125u);   // 12000 / 16000 / 20000 / 24000
+    a->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 1);
+    p->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    p->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+    p->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    p->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, (UINT32)e.audio_rate);
+    p->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+    p->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
+    p->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, (UINT32)e.audio_rate * 4u);
+    *out_aac = a.Detach();
+    *in_pcm = p.Detach();
+    return S_OK;
+}
+
 // Creates the sink writer; with_manager = hand the capture device to the encoder (GPU textures).
 HRESULT build_writer(MfEnc &e, bool with_manager) {
     e.writer.Reset();
     e.mgr.Reset();
     e.textures_ok = false;
     e.began = false;
+    e.audio_ok = false;            // (re)decided below; a rebuild only happens before anything was written
+    e.audio_frames = 0;
+    e.audio_fail = 0;
+    e.pre_flushed = false;
 
     ComPtr<IMFAttributes> attrs;
     HRESULT hr = MFCreateAttributes(&attrs, 4);
@@ -268,6 +309,26 @@ HRESULT build_writer(MfEnc &e, bool with_manager) {
     if (FAILED(hr)) return hr;
     hr = e.writer->SetInputMediaType(stream, in_t.Get(), nullptr);
     if (FAILED(hr)) return hr;
+
+    // Audio: a second stream (PCM in -> AAC out, the sink writer inserts the encoder). A refusal (no AAC encoder
+    // on this Windows, odd driver) is not an error for the VIDEO: the caller sees hr_mf_audio_enabled() == 0.
+    if (e.audio_rate > 0) {
+        ComPtr<IMFMediaType> aac, pcm;
+        DWORD astream = 0;
+        HRESULT ha = make_audio_types(e, &aac, &pcm);
+        if (SUCCEEDED(ha)) ha = e.writer->AddStream(aac.Get(), &astream);
+        if (SUCCEEDED(ha)) ha = e.writer->SetInputMediaType(astream, pcm.Get(), nullptr);
+        if (SUCCEEDED(ha)) {
+            e.audio_stream = astream;
+            e.audio_ok = true;
+        } else {
+            HrLog::Warn("MF encoder: the AAC audio stream could not be added (" + hex(ha) +
+                        ") - the audio will be merged after Stop instead.");
+            // The sink writer may keep a half-added stream: rebuild once without audio so BeginWriting() is clean.
+            e.audio_rate = 0;
+            return build_writer(e, with_manager);
+        }
+    }
 
     hr = e.writer->BeginWriting();
     if (FAILED(hr)) return hr;
@@ -330,6 +391,62 @@ void fill_to(MfEnc &e, int64_t upto, int max_repeats) {
         ++n;
     }
     // A hole this loop refused to fill (huge gap) is skipped: the next picture simply starts later.
+}
+
+// Hands PCM to the AAC stream. Caller holds wmu. The sample time is the number of frames written so far, so the audio
+// is gapless by construction (the mixer already keeps it on the wall clock).
+void write_audio_locked(MfEnc &e, const int16_t *pcm, size_t frames) {
+    if (!e.writer || !e.audio_ok || e.state.load() != 1 || !pcm) return;
+    if (e.audio_skip > 0) {
+        const size_t s = (size_t)std::min<uint64_t>(e.audio_skip, frames);
+        pcm += s * 2;
+        frames -= s;
+        e.audio_skip -= s;
+    }
+    if (frames == 0) return;
+    const DWORD bytes = (DWORD)(frames * 4);
+    ComPtr<IMFMediaBuffer> buf;
+    HRESULT hr = MFCreateMemoryBuffer(bytes, &buf);
+    BYTE *dst = nullptr;
+    if (SUCCEEDED(hr)) hr = buf->Lock(&dst, nullptr, nullptr);
+    if (SUCCEEDED(hr)) {
+        std::memcpy(dst, pcm, bytes);
+        buf->Unlock();
+        hr = buf->SetCurrentLength(bytes);
+    }
+    ComPtr<IMFSample> smp;
+    if (SUCCEEDED(hr)) hr = MFCreateSample(&smp);
+    if (SUCCEEDED(hr)) hr = smp->AddBuffer(buf.Get());
+    if (SUCCEEDED(hr)) {
+        const LONGLONG t0 = (LONGLONG)(e.audio_frames * 10000000ull / (uint64_t)e.audio_rate);
+        const LONGLONG t1 = (LONGLONG)((e.audio_frames + frames) * 10000000ull / (uint64_t)e.audio_rate);
+        smp->SetSampleTime(t0);
+        smp->SetSampleDuration(t1 - t0);
+        hr = e.writer->WriteSample(e.audio_stream, smp.Get());
+    }
+    if (FAILED(hr)) {
+        if (++e.audio_fail >= 20 && e.audio_ok) {
+            e.audio_ok = false;     // stop trying; the video carries on
+            HrLog::Error("MF encoder: audio WriteSample failed " + hex(hr) + " repeatedly - the recording continues WITHOUT sound from here.");
+        }
+        return;
+    }
+    e.audio_fail = 0;
+    e.audio_frames += frames;
+}
+
+// The first picture is in: its slot is the video's time zero. Audio started at the recording origin, so the part
+// before that slot is cut, and what was waiting is written now. Caller holds wmu.
+void on_first_picture(MfEnc &e) {
+    if (e.pre_flushed) return;
+    e.pre_flushed = true;
+    if (!e.audio_ok) { e.pre_audio.clear(); return; }
+    if (e.base_slot > 0 && e.fps > 0) e.audio_skip = (uint64_t)e.base_slot * (uint64_t)e.audio_rate / (uint64_t)e.fps;
+    if (!e.pre_audio.empty()) {
+        write_audio_locked(e, e.pre_audio.data(), e.pre_audio.size() / 2);
+        e.pre_audio.clear();
+        e.pre_audio.shrink_to_fit();
+    }
 }
 
 // Free system-memory buffer of at least `size` bytes (reused when no sample references it any more).
@@ -415,6 +532,39 @@ int hr_mf_configure(void *h, const char *out_path_utf8, int w, int h_px, int fps
     return 1;
 }
 
+int hr_mf_audio_configure(void *h, int rate_hz, int kbps) {
+    auto e = lookup(h);
+    if (!e || (rate_hz != 44100 && rate_hz != 48000)) return 0;
+    std::lock_guard<std::mutex> lk(e->wmu);
+    e->audio_rate = rate_hz;
+    e->audio_kbps = kbps >= 176 ? 192 : kbps >= 144 ? 160 : kbps >= 112 ? 128 : 96;
+    return 1;
+}
+
+int hr_mf_audio_enabled(const void *h) {
+    auto e = lookup(h);
+    return (e && e->audio_ok) ? 1 : 0;
+}
+
+void hr_mf_write_audio(void *h, const int16_t *stereo, size_t frames) {
+    auto e = lookup(h);
+    if (!e || !stereo || frames == 0) return;
+    std::lock_guard<std::mutex> lk(e->wmu);
+    if (!e->audio_ok || e->state.load() != 1) return;
+    if (!e->pre_flushed) {
+        // Wait for the first picture (it defines the video's time zero). Bounded: a video that never starts must not
+        // eat the RAM - past 20 s the audio is simply written (time zero then stays the recording origin).
+        const size_t cap = (size_t)e->audio_rate * 2u * 20u;
+        if (e->pre_audio.size() + frames * 2 <= cap) {
+            e->pre_audio.insert(e->pre_audio.end(), stereo, stereo + frames * 2);
+            return;
+        }
+        e->pre_flushed = true;
+        if (!e->pre_audio.empty()) { write_audio_locked(*e, e->pre_audio.data(), e->pre_audio.size() / 2); e->pre_audio.clear(); }
+    }
+    write_audio_locked(*e, stereo, frames);
+}
+
 int hr_mf_start(void *h, void *d3d11_device, int want_textures) {
     auto e = lookup(h);
     if (!e) return 0;
@@ -451,7 +601,9 @@ int hr_mf_start(void *h, void *d3d11_device, int want_textures) {
     HrLog::Info("MF encoder: started (" + std::to_string(e->w) + "x" + std::to_string(e->h) + " @ " +
                 std::to_string(e->fps) + " fps, " + std::to_string(e->kbps) + " kbps, encoder: " +
                 (name.empty() ? std::string(hw == 1 ? "hardware MFT" : "unknown MFT") : name) +
-                ", GPU textures " + (e->textures_ok ? "on" : "off") + ").");
+                ", GPU textures " + (e->textures_ok ? "on" : "off") +
+                (e->audio_ok ? ", audio AAC " + std::to_string(e->audio_rate) + " Hz " + std::to_string(e->audio_kbps) + " kbps"
+                             : std::string()) + ").");
     e->state.store(1);
     return 1;
 }
@@ -492,6 +644,7 @@ int hr_mf_write_sysmem(void *h, const uint8_t *nv12, int w, int h_px, int64_t sl
     e->have_last = true;
     e->last_slot = slot;
     ++e->real_pictures;
+    on_first_picture(*e);
     return 1;
 }
 
@@ -521,6 +674,7 @@ int hr_mf_write_texture(void *h, void *tex, int64_t slot) {
             e->have_last = true;
             e->last_slot = slot;
             ++e->real_pictures;
+            on_first_picture(*e);
             return 1;
         }
         hr = E_FAIL;
@@ -638,6 +792,9 @@ extern "C" {
 void *hr_mf_create(void) { return nullptr; }
 void  hr_mf_destroy(void *) {}
 int   hr_mf_configure(void *, const char *, int, int, int, int) { return 0; }
+int   hr_mf_audio_configure(void *, int, int) { return 0; }
+int   hr_mf_audio_enabled(const void *) { return 0; }
+void  hr_mf_write_audio(void *, const int16_t *, size_t) {}
 int   hr_mf_start(void *, void *, int) { return 0; }
 int   hr_mf_textures_enabled(const void *) { return 0; }
 int   hr_mf_write_sysmem(void *, const uint8_t *, int, int, int64_t) { return 0; }
