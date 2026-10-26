@@ -84,6 +84,18 @@ struct FfmpegCtx {
     // log_path      - ffmpeg's stderr is redirected here (logs\ffmpeg_ddagrab.log)
     std::string log_path;
     std::string progress_path;
+
+    /* Item 10 - in-process audio: the mixed recording audio reaches ffmpeg as a SECOND input over a named pipe
+     * (the pipe is created in hr_ff_start() BEFORE the process is launched; core/audio_pipe.cpp writes to it)
+     * and is encoded to AAC + muxed live, so there is no WAV file and no merge pass after Stop.
+     * audio_rate > 0 asks for it (pipe_input only, never ddagrab); audio_active says it really happened. */
+    int         audio_rate{0};
+    int         audio_kbps{160};
+    bool        audio_active{false};
+    std::string audio_pipe_name;      /* \\.\pipe\HomRecAudio_<pid>_<n> (ASCII) */
+#ifdef _WIN32
+    HANDLE      hAudioPipe{nullptr};  /* server end; owned here until hr_ff_take_audio_pipe() */
+#endif
 };
 
 /* -- Helpers ---------------------------------------------------------------- */
@@ -133,6 +145,29 @@ static bool _create_overlapped_stdin_pipe(HANDLE *out_read, HANDLE *out_write) {
 
     *out_read  = hRead;
     *out_write = hWrite;
+    return true;
+}
+
+#ifndef PIPE_REJECT_REMOTE_CLIENTS
+  #define PIPE_REJECT_REMOTE_CLIENTS 0x00000008
+#endif
+
+// Server end of the audio pipe ffmpeg reads as its second input. Plain synchronous byte pipe, one instance, not
+// inheritable (the child opens it BY NAME). The writer thread in audio_pipe.cpp waits in ConnectNamedPipe().
+static bool _create_audio_pipe(FfmpegCtx *ctx) {
+    static std::atomic<uint32_t> s_counter{0};
+    char name[96];
+    std::snprintf(name, sizeof(name), "\\\\.\\pipe\\HomRecAudio_%lu_%u",
+                  (unsigned long)GetCurrentProcessId(), (unsigned)s_counter.fetch_add(1, std::memory_order_relaxed));
+    HANDLE h = CreateNamedPipeW(_utf8_to_wide(name).c_str(),
+                                PIPE_ACCESS_OUTBOUND,
+                                PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                1,              // one instance: private pipe, ffmpeg is the only client
+                                1 << 20,        // out buffer: ~5 s of 48 kHz stereo
+                                0, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    ctx->hAudioPipe = h;
+    ctx->audio_pipe_name = name;
     return true;
 }
 
@@ -350,6 +385,13 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
            << L" -i " << Q(ctx->input_path);
     }
 
+    /* Item 10: the mixed recording audio (raw 16-bit stereo) from the named pipe = input #1. A deep input queue
+       because the audio arrives in bursts while the video encoder is busy. */
+    if (ctx->audio_active) {
+        ss << L" -f s16le -ar " << ctx->audio_rate << L" -ac 2 -thread_queue_size 1024"
+           << L" -i " << Q(ctx->audio_pipe_name);
+    }
+
     /* Codec args (already formatted, e.g. "-c:v libx264 -preset ultrafast …") */
     if (!ctx->codec_args.empty()) {
         ss << L" " << _utf8_to_wide(ctx->codec_args);
@@ -381,6 +423,12 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         if (!vf.empty()) ss << L" -vf " << vf;
     }
 
+    /* Item 10: video from input 0, audio from the pipe (input 1), AAC. No -shortest: both inputs end when the
+       recording stops, the audio a few ms earlier (it is closed first); a stalled audio pipe must not cut the video. */
+    if (ctx->audio_active) {
+        ss << L" -map 0:v:0 -map 1:a:0 -c:a aac -b:a " << (ctx->audio_kbps > 0 ? ctx->audio_kbps : 160) << L"k";
+    }
+
     // Extra output-side flags (Instant Replay's segment muxer, etc.) - must land after
     // codec/scale args and before -y/output_path, same position ffmpeg itself expects "-f
     // segment ..." in on a real command line.
@@ -403,6 +451,9 @@ HR_EXPORT void *hr_ff_create() {
 HR_EXPORT void hr_ff_destroy(void *handle) {
     if (!handle) return;
     auto *ctx = static_cast<FfmpegCtx *>(handle);
+#ifdef _WIN32
+    if (ctx->hAudioPipe) { CloseHandle(ctx->hAudioPipe); ctx->hAudioPipe = nullptr; }   // never handed to a sink
+#endif
     /* Force-kill if still running */
 #ifdef _WIN32
     if (ctx->running && ctx->hProcess) {
@@ -599,6 +650,34 @@ HR_EXPORT void hr_ff_set_pipe_input(void *h, int enable) {
     ctx->pipe_ts    = (enable == 2);
 }
 
+// Item 10 - in-process audio. rate_hz > 0: ffmpeg gets the mixed recording audio as a second input over a named
+// pipe and writes AAC (kbps) into the output live. Only with pipe input (not ddagrab). Call before hr_ff_start();
+// afterwards hr_ff_audio_pipe_active() says whether it really is on (the pipe could not be created -> 0, the
+// caller then uses the WAV + merge path). The sink takes the pipe with hr_ff_take_audio_pipe().
+HR_EXPORT void hr_ff_set_audio_pipe(void *h, int rate_hz, int kbps) {
+    if (!h) return;
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    ctx->audio_rate = rate_hz > 0 ? rate_hz : 0;
+    ctx->audio_kbps = (kbps >= 32 && kbps <= 512) ? kbps : 160;
+}
+
+HR_EXPORT int hr_ff_audio_pipe_active(const void *h) {
+    return (h && static_cast<const FfmpegCtx *>(h)->audio_active) ? 1 : 0;
+}
+
+// Hands the server end of the audio pipe to the caller (it must pass it to hr_apipe_open()). 0 = none.
+HR_EXPORT intptr_t hr_ff_take_audio_pipe(void *h) {
+    if (!h) return 0;
+#ifdef _WIN32
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    HANDLE p = ctx->hAudioPipe;
+    ctx->hAudioPipe = nullptr;
+    return reinterpret_cast<intptr_t>(p);
+#else
+    return 0;
+#endif
+}
+
 // hr_ff_get_stdin_handle Returns the write end of ffmpeg's stdin pipe (valid only once
 // hr_ff_start() has succeeded and pipe_input was enabled), as an intptr_t-sized value so
 // it round-trips through a 64-bit HANDLE on Win64 without truncation.
@@ -621,10 +700,23 @@ HR_EXPORT int hr_ff_start(void *handle) {
     if (ctx->ffmpeg_path.empty() || ctx->output_path.empty()) return HR_FF_ERROR;
     if (!ctx->pipe_input && !ctx->gpu_capture && ctx->input_path.empty()) return HR_FF_ERROR;
 
+#ifdef _WIN32
+    // Item 10: the named pipe has to exist BEFORE ffmpeg starts (it opens it by name). A failure here is not
+    // fatal: the recording just goes the old way (audio merged after Stop) - the caller checks audio_pipe_active.
+    ctx->audio_active = false;
+    if (ctx->audio_rate > 0 && ctx->pipe_input && !ctx->gpu_capture) {
+        if (_create_audio_pipe(ctx)) ctx->audio_active = true;
+        else HrLog::Warn("Recording: could not create the audio pipe for ffmpeg - audio will be merged after Stop instead.");
+    }
+#endif
     std::wstring cmdline = _build_cmdline(ctx);
 
 #ifdef _WIN32
-    if (!_launch_win(ctx, cmdline)) return HR_FF_ERROR;
+    if (!_launch_win(ctx, cmdline)) {
+        if (ctx->hAudioPipe) { CloseHandle(ctx->hAudioPipe); ctx->hAudioPipe = nullptr; }
+        ctx->audio_active = false;
+        return HR_FF_ERROR;
+    }
 #else
     /* POSIX: not implemented in this stub - extend as needed */
     return HR_FF_ERROR;
