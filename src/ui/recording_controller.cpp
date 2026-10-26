@@ -1623,14 +1623,19 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
 
     bool have_audio_file = false;
     if (mic_written && sys_written) {
-        if (hr_audio_mix_wav(mic_wav.c_str(), sys_wav.c_str(), audio_wav.c_str()) == 0) {
+        // The two raw tracks are only deleted once the mixed file really exists and isn't a stub: a
+        // "successful" mix of unreadable inputs used to leave an empty file and no source audio.
+        if (hr_audio_mix_wav(mic_wav.c_str(), sys_wav.c_str(), audio_wav.c_str()) == 0 &&
+            hr_file_size_mb(audio_wav.c_str()) > 0.01f) {
             RemoveFileUtf8(mic_wav);
             RemoveFileUtf8(sys_wav);
             have_audio_file = true;
         } else {
-            // Mixing failed - fall back to whichever single track exists
-            // (mic preferred).
-            RemoveFileUtf8(sys_wav);
+            // Mixing failed - fall back to whichever single track exists (mic preferred). The other
+            // track is KEPT next to the recording, not deleted.
+            RemoveFileUtf8(audio_wav);
+            HrLog::Error("Recording: couldn't mix the microphone and system audio -- keeping '" + sys_wav +
+                         "' (system audio) next to the recording.");
             RenameFileUtf8(mic_wav, audio_wav);
             have_audio_file = true;
         }
