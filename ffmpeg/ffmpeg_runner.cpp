@@ -85,7 +85,7 @@ struct FfmpegCtx {
     std::string log_path;
     std::string progress_path;
 
-    /* Item 10 - in-process audio: the mixed recording audio reaches ffmpeg as a SECOND input over a named pipe
+    /* In-process audio: the mixed recording audio reaches ffmpeg as a SECOND input over a named pipe
      * (the pipe is created in hr_ff_start() BEFORE the process is launched; core/audio_pipe.cpp writes to it)
      * and is encoded to AAC + muxed live, so there is no WAV file and no merge pass after Stop.
      * audio_rate > 0 asks for it (pipe_input only, never ddagrab); audio_active says it really happened. */
@@ -434,7 +434,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
            << L" -i " << Q(ctx->input_path);
     }
 
-    /* Item 10: the mixed recording audio (raw 16-bit stereo) from the named pipe = input #1. A deep input queue
+    /* The mixed recording audio (raw 16-bit stereo) from the named pipe = input #1. A deep input queue
        because the audio arrives in bursts while the video encoder is busy. */
     if (ctx->audio_active) {
         ss << L" -f s16le -ar " << ctx->audio_rate << L" -ac 2 -thread_queue_size 1024"
@@ -472,7 +472,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         if (!vf.empty()) ss << L" -vf " << vf;
     }
 
-    /* Item 10: video from input 0, audio from the pipe (input 1), AAC. No -shortest: both inputs end when the
+    /* Video from input 0, audio from the pipe (input 1), AAC. No -shortest: both inputs end when the
        recording stops, the audio a few ms earlier (it is closed first); a stalled audio pipe must not cut the video. */
     if (ctx->audio_active) {
         ss << L" -map 0:v:0 -map 1:a:0 -c:a aac -b:a " << (ctx->audio_kbps > 0 ? ctx->audio_kbps : 160) << L"k";
@@ -704,7 +704,7 @@ HR_EXPORT void hr_ff_set_pipe_input(void *h, int enable) {
     ctx->pipe_ts    = (enable == 2);
 }
 
-// Item 10 - in-process audio. rate_hz > 0: ffmpeg gets the mixed recording audio as a second input over a named
+// In-process audio. rate_hz > 0: ffmpeg gets the mixed recording audio as a second input over a named
 // pipe and writes AAC (kbps) into the output live. Only with pipe input (not ddagrab). Call before hr_ff_start();
 // afterwards hr_ff_audio_pipe_active() says whether it really is on (the pipe could not be created -> 0, the
 // caller then uses the WAV + merge path). The sink takes the pipe with hr_ff_take_audio_pipe().
@@ -755,13 +755,13 @@ HR_EXPORT intptr_t hr_ff_take_overlay_pipe(void *h) {
 #endif
 }
 
-// Item 7. enable = 1: ffmpeg's stdout is captured (use `pipe:1` as the output path). Call before hr_ff_start().
+// enable = 1: ffmpeg's stdout is captured (use `pipe:1` as the output path). Call before hr_ff_start().
 HR_EXPORT void hr_ff_set_capture_stdout(void *h, int enable) {
     if (!h) return;
     static_cast<FfmpegCtx *>(h)->capture_stdout = (enable != 0);
 }
 
-// Item 7. Blocking read of up to `cap` bytes of ffmpeg's captured stdout. Returns the byte count (> 0), 0 at
+// Blocking read of up to `cap` bytes of ffmpeg's captured stdout. Returns the byte count (> 0), 0 at
 // end-of-file (ffmpeg ended and everything it wrote was read), -1 when capture is not on / not started / error.
 // Meant for ONE reader thread; join it before hr_ff_destroy().
 HR_EXPORT int hr_ff_read_stdout(void *h, void *buf, int cap) {
