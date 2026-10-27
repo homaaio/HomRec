@@ -67,6 +67,7 @@ set(HR_SOURCES
     src/utils/ui_utils.cpp
     src/core/audio.cpp
     src/core/audio_pipe.cpp
+    src/core/overlay_feed.cpp
     src/core/dxgi_capture.cpp
     src/core/gpu_overlay.cpp
     src/core/mf_encoder.cpp
