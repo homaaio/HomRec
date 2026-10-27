@@ -163,7 +163,7 @@ private:
     void BuildBottomBar(wxWindow *parent, wxSizer *parentSizer);
     void ApplyThemeColours();
     void ApplyLanguageText();
-    // Phase 1 settings-storage migration (see commands.md): persists the *entire* current
+    // Persists the *entire* current
     // state_ via HrcConfig::Save(), mirroring to the default location too if a custom settings
     // path is configured (see hrc_config.h's ResolveSettingsPath()).
     void PersistSettings();
@@ -230,7 +230,8 @@ private:
     // this ports from. state_.show_summary (the actual settings toggle)
     bool summary_dont_show_again_ = false;
     bool recording_crashed_pending_notice_ = false;
-    // Stop was pressed (or the encoder died) and the recording is being finalized in the background
+    // Stop was pressed (or the encoder died) and the recording is being finalized in the background:
+    // state_.recording stays true for those seconds, but the Time / state labels must stay frozen.
     bool stop_pending_ = false;
     // The crash was the full-GPU (ddagrab) ffmpeg dying (e.g. a game changed the display mode): once the
     // interrupted recording is finalized, a new one is started right away with the normal pipeline.

@@ -6,7 +6,7 @@
 #include <string>
 #include <shlobj.h>
 
-// Phase 1 (see commands.md): persistence now goes through HrcConfig::Save (hrc_config.h),
+// Persistence goes through HrcConfig::Save (hrc_config.h),
 // which writes the entire AppState in one shot - the old hr_settings_* JSON engine's fixed
 // field whitelist is no longer touched from this wizard at all.
 

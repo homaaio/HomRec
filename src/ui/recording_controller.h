@@ -12,7 +12,7 @@
 #include <memory>
 #include "app_state.h"
 #include "../core/overlay_render.h"
-#include "../core/replay_ram.h"
+#include "../core/replay_ram.h"     // Instant Replay buffer in RAM
 
 class RecordingController {
 public:
@@ -134,7 +134,7 @@ public:
     void EndSnapshotEditing();
 
     bool recording() const { return state_.recording; }
-    // Phase 1 (see commands.md): lets homrec.get_setting()/set_setting()
+    // Lets homrec.get_setting()/set_setting()
     AppState &state() { return state_; }
     bool paused() const { return state_.paused; }
     double elapsed_seconds() const;
@@ -261,9 +261,15 @@ private:
     std::wstring replay_dir_;               // current run's segment subfolder (see StartInstantReplayEncoder())
     int    replay_applied_buffer_sec_ = 0;   // buffer length the running Instant Replay encoder was started with
     int    replay_run_seq_ = 0;             // bumped per StartInstantReplayEncoder() call - keeps each run's folder unique
+    // Non-null = the running replay encoder is the RAM variant (ffmpeg's MPEG-TS output is read from its stdout into
+    // this buffer; there is no segment folder). Shared with the async stop thread, which joins the reader before the
+    // ffmpeg object is destroyed.
     std::shared_ptr<ReplayRam> replay_ram_;
     int    replay_save_seq_ = 0;            // names the temp folder of each RAM-mode Save Replay
     static constexpr int kReplayRamMaxSec = 300;   // longer buffers stay on disk (RAM use grows with the length)
+    // Cuts the audio for a saved replay (mic + system, mixed) into `dir`; window_ms > 0 = just the newest window_ms
+    // (RAM mode, so the audio is exactly as long as the video), 0 = the whole rolling audio buffer (segment mode).
+    // Returns the path of the mixed WAV, empty when there is no replay audio.
     std::string BuildReplayAudioWav(const std::wstring &dir, int window_ms);
     static constexpr int kReplaySegmentSec = 5; // segment length - Save Replay's trim is accurate to within this many seconds
 
@@ -293,7 +299,7 @@ private:
     void *mfenc_ = nullptr;
     bool mf_blocked_ = false;    // the encoder failed to start / died once: not tried again this session
 
-    // Item 10 - in-process audio. live_audio_rate_ > 0 while THIS recording is set up for it (Hz of the live mix, the
+    // In-process audio. live_audio_rate_ > 0 while THIS recording is set up for it (Hz of the live mix, the
     // encoder was built for that rate); live_audio_ = the mixer is really running and feeds the encoder (so there is no
     // WAV and no merge after Stop). apipe_ = the named-pipe sink when the encoder is ffmpeg (nullptr with the MF encoder).
     int   live_audio_rate_ = 0;
@@ -321,7 +327,7 @@ private:
     std::chrono::steady_clock::time_point ddagrab_last_frames_t_{};
     int  ddagrab_probe_ = 0;     // 0 = not probed yet, 1 = ffmpeg has ddagrab, 2 = it doesn't
 
-    // ---- Item 8: ddagrab with pause and overlays ----------------------------------------------------------------
+    // ---- ddagrab with pause and overlays ----------------------------------------------------------------
     // Pause: ffmpeg owns the capture and cannot be paused, so Pause closes the current ffmpeg piece and Resume starts
     // the next one (`<output>.partN.<same extension as the output>`); Stop joins the pieces with a stream copy.
     // A recording that is never paused is one ffmpeg and one file, exactly as before.

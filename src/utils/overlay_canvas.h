@@ -1,4 +1,4 @@
-// overlay_canvas.h - item 8 (ddagrab + HomRec overlays). Portable, header-only.
+// overlay_canvas.h - ddagrab + HomRec overlays. Portable, header-only.
 //
 // With ddagrab ffmpeg grabs the screen by itself, so HomRec cannot draw into its frames. Instead HomRec draws every
 // overlay layer into a TRANSPARENT full-frame BGRA picture (this file) and hands that picture to ffmpeg as a second

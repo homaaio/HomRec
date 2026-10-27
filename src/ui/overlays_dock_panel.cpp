@@ -12,7 +12,7 @@
 #include <string>
 #include <algorithm>
 
-// Phase 1 (see commands.md): show_overlays_panel is now persisted via HrcConfig::Save()
+// show_overlays_panel is persisted via HrcConfig::Save()
 // below, same as everything else in AppState - the old hr_settings_* JSON engine's fixed
 // field whitelist is no longer touched here at all.
 

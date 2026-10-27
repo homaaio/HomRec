@@ -123,7 +123,7 @@ struct AppState {
     // the CPU, crop/scale/BGRA->NV12 run on the GPU via the D3D11 video processor and only 1.5
     // bytes/pixel are read back.
     bool        gpu_convert        = true;
-    // Item 9: with the GPU path, overlays (text / image / gif / webcam / input) are alpha-blended by a D3D11 pixel
+    // With the GPU path, overlays (text / image / gif / webcam / input) are alpha-blended by a D3D11 pixel
     // shader BEFORE the NV12 conversion instead of per frame on the CPU. Falls back to the CPU compositor by itself
     // (no shader compiler, driver refusal, error). Terminal / cfg only (`gpu_overlay=0` = always CPU).
     bool        gpu_overlay        = true;
@@ -135,14 +135,14 @@ struct AppState {
     // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg captures AND
     // encodes entirely on the GPU.
     bool        gpu_capture_ddagrab = false;
-    //                        ddagrab, the two things it used to lack. Terminal / cfg only.
+    // Ddagrab, the two things it used to lack. Terminal / cfg only.
     //   ddagrab_pause    : Pause works during a ddagrab recording. ffmpeg owns the capture and cannot be paused, so Pause
     //                      ends the current ffmpeg piece and Resume starts the next one (same container as the output); Stop joins the pieces with a
     //                      stream copy (no re-encode). `ddagrab_pause=0` = Pause stays unavailable (old behaviour).
     //   ddagrab_overlays : HomRec overlays (text / image / gif / webcam / input) on a ddagrab recording. HomRec draws them
     //                      into a transparent picture that ffmpeg gets as a second input and blends onto the grabbed
     //                      frame. This needs the frames in system memory (hwdownload) for the blend - it is an opt-in
-    //                      because on a weak PC the normal pipeline with GPU-blended overlays (item 9) is usually the
+    //                      because on a weak PC the normal pipeline with GPU-blended overlays is usually the
     //                      cheaper choice. NVENC / AMF only. `ddagrab_overlays=1` turns it on.
     bool        ddagrab_pause    = true;
     bool        ddagrab_overlays = false;
@@ -151,7 +151,7 @@ struct AppState {
     // Falls back to the ffmpeg pipe by itself when it cannot start. Audio is still merged by ffmpeg.
     bool        mf_encoder = false;
     // With mf_encoder: hand the finished NV12 GPU texture to the encoder (no GPU->CPU->GPU round trip).
-    // Used only while the pointer is not drawn and no overlay is drawn by the CPU (GPU-blended overlays, item 9, are fine);
+    // Used only while the pointer is not drawn and no overlay is drawn by the CPU (GPU-blended overlays are fine);
     // `mf_gpu_texture=0` turns it off.
     bool        mf_gpu_texture = true;
     bool        inproc_audio       = true;
@@ -305,7 +305,7 @@ struct AppState {
     std::string mic_device_id;
     bool        first_launch = false;
 
-    // -- Phase 1 settings-storage migration (see commands.md / hrc_config.h)
+    // -- Settings storage (see hrc_config.h)
     // Empty = use HrcConfig::kDefaultSettingsPath ("homrec.hrc" next to the
     // exe). Settings dialog's Advanced tab lets this be pointed elsewhere;
     std::string settings_path;

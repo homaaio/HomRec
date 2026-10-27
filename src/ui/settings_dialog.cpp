@@ -52,7 +52,7 @@ extern "C" {
 }
 
 namespace {
-// Phase 1 settings-storage migration (see commands.md): this dialog now
+// Settings storage: this dialog
 // persists via HrcConfig::Save() (hrc_config.h) instead of the old JSON
 // engine writing to a fixed "homrec_settings.json" path - see OnSave().
 
@@ -762,7 +762,7 @@ private:
         replayNote->SetBackgroundColour(bg);
         pageRoot->Add(replayNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
 
-        // -- Settings file path (Phase 1 storage migration, see commands.md) - the app's own auto-
+        // -- Settings file path - the app's own auto-
         // managed settings file, an .hrc-format file (hrc_config.cpp) that replaced the old
         // homrec_settings.json.
         AddSectionHeading(page, pageRoot, FromColorref(theme_.accent), bg, "Settings Storage");

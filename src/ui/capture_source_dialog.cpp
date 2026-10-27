@@ -187,6 +187,7 @@ public:
             row->Add(monitor_choice_, 1, wxALIGN_CENTRE_VERTICAL);
             col->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT, 16);
 
+
             if (fixed_ == CaptureMode::Desktop) {
                 BuildMonitorThumbs(mons);
                 monitor_preview_ = new wxStaticBitmap(scroll_, wxID_ANY, wxNullBitmap, wxDefaultPosition,

@@ -116,7 +116,7 @@ extern "C" {
     void hr_pl_set_output_size(void *handle, int w, int h);
     void hr_pl_set_output_pixfmt(void *handle, int nv12);
     void hr_pl_set_gpu_convert(void *handle, int enabled);
-    void hr_pl_set_gpu_overlay(void *handle, int enabled);   // item 9
+    void hr_pl_set_gpu_overlay(void *handle, int enabled);
     void hr_pl_set_preview_fps(void *handle, int fps);
     void hr_pl_set_preview_size(void *handle, int pw, int ph);
     void hr_pl_set_fps(void *handle, int fps);
@@ -125,7 +125,7 @@ extern "C" {
 
     // ffmpeg_runner.cpp
     void *hr_ff_create();
-    // item 8: ddagrab + overlays (ffmpeg_runner.cpp / overlay_feed.cpp)
+    // ddagrab + overlays (ffmpeg_runner.cpp / overlay_feed.cpp)
     void hr_ff_set_overlay_input(void *handle, int w, int h, int fps);
     int hr_ff_overlay_pipe_active(const void *handle);
     intptr_t hr_ff_take_overlay_pipe(void *handle);
@@ -152,7 +152,7 @@ extern "C" {
     void hr_ff_set_gpu_capture(void *h, int enable, int output_idx, int off_x, int off_y,
                                 int w, int h2, int draw_mouse);
     int hr_ff_start(void *handle);
-    void hr_ff_set_capture_stdout(void *h, int enable);   // item 7 (hr_ff_read_stdout() is declared in replay_ram.h)
+    void hr_ff_set_capture_stdout(void *h, int enable);   // (hr_ff_read_stdout() is declared in replay_ram.h)
     intptr_t hr_ff_get_stdin_handle(void *handle);
     int hr_ff_stop_graceful(void *handle);
     int hr_ff_wait(void *handle, int timeout_ms);
@@ -170,7 +170,7 @@ extern "C" {
     int hr_audio_start(float mic_vol, float sys_vol, int mic_mute, int sys_mute, const wchar_t *mic_device_id);
     void hr_audio_set_max_buffer_sec(int seconds);
     int hr_audio_snapshot_to_wav(const char *mic_wav_path, const char *sys_wav_path);
-    // item 7: the newest window_ms only (0 = the whole rolling buffer)
+    // The newest window_ms only (0 = the whole rolling buffer)
     int hr_audio_snapshot_to_wav_ex(const char *mic_wav_path, const char *sys_wav_path, int window_ms);
     int hr_audio_stop(const char *mic_wav_path, const char *sys_wav_path);
     void hr_audio_set_volumes(float mic_vol, float sys_vol, int mic_mute, int sys_mute);
@@ -191,7 +191,7 @@ extern "C" {
     int  hr_audio_extra_collect(char *out, int cap);
     void hr_audio_extra_shutdown();
 
-    // Item 10 - in-process audio (audio.cpp / audio_pipe.cpp / ffmpeg_runner.cpp)
+    // In-process audio (audio.cpp / audio_pipe.cpp / ffmpeg_runner.cpp)
     int  hr_audio_live_prepare();
     int  hr_audio_live_start(void (*sink)(void *, const int16_t *, size_t), void *user, int out_rate, int head_ms);
     long long hr_audio_live_stop();
@@ -411,7 +411,7 @@ bool RecordingController::StartMfEncoder() {
                               output_w_, output_h_, state_.target_fps, kbps) != 0;
     void *dev = nullptr;
     if (ok && state_.mf_gpu_texture) dev = hr_pl_get_d3d_device(pipeline_);
-    // Item 10: AAC stream in the same .mp4 writer (the audio mixer feeds it live).
+    // AAC stream in the same .mp4 writer (the audio mixer feeds it live).
     if (ok && live_audio_rate_ > 0) hr_mf_audio_configure(mfenc_, live_audio_rate_, HrAacKbps(state_.audio_aac_bitrate));
     if (ok) ok = hr_mf_start(mfenc_, dev, dev ? 1 : 0) != 0;
     if (!ok) {
@@ -432,7 +432,7 @@ bool RecordingController::StartMfEncoder() {
     return true;
 }
 
-// Item 10. Builds the sink for the encoder of THIS recording and starts the live mixer. Called right after the audio
+// Builds the sink for the encoder of THIS recording and starts the live mixer. Called right after the audio
 // buffers were reset (the audio timeline starts there); head_ms = how much later than the video's start that was.
 bool RecordingController::StartLiveAudio(int head_ms) {
     live_audio_ = false;
@@ -1017,6 +1017,7 @@ void RecordingController::DestroyOverlayFeed() {
     if (ovfeed_) { hr_ovf_destroy(ovfeed_); ovfeed_ = nullptr; }
 }
 
+// One ffmpeg ddagrab process writing `out_path` (the whole recording, or one piece after a Pause).
 void *RecordingController::SpawnDdagrabFfmpeg(const std::wstring &out_path, bool overlay, bool &died, bool &capturing) {
     died = false;
     capturing = false;
@@ -1098,8 +1099,8 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
         if (o.visible && o.w > 0 && o.h > 0) { any_overlay = true; break; }
     if (!state_.desktop_visible) any_overlay = true;   // a hidden Desktop layer needs the CPU pipeline (ddagrab can't blank it)
 
-    // overlays through ffmpeg are an opt-in and have their own preconditions; anything else keeps using the
-    // normal pipeline (item 9's GPU-blended overlays are usually the cheaper choice anyway).
+    // Overlays through ffmpeg are an opt-in and have their own preconditions; anything else keeps using the
+    // normal pipeline.
     const char *overlay_why = nullptr;
     bool overlay_mode = false;
     if (any_overlay) {
@@ -1175,7 +1176,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     return true;
 }
 
-// ---- Item 8: Pause / Resume of a ddagrab recording --------------------------------------------------------------
+// ---- Pause / Resume of a ddagrab recording --------------------------------------------------------------
 void RecordingController::DdagrabPause() {
     // The clocks stop at the click; ffmpeg needs a moment to close its piece.
     const int new_state = hr_ctl_pause_toggle(ctl_);
@@ -1386,7 +1387,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     // ---- optional full-GPU path: ffmpeg's own "ddagrab" capture ------------- Settings >
     // Video > GPU acceleration.
     ddagrab_active_ = false;
-    live_audio_ = false;          // item 10: decided below, per recording
+    live_audio_ = false;          // decided below, per recording
     live_audio_rate_ = 0;
     crash_was_ddagrab_ = false;
     crash_video_elapsed_sec_ = 0.0;
@@ -1410,7 +1411,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         // In-process Media Foundation encoder instead of an ffmpeg process + pipe (see mf_encoder.h). ffmpeg is
         // then only needed afterwards, to merge the audio.
         const bool use_mf = MfEncoderWanted(codec, codec_is_hw);
-        // Item 10: mix the audio while recording and give it to the encoder live (no WAV files, no merge after Stop).
+        // Mix the audio while recording and give it to the encoder live (no WAV files, no merge after Stop).
         // Needs at least one capture stream; the Media Foundation path needs no ffmpeg at all, the ffmpeg path needs
         // an ffmpeg command line without custom stream / audio options.
         if (state_.inproc_audio && state_.audio_out_channels > 0 && (use_mf || !HrCustomArgsTouchAudio(state_)))
@@ -1585,7 +1586,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         std::string audio_stem = (audio_dot == std::string::npos) ? audio_base : audio_base.substr(0, audio_dot);
         bool live_started = false;
         if (live_audio_rate_ > 0) {
-            // Item 10: no WAV files. The audio timeline starts at the buffer reset below; the video started
+            // No WAV files. The audio timeline starts at the buffer reset below; the video started
             // `skew` earlier, so that much silence goes in front (same measurement the merge step used).
             hr_audio_reset_buffers(nullptr, nullptr);
             hr_audio_set_volumes(mic_vol_, sys_vol_, mic_muted_ ? 1 : 0, sys_muted_ ? 1 : 0);
@@ -1665,7 +1666,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // Everything below (stopping the pipeline, mixing/merging audio, the mkv->mp4 copy) is not time-critical, and the
     // user is usually back in the game by now: keep this thread out of the game's way.
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-    // Item 10: the live mixer hands its last audio to the encoder BEFORE the video side is ended (the in-process
+    // The live mixer hands its last audio to the encoder BEFORE the video side is ended (the in-process
     // encoder is finalized by the pipeline's writer thread when the recording segment closes below, and ffmpeg only
     // opens its audio input after the video input is done).
     StopLiveAudio();
@@ -1728,7 +1729,7 @@ void RecordingController::FinishPipelineAfterStop(bool keep_for_preview) {
     }
 }
 
-void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorded_sec) {
+void RecordingController::StopFinalizeTail(bool /*keep_for_preview*/, double recorded_sec) {
     // Where does the wait after Stop go? One summary line at the end of this function (homrec.log).
     const auto fin_t0 = std::chrono::steady_clock::now();
     auto fin_lap = fin_t0;
@@ -1739,7 +1740,7 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
         return ms;
     };
     long long ms_ffwait = 0, ms_audio = 0, ms_merge = 0, ms_mp3 = 0, ms_mp4 = 0;
-    // Item 10: this recording's audio went to the encoder live - there are no WAVs to mix and nothing to merge.
+    // This recording's audio went to the encoder live - there are no WAVs to mix and nothing to merge.
     const bool live_rec = live_audio_rate_ > 0;
 
     JoinPendingInstantReplayStop();
@@ -1768,7 +1769,7 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
                         std::to_string((long long)hr_mf_frames_written(mfenc_)) + " frames written).");
         }
     }
-    // Item 10: ffmpeg reads the tail of the audio pipe once its video input has ended (the segment is closed by now).
+    // ffmpeg reads the tail of the audio pipe once its video input has ended (the segment is closed by now).
     FinishAudioSink();
     // This used to be hr_ff_wait(ffproc_, 3000) -- a flat 3 second budget for ffmpeg to
     // receive EOF on stdin, flush libx264's internal frame buffer, and write the moov atom
@@ -1787,7 +1788,7 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
     }
     ms_ffwait = fin_ms();
 
-    // Item 8: the overlay feeder is only a helper of the ffmpeg that just ended; and a recording that was paused
+    // The overlay feeder is only a helper of the ffmpeg that just ended; and a recording that was paused
     // consists of several ffmpeg pieces, joined now (stream copy) so everything below sees ONE finished file.
     DestroyOverlayFeed();
     bool ddagrab_joined = false;
@@ -2054,7 +2055,7 @@ void RecordingController::TogglePause() {
     if (!state_.recording) return;
     if (ddagrab_active_) {
         // ffmpeg owns the capture in this mode and cannot be paused (pausing only the audio would desynchronize
-        // the recording). Item 8: Pause closes the current ffmpeg piece, Resume starts the next one, Stop joins them.
+        // the recording). Pause closes the current ffmpeg piece, Resume starts the next one, Stop joins them.
         if (!state_.ddagrab_pause) {
             if (!ddagrab_pause_warned_) {
                 ddagrab_pause_warned_ = true;
@@ -2137,8 +2138,8 @@ void RecordingController::PollStats() {
             }
             state_.frame_count = (long)(ddagrab_frame_base_ + fr);
         }
-        if (ovfeed_) hr_ovf_set_current_fps(ovfeed_, current_fps_);   // item 8: for text overlays that show the FPS
-        // Item 8: the overlay feeder ended while ffmpeg still runs (nothing breaks - ffmpeg holds the last overlay
+        if (ovfeed_) hr_ovf_set_current_fps(ovfeed_, current_fps_);   // for text overlays that show the FPS
+        // The overlay feeder ended while ffmpeg still runs (nothing breaks - ffmpeg holds the last overlay
         // picture - but the overlays stop updating). Say so once.
         if (ovfeed_ && !ddagrab_gap_ && hr_ovf_state(ovfeed_) < 0 && hr_ff_is_running(ffproc_)) {
             HrLog::Warn("Recording: the ddagrab overlay feed stopped - overlays keep showing their last picture.");
@@ -2170,7 +2171,7 @@ void RecordingController::PollStats() {
     }
 
     double size_mb = mfenc_ ? hr_mf_output_size_mb(mfenc_) : (ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0);
-    if (ddagrab_active_) size_mb += ddagrab_done_mb_;      // item 8: + the pieces closed by Pause
+    if (ddagrab_active_) size_mb += ddagrab_done_mb_;      // + the pieces closed by Pause
     hr_ctl_update_stats(ctl_, (long long)(size_mb * 1024.0 * 1024.0));
 
     hr_audio_get_levels(&mic_level_, &sys_level_);
@@ -2232,7 +2233,7 @@ void RecordingController::SyncOverlays() {
     // GPU colour conversion (Settings > Video): only ever takes effect for NV12
     // output, i.e. hardware encoders - the capture loop checks that itself.
     hr_pl_set_gpu_convert(pipeline_, state_.gpu_convert ? 1 : 0);
-    // Item 9: overlays blended on the GPU when the GPU path is in use (falls back to the CPU by itself).
+    // Overlays blended on the GPU when the GPU path is in use (falls back to the CPU by itself).
     hr_pl_set_gpu_overlay(pipeline_, state_.gpu_overlay ? 1 : 0);
 
     // "#RRGGBB" -> (r,g,b); falls back to white on anything malformed
@@ -2314,7 +2315,7 @@ void RecordingController::SyncOverlays() {
     hr_pl_set_overlays(pipeline_, descs.empty() ? nullptr : descs.data(), (int)descs.size());
     last_overlays_sent_.swap(descs); // descs (== overlays_scratch_) keeps the old buffer for reuse
     last_overlays_sent_valid_ = true;
-    // Item 8: a ddagrab recording blends the same overlays through ffmpeg; its feeder gets the same list.
+    // a ddagrab recording blends the same overlays through ffmpeg; its feeder gets the same list.
     if (ovfeed_)
         hr_ovf_set_overlays(ovfeed_, last_overlays_sent_.empty() ? nullptr : last_overlays_sent_.data(),
                             (int)last_overlays_sent_.size());
@@ -2360,7 +2361,7 @@ void RecordingController::ResolveWindowLayer(OverlayDef &ov, HrOverlayDesc &d) {
     }
 }
 
-// Item 7: the RAM buffer is MPEG-TS, which only carries H.264 / HEVC (and MPEG-2 / 4) here.
+// The RAM buffer is MPEG-TS, which only carries H.264 / HEVC (and MPEG-2 / 4) here.
 static bool ReplayRamCodecOk(const std::wstring &codec) {
     std::wstring lc = codec;
     std::transform(lc.begin(), lc.end(), lc.begin(), ::towlower);
@@ -2381,7 +2382,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
     const int fps = state_.target_fps > 0 ? state_.target_fps : 30;
 
-    // Item 7: RAM buffer when it is on, short enough and the codec fits into MPEG-TS; any failure to start it
+    // RAM buffer when it is on, short enough and the codec fits into MPEG-TS; any failure to start it
     // falls through to the segment files below (the old behaviour).
     const bool ram_wanted = state_.replay_in_ram && buf_sec <= kReplayRamMaxSec && ReplayRamCodecOk(codec);
 
@@ -2478,7 +2479,7 @@ void RecordingController::StopInstantReplayEncoder() {
         HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
         hr_ff_kill(replay_ff_);
     }
-    // Item 7: the process is gone, so its stdout is at end-of-file and the reader ends; it must be joined before the
+    // The process is gone, so its stdout is at end-of-file and the reader ends; it must be joined before the
     // ffmpeg object (which owns the pipe handle) is destroyed. The buffered replay is discarded with it.
     if (replay_ram_) { replay_ram_->join(); replay_ram_.reset(); }
     hr_ff_destroy(replay_ff_);
@@ -2489,7 +2490,7 @@ void RecordingController::StopInstantReplayEncoderAsync() {
     if (!replay_ff_) return;
     void *h = replay_ff_;
     replay_ff_ = nullptr;
-    std::shared_ptr<ReplayRam> ram = std::move(replay_ram_);   // item 7: the stop thread joins its reader
+    std::shared_ptr<ReplayRam> ram = std::move(replay_ram_);   // the stop thread joins its reader
     replay_ram_.reset();
     void *pl = pipeline_;
     // See JoinPendingInstantReplayStop()'s comment (recording_controller.h)
@@ -2504,7 +2505,7 @@ void RecordingController::StopInstantReplayEncoderAsync() {
                 HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
                 hr_ff_kill(h);
             }
-            if (ram) ram->join();      // item 7: before the ffmpeg object (= the pipe handle) goes away
+            if (ram) ram->join();      // before the ffmpeg object (= the pipe handle) goes away
             hr_ff_destroy(h);
         } catch (const std::exception &e) {
             HrLog::Error(std::string("Instant Replay: stopping the segment writer threw (") +
@@ -2641,7 +2642,7 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
     int audio_window_ms = 0;
 
     if (replay_ram_) {
-        // ---- Item 7: RAM buffer. The encoder keeps running (no stop / restart, so the buffer is not emptied and the
+        // ---- RAM buffer. The encoder keeps running (no stop / restart, so the buffer is not emptied and the
         // next Save works at once); what is held in memory is written ONCE, as one MPEG-TS file, and ffmpeg
         // stream-copies it into the output container below.
         double sec = 0.0;

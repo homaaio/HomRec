@@ -67,7 +67,7 @@ extern "C" {
     const char *hr_settings_get_codec(const void *h);
     const char *hr_settings_get_theme(const void *h);
     int hr_settings_get_flag(const void *h, const char *name);
-    // Phase 1 (see commands.md): the set_*/save side of this API is no longer used here -
+    // The set_*/save side of this API is no longer used here -
     // PersistSettings() (this file) and HrcConfig::Save (hrc_config.h) replace it.
 
     // dxgi_capture.cpp - one-shot GPU vendor probe, used only on a
@@ -943,6 +943,10 @@ void HomRecMainFrame::PersistSettings() {
     if (target != HrcConfig::kDefaultSettingsPath) HrcConfig::Save(state_, HrcConfig::kDefaultSettingsPath);
 }
 
+// "Fullscreen\tF11" style menu text. The fullscreen key is a window-local accelerator (it works
+// only while HomRec has focus - it used to be a system-wide hotkey that stole F11 from every
+// other program). Spaces are dropped ("Ctrl + F" -> "Ctrl+F"); a binding wx can't parse as an
+// accelerator (e.g. one using Win) just leaves the item without a shortcut.
 static wxString HrFullscreenMenuText(const wxString &label, const std::string &keys) {
     std::string k;
     for (char c : keys)
@@ -1113,6 +1117,7 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
 
     if (!horizontal) {
         auto *sizer = new wxBoxSizer(wxVERTICAL);
+        // Start / Pause sit near the top of the pane (they used to hang ~120 px down, "halfway down the menu").
         sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 16);
         sizer->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
         sizer->Add(section_status_lbl_, 0, wxEXPAND | wxTOP, 15);
