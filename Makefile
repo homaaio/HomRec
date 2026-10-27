@@ -76,6 +76,7 @@ OBJS := \
 	src/core/audio_pipe.o \
 	src/core/dxgi_capture.o \
 	src/core/gpu_overlay.o \
+	src/core/overlay_feed.o \
 	src/core/mf_encoder.o \
 	src/core/wgc_capture.o \
 	src/utils/stopwatch.o \
