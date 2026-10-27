@@ -125,6 +125,15 @@ extern "C" {
 
     // ffmpeg_runner.cpp
     void *hr_ff_create();
+    // item 8: ddagrab + overlays (ffmpeg_runner.cpp / overlay_feed.cpp)
+    void hr_ff_set_overlay_input(void *handle, int w, int h, int fps);
+    int hr_ff_overlay_pipe_active(const void *handle);
+    intptr_t hr_ff_take_overlay_pipe(void *handle);
+    void *hr_ovf_create(intptr_t pipe_handle, int w, int h, int fps);
+    void hr_ovf_set_overlays(void *handle, const HrOverlayDesc *items, int count);
+    void hr_ovf_set_current_fps(void *handle, double fps);
+    int hr_ovf_state(const void *handle);
+    void hr_ovf_destroy(void *handle);
     void hr_ff_destroy(void *handle);
     void hr_ff_set_ffmpeg_path(void *h, const char *path);
     void hr_ff_set_output_path(void *h, const char *path);
@@ -143,6 +152,7 @@ extern "C" {
     void hr_ff_set_gpu_capture(void *h, int enable, int output_idx, int off_x, int off_y,
                                 int w, int h2, int draw_mouse);
     int hr_ff_start(void *handle);
+    void hr_ff_set_capture_stdout(void *h, int enable);   // item 7 (hr_ff_read_stdout() is declared in replay_ram.h)
     intptr_t hr_ff_get_stdin_handle(void *handle);
     int hr_ff_stop_graceful(void *handle);
     int hr_ff_wait(void *handle, int timeout_ms);
@@ -160,6 +170,8 @@ extern "C" {
     int hr_audio_start(float mic_vol, float sys_vol, int mic_mute, int sys_mute, const wchar_t *mic_device_id);
     void hr_audio_set_max_buffer_sec(int seconds);
     int hr_audio_snapshot_to_wav(const char *mic_wav_path, const char *sys_wav_path);
+    // item 7: the newest window_ms only (0 = the whole rolling buffer)
+    int hr_audio_snapshot_to_wav_ex(const char *mic_wav_path, const char *sys_wav_path, int window_ms);
     int hr_audio_stop(const char *mic_wav_path, const char *sys_wav_path);
     void hr_audio_set_volumes(float mic_vol, float sys_vol, int mic_mute, int sys_mute);
     void hr_audio_get_levels(int *out_mic, int *out_sys);
@@ -264,6 +276,7 @@ RecordingController::~RecordingController() {
     JoinPendingInstantReplayStop();
     JoinPendingPreviewTeardown();
     if (ctl_) hr_ctl_destroy(ctl_);
+    DestroyOverlayFeed();
     if (ffproc_) hr_ff_destroy(ffproc_);
     if (pipeline_) hr_pl_destroy(pipeline_);
     if (live_audio_) { hr_audio_live_stop(); live_audio_ = false; }
@@ -1000,6 +1013,80 @@ static void LogFfmpegDeathDetails(void *ff, const std::string &what) {
     HrLog::Error(msg);
 }
 
+void RecordingController::DestroyOverlayFeed() {
+    if (ovfeed_) { hr_ovf_destroy(ovfeed_); ovfeed_ = nullptr; }
+}
+
+void *RecordingController::SpawnDdagrabFfmpeg(const std::wstring &out_path, bool overlay, bool &died, bool &capturing) {
+    died = false;
+    capturing = false;
+    void *ff = hr_ff_create();
+    if (!ff) return nullptr;
+    const int ov_fps = state_.target_fps > 0 && state_.target_fps < 15 ? state_.target_fps : 15;
+    hr_ff_set_ffmpeg_path(ff, NarrowFromWide(ffmpeg_path_).c_str());
+    hr_ff_set_output_path(ff, NarrowFromWide(out_path).c_str());
+    hr_ff_set_codec_args(ff, NarrowFromWide(ddagrab_codec_args_).c_str());
+    hr_ff_set_normal_priority(ff, state_.game_friendly_priority ? 1 : 0);
+    hr_ff_set_gpu_low_priority(ff, state_.gpu_low_priority ? 1 : 0);
+    hr_ff_set_video_params(ff, ddagrab_src_w_, ddagrab_src_h_, state_.target_fps);
+    hr_ff_set_gpu_capture(ff, /*enable=*/1, capture_output_idx_,
+                          crop_x_, crop_y_, crop_w_, crop_h_,
+                          state_.cursor_enabled ? 1 : 0);
+    if (overlay) hr_ff_set_overlay_input(ff, ddagrab_src_w_, ddagrab_src_h_, ov_fps);
+    // ffmpeg's stderr + a -progress file (live frame count for the FPS readout).
+    {
+        const std::string ff_log  = NarrowFromWide(HrLogPaths::LogFilePath(L"ffmpeg_ddagrab.log"));
+        const std::string ff_prog = NarrowFromWide(HrLogPaths::LogFilePath(L"ffmpeg_ddagrab_progress.txt"));
+        RemoveFileUtf8(ff_prog);   // a stale file must not report old frame counts
+        hr_ff_set_diag_paths(ff, ff_log.c_str(), ff_prog.c_str());
+    }
+    if (hr_ff_start(ff) != 0) {
+        HrLog::Warn("Recording: couldn't launch ffmpeg for ddagrab capture.");
+        hr_ff_destroy(ff);
+        return nullptr;
+    }
+    if (overlay) {
+        // ffmpeg opens the overlay pipe while it initialises and waits for the first picture, so the feeder has to
+        // be running right away (it connects, then sends two pictures at once).
+        const intptr_t pipe = hr_ff_overlay_pipe_active(ff) ? hr_ff_take_overlay_pipe(ff) : 0;
+        ovfeed_ = pipe ? hr_ovf_create(pipe, ddagrab_src_w_, ddagrab_src_h_, ov_fps) : nullptr;
+        if (!ovfeed_) {
+            if (pipe) CloseHandle(reinterpret_cast<HANDLE>(pipe));   // hr_ovf_create() did not take it
+            HrLog::Warn("Recording: the ddagrab overlay feed could not be set up.");
+            hr_ff_kill(ff);
+            hr_ff_destroy(ff);
+            RemoveFileUtf8(NarrowFromWide(out_path));
+            return nullptr;
+        }
+        if (last_overlays_sent_valid_)
+            hr_ovf_set_overlays(ovfeed_, last_overlays_sent_.empty() ? nullptr : last_overlays_sent_.data(),
+                                (int)last_overlays_sent_.size());
+    }
+    HrLog::Info(HrLowImpactFlagsLine(state_));
+    if (state_.gpu_low_priority)
+        HrLogFfmpegGpuPriorityStart(hr_ff_gpu_priority_applied(ff) != 0);
+
+    // ffmpeg writes the container header only once the first captured frame has gone through
+    // the filter graph and the encoder is initialised, so "the output file has content" ==
+    // "capture is really running".
+    const std::string out_narrow = NarrowFromWide(out_path);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+        if (!hr_ff_is_running(ff)) { died = true; break; }
+        if (hr_file_size_mb(out_narrow.c_str()) > 0.0f) { capturing = true; break; }
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(3000)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    if (died) {
+        LogFfmpegDeathDetails(ff, "Recording: ffmpeg exited while starting ddagrab capture");
+        DestroyOverlayFeed();
+        hr_ff_destroy(ff);
+        RemoveFileUtf8(out_narrow);
+        return nullptr;
+    }
+    return ff;
+}
+
 bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool codec_is_hw,
                                           std::chrono::steady_clock::time_point &t_video_go) {
     if (!state_.gpu_capture_ddagrab) return false;
@@ -1011,12 +1098,32 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
         if (o.visible && o.w > 0 && o.h > 0) { any_overlay = true; break; }
     if (!state_.desktop_visible) any_overlay = true;   // a hidden Desktop layer needs the CPU pipeline (ddagrab can't blank it)
 
+    // overlays through ffmpeg are an opt-in and have their own preconditions; anything else keeps using the
+    // normal pipeline (item 9's GPU-blended overlays are usually the cheaper choice anyway).
+    const char *overlay_why = nullptr;
+    bool overlay_mode = false;
+    if (any_overlay) {
+        if (!state_.ddagrab_overlays)        overlay_why = "overlays/plugins are active and need the CPU pipeline (ddagrab_overlays=1 would draw them through ffmpeg)";
+        else if (!state_.desktop_visible)    overlay_why = "a hidden Desktop layer needs the CPU pipeline";
+        else if (!pipeline_)                 overlay_why = "the overlay feed needs the preview pipeline (the live preview is off)";
+        else if (codec_args.find(L"qsv") != std::wstring::npos)
+                                             overlay_why = "ddagrab overlays work with NVENC / AMF only";
+        else {
+            for (const auto &o : state_.overlays)
+                if (o.visible && o.w > 0 && o.h > 0 && (o.type == "region" || o.type == "window")) {
+                    overlay_why = "region / window layers need the CPU pipeline";
+                    break;
+                }
+        }
+        overlay_mode = (overlay_why == nullptr);
+    }
+
     const char *why = nullptr;
     if (!ffmpeg_found_)                                   why = "ffmpeg not found";
     else if (ddagrab_blocked_)                            why = "it already failed mid-recording in this session (a game changing the display mode?)";
     else if (!codec_is_hw)                                why = "a software encoder is selected (ddagrab needs nvenc/qsv/amf)";
     else if (state_.capture_mode == CaptureMode::Window)  why = "window capture follows a moving window";
-    else if (any_overlay)                                 why = "overlays/plugins are active and need the CPU pipeline";
+    else if (any_overlay && !overlay_mode)                why = overlay_why;
     else if (state_.auto_pause_on_silence)                why = "auto-pause on silence needs the pipeline's pause";
     else if (src_w <= 0 || src_h <= 0 ||
              output_w_ != src_w || output_h_ != src_h)    why = "the output resolution differs from the captured size";
@@ -1034,51 +1141,23 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
         return false;
     }
 
-    void *ff = hr_ff_create();
-    if (!ff) return false;
-    hr_ff_set_ffmpeg_path(ff, NarrowFromWide(ffmpeg_path_).c_str());
-    hr_ff_set_output_path(ff, NarrowFromWide(current_output_path_).c_str());
-    hr_ff_set_codec_args(ff, NarrowFromWide(codec_args).c_str());
-    hr_ff_set_normal_priority(ff, state_.game_friendly_priority ? 1 : 0);
-    hr_ff_set_gpu_low_priority(ff, state_.gpu_low_priority ? 1 : 0);
-    hr_ff_set_video_params(ff, src_w, src_h, state_.target_fps);
-    hr_ff_set_gpu_capture(ff, /*enable=*/1, capture_output_idx_,
-                          crop_x_, crop_y_, crop_w_, crop_h_,
-                          state_.cursor_enabled ? 1 : 0);
-    // ffmpeg's stderr + a -progress file (live frame count for the FPS readout).
-    {
-        const std::string ff_log  = NarrowFromWide(HrLogPaths::LogFilePath(L"ffmpeg_ddagrab.log"));
-        const std::string ff_prog = NarrowFromWide(HrLogPaths::LogFilePath(L"ffmpeg_ddagrab_progress.txt"));
-        RemoveFileUtf8(ff_prog);   // a stale file must not report old frame counts
-        hr_ff_set_diag_paths(ff, ff_log.c_str(), ff_prog.c_str());
-    }
-    if (hr_ff_start(ff) != 0) {
-        HrLog::Warn("Recording: couldn't launch ffmpeg for ddagrab capture -> using the normal capture pipeline.");
-        hr_ff_destroy(ff);
-        return false;
-    }
-    HrLog::Info(HrLowImpactFlagsLine(state_));
-    if (state_.gpu_low_priority)
-        HrLogFfmpegGpuPriorityStart(hr_ff_gpu_priority_applied(ff) != 0);
+    ddagrab_src_w_ = src_w;
+    ddagrab_src_h_ = src_h;
+    ddagrab_codec_args_ = codec_args;
+    ddagrab_extra_segs_.clear();
+    ddagrab_frame_base_ = 0;
+    ddagrab_done_mb_ = 0.0;
+    ddagrab_seg_seq_ = 0;
+    ddagrab_gap_ = false;
+    DestroyOverlayFeed();
+    if (overlay_mode) SyncOverlays();   // make last_overlays_sent_ current before the feeder takes its first copy
 
-    // ffmpeg writes the container header only once the first captured frame has gone through
-    // the filter graph and the encoder is initialised, so "the output file has content" ==
-    // "capture is really running".
-    const std::string out_path = NarrowFromWide(current_output_path_);
-    const auto t0 = std::chrono::steady_clock::now();
-    bool capturing = false, died = false;
-    for (;;) {
-        if (!hr_ff_is_running(ff)) { died = true; break; }
-        if (hr_file_size_mb(out_path.c_str()) > 0.0f) { capturing = true; break; }
-        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(3000)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    }
-    if (died) {
-        LogFfmpegDeathDetails(ff, "Recording: ffmpeg exited while starting ddagrab capture");
-        HrLog::Warn("Recording: ffmpeg exited while starting ddagrab capture (unsupported on this "
-                    "GPU/driver/ffmpeg build?) -> falling back to the normal capture pipeline.");
-        hr_ff_destroy(ff);
-        RemoveFileUtf8(out_path);
+    bool died = false, capturing = false;
+    void *ff = SpawnDdagrabFfmpeg(current_output_path_, overlay_mode, died, capturing);
+    if (!ff) {
+        HrLog::Warn(died ? "Recording: ffmpeg exited while starting ddagrab capture (unsupported on this "
+                           "GPU/driver/ffmpeg build?) -> falling back to the normal capture pipeline."
+                         : "Recording: ddagrab capture could not start -> using the normal capture pipeline.");
         return false;
     }
     if (!capturing) {
@@ -1087,9 +1166,119 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     }
 
     ffproc_ = ff;
+    ddagrab_overlay_ = overlay_mode;
     t_video_go = std::chrono::steady_clock::now();
     ddagrab_pause_warned_ = false;
-    HrLog::Info("Recording: full-GPU capture + encode via ffmpeg ddagrab (HomRec overlays/plugins/pause unavailable).");
+    HrLog::Info(std::string("Recording: full-GPU capture + encode via ffmpeg ddagrab") +
+                (overlay_mode ? " with HomRec overlays blended by ffmpeg (system-memory blend)" : " (HomRec overlays/plugins unavailable)") +
+                (state_.ddagrab_pause ? ", Pause supported (piece-wise)." : ", Pause unavailable."));
+    return true;
+}
+
+// ---- Item 8: Pause / Resume of a ddagrab recording --------------------------------------------------------------
+void RecordingController::DdagrabPause() {
+    // The clocks stop at the click; ffmpeg needs a moment to close its piece.
+    const int new_state = hr_ctl_pause_toggle(ctl_);
+    state_.paused = (new_state == 2 /* HR_STATE_PAUSED */);
+    hr_audio_pause(1);
+    ddagrab_gap_ = true;          // BEFORE ffmpeg ends: PollStats must not call that a crash
+    const long long fr = ffproc_ ? hr_ff_progress_frames(ffproc_) : -1;
+    hr_ff_stop_graceful(ffproc_);   // 'q': the piece gets its index / trailer
+    if (hr_ff_wait(ffproc_, 10000) != 0 && hr_ff_is_running(ffproc_)) {
+        HrLog::Error("Recording: ffmpeg didn't close the piece within 10s of Pause - killing it (this piece may be damaged).");
+        hr_ff_kill(ffproc_);
+    }
+    DestroyOverlayFeed();
+    const long long fr_end = ffproc_ ? hr_ff_progress_frames(ffproc_) : -1;
+    ddagrab_frame_base_ += (fr_end > fr ? fr_end : (fr > 0 ? fr : 0));
+    ddagrab_done_mb_ += ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
+    ddagrab_last_frames_ = -1;
+    HrLog::Info("Recording paused (ddagrab: piece " + std::to_string(ddagrab_extra_segs_.size() + 1) + " closed)");
+}
+
+void RecordingController::DdagrabResume() {
+    // Every piece gets the SAME container as the first one: ffmpeg's concat demuxer mis-times a join of mp4 + mkv
+    // pieces (checked with ffmpeg 6.1: 9 s of frames came out as 2.98 s), but joins same-container pieces exactly.
+    std::wstring seg = current_output_path_;
+    std::wstring ext = L".mkv";
+    const size_t dot = seg.find_last_of(L'.');
+    if (dot != std::wstring::npos && (seg.find_last_of(L"\\/") == std::wstring::npos || dot > seg.find_last_of(L"\\/"))) {
+        ext = seg.substr(dot);
+        seg.resize(dot);
+    }
+    seg += L".part" + std::to_wstring(++ddagrab_seg_seq_) + ext;
+
+    if (ddagrab_overlay_ && pipeline_) SyncOverlays();
+    bool died = false, capturing = false;
+    void *ff = SpawnDdagrabFfmpeg(seg, ddagrab_overlay_, died, capturing);
+    if (!ff) {
+        HrLog::Error("Recording: ffmpeg couldn't be restarted after the Pause - stopping the recording "
+                     "with what was captured so far.");
+        crash_was_ddagrab_ = false;               // no automatic restart of a recording the user paused
+        crash_video_elapsed_sec_ = elapsed_seconds();
+        crashed_ = true;                          // the UI stops + finalizes (the closed pieces are joined)
+        return;
+    }
+    ddagrab_extra_segs_.push_back(seg);
+    if (ffproc_) hr_ff_destroy(ffproc_);          // the closed piece's handle
+    ffproc_ = ff;
+    ddagrab_gap_ = false;
+    // Video is capturing again: now the clocks and the audio go on, so audio and picture stay together.
+    const int new_state = hr_ctl_pause_toggle(ctl_);
+    state_.paused = (new_state == 2);
+    hr_audio_pause(0);
+    last_loud_time_ = std::chrono::steady_clock::now();
+    HrLog::Info("Recording resumed (ddagrab: piece " + std::to_string(ddagrab_extra_segs_.size() + 1) + " started)");
+}
+
+// Joins the first piece (current_output_path_) and the pieces made after Pauses into current_output_path_. Stream copy
+// (no re-encode); on any failure everything stays where it is and false is returned.
+bool RecordingController::JoinDdagrabSegments() {
+    if (ddagrab_extra_segs_.empty()) return true;
+    std::wstring stem = current_output_path_;
+    std::wstring ext;
+    const size_t dot = stem.find_last_of(L'.');
+    if (dot != std::wstring::npos && dot > stem.find_last_of(L"\\/")) { ext = stem.substr(dot); stem.resize(dot); }
+    const std::wstring list_path   = stem + L".parts.txt";
+    const std::wstring joined_path = stem + L".joined" + ext;
+
+    std::string list = "ffconcat version 1.0\n";
+    auto add = [&](const std::wstring &p) {
+        std::string n = NarrowFromWide(p);
+        std::string esc;
+        for (char c : n) { if (c == '\'') esc += "'\\''"; else esc += c; }
+        list += "file '" + esc + "'\n";
+    };
+    add(current_output_path_);
+    for (const auto &sp : ddagrab_extra_segs_) add(sp);
+    bool wrote = false;
+    if (FILE *f = _wfopen(list_path.c_str(), L"wb")) {
+        wrote = std::fwrite(list.data(), 1, list.size(), f) == list.size();
+        if (std::fclose(f) != 0) wrote = false;
+    }
+    if (!wrote) {
+        HrLog::Error("Recording: couldn't write the list of recording pieces - they are left next to the output.");
+        return false;
+    }
+    HrLog::Info("Recording: joining " + std::to_string(ddagrab_extra_segs_.size() + 1) + " ddagrab pieces (stream copy)...");
+    const int rc = hr_concat_segments(ffmpeg_path_.c_str(), list_path.c_str(), joined_path.c_str());
+    if (rc != 0 || !hr_path_exists(NarrowFromWide(joined_path).c_str()) ||
+        hr_file_size_mb(NarrowFromWide(joined_path).c_str()) <= 0.0f) {
+        HrLog::Error("Recording: joining the pieces failed - the first piece stays as the output and the other pieces "
+                     "(<name>.partN.<ext>) are kept next to it.");
+        RemoveFileUtf8(NarrowFromWide(joined_path));
+        RemoveFileUtf8(NarrowFromWide(list_path));
+        return false;
+    }
+    if (!MoveFileExW(joined_path.c_str(), current_output_path_.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        HrLog::Error("Recording: couldn't replace the output with the joined file - it is kept as " +
+                     NarrowFromWide(joined_path));
+        RemoveFileUtf8(NarrowFromWide(list_path));
+        return false;
+    }
+    RemoveFileUtf8(NarrowFromWide(list_path));
+    for (const auto &sp : ddagrab_extra_segs_) RemoveFileUtf8(NarrowFromWide(sp));
+    ddagrab_extra_segs_.clear();
     return true;
 }
 
@@ -1598,6 +1787,13 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
     }
     ms_ffwait = fin_ms();
 
+    // Item 8: the overlay feeder is only a helper of the ffmpeg that just ended; and a recording that was paused
+    // consists of several ffmpeg pieces, joined now (stream copy) so everything below sees ONE finished file.
+    DestroyOverlayFeed();
+    bool ddagrab_joined = false;
+    if (ddagrab_active_ && !ddagrab_extra_segs_.empty()) ddagrab_joined = JoinDdagrabSegments();
+    ddagrab_gap_ = false;
+
     // mic/system audio were captured into separate temp WAVs (unless muted); mix them into one
     // file, then remux that into the finished video via hr_merge_av, the native fast path used
     // when no custom bitrate/extra ffmpeg args are set.
@@ -1769,6 +1965,7 @@ void RecordingController::StopFinalizeTail(bool keep_for_preview, double recorde
     last_output_path_ = current_output_path_;
     last_output_size_mb_ = mfenc_ ? hr_mf_output_size_mb(mfenc_)
                                   : (ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0);
+    if (ddagrab_joined) last_output_size_mb_ = hr_file_size_mb(NarrowFromWide(current_output_path_).c_str());
 
     hr_ff_destroy(ffproc_);
     ffproc_ = nullptr;
@@ -1856,14 +2053,19 @@ void RecordingController::RunPostRecordHook(const std::wstring &output_path) {
 void RecordingController::TogglePause() {
     if (!state_.recording) return;
     if (ddagrab_active_) {
-        // ffmpeg owns the capture in this mode; there is no frame clock of ours to
-        // freeze, and pausing only the audio would desynchronize the recording.
-        if (!ddagrab_pause_warned_) {
-            ddagrab_pause_warned_ = true;
-            HrLog::Warn("Pause is unavailable during a full-GPU (ddagrab) recording -- "
-                        "turn off \"Full-GPU capture via ffmpeg ddagrab\" in Settings > Video "
-                        "to be able to pause.");
+        // ffmpeg owns the capture in this mode and cannot be paused (pausing only the audio would desynchronize
+        // the recording). Item 8: Pause closes the current ffmpeg piece, Resume starts the next one, Stop joins them.
+        if (!state_.ddagrab_pause) {
+            if (!ddagrab_pause_warned_) {
+                ddagrab_pause_warned_ = true;
+                HrLog::Warn("Pause is switched off for full-GPU (ddagrab) recordings (ddagrab_pause=0) -- "
+                            "turn off \"Full-GPU capture via ffmpeg ddagrab\" in Settings > Video "
+                            "to be able to pause.");
+            }
+            return;
         }
+        if (finalizing_ || !ffproc_) return;
+        if (!state_.paused) DdagrabPause(); else DdagrabResume();
         return;
     }
     int new_state = hr_ctl_pause_toggle(ctl_);
@@ -1893,7 +2095,7 @@ void RecordingController::PollStats() {
         crashed_ = true;
         return;
     }
-    if (ffproc_ && !finalizing_ && !hr_ff_is_running(ffproc_)) {
+    if (ffproc_ && !finalizing_ && !ddagrab_gap_ && !hr_ff_is_running(ffproc_)) {
         HrLog::Error("Recording: the ffmpeg process ended unexpectedly mid-recording "
                      "(crashed, was closed externally, or hit a fatal error) - flagging "
                      "this as a crash so the UI can stop and finalize what was captured.");
@@ -1933,7 +2135,14 @@ void RecordingController::PollStats() {
                     ddagrab_last_frames_t_ = now;
                 }
             }
-            state_.frame_count = (long)fr;
+            state_.frame_count = (long)(ddagrab_frame_base_ + fr);
+        }
+        if (ovfeed_) hr_ovf_set_current_fps(ovfeed_, current_fps_);   // item 8: for text overlays that show the FPS
+        // Item 8: the overlay feeder ended while ffmpeg still runs (nothing breaks - ffmpeg holds the last overlay
+        // picture - but the overlays stop updating). Say so once.
+        if (ovfeed_ && !ddagrab_gap_ && hr_ovf_state(ovfeed_) < 0 && hr_ff_is_running(ffproc_)) {
+            HrLog::Warn("Recording: the ddagrab overlay feed stopped - overlays keep showing their last picture.");
+            DestroyOverlayFeed();
         }
     } else {
         if (pipeline_) hr_pl_stats(pipeline_, &frames, &drops, &fps);
@@ -1961,6 +2170,7 @@ void RecordingController::PollStats() {
     }
 
     double size_mb = mfenc_ ? hr_mf_output_size_mb(mfenc_) : (ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0);
+    if (ddagrab_active_) size_mb += ddagrab_done_mb_;      // item 8: + the pieces closed by Pause
     hr_ctl_update_stats(ctl_, (long long)(size_mb * 1024.0 * 1024.0));
 
     hr_audio_get_levels(&mic_level_, &sys_level_);
@@ -2104,6 +2314,10 @@ void RecordingController::SyncOverlays() {
     hr_pl_set_overlays(pipeline_, descs.empty() ? nullptr : descs.data(), (int)descs.size());
     last_overlays_sent_.swap(descs); // descs (== overlays_scratch_) keeps the old buffer for reuse
     last_overlays_sent_valid_ = true;
+    // Item 8: a ddagrab recording blends the same overlays through ffmpeg; its feeder gets the same list.
+    if (ovfeed_)
+        hr_ovf_set_overlays(ovfeed_, last_overlays_sent_.empty() ? nullptr : last_overlays_sent_.data(),
+                            (int)last_overlays_sent_.size());
 }
 
 void RecordingController::ResolveWindowLayer(OverlayDef &ov, HrOverlayDesc &d) {
@@ -2146,14 +2360,15 @@ void RecordingController::ResolveWindowLayer(OverlayDef &ov, HrOverlayDesc &d) {
     }
 }
 
-bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
-    wchar_t tmp[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmp);
-    std::wstring base_dir = std::wstring(tmp) + L"HomRec_replay\\";
-    CreateDirectoryW(base_dir.c_str(), nullptr); // fine if it already exists
-    replay_dir_ = base_dir + std::to_wstring(++replay_run_seq_) + L"\\";
-    CreateDirectoryW(replay_dir_.c_str(), nullptr);
+// Item 7: the RAM buffer is MPEG-TS, which only carries H.264 / HEVC (and MPEG-2 / 4) here.
+static bool ReplayRamCodecOk(const std::wstring &codec) {
+    std::wstring lc = codec;
+    std::transform(lc.begin(), lc.end(), lc.begin(), ::towlower);
+    return lc.find(L"264") != std::wstring::npos || lc.find(L"hevc") != std::wstring::npos ||
+           lc.find(L"265") != std::wstring::npos;
+}
 
+bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     int buf_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
     replay_applied_buffer_sec_ = buf_sec;
     int wrap = (buf_sec + kReplaySegmentSec - 1) / kReplaySegmentSec + 1;
@@ -2164,37 +2379,85 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
                               ? hw_encoder_ : WideFromNarrow(state_.video_codec);
     std::wstring codec_args = BuildCodecArgs(codec);
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
+    const int fps = state_.target_fps > 0 ? state_.target_fps : 30;
 
-    replay_ff_ = hr_ff_create();
-    hr_ff_set_ffmpeg_path(replay_ff_, NarrowFromWide(ffmpeg_path_).c_str());
-    hr_ff_set_output_path(replay_ff_, NarrowFromWide(replay_dir_ + L"seg_%03d.mp4").c_str());
-    hr_ff_set_codec_args(replay_ff_, NarrowFromWide(codec_args).c_str());
-    hr_ff_set_video_params(replay_ff_, output_w_, output_h_, state_.target_fps);
-    hr_ff_set_output_size(replay_ff_, output_w_, output_h_);
-    hr_ff_set_pipe_input(replay_ff_, HrPipeInputMode(state_));
-    std::string seg_args = "-f segment -segment_time " + std::to_string(kReplaySegmentSec) +
-                            " -segment_wrap " + std::to_string(wrap) + " -reset_timestamps 1";
-    hr_ff_set_extra_output_args(replay_ff_, seg_args.c_str());
+    // Item 7: RAM buffer when it is on, short enough and the codec fits into MPEG-TS; any failure to start it
+    // falls through to the segment files below (the old behaviour).
+    const bool ram_wanted = state_.replay_in_ram && buf_sec <= kReplayRamMaxSec && ReplayRamCodecOk(codec);
 
-    if (hr_ff_start(replay_ff_) != 0) {
-        error_out = L"Failed to start the Instant Replay encoder.";
-        HrLog::Error("Instant Replay: ffmpeg segment-writer process didn't start");
-        hr_ff_destroy(replay_ff_);
-        replay_ff_ = nullptr;
-        return false;
+    // Starts the replay ffmpeg (RAM variant or segment-file variant) and checks its stdin pipe. On failure
+    // nothing is left behind and `why` says what happened.
+    auto launch = [&](bool ram, std::wstring &why) -> bool {
+        replay_ff_ = hr_ff_create();
+        hr_ff_set_ffmpeg_path(replay_ff_, NarrowFromWide(ffmpeg_path_).c_str());
+        hr_ff_set_codec_args(replay_ff_, NarrowFromWide(codec_args).c_str());
+        hr_ff_set_video_params(replay_ff_, output_w_, output_h_, state_.target_fps);
+        hr_ff_set_output_size(replay_ff_, output_w_, output_h_);
+        hr_ff_set_pipe_input(replay_ff_, HrPipeInputMode(state_));
+        if (ram) {
+            // MPEG-TS on stdout. -g = one GOP per second, so the window can be trimmed in 1 s steps (this overrides a
+            // longer -g from the codec args for the replay encoder only); PAT/PMT at every key picture keeps every cut
+            // chunk self-contained.
+            hr_ff_set_output_path(replay_ff_, "pipe:1");
+            hr_ff_set_capture_stdout(replay_ff_, 1);
+            hr_ff_set_extra_output_args(replay_ff_, ("-g " + std::to_string(fps) +
+                " -f mpegts -muxdelay 0 -muxpreload 0 -flush_packets 1 -mpegts_flags +pat_pmt_at_frames").c_str());
+        } else {
+            wchar_t tmp[MAX_PATH];
+            GetTempPathW(MAX_PATH, tmp);
+            std::wstring base_dir = std::wstring(tmp) + L"HomRec_replay\\";
+            CreateDirectoryW(base_dir.c_str(), nullptr); // fine if it already exists
+            replay_dir_ = base_dir + std::to_wstring(++replay_run_seq_) + L"\\";
+            CreateDirectoryW(replay_dir_.c_str(), nullptr);
+            hr_ff_set_output_path(replay_ff_, NarrowFromWide(replay_dir_ + L"seg_%03d.mp4").c_str());
+            std::string seg_args = "-f segment -segment_time " + std::to_string(kReplaySegmentSec) +
+                                    " -segment_wrap " + std::to_string(wrap) + " -reset_timestamps 1";
+            hr_ff_set_extra_output_args(replay_ff_, seg_args.c_str());
+        }
+
+        if (hr_ff_start(replay_ff_) != 0) {
+            why = L"Failed to start the Instant Replay encoder.";
+            HrLog::Error(ram ? "Instant Replay: ffmpeg (RAM buffer) process didn't start"
+                             : "Instant Replay: ffmpeg segment-writer process didn't start");
+            hr_ff_destroy(replay_ff_);
+            replay_ff_ = nullptr;
+            return false;
+        }
+        intptr_t stdin_h = hr_ff_get_stdin_handle(replay_ff_);
+        if (stdin_h == 0) {
+            why = L"Failed to start the Instant Replay encoder.";
+            HrLog::Error("Instant Replay: ffmpeg stdin pipe handle unavailable");
+            hr_ff_kill(replay_ff_);
+            hr_ff_destroy(replay_ff_);
+            replay_ff_ = nullptr;
+            return false;
+        }
+        if (ram) {
+            size_t cap = (size_t)(state_.replay_ram_mb < 64 ? 64 : (state_.replay_ram_mb > 16384 ? 16384 : state_.replay_ram_mb)) << 20;
+            replay_ram_ = std::make_shared<ReplayRam>(replay_ff_, (double)buf_sec, cap);
+            replay_ram_->start();
+        }
+        hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
+        hr_pl_set_timestamped_pipe(pipeline_, HrPipeInputMode(state_) == 2 ? state_.target_fps : 0);
+        hr_pl_set_recording(pipeline_, /*active=*/1, stdin_h);
+        return true;
+    };
+
+    bool started = false;
+    replay_ram_.reset();
+    if (ram_wanted) {
+        std::wstring why;
+        started = launch(true, why);
+        if (started)
+            HrLog::Info("Instant Replay: buffer is kept in RAM (MPEG-TS, up to " + std::to_string(state_.replay_ram_mb) + " MB) - no temp files.");
+        else
+            HrLog::Warn("Instant Replay: the RAM buffer could not start - using segment files in %TEMP% instead.");
+    } else if (state_.replay_in_ram) {
+        HrLog::Info(std::string("Instant Replay: RAM buffer not used (") +
+                    (buf_sec > kReplayRamMaxSec ? "buffer longer than 300 s" : "codec is not H.264 / HEVC") +
+                    ") - segment files in %TEMP%.");
     }
-    intptr_t stdin_h = hr_ff_get_stdin_handle(replay_ff_);
-    if (stdin_h == 0) {
-        error_out = L"Failed to start the Instant Replay encoder.";
-        HrLog::Error("Instant Replay: ffmpeg stdin pipe handle unavailable");
-        hr_ff_kill(replay_ff_);
-        hr_ff_destroy(replay_ff_);
-        replay_ff_ = nullptr;
-        return false;
-    }
-    hr_pl_set_output_pixfmt(pipeline_, codec_is_hw ? 1 : 0);
-    hr_pl_set_timestamped_pipe(pipeline_, HrPipeInputMode(state_) == 2 ? state_.target_fps : 0);
-    hr_pl_set_recording(pipeline_, /*active=*/1, stdin_h);
+    if (!started && !launch(false, error_out)) return false;
 
     if (state_.audio_out_channels > 0 && !state_.recording) {
         hr_audio_set_max_buffer_sec(wrap * kReplaySegmentSec);
@@ -2215,6 +2478,9 @@ void RecordingController::StopInstantReplayEncoder() {
         HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
         hr_ff_kill(replay_ff_);
     }
+    // Item 7: the process is gone, so its stdout is at end-of-file and the reader ends; it must be joined before the
+    // ffmpeg object (which owns the pipe handle) is destroyed. The buffered replay is discarded with it.
+    if (replay_ram_) { replay_ram_->join(); replay_ram_.reset(); }
     hr_ff_destroy(replay_ff_);
     replay_ff_ = nullptr;
 }
@@ -2223,11 +2489,13 @@ void RecordingController::StopInstantReplayEncoderAsync() {
     if (!replay_ff_) return;
     void *h = replay_ff_;
     replay_ff_ = nullptr;
+    std::shared_ptr<ReplayRam> ram = std::move(replay_ram_);   // item 7: the stop thread joins its reader
+    replay_ram_.reset();
     void *pl = pipeline_;
     // See JoinPendingInstantReplayStop()'s comment (recording_controller.h)
     JoinPendingInstantReplayStop();
     hr_pl_end_recording_segment(pl, 1500);
-    instant_replay_stop_thread_ = std::thread([h]() {
+    instant_replay_stop_thread_ = std::thread([h, ram]() {
         // (std::terminate() crash a moment after "Instant Replay:
         // segment writer didn't finish gracefully in time - killing it"):
         try {
@@ -2236,6 +2504,7 @@ void RecordingController::StopInstantReplayEncoderAsync() {
                 HrLog::Warn("Instant Replay: segment writer didn't finish gracefully in time - killing it.");
                 hr_ff_kill(h);
             }
+            if (ram) ram->join();      // item 7: before the ffmpeg object (= the pipe handle) goes away
             hr_ff_destroy(h);
         } catch (const std::exception &e) {
             HrLog::Error(std::string("Instant Replay: stopping the segment writer threw (") +
@@ -2326,62 +2595,18 @@ void RecordingController::DisableInstantReplay() {
     HrLog::Info("Instant Replay: stopped.");
 }
 
-bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_saved_path) {
-    if (!instant_replay_active_ || !replay_ff_) {
-        error_out = L"Instant Replay isn't running.";
-        return false;
-    }
-    std::wstring dir_to_read = replay_dir_;
-
-    // Stop the current segment writer so its last (possibly still-open)
-    StopInstantReplayEncoder();
-    std::wstring restart_err;
-    bool restarted = StartInstantReplayEncoder(restart_err);
-
-    std::vector<std::wstring> segs;
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir_to_read + L"seg_*.mp4").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do { segs.push_back(dir_to_read + fd.cFileName); } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    if (segs.empty()) {
-        error_out = L"Instant Replay buffer is empty (nothing captured yet).";
-        instant_replay_active_ = restarted;
-        if (!restarted) HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering - " + restart_err));
-        // See DeleteReplayDir()'s comment - dir_to_read's run is over
-        // either way (StartInstantReplayEncoder() above already moved
-        // replay_dir_ on to a new folder), empty or not.
-        DeleteReplayDir(dir_to_read);
-        return false;
-    }
-
-    // segment_wrap reuses filenames (seg_000 can be newer than seg_005
-    // once the writer has wrapped around once), so chronological order
-    // has to come from last-write-time, not the filename itself.
-    std::sort(segs.begin(), segs.end(), [](const std::wstring &a, const std::wstring &b) {
-        auto mtime = [](const std::wstring &p) -> uint64_t {
-            WIN32_FILE_ATTRIBUTE_DATA d{};
-            if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &d)) return 0;
-            return (uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32) | d.ftLastWriteTime.dwLowDateTime;
-        };
-        return mtime(a) < mtime(b);
-    });
-
-    int buf_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
-    int want = (buf_sec + kReplaySegmentSec - 1) / kReplaySegmentSec;
-    if (want < 1) want = 1;
-    if ((int)segs.size() > want) segs.erase(segs.begin(), segs.end() - want);
-
-    std::string mic_wav_a = NarrowFromWide(dir_to_read + L"replay_mic_tmp.wav");
-    std::string sys_wav_a = NarrowFromWide(dir_to_read + L"replay_sys.wav");
-    std::string audio_wav_a = NarrowFromWide(dir_to_read + L"replay_audio.wav");
+// Cuts the replay audio (mic + system, mixed to one WAV) into `dir`. Shared by both Save Replay modes; the body is the
+// code SaveReplay() always had, only the window is new (see hr_audio_snapshot_to_wav_ex()).
+std::string RecordingController::BuildReplayAudioWav(const std::wstring &dir, int window_ms) {
+    std::string mic_wav_a = NarrowFromWide(dir + L"replay_mic_tmp.wav");
+    std::string sys_wav_a = NarrowFromWide(dir + L"replay_sys.wav");
+    std::string audio_wav_a = NarrowFromWide(dir + L"replay_audio.wav");
     bool want_mic = !mic_muted_;
     bool want_sys = !sys_muted_;
     bool have_replay_audio = false;
     if (state_.audio_out_channels > 0 && (want_mic || want_sys)) {
-        int ar = hr_audio_snapshot_to_wav(want_mic ? mic_wav_a.c_str() : nullptr,
-                                           want_sys ? sys_wav_a.c_str() : nullptr);
+        int ar = hr_audio_snapshot_to_wav_ex(want_mic ? mic_wav_a.c_str() : nullptr,
+                                              want_sys ? sys_wav_a.c_str() : nullptr, window_ms);
         bool mic_written = want_mic && (ar & 0x1) && hr_path_exists(mic_wav_a.c_str());
         bool sys_written = want_sys && (ar & 0x2) && hr_path_exists(sys_wav_a.c_str());
         if (mic_written && sys_written) {
@@ -2401,6 +2626,103 @@ bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_
             have_replay_audio = true;
         }
     }
+    return have_replay_audio ? audio_wav_a : std::string();
+}
+
+bool RecordingController::SaveReplay(std::wstring &error_out, std::wstring *out_saved_path) {
+    if (!instant_replay_active_ || !replay_ff_) {
+        error_out = L"Instant Replay isn't running.";
+        return false;
+    }
+    std::wstring dir_to_read;
+    std::wstring restart_err;
+    bool restarted = true;
+    std::vector<std::wstring> segs;
+    int audio_window_ms = 0;
+
+    if (replay_ram_) {
+        // ---- Item 7: RAM buffer. The encoder keeps running (no stop / restart, so the buffer is not emptied and the
+        // next Save works at once); what is held in memory is written ONCE, as one MPEG-TS file, and ffmpeg
+        // stream-copies it into the output container below.
+        double sec = 0.0;
+        const std::vector<ReplayRing::Chunk> parts = replay_ram_->ring().snapshot(&sec, /*final_flush=*/false);
+        const ReplayRing::Stats st = replay_ram_->ring().stats();
+        size_t total = 0;
+        for (const auto &c : parts) total += c->size();
+        if (parts.empty() || sec < 0.5 || total <= 2 * ReplayRing::kPkt) {
+            error_out = L"Instant Replay buffer is empty (nothing captured yet).";
+            return false;
+        }
+        wchar_t tmp[MAX_PATH];
+        GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base_dir = std::wstring(tmp) + L"HomRec_replay\\";
+        CreateDirectoryW(base_dir.c_str(), nullptr);
+        dir_to_read = base_dir + L"save" + std::to_wstring(++replay_save_seq_) + L"\\";
+        CreateDirectoryW(dir_to_read.c_str(), nullptr);
+        const std::wstring ts_path = dir_to_read + L"replay_ram.ts";
+        bool wrote = false;
+        if (FILE *f = _wfopen(ts_path.c_str(), L"wb")) {
+            wrote = true;
+            for (const auto &c : parts)
+                if (std::fwrite(c->data(), 1, c->size(), f) != c->size()) { wrote = false; break; }
+            if (std::fclose(f) != 0) wrote = false;
+        }
+        if (!wrote) {
+            error_out = L"Couldn't write the replay buffer to the temp folder (disk full?).";
+            HrLog::Error("Instant Replay: writing the RAM buffer to " + NarrowFromWide(ts_path) + " failed");
+            DeleteReplayDir(dir_to_read);
+            return false;
+        }
+        segs.push_back(ts_path);
+        audio_window_ms = (int)(sec * 1000.0);
+        HrLog::Info("Instant Replay: saving " + std::to_string((int)(total >> 20)) + " MB / " +
+                    std::to_string((int)(sec + 0.5)) + " s from the RAM buffer" +
+                    (st.capped ? " (the memory cap shortened it below the requested length - raise replay_ram_mb)" : "") + ".");
+    } else {
+        // ---- Segment files in %TEMP% (the original behaviour).
+        dir_to_read = replay_dir_;
+
+        // Stop the current segment writer so its last (possibly still-open)
+        StopInstantReplayEncoder();
+        restarted = StartInstantReplayEncoder(restart_err);
+
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir_to_read + L"seg_*.mp4").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do { segs.push_back(dir_to_read + fd.cFileName); } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        if (segs.empty()) {
+            error_out = L"Instant Replay buffer is empty (nothing captured yet).";
+            instant_replay_active_ = restarted;
+            if (!restarted) HrLog::Error(NarrowFromWide(L"Instant Replay: failed to resume buffering - " + restart_err));
+            // See DeleteReplayDir()'s comment - dir_to_read's run is over
+            // either way (StartInstantReplayEncoder() above already moved
+            // replay_dir_ on to a new folder), empty or not.
+            DeleteReplayDir(dir_to_read);
+            return false;
+        }
+
+        // segment_wrap reuses filenames (seg_000 can be newer than seg_005
+        // once the writer has wrapped around once), so chronological order
+        // has to come from last-write-time, not the filename itself.
+        std::sort(segs.begin(), segs.end(), [](const std::wstring &a, const std::wstring &b) {
+            auto mtime = [](const std::wstring &p) -> uint64_t {
+                WIN32_FILE_ATTRIBUTE_DATA d{};
+                if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &d)) return 0;
+                return (uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32) | d.ftLastWriteTime.dwLowDateTime;
+            };
+            return mtime(a) < mtime(b);
+        });
+
+        int buf_sec = state_.replay_buffer_sec > 0 ? state_.replay_buffer_sec : 30;
+        int want = (buf_sec + kReplaySegmentSec - 1) / kReplaySegmentSec;
+        if (want < 1) want = 1;
+        if ((int)segs.size() > want) segs.erase(segs.begin(), segs.end() - want);
+    }
+
+    const std::string audio_wav_a = BuildReplayAudioWav(dir_to_read, audio_window_ms);
+    const bool have_replay_audio = !audio_wav_a.empty();
 
     std::wstring list_path = dir_to_read + L"concat_list.txt";
     {
@@ -2946,7 +3268,7 @@ std::wstring RecordingController::elapsed_formatted() const {
 
 double RecordingController::output_size_mb() const {
     if (mfenc_) return hr_mf_output_size_mb(mfenc_);
-    return ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0;
+    return (ffproc_ ? hr_ff_output_size_mb(ffproc_) : 0.0) + (ddagrab_active_ ? ddagrab_done_mb_ : 0.0);
 }
 
 std::wstring RecordingController::last_duration_formatted() const {

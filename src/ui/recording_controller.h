@@ -9,8 +9,10 @@
 #include <thread>
 #include <atomic>
 #include <functional>
+#include <memory>
 #include "app_state.h"
 #include "../core/overlay_render.h"
+#include "../core/replay_ram.h"
 
 class RecordingController {
 public:
@@ -259,6 +261,10 @@ private:
     std::wstring replay_dir_;               // current run's segment subfolder (see StartInstantReplayEncoder())
     int    replay_applied_buffer_sec_ = 0;   // buffer length the running Instant Replay encoder was started with
     int    replay_run_seq_ = 0;             // bumped per StartInstantReplayEncoder() call - keeps each run's folder unique
+    std::shared_ptr<ReplayRam> replay_ram_;
+    int    replay_save_seq_ = 0;            // names the temp folder of each RAM-mode Save Replay
+    static constexpr int kReplayRamMaxSec = 300;   // longer buffers stay on disk (RAM use grows with the length)
+    std::string BuildReplayAudioWav(const std::wstring &dir, int window_ms);
     static constexpr int kReplaySegmentSec = 5; // segment length - Save Replay's trim is accurate to within this many seconds
 
     // TeardownPreview() hands the actual hr_pl_destroy() off to a background thread (see its
@@ -314,6 +320,29 @@ private:
     long long ddagrab_last_frames_ = -1;   // -progress frame count at the last FPS sample
     std::chrono::steady_clock::time_point ddagrab_last_frames_t_{};
     int  ddagrab_probe_ = 0;     // 0 = not probed yet, 1 = ffmpeg has ddagrab, 2 = it doesn't
+
+    // ---- Item 8: ddagrab with pause and overlays ----------------------------------------------------------------
+    // Pause: ffmpeg owns the capture and cannot be paused, so Pause closes the current ffmpeg piece and Resume starts
+    // the next one (`<output>.partN.<same extension as the output>`); Stop joins the pieces with a stream copy.
+    // A recording that is never paused is one ffmpeg and one file, exactly as before.
+    // Overlays: a second ffmpeg input fed by hr_ovf_* (core/overlay_feed.cpp), blended by ffmpeg's overlay filter.
+    // Starts ONE ffmpeg ddagrab process writing out_path and waits (<= 3 s) until the file has content. Returns the
+    // process handle, or nullptr (`died` = it exited while starting). With `overlay` the overlay feeder is started
+    // too (ovfeed_); nullptr is returned when that cannot be set up.
+    void *SpawnDdagrabFfmpeg(const std::wstring &out_path, bool overlay, bool &died, bool &capturing);
+    void  DdagrabPause();
+    void  DdagrabResume();
+    bool  JoinDdagrabSegments();      // the pieces -> current_output_path_ (stream copy); false = join failed, pieces kept
+    void  DestroyOverlayFeed();
+    void *ovfeed_ = nullptr;          // overlay feeder (hr_ovf_*) of the running ddagrab ffmpeg, if any
+    bool  ddagrab_overlay_ = false;   // this ddagrab recording blends HomRec overlays through ffmpeg
+    bool  ddagrab_gap_ = false;       // paused: the ffmpeg process has ended ON PURPOSE (not a crash)
+    int   ddagrab_src_w_ = 0, ddagrab_src_h_ = 0;
+    std::wstring ddagrab_codec_args_;
+    std::vector<std::wstring> ddagrab_extra_segs_;   // pieces after the first (the first is current_output_path_)
+    long long ddagrab_frame_base_ = 0;               // frames of the closed pieces (for the live frame counter)
+    double    ddagrab_done_mb_ = 0.0;                // size of the closed pieces (for the live size readout)
+    int       ddagrab_seg_seq_ = 0;
     bool TryStartDdagrab(const std::wstring &codec_args, bool codec_is_hw,
                          std::chrono::steady_clock::time_point &t_video_go);
 
