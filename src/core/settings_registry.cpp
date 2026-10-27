@@ -88,7 +88,7 @@ const std::vector<SettingDef> &All() {
         v.push_back(StrField("ui_font", "identity", &AppState::ui_font));
         v.push_back(DblField("ui_scale", "identity", &AppState::ui_scale));
 
-        // -- [storage] (Phase 1 settings-storage migration, see commands.md) --
+        // -- [storage] --
         v.push_back(StrField("settings_path", "storage", &AppState::settings_path));
 
         // -- [window] ------------------------------------------------------

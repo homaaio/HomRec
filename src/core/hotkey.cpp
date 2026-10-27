@@ -149,6 +149,11 @@ static DWORD WINAPI _MsgThread(LPVOID param) {
     /* Register hotkeys (configurable - see hr_hk_configure()) */
     _RegisterHotkeyChecked(ctx->hwnd, HK_START_STOP, ctx->mod_start_stop, ctx->vk_start_stop);
     _RegisterHotkeyChecked(ctx->hwnd, HK_PAUSE,      ctx->mod_pause,      ctx->vk_pause);
+    /* HK_FULLSCREEN is deliberately NOT registered here. RegisterHotKey is system-wide, so F11
+     * used to be swallowed in every other program (browsers, games, players...) and make HomRec
+     * go fullscreen instead. Fullscreen is a window-local accelerator on the main frame now
+     * (View menu, see main_frame.cpp), so it only reacts while HomRec itself has focus. The
+     * hr_hk_configure()/callback API still accepts a fullscreen binding so callers don't break. */
     _RegisterHotkeyChecked(ctx->hwnd, HK_SAVE_REPLAY, ctx->mod_save_replay, ctx->vk_save_replay);
     for (const auto &c : ctx->customs) _RegisterHotkeyChecked(ctx->hwnd, c.id, c.mod, c.vk);
 

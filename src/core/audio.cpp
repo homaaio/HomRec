@@ -24,7 +24,7 @@
 #include "../utils/log.h"
 #include "pcm_ring.h"
 #include "wav_util.h"
-#include "audio_mixer.h"   // item 10: live mixer + resampler (portable, unit-tested)
+#include "audio_mixer.h"   // live mixer + resampler (portable, unit-tested)
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
@@ -758,7 +758,7 @@ HR_EXPORT void hr_audio_pause(int paused)
     extra_on_pause(paused != 0);
 }
 
-static void live_shutdown();                // end of this file (item 10)
+static void live_shutdown();                // end of this file
 
 HR_EXPORT int hr_audio_stop(const char* mic_wav_path,
                              const char* sys_wav_path)
@@ -925,6 +925,10 @@ static size_t window_samples(int cap_sec, int rate)
     return (size_t)cap_sec * (size_t)rate * 2;
 }
 
+// The same snapshot, but of the NEWEST `window_ms` milliseconds (window_ms <= 0 = the whole rolling
+// buffer, i.e. hr_audio_snapshot_to_wav()). The RAM Instant Replay knows exactly how long the video it saved is,
+// so the audio is cut to that length at the same (newest) end - before, the audio window was up to 5-15 s longer
+// than the video and, merged from t=0, ran that much ahead of the picture once the buffer was full.
 HR_EXPORT int hr_audio_snapshot_to_wav_ex(const char* mic_wav_path,
                                             const char* sys_wav_path,
                                             int window_ms)
@@ -1174,6 +1178,20 @@ HR_EXPORT int hr_audio_rms(const void* buf, int n_bytes)
 
 // 2.4: extra Audio Mixer channels (another mic, a browser / window, an audio file)
 #include "audio_extra.inc"
+
+// ===========================================================================
+// In-process audio: live mixing of mic + system + extra channels
+// ===========================================================================
+// Instead of streaming every source into its own WAV and mixing / merging after Stop, a mixer thread drains
+// the same capture rings every 20 ms, mixes them (audio_mixer.h) and hands the result to a SINK while the
+// recording is running:
+//   * the Media Foundation sink writer (mf_encoder.cpp: hr_mf_write_audio) - AAC encoded + muxed in process;
+//   * a named pipe that ffmpeg reads as a second input and muxes live (audio_pipe.cpp: hr_apipe_write).
+// Volume / mute / level meters / the wall-clock padding stay exactly where they were (capture workers).
+//
+// Call order (RecordingController::Start): hr_audio_live_prepare() -> [build the sink] -> hr_audio_pause(0),
+// hr_audio_reset_buffers(nullptr, nullptr), hr_audio_set_volumes(), hr_audio_extra_begin_live() ->
+// hr_audio_live_start(). Stop: hr_audio_live_stop() BEFORE the video side is finalized.
 
 typedef void (*HrAudioSinkFn)(void *user, const int16_t *stereo, size_t frames);
 

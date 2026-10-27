@@ -6,7 +6,7 @@
 //       thread hands over the D3D11 NV12 texture (hr_mf_write_texture) - no GPU->CPU->GPU round trip.
 //
 // Without hr_mf_audio_configure() the output is a video-only .mp4 and the audio is merged afterwards by the ffmpeg
-// merge step (hr_merge_av_ex). With it (item 10) the sink writer also gets an AAC audio stream that is fed from the
+// merge step (hr_merge_av_ex). With it the sink writer also gets an AAC audio stream that is fed from the
 // live audio mixer, so the finished .mp4 already has its sound and nothing is merged after Stop.
 //
 // Threading: configure/start/end/wait/destroy come from the UI / finalize thread; the write calls
@@ -33,7 +33,7 @@ int    hr_mf_configure(void *h, const char *out_path_utf8, int w, int h_px, int 
 int    hr_mf_start(void *h, void *d3d11_device, int want_textures);
 int    hr_mf_textures_enabled(const void *h);        // 1 if the writer was built with a D3D manager
 
-// ---- audio (item 10) ------------------------------------------------------------------------------
+// ---- Audio ------------------------------------------------------------------------------
 // Call BEFORE hr_mf_start(). Adds an AAC stream (kbps is rounded to 96/128/160/192) fed with 16-bit stereo PCM at
 // rate_hz (44100 or 48000 only - what the Windows AAC encoder accepts). Returns 1 if accepted for the attempt;
 // whether the writer really got the stream is hr_mf_audio_enabled() AFTER hr_mf_start() (0 = no AAC encoder, e.g.

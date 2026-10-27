@@ -384,16 +384,16 @@ static void hr_csc_band_avx2(
 #undef HR_AVX2_CHROMA
 
     if (vec_w < width) {
-        // up to 15 leftover columns: SSE4.1 for the next group(s) of 8, scalar for the rest.
-        // (_mm256_zeroupper() is emitted by the compiler on return from an AVX2 function.)
+        /* up to 15 leftover columns: SSE4.1 for the next group(s) of 8, scalar for the rest.
+         * (_mm256_zeroupper() is emitted by the compiler on return from an AVX2 function.) */
         hr_csc_band_sse41(bgra, out, width, height, y0, y1, vec_w, nv12, k);
     }
 }
-#endif // HR_HAVE_X86_SIMD
+#endif /* HR_HAVE_X86_SIMD */
 
 #if defined(HR_HAVE_X86_SIMD)
-// 0 = scalar, 1 = SSE4.1, 2 = AVX2 (CPU and OS support, detected once).
-static int g_csc_simd_cap = -1;   // -1 = no cap; set by hr_csc_set_max_simd() (tests, troubleshooting)
+/* 0 = scalar, 1 = SSE4.1, 2 = AVX2 (CPU and OS support, detected once). */
+static int g_csc_simd_cap = -1;   /* -1 = no cap; set by hr_csc_set_max_simd() (tests, troubleshooting) */
 static int hr_csc_simd_level(void)
 {
     static int detected = -1;
@@ -405,8 +405,8 @@ static int hr_csc_simd_level(void)
 }
 #endif
 
-// Limits the BGRA->YUV converters to scalar (0), SSE4.1 (1) or AVX2 (2); -1 removes the limit. Used by
-// the unit test to compare every implementation against the scalar one. Returns the level now in use.
+/* Limits the BGRA->YUV converters to scalar (0), SSE4.1 (1) or AVX2 (2); -1 removes the limit. Used by
+ * the unit test to compare every implementation against the scalar one. Returns the level now in use. */
 HR_EXPORT int hr_csc_set_max_simd(int cap)
 {
 #if defined(HR_HAVE_X86_SIMD)
@@ -425,7 +425,7 @@ static void hr_csc_band(
     if (HR_UNLIKELY(!bgra || !out || width <= 0 || height <= 0)) return;
     if (y0 < 0) y0 = 0;
     if (y1 > height) y1 = height;
-    y0 &= ~1;                       // chroma rows come in pairs
+    y0 &= ~1;                       /* chroma rows come in pairs */
     if (y0 >= y1) return;
 #if defined(HR_HAVE_X86_SIMD)
     const int level = hr_csc_simd_level();
@@ -441,7 +441,7 @@ static void hr_csc_band(
     hr_csc_band_scalar(bgra, out, width, height, y0, y1, 0, nv12, k);
 }
 
-// Planar I420, full/PC range - software encoders (libx264/libx265).
+/* Planar I420, full/PC range - software encoders (libx264/libx265). */
 HR_EXPORT void hr_bgra_to_yuv420p_band(
     const uint8_t * HR_RESTRICT bgra,
     uint8_t       * HR_RESTRICT yuv_out,

@@ -1,5 +1,5 @@
 #pragma once
-// gpu_overlay.h - item 9: overlay layers alpha-blended on the GPU (D3D11 pixel shader) instead of the CPU
+// gpu_overlay.h - overlay layers alpha-blended on the GPU (D3D11 pixel shader) instead of the CPU
 // ApplyNv12() pass. The layers are the same cached BGRA bitmaps OverlayCompositor already renders (text,
 // image, gif, webcam, input overlay); they are uploaded to small GPU textures only when their content changes
 // and are blended onto a GPU copy of the desktop BEFORE the video processor converts / scales it to NV12.

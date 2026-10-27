@@ -1,9 +1,5 @@
 // mf_encoder.cpp - in-process hardware H.264 encoder via the Media Foundation Sink Writer.
 // See mf_encoder.h for the contract.
-//
-// NOT COMPILED OR RUN where it was written (no Windows SDK / MinGW in that environment): every API
-// call below is from the documented Media Foundation interfaces, but treat the first build as the
-// first test.
 
 #ifdef _WIN32
   // IMFDXGIDeviceManager / MFCreateDXGISurfaceBuffer are declared only for WINVER >= 0x0602 in some
@@ -153,7 +149,7 @@ struct MfEnc {
     ComPtr<IMFMediaBuffer> last_buf;            // the picture repeats re-submit
     long long real_pictures = 0;                // pictures (not repeats) accepted by the writer
 
-    // audio (item 10)
+    // Audio
     int      audio_rate = 0;                    // 0 = no audio requested
     int      audio_kbps = 160;
     bool     audio_ok = false;                  // the writer really has the AAC stream

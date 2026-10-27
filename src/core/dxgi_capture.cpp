@@ -23,7 +23,7 @@
 #include <algorithm>
 #include <vector>
 #include <memory>
-#include "gpu_overlay.h"   // item 9: overlays blended on the GPU (HrGpuLayer / HrGpuOverlay)
+#include "gpu_overlay.h"   // overlays blended on the GPU (HrGpuLayer / HrGpuOverlay)
 
 #ifdef _WIN32
   #define HR_EXPORT extern "C" __declspec(dllexport)
@@ -146,7 +146,7 @@ struct DxCapCtx {
     bool pv_have_pending = false;
     bool mt_protected = false;
 
-    /* ---- item 9: overlays blended on the GPU --------------------------------------------------
+    /* ---- Overlays blended on the GPU --------------------------------------------------
      * With layers set (hr_dx_gpu_overlay_set) vp_blt() first copies the part of desk_tex it is going to read
      * into comp_tex, blends the layers onto that copy (pixel shader, gpu_overlay.cpp) and feeds comp_tex to the
      * video processor instead of desk_tex. desk_tex itself is never drawn on: it is the persistent desktop
@@ -400,7 +400,7 @@ struct DxCapCtx {
         D3D11_VIDEO_PROCESSOR_STREAM st{};
         st.Enable = TRUE;
         st.pInputSurface = vin.Get();
-        if (ov_render(src)) st.pInputSurface = vin_comp.Get();   /* item 9: desktop + overlays */
+        if (ov_render(src)) st.pInputSurface = vin_comp.Get();   /* desktop + overlays */
         ov_dirty = false;                                        /* this picture shows the current layers */
         HRESULT hr = vctx->VideoProcessorBlt(vproc.Get(), vout.Get(), 0, 1, &st);
         return SUCCEEDED(hr);
@@ -1038,7 +1038,7 @@ HR_EXPORT int hr_dx_gpu_ready(void *handle) {
 #endif
 }
 
-/* Item 9 - overlays blended on the GPU.
+/* Overlays blended on the GPU.
  * Sets the layer list for the NEXT captures made with hr_dx_capture_nv12() / hr_dx_capture_nv12_tex(): until the
  * list is replaced every picture they produce has the layers blended onto the desktop BEFORE the video
  * processor scales / converts it (so coordinates are desktop pixels, see HrGpuLayer). Call it once per capture

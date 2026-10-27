@@ -1,7 +1,15 @@
 // nut_mux.h - the smallest possible NUT (https://ffmpeg.org/~michael/nut.txt) writer: ONE raw
 // video stream, every frame a key frame, an explicit presentation time stamp on every frame.
-// -----------------------------------------------------------------------------------------
-// Pure C++11, no platform headers, so it can be unit-tested anywhere.
+//
+// WHY: a plain `-f rawvideo` pipe has no timestamps, so ffmpeg numbers the frames 0,1,2,... at the
+// input frame rate. A static screen therefore had to be sent frame after frame (3 MB each at 1080p
+// NV12, ~90 MB/s through the pipe at 30 fps) only so the timeline kept its length. With NUT the
+// recorder sends a frame only when the picture changed, stamped with the slot on the constant-fps
+// timeline it belongs to, and ffmpeg's `fps` filter repeats the previous frame across the gap.
+// The output stays constant-frame-rate, so everything downstream (audio mux, retime check, Instant
+// Replay segments) is unchanged.
+//
+// Pure C++11, no platform headers, so it can be unit-tested anywhere (see the report in CHANGELOG).
 #pragma once
 
 #include <cstddef>

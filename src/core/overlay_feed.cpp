@@ -1,4 +1,4 @@
-// overlay_feed.cpp - item 8: the "overlay feeder" of a ddagrab recording. ffmpeg grabs the screen itself, so HomRec's
+// overlay_feed.cpp - the "overlay feeder" of a ddagrab recording. ffmpeg grabs the screen itself, so HomRec's
 // overlays (text / image / gif / webcam / input) reach it as a SECOND video input: a transparent full-frame BGRA
 // picture, `fps` pictures per second, written to a named pipe that ffmpeg reads (see the overlay graph in
 // ffmpeg_runner.cpp). The picture is drawn here with the same cached layer bitmaps the capture pipeline uses
@@ -213,6 +213,6 @@ void hr_ovf_destroy(void *h) {
     delete f;
 }
 
-} // extern C
+} // extern "C"
 
-#endif
+#endif // _WIN32

@@ -1,4 +1,4 @@
-// gpu_overlay.cpp - see gpu_overlay.h. NOT COMPILED OR RUN (written without a compiler / GPU).
+// gpu_overlay.cpp - see gpu_overlay.h.
 #ifdef _WIN32
 #define HR_GPU_OVERLAY_INTERNAL
 #define WIN32_LEAN_AND_MEAN

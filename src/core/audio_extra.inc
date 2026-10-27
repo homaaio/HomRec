@@ -85,7 +85,7 @@ bool WasapiStream::open_process(unsigned long pid)
     using ActivateFn = HRESULT(WINAPI *)(LPCWSTR, REFIID, PROPVARIANT *, hrx::IHandler *, void **);
     HMODULE mm = LoadLibraryW(L"Mmdevapi.dll");
     if (!mm) return false;
-    auto fn = reinterpret_cast<ActivateFn>(GetProcAddress(mm, "ActivateAudioInterfaceAsync"));
+    auto fn = reinterpret_cast<ActivateFn>(reinterpret_cast<void *>(GetProcAddress(mm, "ActivateAudioInterfaceAsync")));
     if (!fn) return false;
 
     hrx::ActivationParams ap{};
@@ -195,6 +195,8 @@ static LARGE_INTEGER                       g_extra_freq{};
 static double                              g_extra_paused_accum = 0.0;
 static LARGE_INTEGER                       g_extra_pause_start{};
 static bool                                g_extra_in_pause = false;
+// In-process audio: extras collect into RAM only (no per-channel WAV); the live mixer in audio.cpp
+// drains them. Set by hr_audio_extra_begin_live(), cleared by hr_audio_extra_end_live().
 static std::atomic<bool>                   g_extra_live{false};
 
 static double rec_elapsed_sec()
@@ -460,7 +462,7 @@ HR_EXPORT void hr_audio_extra_begin(const char *stem)
     g_extra_recording.store(true);
 }
 
-/*  Item 10: same as hr_audio_extra_begin(), but the channels only collect into RAM (no _x<id>.wav files) -
+/*  Same as hr_audio_extra_begin(), but the channels only collect into RAM (no _x<id>.wav files) -
     the live mixer (hr_audio_live_start in audio.cpp) drains them. Pair with hr_audio_extra_end_live(). */
 HR_EXPORT void hr_audio_extra_begin_live()
 {
@@ -468,7 +470,7 @@ HR_EXPORT void hr_audio_extra_begin_live()
     hr_audio_extra_begin(nullptr);
 }
 
-//  Ends a live recording of the extras: they stop collecting and whatever is left is discarded.
+/*  Ends a live recording of the extras: they stop collecting and whatever is left is discarded. */
 HR_EXPORT void hr_audio_extra_end_live()
 {
     using namespace hrx;

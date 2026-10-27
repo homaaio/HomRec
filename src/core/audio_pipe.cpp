@@ -1,6 +1,14 @@
-// audio_pipe.cpp - item 10: the "audio sink" that feeds ffmpeg's SECOND input (the mixed recording audio) through
+// audio_pipe.cpp - the "audio sink" that feeds ffmpeg's SECOND input (the mixed recording audio) through
 // a named pipe while the recording is running, so ffmpeg encodes AAC and muxes it into the output file live -
 // no WAV files, no merge pass after Stop.
+//
+// The pipe itself (server end) is created by ffmpeg_runner.cpp BEFORE ffmpeg is launched (ffmpeg opens it by
+// name as `-i \\.\pipe\HomRecAudio_<pid>_<n>`); hr_ff_take_audio_pipe() hands the server HANDLE over to
+// hr_apipe_open() here.
+//
+// Threading: hr_apipe_write() is called from the audio mixer thread and only queues (never blocks). One writer
+// thread does the blocking I/O (ConnectNamedPipe, WriteFile). The writer thread is the only one that touches
+// the HANDLE; a blocked call is interrupted with CancelSynchronousIo() when finishing / destroying.
 
 #include <cstddef>
 #include <cstdint>
@@ -60,10 +68,10 @@ struct PipeSink {
         }
         // ---- wait for ffmpeg to open its end ------------------------------------------------------------
         BOOL ok = ConnectNamedPipe(pipe, nullptr);
-        if (!ok && GetLastError() == ERROR_PIPE_CONNECTED) ok = TRUE; // ffmpeg was faster than us
+        if (!ok && GetLastError() == ERROR_PIPE_CONNECTED) ok = TRUE;     // ffmpeg was faster than us
         if (!ok) {
             std::lock_guard<std::mutex> lk(mu);
-            failed = true; // cancelled (ffmpeg never came) or an error
+            failed = true;                                                  // cancelled (ffmpeg never came) or an error
             done.store(true);
             return;
         }
@@ -75,11 +83,11 @@ struct PipeSink {
             {
                 std::unique_lock<std::mutex> lk(mu);
                 cv.wait(lk, [&] { return !q.empty() || finishing; });
-                if (q.empty()) break; // finishing and everything written
+                if (q.empty()) break;                                       // finishing and everything written
                 chunk = std::move(q.front());
                 q.pop_front();
                 q_samples -= chunk.size();
-                while (!q.empty() && chunk.size() < 16384) { // fewer, bigger writes
+                while (!q.empty() && chunk.size() < 16384) {                // fewer, bigger writes
                     chunk.insert(chunk.end(), q.front().begin(), q.front().end());
                     q_samples -= q.front().size();
                     q.pop_front();

@@ -81,7 +81,7 @@ extern "C" {
     int   hr_dx_capture_nv12_tex(void *handle, int timeout_ms, int src_l, int src_t, int src_r, int src_b,
                                   void **out_tex);
     int   hr_dx_nv12_preview(void *handle, uint8_t *out_nv12, int queue_new);
-    // Item 9: overlay layers blended on the GPU (dxgi_capture.cpp / gpu_overlay.cpp)
+    // Overlay layers blended on the GPU (dxgi_capture.cpp / gpu_overlay.cpp)
     int   hr_dx_gpu_overlay_set(void *handle, const HrGpuLayer *layers, int count);
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
@@ -675,7 +675,7 @@ struct Pipeline {
     bool last_yuv_direct = false;
 
     std::atomic<bool> gpu_convert{false};
-    // Item 9: blend the overlays on the GPU (before the NV12 conversion) instead of on the CPU (ApplyNv12).
+    // Blend the overlays on the GPU (before the NV12 conversion) instead of on the CPU (ApplyNv12).
     std::atomic<bool> gpu_overlay{true};
     bool gpu_ov_failed_ = false;              // capture thread only: GPU overlays failed -> CPU compositor for good
     bool gpu_ov_pushed_ = false;              // capture thread only: the DXGI context holds a non-empty layer list
@@ -1524,7 +1524,7 @@ struct Pipeline {
                 // Overlays are blended into the finished NV12 frame (OverlayCompositor::ApplyNv12), which
                 // only works when that frame is the same size as the space overlay coordinates live in (no
                 // GPU downscale).
-                // With GPU overlays (item 9) the layers are drawn BEFORE the video processor scales the picture,
+                // With GPU overlays the layers are drawn BEFORE the video processor scales the picture,
                 // so a scaled output no longer blocks the GPU path; only the CPU compositor needs equal sizes.
                 const bool gpu_ov_possible = overlays_active && gpu_overlay.load(std::memory_order_relaxed) &&
                                              !gpu_ov_failed_;
@@ -1583,7 +1583,7 @@ struct Pipeline {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
-            // ====== ITEM 9: overlays blended on the GPU ======
+            // ====== overlays blended on the GPU ======
             // The layers go to the DXGI context now; the capture below draws them onto the desktop copy
             // before the video processor converts it (no CPU ApplyNv12 pass, no per-frame blending work).
             bool gpu_ov_tick = false;
@@ -2506,7 +2506,7 @@ HR_EXPORT void hr_pl_set_gpu_convert(void* handle, int enabled) {
 #endif
 }
 
-// Item 9 (setting gpu_overlay): overlays are blended on the GPU, before the NV12 conversion, whenever the GPU
+// Setting gpu_overlay: overlays are blended on the GPU, before the NV12 conversion, whenever the GPU
 // colour-conversion path is used. 0 = always composite them on the CPU like before. Safe to change while running.
 HR_EXPORT void hr_pl_set_gpu_overlay(void* handle, int enabled) {
     if (!handle) return;

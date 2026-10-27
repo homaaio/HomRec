@@ -1,4 +1,23 @@
-// audio_mixer.h - real-time mixer for the in-process audio path (item 10).
+// audio_mixer.h - real-time mixer for the in-process audio path.
+//
+// WHAT: the capture threads (mic, system loopback, the extra Audio Mixer channels) each hand over
+// interleaved 16-bit stereo at THEIR device's rate. This turns them into ONE stereo stream at one
+// output rate while the recording is running, so no per-source WAV files and no mix pass after Stop
+// are needed. The result goes to an "audio sink": the Media Foundation sink writer (AAC, in process) or
+// a named pipe that ffmpeg reads as a second input and muxes live.
+//
+// Contents
+//   StereoResampler  streaming linear resampler (state is kept between calls, so the result does not
+//                    depend on how the input was chopped into blocks).
+//   LiveMixer        any number of "push" sources (a capture thread feeds them) plus "pull" sources
+//                    (an audio file that is read on demand), summed with clipping.
+//
+// Alignment rule: every push source already keeps itself on the wall clock (WasapiStream::read() pads
+// silence / trims surplus), so equal amounts of audio are equal amounts of time. mix() therefore emits as
+// many frames as the SLOWEST push source has (the sources are consumed in lock-step). A source that falls
+// more than `max_lag` behind the fastest one is not waited for: it is padded with silence and remembers
+// the silence it owes ("debt"), so when its data finally arrives the stale part is dropped instead of
+// staying shifted for the rest of the recording.
 //
 // Pure C++11, no platform headers: unit tests live in scripts/tests/test_audio_mixer.cpp.
 // Not thread-safe: one thread owns a LiveMixer.
@@ -37,7 +56,7 @@ public:
         }
         const uint64_t ONE = (uint64_t)1 << 32;
         size_t i = 0;
-        if (!have_prev_) { // the very first frame is output frame 0 (position 0.0)
+        if (!have_prev_) {                 // the very first frame is output frame 0 (position 0.0)
             prev_[0] = in[0];
             prev_[1] = in[1];
             have_prev_ = true;

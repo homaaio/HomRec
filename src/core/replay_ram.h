@@ -1,4 +1,4 @@
-// replay_ram.h - the RAM Instant Replay buffer of ONE replay encoder run, the ffmpeg process' captured
+// replay_ram.h - the RAM Instant Replay buffer of ONE replay encoder run: the ffmpeg process' captured
 // stdout (an MPEG-TS stream, see hr_ff_set_capture_stdout() in ffmpeg_runner.cpp) is drained by a reader thread into a
 // ReplayRing (replay_ring.h). Nothing here touches Windows; hr_ff_read_stdout() is the only dependency.
 //
