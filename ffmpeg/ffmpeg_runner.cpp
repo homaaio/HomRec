@@ -96,6 +96,18 @@ struct FfmpegCtx {
 #ifdef _WIN32
     HANDLE      hAudioPipe{nullptr};  /* server end; owned here until hr_ff_take_audio_pipe() */
 #endif
+
+    bool        capture_stdout{false};
+#ifdef _WIN32
+    HANDLE      hStdoutRead{nullptr};
+#endif
+
+    int         overlay_w{0}, overlay_h{0}, overlay_fps{15};
+    bool        overlay_active{false};
+    std::string overlay_pipe_name;    /* \\.\pipe\HomRecOverlay_<pid>_<n> (ASCII) */
+#ifdef _WIN32
+    HANDLE      hOverlayPipe{nullptr};// server end; owned here until hr_ff_take_overlay_pipe()
+#endif
 };
 
 /* -- Helpers ---------------------------------------------------------------- */
@@ -171,6 +183,21 @@ static bool _create_audio_pipe(FfmpegCtx *ctx) {
     return true;
 }
 
+static bool _create_overlay_pipe(FfmpegCtx *ctx) {
+    static std::atomic<uint32_t> s_counter{0};
+    char name[96];
+    std::snprintf(name, sizeof(name), "\\\\.\\pipe\\HomRecOverlay_%lu_%u",
+                  (unsigned long)GetCurrentProcessId(), (unsigned)s_counter.fetch_add(1, std::memory_order_relaxed));
+    HANDLE h = CreateNamedPipeW(_utf8_to_wide(name).c_str(),
+                                PIPE_ACCESS_OUTBOUND,
+                                PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                1, 4 << 20, 0, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    ctx->hOverlayPipe = h;
+    ctx->overlay_pipe_name = name;
+    return true;
+}
+
 static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
     HANDLE hReadStdin{}, hWriteStdin{};
     // stdin is redirected in pipe mode (raw frames) and in ddagrab mode (only
@@ -191,6 +218,16 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
         SetHandleInformation(hWriteStdin, HANDLE_FLAG_INHERIT, 0);   // child must only inherit the read end
     }
 
+    HANDLE hOutRead = nullptr, hOutWrite = nullptr;
+    if (ctx->capture_stdout) {
+        SECURITY_ATTRIBUTES sa_out{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        if (!CreatePipe(&hOutRead, &hOutWrite, &sa_out, 1 << 20)) {
+            if (want_stdin) { CloseHandle(hReadStdin); CloseHandle(hWriteStdin); }
+            return false;
+        }
+        SetHandleInformation(hOutRead, HANDLE_FLAG_INHERIT, 0);
+    }
+
     // ddagrab mode: send ffmpeg's stderr to a log file so that a failure mid-recording
     // (display mode change by a game, encoder error, ...) leaves its reason behind.
     HANDLE hErrLog = INVALID_HANDLE_VALUE;
@@ -204,10 +241,10 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
-    if (want_stdin) {
-        si.hStdInput = hReadStdin;
+    if (want_stdin || ctx->capture_stdout) {
+        si.hStdInput = want_stdin ? hReadStdin : GetStdHandle(STD_INPUT_HANDLE);
         si.dwFlags  |= STARTF_USESTDHANDLES;
-        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.hStdOutput = ctx->capture_stdout ? hOutWrite : GetStdHandle(STD_OUTPUT_HANDLE);
         si.hStdError  = (hErrLog != INVALID_HANDLE_VALUE) ? hErrLog : GetStdHandle(STD_ERROR_HANDLE);
     }
     si.wShowWindow = SW_HIDE;
@@ -218,17 +255,20 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
         ((_wants_hw_pixfmt(ctx->codec_args) && !ctx->normal_priority) ? ABOVE_NORMAL_PRIORITY_CLASS
                                                                        : NORMAL_PRIORITY_CLASS);
     bool ok = (CreateProcessW(nullptr, mut_cmd.data(),
-                               nullptr, nullptr, want_stdin ? TRUE : FALSE,
+                               nullptr, nullptr, (want_stdin || ctx->capture_stdout) ? TRUE : FALSE,
                                priority_class,
                                nullptr, nullptr, &si, &pi) != 0);
 
     if (want_stdin && hReadStdin) CloseHandle(hReadStdin);
     if (hErrLog != INVALID_HANDLE_VALUE) CloseHandle(hErrLog);   // the child keeps its own copy
+    if (hOutWrite) CloseHandle(hOutWrite);                       // ditto: only ffmpeg holds the write end now
 
     if (!ok) {
         if (want_stdin && hWriteStdin) CloseHandle(hWriteStdin);
+        if (hOutRead) CloseHandle(hOutRead);
         return false;
     }
+    if (hOutRead) ctx->hStdoutRead = hOutRead;
 
     ctx->hProcess = pi.hProcess;
     ctx->hThread  = pi.hThread;
@@ -357,9 +397,18 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
                  << L":video_size=" << ctx->grab_w << L"x" << ctx->grab_h;
         }
         if (is_qsv) ss << L" -init_hw_device d3d11va";
-        ss << L" -filter_complex \"" << grab.str();
-        if (is_qsv) ss << L",hwmap=derive_device=qsv,format=qsv";
-        ss << L"\"";
+        if (ctx->overlay_active) {
+            ss << L" -f rawvideo -pixel_format bgra -video_size " << ctx->overlay_w << L"x" << ctx->overlay_h
+               << L" -framerate " << (ctx->overlay_fps > 0 ? ctx->overlay_fps : 15)
+               << L" -thread_queue_size 4 -i " << Q(ctx->overlay_pipe_name);
+            ss << L" -filter_complex \"" << grab.str()
+               << L",hwdownload,format=bgra[bg];[1:v]format=bgra[ov];"
+                  L"[bg][ov]overlay=x=0:y=0:eof_action=pass:repeatlast=1:format=auto,format=nv12[out]\" -map \"[out]\"";
+        } else {
+            ss << L" -filter_complex \"" << grab.str();
+            if (is_qsv) ss << L",hwmap=derive_device=qsv,format=qsv";
+            ss << L"\"";
+        }
         if (!ctx->codec_args.empty()) ss << L" " << _utf8_to_wide(ctx->codec_args);
         // Fix the colour tags of the encoded stream (limited range, BT.601) - see _ddagrab_vui_bsf().
         ss << _ddagrab_vui_bsf(ctx->codec_args);
@@ -453,6 +502,7 @@ HR_EXPORT void hr_ff_destroy(void *handle) {
     auto *ctx = static_cast<FfmpegCtx *>(handle);
 #ifdef _WIN32
     if (ctx->hAudioPipe) { CloseHandle(ctx->hAudioPipe); ctx->hAudioPipe = nullptr; }   // never handed to a sink
+    if (ctx->hOverlayPipe) { CloseHandle(ctx->hOverlayPipe); ctx->hOverlayPipe = nullptr; }   // ditto
 #endif
     /* Force-kill if still running */
 #ifdef _WIN32
@@ -468,6 +518,10 @@ HR_EXPORT void hr_ff_destroy(void *handle) {
     }
 #else
     if (ctx->running && ctx->pid > 0) kill(ctx->pid, SIGKILL);
+#endif
+#ifdef _WIN32
+    // The reader thread (if any) has been joined by the caller by now (see the capture_stdout comment).
+    if (ctx->hStdoutRead) { CloseHandle(ctx->hStdoutRead); ctx->hStdoutRead = nullptr; }
 #endif
     delete ctx;
 }
@@ -677,6 +731,55 @@ HR_EXPORT intptr_t hr_ff_take_audio_pipe(void *h) {
     return 0;
 #endif
 }
+HR_EXPORT void hr_ff_set_overlay_input(void *h, int w, int h2, int fps) {
+    if (!h) return;
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    ctx->overlay_w = w > 0 ? w : 0;
+    ctx->overlay_h = h2 > 0 ? h2 : 0;
+    ctx->overlay_fps = (fps >= 1 && fps <= 60) ? fps : 15;
+}
+
+HR_EXPORT int hr_ff_overlay_pipe_active(const void *h) {
+    return (h && static_cast<const FfmpegCtx *>(h)->overlay_active) ? 1 : 0;
+}
+
+HR_EXPORT intptr_t hr_ff_take_overlay_pipe(void *h) {
+    if (!h) return 0;
+#ifdef _WIN32
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    HANDLE p = ctx->hOverlayPipe;
+    ctx->hOverlayPipe = nullptr;
+    return reinterpret_cast<intptr_t>(p);
+#else
+    return 0;
+#endif
+}
+
+// Item 7. enable = 1: ffmpeg's stdout is captured (use `pipe:1` as the output path). Call before hr_ff_start().
+HR_EXPORT void hr_ff_set_capture_stdout(void *h, int enable) {
+    if (!h) return;
+    static_cast<FfmpegCtx *>(h)->capture_stdout = (enable != 0);
+}
+
+// Item 7. Blocking read of up to `cap` bytes of ffmpeg's captured stdout. Returns the byte count (> 0), 0 at
+// end-of-file (ffmpeg ended and everything it wrote was read), -1 when capture is not on / not started / error.
+// Meant for ONE reader thread; join it before hr_ff_destroy().
+HR_EXPORT int hr_ff_read_stdout(void *h, void *buf, int cap) {
+    if (!h || !buf || cap <= 0) return -1;
+#ifdef _WIN32
+    auto *ctx = static_cast<FfmpegCtx *>(h);
+    if (!ctx->hStdoutRead) return -1;
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(ctx->hStdoutRead, buf, (DWORD)cap, &got, nullptr)) {
+            return GetLastError() == ERROR_BROKEN_PIPE ? 0 : -1;   // the write end closed = ffmpeg is gone = EOF
+        }
+        if (got > 0) return (int)got;   // (a successful 0-byte read is not end-of-file on a pipe: read again)
+    }
+#else
+    return -1;
+#endif
+}
 
 // hr_ff_get_stdin_handle Returns the write end of ffmpeg's stdin pipe (valid only once
 // hr_ff_start() has succeeded and pipe_input was enabled), as an intptr_t-sized value so
@@ -701,12 +804,15 @@ HR_EXPORT int hr_ff_start(void *handle) {
     if (!ctx->pipe_input && !ctx->gpu_capture && ctx->input_path.empty()) return HR_FF_ERROR;
 
 #ifdef _WIN32
-    // Item 10: the named pipe has to exist BEFORE ffmpeg starts (it opens it by name). A failure here is not
-    // fatal: the recording just goes the old way (audio merged after Stop) - the caller checks audio_pipe_active.
     ctx->audio_active = false;
     if (ctx->audio_rate > 0 && ctx->pipe_input && !ctx->gpu_capture) {
         if (_create_audio_pipe(ctx)) ctx->audio_active = true;
         else HrLog::Warn("Recording: could not create the audio pipe for ffmpeg - audio will be merged after Stop instead.");
+    }
+    ctx->overlay_active = false;
+    if (ctx->overlay_w > 0 && ctx->overlay_h > 0 && ctx->gpu_capture) {
+        if (_create_overlay_pipe(ctx)) ctx->overlay_active = true;
+        else HrLog::Warn("Recording: could not create the overlay pipe for ffmpeg ddagrab.");
     }
 #endif
     std::wstring cmdline = _build_cmdline(ctx);
@@ -714,7 +820,9 @@ HR_EXPORT int hr_ff_start(void *handle) {
 #ifdef _WIN32
     if (!_launch_win(ctx, cmdline)) {
         if (ctx->hAudioPipe) { CloseHandle(ctx->hAudioPipe); ctx->hAudioPipe = nullptr; }
+        if (ctx->hOverlayPipe) { CloseHandle(ctx->hOverlayPipe); ctx->hOverlayPipe = nullptr; }
         ctx->audio_active = false;
+        ctx->overlay_active = false;
         return HR_FF_ERROR;
     }
 #else
