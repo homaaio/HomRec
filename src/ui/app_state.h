@@ -135,6 +135,17 @@ struct AppState {
     // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg captures AND
     // encodes entirely on the GPU.
     bool        gpu_capture_ddagrab = false;
+    //                        ddagrab, the two things it used to lack. Terminal / cfg only.
+    //   ddagrab_pause    : Pause works during a ddagrab recording. ffmpeg owns the capture and cannot be paused, so Pause
+    //                      ends the current ffmpeg piece and Resume starts the next one (same container as the output); Stop joins the pieces with a
+    //                      stream copy (no re-encode). `ddagrab_pause=0` = Pause stays unavailable (old behaviour).
+    //   ddagrab_overlays : HomRec overlays (text / image / gif / webcam / input) on a ddagrab recording. HomRec draws them
+    //                      into a transparent picture that ffmpeg gets as a second input and blends onto the grabbed
+    //                      frame. This needs the frames in system memory (hwdownload) for the blend - it is an opt-in
+    //                      because on a weak PC the normal pipeline with GPU-blended overlays (item 9) is usually the
+    //                      cheaper choice. NVENC / AMF only. `ddagrab_overlays=1` turns it on.
+    bool        ddagrab_pause    = true;
+    bool        ddagrab_overlays = false;
     // In-process hardware encoder (Windows Media Foundation, no ffmpeg process / pipe) for H.264 on
     // NVENC / QSV / AMF with the .mp4 container. Experimental: terminal / cfg only (`mf_encoder=1`).
     // Falls back to the ffmpeg pipe by itself when it cannot start. Audio is still merged by ffmpeg.
@@ -155,6 +166,8 @@ struct AppState {
     std::string filename_template = "HomRec_{date}_{time}";
     int         auto_stop_min      = 0;
     int         replay_buffer_sec  = 0;
+    bool        replay_in_ram      = true;
+    int         replay_ram_mb      = 1024;
     // Name of the preset (.hrc file, see preset_dialog.cpp) currently switched to - "default"
     // until the user ever uses File > Set Preset...
     std::string active_preset_name = "default";

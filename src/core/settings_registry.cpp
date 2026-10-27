@@ -165,6 +165,8 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("gpu_overlay", "video", &AppState::gpu_overlay, {"gpu_overlays"}));
         v.push_back(BoolField("skip_static_frames", "video", &AppState::skip_static_frames, {"vfr_pipe"}));
         v.push_back(BoolField("gpu_capture_ddagrab", "video", &AppState::gpu_capture_ddagrab));
+        v.push_back(BoolField("ddagrab_pause", "video", &AppState::ddagrab_pause));
+        v.push_back(BoolField("ddagrab_overlays", "video", &AppState::ddagrab_overlays));
         v.push_back(BoolField("mf_encoder", "video", &AppState::mf_encoder, {"media_foundation"}));
         v.push_back(BoolField("mf_gpu_texture", "video", &AppState::mf_gpu_texture));
         v.push_back(BoolField("inproc_audio", "audio", &AppState::inproc_audio, {"live_audio"}));
@@ -201,6 +203,8 @@ const std::vector<SettingDef> &All() {
         v.push_back(StrField("filename_template", "recording_extra", &AppState::filename_template));
         v.push_back(IntField("auto_stop_min", "recording_extra", &AppState::auto_stop_min));
         v.push_back(IntField("replay_buffer_sec", "recording_extra", &AppState::replay_buffer_sec));
+        v.push_back(BoolField("replay_in_ram", "recording_extra", &AppState::replay_in_ram, {"replay_ram"}));
+        v.push_back(IntField("replay_ram_mb", "recording_extra", &AppState::replay_ram_mb));
         v.push_back(BoolField("instant_replay_enabled", "recording_extra", &AppState::instant_replay_enabled));
         v.push_back(StrField("active_preset_name", "recording_extra", &AppState::active_preset_name));
         v.push_back(BoolField("scheduled_start_enabled", "recording_extra", &AppState::scheduled_start_enabled));
