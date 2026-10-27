@@ -925,8 +925,9 @@ static size_t window_samples(int cap_sec, int rate)
     return (size_t)cap_sec * (size_t)rate * 2;
 }
 
-HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
-                                         const char* sys_wav_path)
+HR_EXPORT int hr_audio_snapshot_to_wav_ex(const char* mic_wav_path,
+                                            const char* sys_wav_path,
+                                            int window_ms)
 {
     if (!g_state) return 0;
     int result = 0;
@@ -936,19 +937,33 @@ HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
     const int cap_sec = g_state->max_buffer_sec.load();
     std::vector<int16_t> mic_copy, sys_copy;
     int mic_rate = 0, sys_rate = 0;
+    // samples (stereo int16) = ms * rate * 2 / 1000, never more than the rolling window itself
+    auto want = [&](int rate) -> size_t {
+        const size_t full = window_samples(cap_sec, rate);
+        if (window_ms <= 0 || rate <= 0) return full;
+        size_t n = (size_t)((long long)window_ms * rate / 1000) * 2;
+        if (full > 0 && n > full) n = full;
+        return n;
+    };
     if (mic_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->mic_mutex);
         mic_rate = g_state->mic_stream.rate;
-        g_state->mic_buf.copy_tail(mic_copy, window_samples(cap_sec, mic_rate));
+        g_state->mic_buf.copy_tail(mic_copy, want(mic_rate));
     }
     if (sys_wav_path) {
         std::lock_guard<std::mutex> lk(g_state->sys_mutex);
         sys_rate = g_state->sys_stream.rate;
-        g_state->sys_buf.copy_tail(sys_copy, window_samples(cap_sec, sys_rate));
+        g_state->sys_buf.copy_tail(sys_copy, want(sys_rate));
     }
     if (!mic_copy.empty() && wav_write(mic_wav_path, mic_copy, 2, mic_rate)) result |= 0x1;
     if (!sys_copy.empty() && wav_write(sys_wav_path, sys_copy, 2, sys_rate)) result |= 0x2;
     return result;
+}
+
+HR_EXPORT int hr_audio_snapshot_to_wav(const char* mic_wav_path,
+                                         const char* sys_wav_path)
+{
+    return hr_audio_snapshot_to_wav_ex(mic_wav_path, sys_wav_path, 0);
 }
 
 // mix_wav_inmemory(mic_wav, sys_wav, out_wav)
@@ -964,6 +979,7 @@ static int mix_wav_inmemory(const char* mic_path,
 
     if (!wav_read(mic_path, mic_pcm, mic_ch, mic_rate)) return -1;
     if (!wav_read(sys_path, sys_pcm, sys_ch, sys_rate)) return -2;
+    // Never "succeed" with an empty result: the caller deletes the source WAVs after a successful mix.
     if (mic_pcm.empty() && sys_pcm.empty()) return -4;
 
     // Make both stereo if needed (simple duplication)
