@@ -1113,8 +1113,7 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
 
     if (!horizontal) {
         auto *sizer = new wxBoxSizer(wxVERTICAL);
-        // Start / Pause sit lower than before: the freed title block is replaced by a larger gap.
-        sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 120);
+        sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 16);
         sizer->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
         sizer->Add(section_status_lbl_, 0, wxEXPAND | wxTOP, 15);
         sizer->Add(statusRow, 0, wxEXPAND | wxTOP, 8);
