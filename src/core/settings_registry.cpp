@@ -169,7 +169,6 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("ddagrab_overlays", "video", &AppState::ddagrab_overlays));
         v.push_back(BoolField("mf_encoder", "video", &AppState::mf_encoder, {"media_foundation"}));
         v.push_back(BoolField("mf_gpu_texture", "video", &AppState::mf_gpu_texture));
-        v.push_back(BoolField("inproc_audio", "audio", &AppState::inproc_audio, {"live_audio"}));
         v.push_back(BoolField("game_friendly_priority", "video", &AppState::game_friendly_priority,
                               {"game_priority"}));
         v.push_back(BoolField("qsv_low_power", "video", &AppState::qsv_low_power, {"low_power"}));
@@ -184,6 +183,9 @@ const std::vector<SettingDef> &All() {
         }
 
         // -- [audio] ---------------------------------------------------------
+        // Registered here (not next to the [video] encoder switches) so the writer emits one
+        // [audio] block instead of splitting [video]/[audio] into two blocks each.
+        v.push_back(BoolField("inproc_audio", "audio", &AppState::inproc_audio, {"live_audio"}));
         v.push_back(IntField("audio_sample_rate", "audio", &AppState::audio_sample_rate));
         v.push_back(StrField("audio_aac_bitrate", "audio", &AppState::audio_aac_bitrate));
         v.push_back(IntField("audio_out_channels", "audio", &AppState::audio_out_channels));
