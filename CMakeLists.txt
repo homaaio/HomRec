@@ -137,3 +137,18 @@ target_compile_definitions(hom PRIVATE UNICODE _UNICODE)
 target_link_options(hom PRIVATE -static-libgcc -static-libstdc++)
 
 target_link_libraries(hom PRIVATE winhttp shlwapi dbghelp)
+
+# homrec.exe - standalone command-line interface (tools/homrec). Like hom it does NOT link
+# wx/Lua; unlike hom it uses a wide wmain(), so it IS built with -municode. Includes src/ only
+# for ui/version.h (the single source of truth for the version string).
+add_executable(homrec tools/homrec/homrec.cpp)
+
+target_include_directories(homrec PRIVATE src)
+
+target_compile_features(homrec PRIVATE cxx_std_17)
+
+target_compile_options(homrec PRIVATE -O2 -Wall -Wextra -municode -static-libgcc -static-libstdc++)
+
+target_compile_definitions(homrec PRIVATE UNICODE _UNICODE)
+
+target_link_options(homrec PRIVATE -municode -static-libgcc -static-libstdc++)

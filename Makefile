@@ -12,6 +12,10 @@ LUA_LDFLAGS ?= -LC:/lua54/lib
 HOM_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++
 HOM_LDLIBS   := -lwinhttp -lshlwapi -ldbghelp
 
+# homrec (tools/homrec/homrec.cpp) is the standalone command-line interface. Unlike hom it uses
+# a wide wmain() so non-ASCII paths in arguments work, hence -municode. No wxWidgets/Lua.
+HOMREC_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++
+
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 \
             -Isrc -IC:/msys64/mingw64/lib/wx/include/msw-unicode-3.2 \
             -IC:/msys64/mingw64/include/wx-3.2 -DWXUSINGDLL -D__WXMSW__ $(LUA_CFLAGS)
@@ -109,11 +113,14 @@ resource.o: resource.rc
 hom: FORCE
 	$(CXX) $(HOM_CXXFLAGS) -o hom.exe tools/hom/hom.cpp $(HOM_LDLIBS)
 
+homrec: FORCE
+	$(CXX) $(HOMREC_CXXFLAGS) -o homrec.exe tools/homrec/homrec.cpp
+
 FORCE:
 
 clean:
-	rm -f $(OBJS) resource.o hr.exe hom.exe
+	rm -f $(OBJS) resource.o hr.exe hom.exe homrec.exe
 
 clwexe: # clear without exe
 	rm -f $(OBJS) resource.o
-.PHONY: all clean hom FORCE
+.PHONY: all clean hom homrec FORCE
