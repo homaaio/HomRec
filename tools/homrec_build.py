@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # btw im from windows
+import contextlib
 import hashlib
 import os
 import re
@@ -7,8 +8,152 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import zipfile
+
+# ---------------------------------------------------------------------------
+# Pretty-printing helpers: colors, unicode, bouncing loading bar
+# ---------------------------------------------------------------------------
+
+def _enable_ansi():
+    """Enable ANSI escape codes on Windows 10+ consoles."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+        return True
+    except Exception:
+        return False
+
+_ANSI_ENABLED = _enable_ansi()
+
+def _stdout_is_tty():
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+def _color_enabled():
+    if not _stdout_is_tty():
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.name == "nt" and not _ANSI_ENABLED:
+        return False
+    return True
+
+def _unicode_ok():
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        for ch in "─│▸●✓✗█░":
+            ch.encode(enc)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
+_COLOR = _color_enabled()
+_UNI = _unicode_ok()
+_ANIMATE = _COLOR  # animation needs ANSI (cursor hide + erase-line)
+
+class C:
+    RESET   = "\033[0m"  if _COLOR else ""
+    BOLD    = "\033[1m"  if _COLOR else ""
+    DIM     = "\033[2m"  if _COLOR else ""
+    RED     = "\033[31m" if _COLOR else ""
+    GREEN   = "\033[32m" if _COLOR else ""
+    YELLOW  = "\033[33m" if _COLOR else ""
+    BLUE    = "\033[34m" if _COLOR else ""
+    MAGENTA = "\033[35m" if _COLOR else ""
+    CYAN    = "\033[36m" if _COLOR else ""
+    WHITE   = "\033[37m" if _COLOR else ""
+
+H      = "─" if _UNI else "-"
+ARROW  = "▸" if _UNI else ">"
+OK     = "✓" if _UNI else "[OK]"
+BAD    = "✗" if _UNI else "[X]"
+DOT    = "●" if _UNI else "*"
+BLOCK  = "█" if _UNI else "#"
+SHADE  = "░" if _UNI else "."
+
+
+def section(title):
+    print()
+    print(f"{C.BOLD}{C.CYAN}{ARROW} {title}{C.RESET}")
+    print(f"{C.DIM}{H * 58}{C.RESET}")
+
+def warn(msg):
+    print(f"  {C.YELLOW}WARNING:{C.RESET} {msg}")
+
+def error(msg):
+    print(f"  {C.RED}ERROR:{C.RESET} {msg}")
+
+def success(msg):
+    print(f"  {C.GREEN}{OK}{C.RESET} {msg}")
+
+
+class _NoopState:
+    def __setitem__(self, k, v):
+        pass
+
+
+@contextlib.contextmanager
+def bouncing_bar(initial_label, width=26, chunk=7):
+    """Bouncing marquee shown while a blocking operation runs.
+
+    The caller can update the label from the main thread via
+    ``state['label'] = '...'``; the animation thread picks it up on the
+    next frame. In non-interactive shells it degrades to a single printed line.
+    """
+    if not _ANIMATE:
+        print(f"  {initial_label} ...", flush=True)
+        yield _NoopState()
+        return
+
+    state = {"label": initial_label}
+    stop = threading.Event()
+    period = max(1, 2 * (width - chunk))
+
+    def animate():
+        sys.stdout.write("\033[?25l")  # hide cursor
+        sys.stdout.flush()
+        frame = 0
+        try:
+            while not stop.is_set():
+                t = frame % period
+                pos = t if t <= width - chunk else period - t
+                cells = [SHADE] * width
+                for i in range(chunk):
+                    idx = pos + i
+                    if 0 <= idx < width:
+                        cells[idx] = BLOCK
+                bar = "".join(cells)
+                label = state["label"]
+                sys.stdout.write(f"\r  {label} {C.CYAN}[{bar}]{C.RESET}\033[K")
+                sys.stdout.flush()
+                frame += 1
+                time.sleep(0.045)
+        finally:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.write("\033[?25h")  # restore cursor
+            sys.stdout.flush()
+
+    t = threading.Thread(target=animate, daemon=True)
+    t.start()
+    try:
+        yield state
+    finally:
+        stop.set()
+        t.join(timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Project paths
+# ---------------------------------------------------------------------------
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION_H = os.path.join(REPO_ROOT, "src", "ui", "version.h")
@@ -21,51 +166,53 @@ ALWAYS_SKIP_FILES = {
     "homrec.hrc", "homrec_settings.json", "homrec_overlays.hrc",
 }
 
-def section(title):
-    print(f"\n=== {title} ===")
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
 
 def ask(prompt, default=None):
     suffix = f" [{default}]" if default not in (None, "") else ""
+    prompt_str = f"{C.CYAN}{prompt}{C.RESET}{C.DIM}{suffix}{C.RESET}: "
     while True:
-        val = input(f"{prompt}{suffix}: ").strip()
+        val = input(prompt_str).strip()
         if val:
             return val
         if default is not None:
             return default
-        print("  (a non-empty answer is required)")
+        print(f"  {C.YELLOW}(a non-empty answer is required){C.RESET}")
 
 def ask_yes_no(prompt, default_yes=True):
     hint = "Y/n" if default_yes else "y/N"
-    val = input(f"{prompt} [{hint}]: ").strip().lower()
+    val = input(f"{C.CYAN}{prompt}{C.RESET} {C.DIM}[{hint}]{C.RESET}: ").strip().lower()
     if not val:
         return default_yes
     return val in ("y", "yes")
 
 def ask_int(prompt, default, lo, hi):
     while True:
-        raw = input(f"{prompt} [{default}]: ").strip()
+        raw = input(f"{C.CYAN}{prompt}{C.RESET} {C.DIM}[{default}]{C.RESET}: ").strip()
         if not raw:
             raw = str(default)
         try:
             n = int(raw)
         except ValueError:
-            print(f"  enter a number between {lo} and {hi}")
+            print(f"  {C.YELLOW}enter a number between {lo} and {hi}{C.RESET}")
             continue
         if lo <= n <= hi:
             return n
-        print(f"  enter a number between {lo} and {hi}")
+        print(f"  {C.YELLOW}enter a number between {lo} and {hi}{C.RESET}")
 
 def ask_choice(prompt, options):
     """options: list of (key, label). Returns the chosen key."""
     for i, (_key, label) in enumerate(options, 1):
-        print(f"  {i}) {label}")
+        print(f"  {C.BOLD}{i}){C.RESET} {label}")
     while True:
-        raw = input(f"{prompt} [1-{len(options)}]: ").strip()
+        raw = input(f"{C.CYAN}{prompt}{C.RESET} {C.DIM}[1-{len(options)}]{C.RESET}: ").strip()
         if not raw:
             raw = "1"
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return options[int(raw) - 1][0]
-        print(f"  enter a number between 1 and {len(options)}")
+        print(f"  {C.YELLOW}enter a number between 1 and {len(options)}{C.RESET}")
 
 def sanitize_label(label):
     label = re.sub(r"[^A-Za-z0-9._-]+", "-", label.strip())
@@ -97,8 +244,8 @@ def write_version(new_version):
         content,
     )
     if n1 == 0 or n2 == 0:
-        print("  WARNING: could not find HR_APP_VERSION/HR_APP_VERSION_W in "
-              "version.h - file left untouched, update the version by hand.")
+        warn("could not find HR_APP_VERSION/HR_APP_VERSION_W in version.h - "
+             "file left untouched, update the version by hand.")
         return False
     with open(VERSION_H, "w", encoding="utf-8") as f:
         f.write(content)
@@ -108,9 +255,9 @@ def step_version():
     section("Version")
     current = read_current_version()
     if current:
-        print(f"Current version in src/ui/version.h: {current}")
+        print(f"  Current version: {C.BOLD}{current}{C.RESET}  {C.DIM}(src/ui/version.h){C.RESET}")
     else:
-        print("Could not read the current version from src/ui/version.h.")
+        warn("could not read the current version from src/ui/version.h")
 
     version = ask("Release version (e.g. 2.1.0)", default=current)
     version = version.lstrip("vV")
@@ -118,7 +265,7 @@ def step_version():
     if current and version != current:
         if ask_yes_no(f"Update src/ui/version.h from {current} to {version}?"):
             if write_version(version):
-                print(f"  version.h updated -> {version}")
+                success(f"version.h updated -> {version}")
     elif not current:
         if ask_yes_no(f"Write {version} to src/ui/version.h?"):
             write_version(version)
@@ -154,7 +301,7 @@ def to_msys_path(win_path):
 def run_in_mingw64(shell_cmd, cwd):
     bash = find_msys2_bash()
     if not bash:
-        print("  MSYS2 not found (looked in MSYS2_ROOT and "
+        error("MSYS2 not found (looked in MSYS2_ROOT and "
               f"{', '.join(MSYS2_ROOT_CANDIDATES)}). Install MSYS2 "
               "(https://www.msys2.org/) and its mingw-w64-x86_64-toolchain "
               "package, or set MSYS2_ROOT to point at an existing install.")
@@ -169,12 +316,12 @@ def run_in_mingw64(shell_cmd, cwd):
 
     msys_cwd = to_msys_path(cwd)
     full_cmd = f"cd '{msys_cwd}' && {shell_cmd}"
-    print(f"  $ [MSYS2 MINGW64] {shell_cmd}")
+    print(f"  {C.DIM}$ [MSYS2 MINGW64]{C.RESET} {shell_cmd}")
     try:
         result = subprocess.run([bash, "-lc", full_cmd], cwd=cwd, env=env)
         return result.returncode == 0
     except FileNotFoundError:
-        print(f"  '{bash}' could not be run.")
+        error(f"'{bash}' could not be run.")
         return False
 
 def step_build():
@@ -182,8 +329,8 @@ def step_build():
     hr_exe = os.path.join(REPO_ROOT, "hr.exe")
     hom_exe = os.path.join(REPO_ROOT, "hom.exe")
 
-    if ask_yes_no("Rebuild hr.exe and hom.exe now (make clean && make && make hom, "
-                  "in MSYS2 MINGW64)?"):
+    if ask_yes_no("Rebuild hr.exe and hom.exe now "
+                  "(make clean && make && make hom, in MSYS2 MINGW64)?"):
         # Same LUA_CFLAGS/LUA_LDFLAGS the Makefile itself defaults to
         # (see its `?=` lines) - overridable via env vars for anyone whose
         # lua54 isn't installed at C:\lua54.
@@ -196,27 +343,28 @@ def step_build():
         )
         ok = run_in_mingw64(make_cmd, REPO_ROOT)
         if not ok:
-            print("  Build finished with an error.")
-            if not ask_yes_no("Continue with the old hr.exe/hom.exe (if any)?", default_yes=False):
+            error("build finished with an error")
+            if not ask_yes_no("Continue with the old hr.exe/hom.exe (if any)?",
+                              default_yes=False):
                 sys.exit(1)
 
     if not os.path.isfile(hr_exe):
-        print("  hr.exe not found in the repo root - the 'full' and "
-              "'portable' presets will be built without it if you continue.")
+        warn("hr.exe not found in the repo root - the 'full' and "
+             "'portable' presets will be built without it if you continue.")
     if not os.path.isfile(hom_exe):
-        print("  hom.exe not found - it will be skipped in the archives if you continue.")
+        warn("hom.exe not found - it will be skipped in the archives if you continue.")
 
-    return hr_exe if os.path.isfile(hr_exe) else None, \
-        hom_exe if os.path.isfile(hom_exe) else None
+    return (hr_exe if os.path.isfile(hr_exe) else None,
+            hom_exe if os.path.isfile(hom_exe) else None)
 
 def find_ffmpeg():
     section("ffmpeg")
-    # No more "use this ffmpeg.exe for the full build?" yes/no here - the 'full' vs 'portable'
-    # choice made in step_archives() *is* the "add ffmpeg or not" decision; asking again here
-    # was a second prompt for the same choice.
+    # No "use this ffmpeg.exe for the full build?" prompt here: the
+    # 'full' vs 'portable' choice in step_archives() *is* the
+    # "add ffmpeg or not" decision.
     candidates = [
         os.path.join(REPO_ROOT, "ffmpeg", "ffmpeg.exe"),
-        os.path.join(REPO_ROOT, "ffmpeg.exe"),  # legacy location, still honored if present
+        os.path.join(REPO_ROOT, "ffmpeg.exe"),  # legacy location
     ]
     found = next((c for c in candidates if os.path.isfile(c)), None)
     if not found:
@@ -225,28 +373,27 @@ def find_ffmpeg():
             found = which
 
     if found:
-        print(f"Found: {found} (will be bundled in 'full' archives)")
+        success(f"using {found} (bundled in 'full' archives)")
         return found
 
-    manual = ask("Path to the ffmpeg.exe to bundle in 'full' archives (Enter to skip)", default="")
+    manual = ask("Path to the ffmpeg.exe to bundle in 'full' archives "
+                 "(Enter to skip)", default="")
     if manual and os.path.isfile(manual):
         return manual
     if manual:
-        print("  File not found at that path - skipping ffmpeg.")
+        warn("file not found at that path - skipping ffmpeg")
     else:
-        print("  ffmpeg not found - 'full' archives will be built without it (like 'portable').")
+        print(f"  {C.DIM}no ffmpeg - 'full' archives will be built without it "
+              f"(like 'portable').{C.RESET}")
     return None
 
 # ---------------------------------------------------------------------------
 # Step 4: archives
 # ---------------------------------------------------------------------------
 
-# README.md/LICENSE/CHANGELOG.txt are the only docs actual end users of a release archive
-# need.
 BASE_DOCS = ["README.md", "LICENSE", "FREE.txt", "CHANGELOG.txt"]
 BASE_DIRS = ["cfg"]
 
-# Archive formats offered in the menu.
 FORMAT_OPTIONS = [
     ("zip", "zip"),
     ("tar.gz", "tar.gz"),
@@ -282,9 +429,10 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
             # see discover_root_dlls(). hom.exe doesn't need these.
             dlls = discover_root_dlls()
             if not dlls:
-                print("  WARNING: hr.exe is included, but no .dll was found next to it "
-                      "in the repo root - if this is a dynamic build (the default for "
-                      "this Makefile), the archive won't run on another machine without them.")
+                warn("hr.exe is included, but no .dll was found next to it "
+                     "in the repo root - if this is a dynamic build (the "
+                     "default for this Makefile), the archive won't run on "
+                     "another machine without them.")
             for dll in dlls:
                 files.append((os.path.join(REPO_ROOT, dll), dll))
         if hom_exe:
@@ -313,14 +461,21 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
     return files
 
 def make_archive(files, out_path, fmt):
+    n = len(files)
+    label = f"Packing {os.path.basename(out_path)}"
+
     if fmt == "zip":
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for abs_path, arcname in files:
-                zf.write(abs_path, arcname)
+            with bouncing_bar(label) as state:
+                for i, (abs_path, arcname) in enumerate(files, 1):
+                    zf.write(abs_path, arcname)
+                    state["label"] = f"{label}  {i}/{n}"
     elif fmt == "tar.gz":
         with tarfile.open(out_path, "w:gz") as tf:
-            for abs_path, arcname in files:
-                tf.add(abs_path, arcname)
+            with bouncing_bar(label) as state:
+                for i, (abs_path, arcname) in enumerate(files, 1):
+                    tf.add(abs_path, arcname)
+                    state["label"] = f"{label}  {i}/{n}"
     elif fmt == "7z":
         sevenzip = shutil.which("7z") or shutil.which("7za")
         if not sevenzip:
@@ -334,14 +489,32 @@ def make_archive(files, out_path, fmt):
         if os.path.isdir(stage):
             shutil.rmtree(stage)
         os.makedirs(stage)
-        for abs_path, arcname in files:
-            dest = os.path.join(stage, arcname)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy2(abs_path, dest)
-        subprocess.run([sevenzip, "a", "-mx=9", out_path, "."], cwd=stage, check=True)
-        shutil.rmtree(stage)
+        try:
+            for abs_path, arcname in files:
+                dest = os.path.join(stage, arcname)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(abs_path, dest)
+            # Suppress 7z's own progress so it doesn't fight with our bar.
+            with bouncing_bar(f"{label} (7z)"):
+                result = subprocess.run(
+                    [sevenzip, "a", "-mx=9", out_path, "."],
+                    cwd=stage,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            if result.returncode != 0:
+                raise RuntimeError(f"7z failed: {result.stderr.strip() or result.returncode}")
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
     else:
         raise ValueError(f"unknown format {fmt}")
+
+def _size_str(num_bytes):
+    mb = num_bytes / (1024 * 1024)
+    if mb >= 1024:
+        return f"{mb / 1024:.2f} GB"
+    return f"{mb:.1f} MB"
 
 def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
     section("Release archives")
@@ -357,27 +530,27 @@ def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
 
     produced = []
     for i in range(1, count + 1):
-        print(f"\n--- Archive {i}/{count} ---")
-        label = sanitize_label(ask(f"Label for archive #{i} (e.g. win64-full)", default=f"build{i}"))
+        print(f"\n{C.BOLD}--- Archive {i}/{count} ---{C.RESET}")
+        label = sanitize_label(ask(f"Label for archive #{i} (e.g. win64-full)",
+                                   default=f"build{i}"))
         preset = ask_choice("What should go in the archive?", preset_options)
         fmt = ask_choice("Archive format?", FORMAT_OPTIONS)
 
         files = collect_files(preset, hr_exe, hom_exe, ffmpeg_path)
         if not files:
-            print("  Nothing to archive (no files for this preset) - skipping.")
+            warn("nothing to archive (no files for this preset) - skipping")
             continue
 
         out_name = f"homrec-{version}-{label}.{fmt}"
         out_path = os.path.join(DIST_DIR, out_name)
-        print(f"  Building {out_name} ({len(files)} files)...")
         try:
             make_archive(files, out_path, fmt)
         except RuntimeError as e:
-            print(f"  {e}")
-            print(f"  Skipping {out_name}.")
+            error(str(e))
+            print(f"  {C.DIM}skipping {out_name}{C.RESET}")
             continue
-        size_mb = os.path.getsize(out_path) / (1024 * 1024)
-        print(f"  Done: {out_path} ({size_mb:.1f} MB)")
+        success(f"{out_name}  {C.DIM}({len(files)} files, "
+                f"{_size_str(os.path.getsize(out_path))}){C.RESET}")
         produced.append(out_path)
 
     return produced
@@ -392,16 +565,21 @@ def write_checksums(produced):
     section("Checksums")
     sums_path = os.path.join(DIST_DIR, "SHA256SUMS.txt")
     lines = []
-    for path in produced:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        lines.append(f"{h.hexdigest()}  {os.path.basename(path)}")
-        print(f"  {lines[-1]}")
+    total = len(produced)
+    with bouncing_bar(f"Hashing {total} archive(s)") as state:
+        for i, path in enumerate(produced, 1):
+            name = os.path.basename(path)
+            state["label"] = f"Hashing {name}  {i}/{total}"
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            lines.append(f"{h.hexdigest()}  {name}")
     with open(sums_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"Written to {sums_path}")
+    for line in lines:
+        print(f"  {C.DIM}{line}{C.RESET}")
+    success(f"written to {sums_path}")
     return sums_path
 
 def extract_release_notes(version):
@@ -434,26 +612,34 @@ def extract_release_notes(version):
 def suggest_git_commands(version):
     section("Git (nothing is run automatically)")
     tag = f"v{version}"
-    print("Once everything checks out, tag and push - by hand:")
-    print(f'  git tag -a {tag} -m "homrec {version}"')
-    print(f"  git push origin {tag}")
-    print("\nThen create the GitHub Release for that tag and attach the archives")
-    print(f"from {DIST_DIR} as release assets.")
-    print("\nThe Windows installer (installer\\HomRec.iss) is no longer built by this")
-    print("script - build it yourself in a separate Inno Setup window (ISCC.exe or the")
-    print("Inno Setup Compiler GUI) and attach the resulting Setup .exe to the release")
-    print("by hand. IMPORTANT for auto-update: it has to be the installer .exe itself")
-    print("(not just the zip/tar.gz) - existing installs' Help > Check for Updates")
-    print("(src/hr_update.cpp) looks at the latest release for an asset whose name ends")
-    print("in .exe and offers to silently install it; skip this and auto-update simply")
-    print("won't find anything to offer.")
+    print(f"  Once everything checks out, tag and push - by hand:")
+    print(f"    {C.BOLD}git tag -a {tag} -m \"homrec {version}\"{C.RESET}")
+    print(f"    {C.BOLD}git push origin {tag}{C.RESET}")
+    print()
+    print("  Then create the GitHub Release for that tag and attach the archives")
+    print(f"  from {C.BOLD}{DIST_DIR}{C.RESET} as release assets.")
+    print()
+    print("  The Windows installer (installer\\HomRec.iss) is no longer built by this")
+    print("  script - build it yourself in a separate Inno Setup window (ISCC.exe or")
+    print("  the Inno Setup Compiler GUI) and attach the resulting Setup .exe to the")
+    print("  release by hand.")
+    print()
+    print(f"  {C.YELLOW}IMPORTANT for auto-update:{C.RESET} it has to be the installer .exe")
+    print("  itself (not just the zip/tar.gz) - existing installs' Help > Check for")
+    print("  Updates (src/hr_update.cpp) looks at the latest release for an asset")
+    print("  whose name ends in .exe and offers to silently install it; skip this")
+    print("  and auto-update simply won't find anything to offer.")
+
+def banner():
+    line = H * 58
+    print(f"{C.BOLD}{C.MAGENTA}{line}{C.RESET}")
+    print(f"{C.BOLD}{C.MAGENTA}  {DOT} HomRec release builder{C.RESET}")
+    print(f"{C.BOLD}{C.MAGENTA}{line}{C.RESET}")
 
 def main():
-    print("=" * 60)
-    print("  HomRec release builder")
-    print("=" * 60)
+    banner()
     print("Welcome! Let's put together the release archives for GitHub/mirrors.")
-    print(f"Repository: {REPO_ROOT}")
+    print(f"{C.DIM}Directory: {REPO_ROOT}{C.RESET}")
 
     start_time = time.time()
 
@@ -466,24 +652,28 @@ def main():
     write_checksums(produced)
     notes_path = extract_release_notes(version)
     if notes_path:
-        print(f"Release notes (from CHANGELOG.txt) saved to {notes_path}")
+        success(f"release notes (from CHANGELOG.txt) saved to {notes_path}")
     else:
-        print("Could not pull a section out of CHANGELOG.txt - no release notes were created.")
+        warn("could not pull a section out of CHANGELOG.txt - no release notes created")
     suggest_git_commands(version)
 
     elapsed = time.time() - start_time
     section("Done")
     if produced:
-        print(f"Archives built: {len(produced)} in {elapsed:.1f}s.")
+        print(f"  {C.GREEN}{OK}{C.RESET} Built {C.BOLD}{len(produced)}{C.RESET} "
+              f"archive(s) in {elapsed:.1f}s")
         for p in produced:
-            print(f"  - {p}")
-        print(f"\nEverything is in {DIST_DIR} - ready to upload to GitHub Releases/mirrors.")
+            print(f"    {C.DIM}{DOT}{C.RESET} {os.path.basename(p)}  "
+                  f"{C.DIM}({_size_str(os.path.getsize(p))}){C.RESET}")
+        print()
+        print(f"  {C.DIM}Everything is in {DIST_DIR} - ready to upload to "
+              f"GitHub Releases/mirrors.{C.RESET}")
     else:
-        print("No archive was built.")
+        warn("no archive was built")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nInterrupted by user.")
+        print(f"\n{C.YELLOW}Interrupted by user.{C.RESET}")
         sys.exit(1)
