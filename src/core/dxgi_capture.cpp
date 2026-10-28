@@ -759,11 +759,15 @@ static int dx_map(DxCapCtx *c, ID3D11Texture2D *tex, bool wait, int timeout_ms,
         hr = c->context->Map(tex, 0, D3D11_MAP_READ, 0, &mapped);
     } else {
         const ULONGLONG map_deadline = GetTickCount64() + (ULONGLONG)std::max(timeout_ms, 8);
+        int polls = 0;
         for (;;) {
             hr = c->context->Map(tex, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
             if (hr != DXGI_ERROR_WAS_STILL_DRAWING) break;
             if (GetTickCount64() >= map_deadline) return HR_DX_TIMEOUT;
-            Sleep(1);
+            ++polls;
+            if (polls <= 32)      YieldProcessor();   // spin: pause hint, no scheduler involved
+            else if (polls <= 64) SwitchToThread();   // give the slice to a ready thread, if any
+            else                  Sleep(1);           // GPU is genuinely busy: stop burning CPU
         }
     }
     return FAILED(hr) ? HR_DX_ERROR : HR_DX_OK;
