@@ -1,6 +1,6 @@
 # HomRec (Hardware Optimized Mechanism Recorder)
 
-[![Version](https://img.shields.io/github/v/release/homaaio/HomRec?include_prereleases&label=version&color=blue&style=flat-square)](https://github.com/homaaio/HomRec/releases)
+[![Version](https://img.shields.io/github/v/release/homaaio/HomRec?include_prereleases&label=latest&color=blue&style=flat-square)](https://github.com/homaaio/HomRec/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2B%20(64--bit)-0078d4?style=flat-square&logo=windows)](#system-requirements)
 [![License](https://img.shields.io/badge/license-GPLv3-green?style=flat-square)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-0047ab?style=flat-square&logo=discord)](https://discord.gg/Gv4t6Xhy7E)
