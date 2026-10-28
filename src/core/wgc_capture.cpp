@@ -314,7 +314,8 @@ struct Ctx {
     int st_w = 0, st_h = 0;
 
     int  geom_w = -1, geom_h = -1;      // content size the canvas was last composed for
-    std::vector<int> xmap;              // scratch for nearest-neighbour scaling
+    std::vector<int> xmap;              // nearest-neighbour column map for the current scale ...
+    int  xmap_sw = -1, xmap_dw = -1;    // ... valid for this source / destination width (-1 = not built)
 
     // ---- PrintWindow backend (no WinRT at all, see PwCapture()) ----
     bool     pw = false;                // this context captures with PrintWindow, not Windows.Graphics.Capture
@@ -799,8 +800,11 @@ void Compose(Ctx *c, const uint8_t *src, int pitch, int sw, int sh, uint8_t *dst
         return;
     }
 
-    c->xmap.resize((size_t)dw);
-    for (int x = 0; x < dw; ++x) c->xmap[(size_t)x] = (int)(((int64_t)x * sw) / dw);
+    if (c->xmap_sw != sw || c->xmap_dw != dw) {     // the map only depends on (sw, dw): rebuild on change
+        c->xmap.resize((size_t)dw);
+        for (int x = 0; x < dw; ++x) c->xmap[(size_t)x] = (int)(((int64_t)x * sw) / dw);
+        c->xmap_sw = sw; c->xmap_dw = dw;
+    }
     for (int y = 0; y < dh; ++y) {
         const int sy = (int)(((int64_t)y * sh) / dh);
         const uint32_t *srow = reinterpret_cast<const uint32_t *>(src + (size_t)sy * pitch);
