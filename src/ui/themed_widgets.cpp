@@ -449,6 +449,7 @@ void FlatFader::OnMouseMove(wxMouseEvent &evt) {
     if (dragging_ && evt.LeftIsDown()) UpdateFromPos(evt.GetPosition());
 }
 void FlatFader::OnWheel(wxMouseEvent &evt) {
+    if (!evt.ControlDown()) { evt.Skip(); return; }
     const int steps = evt.GetWheelRotation() / std::max(1, evt.GetWheelDelta());
     if (steps != 0) SetAndNotify(value_ + steps * 5);
 }
