@@ -161,15 +161,11 @@ void MaybeLogSnapshot(bool is_recording, double current_fps, bool hw_encoder_act
                                    (cur.sys_idle   - prev_sample.sys_idle);
         uint64_t sys_total_delta = (cur.sys_kernel - prev_sample.sys_kernel) +
                                     (cur.sys_user   - prev_sample.sys_user);
-        SYSTEM_INFO si{};
-        GetSystemInfo(&si);
-        int cores = si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
         if (sys_total_delta > 0) {
-            // proc_delta is summed across all cores the process used;
-            proc_cpu_pct = 100.0 * (double)proc_delta / (double)sys_total_delta / cores;
+            proc_cpu_pct = 100.0 * (double)proc_delta / (double)sys_total_delta;
             sys_cpu_pct  = 100.0 * (double)sys_busy_delta / (double)sys_total_delta;
             // Same scale as cpu_proc / cpu_sys (0-100 of the whole CPU, all cores).
-            ff_cpu_pct   = 100.0 * (double)ff.cpu_delta / (double)sys_total_delta / cores;
+            ff_cpu_pct   = 100.0 * (double)ff.cpu_delta / (double)sys_total_delta;
         }
     }
     prev_sample = cur;
@@ -223,10 +219,22 @@ void MaybeLogSnapshot(bool is_recording, double current_fps, bool hw_encoder_act
     if (free_disk_gb >= 0) snprintf(disk_buf, sizeof(disk_buf), "%.1fGB", free_disk_gb);
     else                   snprintf(disk_buf, sizeof(disk_buf), "n/a");
 
-    char line[640];
+    // hr.exe + all child ffmpeg.exe together - what you get when adding both rows in Task Manager.
+    char total_cpu_buf[16];
+    if (proc_cpu_pct >= 0 && ff_cpu_pct >= 0)
+        snprintf(total_cpu_buf, sizeof(total_cpu_buf), "%.1f%%", proc_cpu_pct + ff_cpu_pct);
+    else if (proc_cpu_pct >= 0 && ff.count == 0)
+        snprintf(total_cpu_buf, sizeof(total_cpu_buf), "%.1f%%", proc_cpu_pct);
+    else
+        snprintf(total_cpu_buf, sizeof(total_cpu_buf), "n/a");
+    const unsigned long long total_mem_mb =
+        (unsigned long long)working_set_mb + (unsigned long long)(ff.ws_bytes / (1024 * 1024));
+
+    char line[704];
     snprintf(line, sizeof(line),
              "[%s] cpu_proc=%s cpu_ffmpeg=%s cpu_sys=%s mem_proc=%lluMB sys_mem=%lu%% "
-             "(%lluMB free of %lluMB) disk_free=%s state=%s fps=%.1f gpu_encoder=%s",
+             "(%lluMB free of %lluMB) disk_free=%s state=%s fps=%.1f gpu_encoder=%s "
+             "cpu_total=%s mem_total=%lluMB",
              ts, proc_cpu_buf, ff_buf, sys_cpu_buf,
              (unsigned long long)working_set_mb,
              (unsigned long)sys_mem_load_pct,
@@ -234,7 +242,8 @@ void MaybeLogSnapshot(bool is_recording, double current_fps, bool hw_encoder_act
              disk_buf,
              is_recording ? "recording" : "idle",
              current_fps,
-             hw_encoder_active ? "yes" : "no");
+             hw_encoder_active ? "yes" : "no",
+             total_cpu_buf, total_mem_mb);
     f << line << "\n";
 }
 
