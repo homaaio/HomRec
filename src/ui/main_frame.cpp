@@ -2574,6 +2574,16 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
         return;
     }
 
+    // Auto-stop (Settings > Advanced, minutes, 0 = off). Counts active recording time only:
+    // elapsed_seconds() excludes pauses. DoStop() sets stop_pending_, so this fires once.
+    if (state_.recording && !stop_pending_ && state_.auto_stop_min > 0 && rec_ &&
+        rec_->elapsed_seconds() >= state_.auto_stop_min * 60.0) {
+        HrLog::Info("Recording: auto-stop limit (" + std::to_string(state_.auto_stop_min) +
+                    " min) reached - stopping.");
+        DoStop();
+        return;
+    }
+
     UpdatePreviewToggleButton();
     UpdatePreviewFpsLabel();
 
