@@ -138,10 +138,38 @@ target_link_options(hom PRIVATE -static-libgcc -static-libstdc++)
 
 target_link_libraries(hom PRIVATE winhttp shlwapi dbghelp)
 
-# homrec.exe - standalone command-line interface (tools/homrec). Like hom it does NOT link
-# wx/Lua; unlike hom it uses a wide wmain(), so it IS built with -municode. Includes src/ only
-# for ui/version.h (the single source of truth for the version string).
-add_executable(homrec tools/homrec/homrec.cpp)
+# homrec.exe - standalone command-line interface (tools/homrec). No wx/Lua, and a wide wmain(), so
+# it IS built with -municode. 'homrec start' records with the same RecordingController as hr.exe,
+# so the wx-free engine sources are compiled into it too (same list as HOMREC_OBJS in the Makefile).
+add_executable(homrec
+    tools/homrec/homrec.cpp
+    ffmpeg/ffmpeg_runner.cpp
+    src/core/audio.cpp
+    src/core/audio_pipe.cpp
+    src/core/capture_ctl.cpp
+    src/core/display_info.cpp
+    src/core/dxgi_capture.cpp
+    src/core/encoder_helpers.c
+    src/core/gpu_overlay.cpp
+    src/core/input_overlay.cpp
+    src/core/mf_encoder.cpp
+    src/core/overlay_feed.cpp
+    src/core/overlay_render.cpp
+    src/core/pipeline.cpp
+    src/core/settings_registry.cpp
+    src/core/tools.cpp
+    src/core/webcam_capture.cpp
+    src/core/wgc_capture.cpp
+    src/ui/hrc_config.cpp
+    src/ui/recording_controller.cpp
+    src/ui/win32_theme.cpp
+    src/ui/window_picker_dialog.cpp
+    src/utils/log.cpp
+    src/utils/log_paths.cpp
+    src/utils/stopwatch.cpp
+    src/utils/ui_utils.cpp
+    src/utils/wgc_log.cpp
+)
 
 target_include_directories(homrec PRIVATE src)
 
@@ -149,6 +177,11 @@ target_compile_features(homrec PRIVATE cxx_std_17)
 
 target_compile_options(homrec PRIVATE -O2 -Wall -Wextra -municode -static-libgcc -static-libstdc++)
 
-target_compile_definitions(homrec PRIVATE UNICODE _UNICODE)
+target_compile_definitions(homrec PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0601)
 
 target_link_options(homrec PRIVATE -municode -static-libgcc -static-libstdc++)
+
+target_link_libraries(homrec PRIVATE
+    comctl32 comdlg32 gdi32 shell32 user32 psapi wininet winhttp d3d11 dxgi pdh
+    winmm ole32 uuid dwmapi uxtheme windowscodecs strmiids oleaut32
+    mfplat mfreadwrite mf mfuuid)

@@ -13,8 +13,22 @@ HOM_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DUNICODE -D_UNICODE -static-libgcc
 HOM_LDLIBS   := -lwinhttp -lshlwapi -ldbghelp
 
 # homrec (tools/homrec/homrec.cpp) is the standalone command-line interface. Unlike hom it uses
-# a wide wmain() so non-ASCII paths in arguments work, hence -municode. No wxWidgets/Lua.
-HOMREC_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -static-libgcc -static-libstdc++
+# a wide wmain() so non-ASCII paths in arguments work, hence -municode. No wxWidgets/Lua - but
+# 'homrec start' records with the same RecordingController as hr.exe, so homrec.exe links the
+# wx-free engine objects below (they are the very same .o files hr.exe is built from).
+HOMREC_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc -static-libgcc -static-libstdc++
+HOMREC_OBJS := \
+	ffmpeg/ffmpeg_runner.o \
+	src/core/audio.o src/core/audio_pipe.o src/core/capture_ctl.o src/core/display_info.o \
+	src/core/dxgi_capture.o src/core/encoder_helpers.o src/core/gpu_overlay.o src/core/input_overlay.o \
+	src/core/mf_encoder.o src/core/overlay_feed.o src/core/overlay_render.o src/core/pipeline.o \
+	src/core/settings_registry.o src/core/tools.o src/core/webcam_capture.o src/core/wgc_capture.o \
+	src/ui/hrc_config.o src/ui/recording_controller.o src/ui/win32_theme.o src/ui/window_picker_dialog.o \
+	src/utils/log.o src/utils/log_paths.o src/utils/stopwatch.o src/utils/ui_utils.o src/utils/wgc_log.o
+HOMREC_LDLIBS := -Wl,-Bstatic,-lpthread,-Bdynamic \
+	-lcomctl32 -lcomdlg32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet -lwinhttp -ld3d11 -ldxgi -lpdh \
+	-lwinmm -lole32 -luuid -ldwmapi -luxtheme -lwindowscodecs -lstrmiids -loleaut32 \
+	-lmfplat -lmfreadwrite -lmf -lmfuuid
 
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 \
             -Isrc -IC:/msys64/mingw64/lib/wx/include/msw-unicode-3.2 \
@@ -113,8 +127,8 @@ resource.o: resource.rc
 hom: FORCE
 	$(CXX) $(HOM_CXXFLAGS) -o hom.exe tools/hom/hom.cpp $(HOM_LDLIBS)
 
-homrec: FORCE
-	$(CXX) $(HOMREC_CXXFLAGS) -o homrec.exe tools/homrec/homrec.cpp
+homrec: $(HOMREC_OBJS) FORCE
+	$(CXX) $(HOMREC_CXXFLAGS) -o homrec.exe tools/homrec/homrec.cpp $(HOMREC_OBJS) $(HOMREC_LDLIBS)
 
 FORCE:
 
