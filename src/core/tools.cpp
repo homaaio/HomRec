@@ -294,7 +294,7 @@ static double probe_duration_sec(const std::wstring& ffpath, const std::wstring&
     if (pos == std::wstring::npos) return -1.0;
     pos += 10; // skip "Duration: "
     int h = 0, m = 0; double s = 0.0;
-    if (swscanf_s(out.c_str() + pos, L"%d:%d:%lf", &h, &m, &s) != 3) return -1.0;
+    if (swscanf(out.c_str() + pos, L"%d:%d:%lf", &h, &m, &s) != 3) return -1.0;
     return h * 3600.0 + m * 60.0 + s;
 }
 
@@ -357,7 +357,7 @@ HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
 
     if (have_real || audio_dur > 0.0) {
         wchar_t lb[160];
-        swprintf_s(lb, L"%.3f / %.3f / %.3f", video_dur, audio_dur, real_elapsed_sec);
+        swprintf(lb, sizeof(lb)/sizeof(lb[0]), L"%.3f / %.3f / %.3f", video_dur, audio_dur, real_elapsed_sec);
         std::wstring w = lb;
         std::string n(w.begin(), w.end());   // ASCII digits only
         HrLog::Info("Recording: lengths before merge (video / audio / real, seconds) = " + n);
@@ -366,11 +366,11 @@ HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
     std::wstring audio_pre;   // goes right before "-i audio_file"
     if (av_start_skew_sec > 0.02) {
         wchar_t buf[64];
-        swprintf_s(buf, L"%.6f", av_start_skew_sec);
+        swprintf(buf, sizeof(buf)/sizeof(buf[0]), L"%.6f", av_start_skew_sec);
         audio_pre = L" -itsoffset " + std::wstring(buf);
     } else if (av_start_skew_sec < -0.02) {
         wchar_t buf[64];
-        swprintf_s(buf, L"%.6f", -av_start_skew_sec);
+        swprintf(buf, sizeof(buf)/sizeof(buf[0]), L"%.6f", -av_start_skew_sec);
         audio_pre = L" -ss " + std::wstring(buf);
     }
 
@@ -384,7 +384,7 @@ HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
     wchar_t ratio_buf[64] = L"1";
     const double stretch_ratio = (stretch && video_dur > 0.0) ? real_elapsed_sec / video_dur : 1.0;
     if (stretch) {
-        swprintf_s(ratio_buf, L"%.6f", stretch_ratio);
+        swprintf(ratio_buf, sizeof(ratio_buf)/sizeof(ratio_buf[0]), L"%.6f", stretch_ratio);
         HrLog::Warn("Recording: the encoded video came out shorter than the "
                     "real recording time (likely dropped frames from an overloaded "
                     "machine) - stretching it back to real speed before merging "
@@ -487,7 +487,7 @@ HR_EXPORT int hr_merge_av_ex(const wchar_t* ffpath,
         const double got = probe_duration_sec(ffpath, tmp);
         if (got >= 0.0 && got < expect * 0.9) {
             wchar_t lb[160];
-            swprintf_s(lb, L"%.1f s instead of ~%.1f s", got, expect);
+            swprintf(lb, sizeof(lb)/sizeof(lb[0]), L"%.1f s instead of ~%.1f s", got, expect);
             std::wstring w = lb;
             HrLog::Error("Recording: the merged file came out much shorter than the video (" +
                          std::string(w.begin(), w.end()) + ") -- keeping the original video without the audio "
