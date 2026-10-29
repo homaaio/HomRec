@@ -255,9 +255,22 @@ void AudioPanel::BuildLayout() {
         c.fader = nullptr; c.mute_btn = nullptr; c.menu_btn = nullptr; c.meter = nullptr;
     }
 
+    // Both scrollbars in both styles (each one only shows when it is needed): with "vertical" meters
+    // the cards sit side by side, but a short pane cut them off at the bottom with no way to reach it.
     scroller_ = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                                     vertical ? wxHSCROLL : wxVSCROLL);
-    scroller_->SetScrollRate(vertical ? 10 : 0, vertical ? 0 : 10);
+                                     wxHSCROLL | wxVSCROLL);
+    scroller_->SetScrollRate(10, 10);
+    // Cards side by side and no vertical bar: the wheel scrolls sideways instead of doing nothing.
+    scroller_->Bind(wxEVT_MOUSEWHEEL, [sw = scroller_](wxMouseEvent &e) {
+        if (!e.ShiftDown() && !sw->HasScrollbar(wxVERTICAL) && sw->HasScrollbar(wxHORIZONTAL)) {
+            const int steps = e.GetWheelRotation() / std::max(1, e.GetWheelDelta());
+            int x = 0;
+            sw->GetViewStart(&x, nullptr);
+            if (steps != 0) sw->Scroll(x - steps * 3, -1);
+            return;
+        }
+        e.Skip();
+    });
     auto *sz = new wxBoxSizer(vertical ? wxHORIZONTAL : wxVERTICAL);
     for (int i = 0; i < ChannelCount(); ++i) {
         BuildCard(At(i), i, vertical);
@@ -304,7 +317,7 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
     ch.mute_btn = new ColorButton(ch.card, ID_AUDIO_MUTE_BASE + index, "Mute");
     ch.mute_btn->SetMinSize(wxSize(vertical ? -1 : 64, 24));
     ch.fader = new FlatFader(ch.card, ID_AUDIO_FADER_BASE + index, (int)std::lround(ch.vol * 100), 0, 150, vertical);
-    ch.fader->SetToolTip("Drag to set the volume. Mouse wheel: +-5%. Double-click: back to 100%.");
+    ch.fader->SetToolTip("Drag to set the volume. Ctrl + mouse wheel: +-5%. Double-click: back to 100%.");
     ch.meter = new LevelMeterPanel(ch.card, vertical);
     if (is_extra) {
         ch.menu_btn = new ColorButton(ch.card, ID_AUDIO_MENU_BASE + index, wxString::FromUTF8("\u2026"));
@@ -321,34 +334,34 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
         top->Add(ch.pct_lbl, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 6);
         top->Add(ch.mute_btn, 0, wxALIGN_CENTRE_VERTICAL);
         if (ch.menu_btn) top->Add(ch.menu_btn, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, 4);
-        root->Add(top, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
+        root->Add(top, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 6);
 
         ch.meter->SetMinSize(wxSize(60, 8));
-        root->Add(ch.meter, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
+        root->Add(ch.meter, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 6);
 
         ch.fader->SetMinSize(wxSize(60, 20));
         // NB: wxEXPAND already overrides every alignment flag in a box sizer; combining it with
         // wxALIGN_* trips a wxWidgets debug assertion ("wxEXPAND overrides alignment flags").
-        root->Add(ch.fader, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 6);
+        root->Add(ch.fader, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 3);
     } else {
         ch.card->SetMinSize(wxSize(96, -1));
-        root->Add(makeIcon(), 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 10);
+        root->Add(makeIcon(), 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 6);
         ch.name_lbl->SetMinSize(wxSize(84, -1));
-        root->Add(ch.name_lbl, 0, wxALIGN_CENTRE_HORIZONTAL | wxLEFT | wxRIGHT | wxTOP, 6);
+        root->Add(ch.name_lbl, 0, wxALIGN_CENTRE_HORIZONTAL | wxLEFT | wxRIGHT | wxTOP, 4);
 
         auto *mid = new wxBoxSizer(wxHORIZONTAL);
-        ch.meter->SetMinSize(wxSize(12, 70));
-        ch.fader->SetMinSize(wxSize(26, 70));
+        ch.meter->SetMinSize(wxSize(12, 50));
+        ch.fader->SetMinSize(wxSize(26, 50));
         mid->AddStretchSpacer(1);          // centres the meter+fader pair (no wxALIGN_* with wxEXPAND!)
         mid->Add(ch.meter, 0, wxEXPAND | wxRIGHT, 6);
         mid->Add(ch.fader, 0, wxEXPAND);
         mid->AddStretchSpacer(1);
-        root->Add(mid, 1, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
+        root->Add(mid, 1, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 6);
 
-        root->Add(ch.pct_lbl, 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 4);
-        root->Add(ch.mute_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
-        if (ch.menu_btn) root->Add(ch.menu_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
-        root->AddSpacer(10);
+        root->Add(ch.pct_lbl, 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 3);
+        root->Add(ch.mute_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 6);
+        if (ch.menu_btn) root->Add(ch.menu_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 3);
+        root->AddSpacer(6);
     }
     ch.card->SetSizer(root);
 }
