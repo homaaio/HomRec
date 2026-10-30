@@ -1683,6 +1683,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
         // with the live preview disabled. Close the segment first (the writer drains the queue
         // and closes ffmpeg's stdin), exactly like the preview-on path does, then stop the threads.
         if (pipeline_) hr_pl_end_recording_segment(pipeline_, 3000);
+        HrLog::Info("Recording: Stop - stopping the capture and writer threads.");
         hr_pl_stop(pipeline_);
     } else {
         // (recordings always took ~30s to "finalize" and came out
