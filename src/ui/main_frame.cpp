@@ -1834,6 +1834,7 @@ void HomRecMainFrame::DoStart() {
         wxMessageBox(wxString(err.c_str()), "HomRec", wxOK | wxICON_WARNING, this);
         return;
     }
+    ws_trim_at_ = GetTickCount64() + 6000;   // after the encoder has opened and start-up allocations settled
     start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("stop")));
     start_color_btn_->SetColours(FromColorref(theme_.error), FromColorref(theme_.bg));
     pause_color_btn_->Enable2(true);
@@ -1884,6 +1885,7 @@ void HomRecMainFrame::HandleRecordingCrashed() {
 
 void HomRecMainFrame::OnRecordingFinalized() {
     stop_pending_ = false;
+    ws_trim_at_ = GetTickCount64() + 3000;   // give back the recording's buffers once the file is closed
     start_color_btn_->Enable2(true);
     start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
     start_color_btn_->SetColours(FromColorref(theme_.success), FromColorref(theme_.bg));
@@ -2561,6 +2563,10 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
 
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
+    if (ws_trim_at_ != 0 && GetTickCount64() >= ws_trim_at_) {
+        ws_trim_at_ = 0;
+        if (!stop_pending_) TrimWorkingSet();
+    }
     // Layers panel, first row: shows what is recorded and (window capture) what the recorder is doing
     // right now (smart mode flips between "smart" and "exact"); repaints only when that text changed.
     if (overlays_panel_ && state_.show_overlays_panel) overlays_panel_->RefreshSourceRow();
@@ -2631,10 +2637,24 @@ void HomRecMainFrame::OnLevelMeterTimer(wxTimerEvent &) {
 }
 
 void HomRecMainFrame::RestartLevelMeterTimer() {
+    if (!ui_visible_) { level_meter_timer_.Stop(); return; }   // restarted by ApplyVisibilityTimers() when shown
     int fps = state_.level_meter_fps;
     if (fps < 10) fps = 10;
     if (fps > 60) fps = 60;
     level_meter_timer_.Start(1000 / fps);
+}
+
+void HomRecMainFrame::ApplyVisibilityTimers(bool visible) {
+    if (ui_visible_ == visible) return;
+    ui_visible_ = visible;
+    // The preview timer also keeps the overlay list / window-follow crop in sync with the recorder, so it
+    // must keep running - just slower while nobody looks at the window.
+    preview_timer_.Start(visible ? 1000 / 20 : 100);
+    RestartLevelMeterTimer();
+}
+
+void HomRecMainFrame::TrimWorkingSet() {
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 }
 
 void HomRecMainFrame::OnClose(wxCloseEvent &evt) {
@@ -2664,11 +2684,13 @@ void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
     // it never reaches OnShowEvent below - the window is still
     // "shown" as far as wx is concerned, just iconized in the taskbar.
     if (rec_) rec_->SetPreviewVisible(!evt.IsIconized());
+    ApplyVisibilityTimers(!evt.IsIconized() && IsShown());
     evt.Skip();
 }
 
 void HomRecMainFrame::OnShowEvent(wxShowEvent &evt) {
     if (rec_) rec_->SetPreviewVisible(evt.IsShown());
+    ApplyVisibilityTimers(evt.IsShown() && !IsIconized());
     evt.Skip();
 }
 
