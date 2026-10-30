@@ -130,7 +130,8 @@ struct MfEnc {
     bool textures_ok = false;                   // writer was built with a D3D manager
 
     // state
-    std::mutex wmu;                             // serialises writes / finalize / rebuild
+    std::timed_mutex wmu;                       // serialises writes / finalize / rebuild
+    std::atomic<bool> audio_lock_warned{false}; // "audio dropped, wmu busy" is logged once
     std::atomic<int>  state{0};                 // 0 idle, 1 running, 2 finalizing, 3 done, -1 failed
     std::atomic<bool> fin_done{false};
     std::atomic<long long> samples{0};
@@ -463,7 +464,7 @@ ComPtr<IMFMediaBuffer> take_sysmem_buffer(MfEnc &e, DWORD size) {
 
 void finalize_now(MfEnc &e) {
     // Caller must not hold wmu while waiting for a long time; Finalize() itself is serialised by it.
-    std::lock_guard<std::mutex> lk(e.wmu);
+    std::lock_guard<std::timed_mutex> lk(e.wmu);
     HRESULT hr = S_OK;
     if (e.writer && e.began) hr = e.writer->Finalize();
     e.writer.Reset();
@@ -531,7 +532,7 @@ int hr_mf_configure(void *h, const char *out_path_utf8, int w, int h_px, int fps
 int hr_mf_audio_configure(void *h, int rate_hz, int kbps) {
     auto e = lookup(h);
     if (!e || (rate_hz != 44100 && rate_hz != 48000)) return 0;
-    std::lock_guard<std::mutex> lk(e->wmu);
+    std::lock_guard<std::timed_mutex> lk(e->wmu);
     e->audio_rate = rate_hz;
     e->audio_kbps = kbps >= 176 ? 192 : kbps >= 144 ? 160 : kbps >= 112 ? 128 : 96;
     return 1;
@@ -545,7 +546,14 @@ int hr_mf_audio_enabled(const void *h) {
 void hr_mf_write_audio(void *h, const int16_t *stereo, size_t frames) {
     auto e = lookup(h);
     if (!e || !stereo || frames == 0) return;
-    std::lock_guard<std::mutex> lk(e->wmu);
+    // wmu is held by the video writer during WriteSample. If that call stalls, an unbounded wait here would block the
+    // mixer thread, and hr_audio_live_stop() joins that thread - Stop would hang. Drop this chunk instead.
+    std::unique_lock<std::timed_mutex> lk(e->wmu, std::chrono::milliseconds(250));
+    if (!lk.owns_lock()) {
+        if (!e->audio_lock_warned.exchange(true))
+            HrLog::Warn("MF encoder: the writer lock was busy for 250 ms - audio chunks are dropped while it stays busy.");
+        return;
+    }
     if (!e->audio_ok || e->state.load() != 1) return;
     if (!e->pre_flushed) {
         // Wait for the first picture (it defines the video's time zero). Bounded: a video that never starts must not
@@ -565,7 +573,7 @@ int hr_mf_start(void *h, void *d3d11_device, int want_textures) {
     auto e = lookup(h);
     if (!e) return 0;
     if (e->out_path_utf8.empty() || e->w < 2 || e->h < 2) { e->set_error("not configured"); return 0; }
-    std::lock_guard<std::mutex> lk(e->wmu);
+    std::lock_guard<std::timed_mutex> lk(e->wmu);
 
     if (d3d11_device) {
         IUnknown *u = static_cast<IUnknown *>(d3d11_device);
@@ -620,7 +628,7 @@ int hr_mf_write_sysmem(void *h, const uint8_t *nv12, int w, int h_px, int64_t sl
         }
         return 0;
     }
-    std::lock_guard<std::mutex> lk(e->wmu);
+    std::lock_guard<std::timed_mutex> lk(e->wmu);
     if (!e->writer) return 0;
     const DWORD size = (DWORD)((size_t)e->w * e->h * 3 / 2);
     ComPtr<IMFMediaBuffer> buf = take_sysmem_buffer(*e, size);
@@ -649,7 +657,7 @@ int hr_mf_write_texture(void *h, void *tex, int64_t slot) {
     if (!e || !tex || e->state.load() != 1 || !e->textures_ok || e->tex_broken.load()) return 0;
     MfApi &api = mf_api();
     if (!api.create_surface_buf) { e->tex_broken.store(true); return 0; }
-    std::lock_guard<std::mutex> lk(e->wmu);
+    std::lock_guard<std::timed_mutex> lk(e->wmu);
     if (!e->writer) return 0;
 
     ComPtr<IMFMediaBuffer> buf;
@@ -698,7 +706,7 @@ int hr_mf_write_texture(void *h, void *tex, int64_t slot) {
 int hr_mf_hold_until(void *h, int64_t slot) {
     auto e = lookup(h);
     if (!e || e->state.load() != 1) return 0;
-    std::lock_guard<std::mutex> lk(e->wmu);
+    std::lock_guard<std::timed_mutex> lk(e->wmu);
     fill_to(*e, slot, 600);
     return 1;
 }
@@ -707,7 +715,7 @@ int hr_mf_end(void *h, int64_t end_slot) {
     auto e = lookup(h);
     if (!e) return 0;
     {
-        std::lock_guard<std::mutex> lk(e->wmu);
+        std::lock_guard<std::timed_mutex> lk(e->wmu);
         const int st = e->state.load();
         if (st == 0 || st == 2 || st == 3) return 0;         // not started / already ending / done
         if (st == 1) {
