@@ -421,10 +421,10 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
            core/nut_mux.h). A frame is only sent when the picture changed; the `fps` filter below repeats
            the previous one across the gaps, so the OUTPUT is still constant frame rate and everything
            downstream (audio mux, retime check, Instant Replay segments) is unchanged. */
-        ss << L" -f nut -i pipe:0";
+        ss << L" -probesize 32 -analyzeduration 1 -f nut -i pipe:0";
     } else if (ctx->pipe_input) {
-        /* Pipe mode: read raw BGRA from stdin */
-        ss << L" -f rawvideo"
+        // Pipe mode: read raw BGRA from stdin
+        ss << L" -probesize 32 -analyzeduration 1 -f rawvideo"
            << L" -pixel_format " << raw_pixfmt
            << L" -video_size " << ctx->width << L"x" << ctx->height
            << L" -framerate " << ctx->fps
@@ -437,7 +437,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     /* The mixed recording audio (raw 16-bit stereo) from the named pipe = input #1. A deep input queue
        because the audio arrives in bursts while the video encoder is busy. */
     if (ctx->audio_active) {
-        ss << L" -f s16le -ar " << ctx->audio_rate << L" -ac 2 -thread_queue_size 1024"
+        ss << L" -probesize 32 -analyzeduration 1 -f s16le -ar " << ctx->audio_rate << L" -ac 2 -thread_queue_size 1024"
            << L" -i " << Q(ctx->audio_pipe_name);
     }
 
