@@ -696,7 +696,7 @@ struct Pipeline {
 
     std::queue<std::vector<uint8_t>> free_bufs;
     std::mutex free_bufs_mtx;
-    static constexpr size_t MAX_FREE_BUFS = MAX_QUEUE_SIZE + 2;
+    static constexpr size_t MAX_FREE_BUFS = 4;
 
     // -------------------------------------------------------------------------
     // Write raw bytes to pipe
