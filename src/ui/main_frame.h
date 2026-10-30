@@ -262,6 +262,14 @@ private:
     // whenever state_.level_meter_fps changes.
     void OnLevelMeterTimer(wxTimerEvent &evt);
     void RestartLevelMeterTimer();
+    // Window hidden / minimised: nobody can see the VU meters or the thumbnail, so the level-meter timer
+    // stops and the overlay-sync (preview) timer drops from 20 Hz to 10 Hz. Back to normal when shown.
+    void ApplyVisibilityTimers(bool visible);
+    bool ui_visible_ = true;
+    // Hands the working set back to Windows (one-off, a few seconds after Start and after Stop finished).
+    // On an 8 GB PC that already sits at ~90 % memory this keeps HomRec from being paged against the browser.
+    void TrimWorkingSet();
+    unsigned long long ws_trim_at_ = 0;   // GetTickCount64() deadline, 0 = nothing scheduled
     void OnClose(wxCloseEvent &evt);
     void OnIconize(wxIconizeEvent &evt);
     void OnShowEvent(wxShowEvent &evt);
