@@ -2156,7 +2156,8 @@ void RecordingController::PollStats() {
     // stray drop under a momentary hiccup.
     long long drops_delta = drops - last_drops_seen_;
     last_drops_seen_ = drops;
-    if (!state_.paused && drops_delta > 0) {
+    const bool in_warmup = elapsed_seconds() < 4.0;
+    if (!state_.paused && !in_warmup && drops_delta > 0) {
         if (overload_streak_ < 3) ++overload_streak_;
     } else {
         overload_streak_ = 0;
