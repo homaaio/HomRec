@@ -1669,7 +1669,9 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
     // The live mixer hands its last audio to the encoder BEFORE the video side is ended (the in-process
     // encoder is finalized by the pipeline's writer thread when the recording segment closes below, and ffmpeg only
     // opens its audio input after the video input is done).
+    HrLog::Info("Recording: Stop - ending the live audio mixer.");
     StopLiveAudio();
+    HrLog::Info("Recording: Stop - closing the recording segment.");
     if (ddagrab_active_) {
         // ffmpeg captured by itself (no pipe was ever attached to this recording), so there is no
         // recording segment to close; the graceful "q" sent above is all it needs.
@@ -1688,6 +1690,7 @@ void RecordingController::StopAsync(std::function<void()> on_done) {
         // hr_pl_end_recording_segment()'s comment for the full story):
         hr_pl_end_recording_segment(pipeline_, 3000);
     }
+    HrLog::Info("Recording: Stop - segment closed, finishing the encoder.");
     FinishPipelineAfterStop(keep_for_preview);
     StopFinalizeTail(keep_for_preview, recorded_sec);
     finalizing_ = false;
