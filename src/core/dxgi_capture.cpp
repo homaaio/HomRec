@@ -765,8 +765,11 @@ static int dx_map(DxCapCtx *c, ID3D11Texture2D *tex, bool wait, int timeout_ms,
             if (hr != DXGI_ERROR_WAS_STILL_DRAWING) break;
             if (GetTickCount64() >= map_deadline) return HR_DX_TIMEOUT;
             ++polls;
-            if (polls <= 32)      YieldProcessor();   // spin: pause hint, no scheduler involved
-            else if (polls <= 64) SwitchToThread();   // give the slice to a ready thread, if any
+            // Short spin only: a staging copy that is not done after a few microseconds is waiting for the
+            // GPU (shared with the browser / game), so sleeping is cheaper than burning a core. The old
+            // 32 + 32 spins cost CPU on every tick of a weak, busy PC.
+            if (polls <= 4)       YieldProcessor();   // spin: pause hint, no scheduler involved
+            else if (polls <= 8)  SwitchToThread();   // give the slice to a ready thread, if any
             else                  Sleep(1);           // GPU is genuinely busy: stop burning CPU
         }
     }
