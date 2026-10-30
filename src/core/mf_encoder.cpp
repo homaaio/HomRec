@@ -464,7 +464,14 @@ ComPtr<IMFMediaBuffer> take_sysmem_buffer(MfEnc &e, DWORD size) {
 
 void finalize_now(MfEnc &e) {
     // Caller must not hold wmu while waiting for a long time; Finalize() itself is serialised by it.
-    std::lock_guard<std::timed_mutex> lk(e.wmu);
+    // Bounded: a WriteSample stuck inside the encoder holds wmu, and waiting for it forever left Stop hanging.
+    std::unique_lock<std::timed_mutex> lk(e.wmu, std::chrono::seconds(10));
+    if (!lk.owns_lock()) {
+        e.set_error("the encoder is stuck in a write (writer lock busy for 10 s) - the .mp4 was not finalized");
+        HrLog::Error("MF encoder: " + e.get_error());
+        e.state.store(-1);
+        return;
+    }
     HRESULT hr = S_OK;
     if (e.writer && e.began) hr = e.writer->Finalize();
     e.writer.Reset();
@@ -504,7 +511,20 @@ void hr_mf_destroy(void *h) {
         e = it->second;
         g_reg.erase(it);        // from now on every API call with this handle is a no-op
     }
-    if (e->fin_thread.joinable()) e->fin_thread.join();
+    if (e->fin_thread.joinable()) {
+        // Finalize() can block for good when the hardware encoder is stuck (e.g. after a display-mode change).
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!e->fin_done.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10))
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!e->fin_done.load(std::memory_order_acquire)) {
+            HrLog::Error("MF encoder: Finalize() did not return within 10 s - abandoning the output file; "
+                         "the stuck thread is left running.");
+            e->fin_thread.detach();
+            return;      // the thread still uses the writer / device: do not touch them from here
+        }
+        e->fin_thread.join();
+    }
     if (e->state.load() == 1 || e->state.load() == 2) {
         // Never ended (crash path / abandoned recording): close the file so it stays playable.
         e->state.store(2);
@@ -715,7 +735,15 @@ int hr_mf_end(void *h, int64_t end_slot) {
     auto e = lookup(h);
     if (!e) return 0;
     {
-        std::lock_guard<std::timed_mutex> lk(e->wmu);
+        // Bounded: a WriteSample stuck in the encoder holds wmu; an unbounded wait here froze Stop for good.
+        std::unique_lock<std::timed_mutex> lk(e->wmu, std::chrono::seconds(5));
+        if (!lk.owns_lock()) {
+            e->set_error("the encoder is stuck in a write (writer lock busy for 5 s) - the .mp4 was not finalized");
+            HrLog::Error("MF encoder: " + e->get_error());
+            e->state.store(-1);
+            e->fin_done.store(true, std::memory_order_release);   // hr_mf_wait() returns at once with an error
+            return 0;
+        }
         const int st = e->state.load();
         if (st == 0 || st == 2 || st == 3) return 0;         // not started / already ending / done
         if (st == 1) {
@@ -728,10 +756,12 @@ int hr_mf_end(void *h, int64_t end_slot) {
         }
         // st == -1 (failed earlier): still try to close the file below so the handle is released.
     }
+    if (e->fin_thread.joinable()) return 0;   // a finalize thread is already running (assigning over it would terminate)
     MfEnc *raw = e.get();
-    // The registry keeps the object alive until hr_mf_destroy(); that joins this thread first.
+    // hr_mf_destroy() waits a bounded time for this thread and detaches it if Finalize() never returns, so the
+    // thread holds its own reference to the encoder.
     try {
-        e->fin_thread = std::thread([raw]() {
+        e->fin_thread = std::thread([raw, keep = e]() {
             const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
             finalize_now(*raw);
             if (com) CoUninitialize();
