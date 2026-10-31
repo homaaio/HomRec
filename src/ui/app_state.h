@@ -196,6 +196,10 @@ struct AppState {
     // 2.4: extra mixer channels (another mic, a browser, a window, an audio
     // file). Persisted by HrcConfig in its own [audio_sources] section.
     std::vector<AudioSourceDef> audio_sources;
+    // The user removed the built-in Microphone / Desktop Audio strip from the mixer. A removed strip
+    // has no card and is not recorded (it counts as muted) until it is added back via "Add source".
+    bool audio_mic_removed = false;
+    bool audio_sys_removed = false;
 
     // -- 2.4 window capture ----------------------------------------------
     // How a selected window is captured:

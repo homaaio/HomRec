@@ -194,6 +194,8 @@ const std::vector<SettingDef> &All() {
         v.push_back(StrField("mic_device_id", "audio", &AppState::mic_device_id));
         // 2.4: "horizontal" | "vertical" level-meter / fader layout of the Audio Mixer
         v.push_back(StrField("audio_meter_style", "audio", &AppState::audio_meter_style));
+        v.push_back(BoolField("audio_mic_removed", "audio", &AppState::audio_mic_removed));
+        v.push_back(BoolField("audio_sys_removed", "audio", &AppState::audio_sys_removed));
 
         // -- [hotkeys] -------------------------------------------------------
         v.push_back(StrField("hotkey_start_stop", "hotkeys", &AppState::hotkey_start_stop));
