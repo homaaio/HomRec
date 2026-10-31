@@ -187,6 +187,8 @@ AudioPanel::~AudioPanel() {
 }
 
 void AudioPanel::InitFromState() {
+    slot_[0].removed = state_.audio_mic_removed;
+    slot_[1].removed = state_.audio_sys_removed;
     extras_.clear();
     for (const AudioSourceDef &d : state_.audio_sources) {
         Channel ch;
@@ -273,6 +275,7 @@ void AudioPanel::BuildLayout() {
     });
     auto *sz = new wxBoxSizer(vertical ? wxHORIZONTAL : wxVERTICAL);
     for (int i = 0; i < ChannelCount(); ++i) {
+        if (At(i).removed) continue;
         BuildCard(At(i), i, vertical);
         if (vertical) sz->Add(At(i).card, 0, wxEXPAND | wxRIGHT, 6);
         else          sz->Add(At(i).card, 0, wxEXPAND | wxBOTTOM, 4);
@@ -319,10 +322,10 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
     ch.fader = new FlatFader(ch.card, ID_AUDIO_FADER_BASE + index, (int)std::lround(ch.vol * 100), 0, 150, vertical);
     ch.fader->SetToolTip("Drag to set the volume. Ctrl + mouse wheel: +-5%. Double-click: back to 100%.");
     ch.meter = new LevelMeterPanel(ch.card, vertical);
-    if (is_extra) {
+    {
         ch.menu_btn = new ColorButton(ch.card, ID_AUDIO_MENU_BASE + index, wxString::FromUTF8("\u2026"));
         ch.menu_btn->SetMinSize(wxSize(vertical ? -1 : 28, 24));
-        ch.menu_btn->SetToolTip("Rename / reconnect / remove");
+        ch.menu_btn->SetToolTip(is_extra ? "Rename / reconnect / remove" : "Reset volume / remove");
     }
 
     if (!vertical) {
@@ -439,7 +442,7 @@ int AudioPanel::IndexOfId(const std::string &id) const {
 // events
 // ---------------------------------------------------------------------------
 void AudioPanel::PushBuiltinVolumes() {
-    hr_audio_set_volumes(slot_[0].vol, slot_[1].vol, slot_[0].muted ? 1 : 0, slot_[1].muted ? 1 : 0);
+    hr_audio_set_volumes(slot_[0].vol, slot_[1].vol, mic_muted() ? 1 : 0, sys_muted() ? 1 : 0);
 }
 
 void AudioPanel::PushExtra(Channel &ch) {
@@ -469,7 +472,7 @@ void AudioPanel::OnMute(wxCommandEvent &evt) {
 
 void AudioPanel::OnMenu(wxCommandEvent &evt) {
     const int idx = evt.GetId() - ID_AUDIO_MENU_BASE;
-    if (idx >= 2 && idx < ChannelCount()) ShowChannelMenu(idx);
+    if (idx >= 0 && idx < ChannelCount()) ShowChannelMenu(idx);
 }
 
 bool AudioPanel::AddingBlocked(const wxString &what) {
@@ -500,17 +503,21 @@ void AudioPanel::ShowAddMenu() {
         ~BusyGuard() { flag = false; }
     } busy_guard(in_add_menu_);
     if (AddingBlocked("The list of audio sources")) return;
-    if (state_.audio_sources.size() >= 32) {
+    // At the limit the menu still opens when a built-in strip can be put back.
+    if (state_.audio_sources.size() >= 32 && !slot_[0].removed && !slot_[1].removed) {
         wxMessageBox("That's the maximum number of extra audio sources (32).", "Audio Mixer", wxOK | wxICON_INFORMATION, this);
         return;
     }
 
-    enum { kMicBase = 3000, kBrowserBase = 3200, kWindow = 3400, kFile = 3401 };
+    enum { kMicBase = 3000, kBrowserBase = 3200, kWindow = 3400, kFile = 3401, kRestoreMic = 3402, kRestoreSys = 3403 };
     const bool loopback_ok = HrProcessLoopbackSupported();
     const std::vector<HrMicDevice> mics = HrEnumerateMics();
     const std::vector<HrAudioApp> browsers = loopback_ok ? HrEnumAudioApps(true) : std::vector<HrAudioApp>();
 
     wxMenu menu;
+    if (slot_[0].removed) menu.Append(kRestoreMic, "Microphone");
+    if (slot_[1].removed) menu.Append(kRestoreSys, "Desktop Audio");
+    if (slot_[0].removed || slot_[1].removed) menu.AppendSeparator();
     auto *micMenu = new wxMenu();
     if (mics.empty()) micMenu->Append(kMicBase + 199, "(no input devices found)")->Enable(false);
     for (size_t i = 0; i < mics.size() && i < 150; ++i)
@@ -529,6 +536,11 @@ void AudioPanel::ShowAddMenu() {
 
     const wxPoint pos = add_btn_->GetPosition() + wxPoint(0, add_btn_->GetSize().GetHeight());
     const int cmd = GetPopupMenuSelectionFromUser(menu, pos);
+
+    if (cmd == kRestoreMic || cmd == kRestoreSys) {
+        RestoreBuiltin(cmd == kRestoreMic ? 0 : 1);
+        return;
+    }
 
     AudioSourceDef def;
     def.id = NextSourceId();
@@ -570,10 +582,60 @@ void AudioPanel::ShowAddMenu() {
     } else {
         return;   // dismissed
     }
+    if (state_.audio_sources.size() >= 32) {
+        wxMessageBox("That's the maximum number of extra audio sources (32).", "Audio Mixer", wxOK | wxICON_INFORMATION, this);
+        return;
+    }
     AddSource(def, /*persist=*/true);
 }
 
+void AudioPanel::ShowBuiltinMenu(int index) {
+    if (index < 0 || index > 1) return;
+    wxPoint pos = wxGetMousePosition();
+    if (slot_[index].menu_btn)
+        pos = slot_[index].menu_btn->GetScreenPosition() + wxPoint(0, slot_[index].menu_btn->GetSize().GetHeight());
+    enum { kReset = 1, kRemove };
+    wxMenu menu;
+    menu.Append(kReset, "Reset volume to 100%");
+    menu.AppendSeparator();
+    menu.Append(kRemove, "Remove source");
+    const int cmd = GetPopupMenuSelectionFromUser(menu, ScreenToClient(pos));
+    // slot_ is a fixed array, but the layout may have been rebuilt while the popup was up - read the widgets now.
+    Channel &ch = slot_[index];
+    if (cmd == kReset) {
+        ch.vol = 1.0f;
+        if (ch.fader) ch.fader->SetValue(100);
+        UpdateCardState(ch);
+        PushBuiltinVolumes();
+    } else if (cmd == kRemove) {
+        RemoveBuiltin(index);
+    }
+}
+
+void AudioPanel::RemoveBuiltin(int index) {
+    if (index < 0 || index > 1 || slot_[index].removed) return;
+    if (AddingBlocked("The list of audio sources")) return;
+    HrLog::Info(std::string("Audio Mixer: removing built-in source '") + (index == 0 ? "Microphone" : "Desktop Audio") + "'");
+    slot_[index].removed = true;
+    (index == 0 ? state_.audio_mic_removed : state_.audio_sys_removed) = true;
+    PushBuiltinVolumes();
+    BuildLayout();
+    if (on_changed) on_changed();
+}
+
+void AudioPanel::RestoreBuiltin(int index) {
+    if (index < 0 || index > 1 || !slot_[index].removed) return;
+    if (AddingBlocked("The list of audio sources")) return;
+    HrLog::Info(std::string("Audio Mixer: adding built-in source '") + (index == 0 ? "Microphone" : "Desktop Audio") + "'");
+    slot_[index].removed = false;
+    (index == 0 ? state_.audio_mic_removed : state_.audio_sys_removed) = false;
+    PushBuiltinVolumes();
+    BuildLayout();
+    if (on_changed) on_changed();
+}
+
 void AudioPanel::ShowChannelMenu(int index) {
+    if (index >= 0 && index < 2) { ShowBuiltinMenu(index); return; }
     if (index < 2 || index >= ChannelCount()) return;
     const std::string cid = At(index).id;
     bool offline_non_file = false;

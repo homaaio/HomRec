@@ -51,8 +51,9 @@ public:
 
     float mic_volume() const { return slot_[0].vol; }
     float sys_volume() const { return slot_[1].vol; }
-    bool mic_muted() const { return slot_[0].muted; }
-    bool sys_muted() const { return slot_[1].muted; }
+    // A removed built-in strip is reported as muted so the recording skips it.
+    bool mic_muted() const { return slot_[0].muted || slot_[0].removed; }
+    bool sys_muted() const { return slot_[1].muted || slot_[1].removed; }
 
     // Kept for source compatibility with the pre-2.4 header (the pane caption closes it now).
     std::function<void()> on_close;
@@ -71,6 +72,7 @@ private:
         bool         muted = false;
         int          handle = 0;      // hr_audio_extra_add() handle (extras)
         bool         online = true;   // false = the device / program isn't available right now
+        bool         removed = false; // built-ins only: taken out of the mixer by the user (no card)
         unsigned long pid = 0;        // "app" channels: process currently captured
         std::string  temp_wav;        // "file" channels: decoded copy
         std::string  target;          // mic endpoint id / exe name / file path (mirrors AudioSourceDef)
@@ -101,6 +103,9 @@ private:
     void OnMenu(wxCommandEvent &evt);
     void ShowAddMenu();
     void ShowChannelMenu(int index);
+    void ShowBuiltinMenu(int index);        // "..." menu of the Microphone / Desktop Audio strips
+    void RemoveBuiltin(int index);          // index 0 / 1
+    void RestoreBuiltin(int index);
     void PushBuiltinVolumes();
     void PushExtra(Channel &ch);
 
