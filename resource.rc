@@ -16,3 +16,7 @@
 // (see icons/README.md) - swap it for real art whenever it's ready, no
 // code changes needed on either side.
 2 ICON "icons/tray.ico"
+
+// Resource ID 3: the tray icon shown while recording (swapped in by
+// HomRecMainFrame::OnStatsTimer(), back to #2 when the recording ends).
+3 ICON "icons/rec.ico"
