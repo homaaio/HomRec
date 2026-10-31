@@ -115,7 +115,10 @@ Source: "hom.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexis
 ; for its "full"/"portable" archive presets.
 Source: "*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "ffmpeg\ffmpeg.exe"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "cfg\*"; DestDir: "{app}\cfg"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; cfg\ also holds per-machine files the app writes (console_history.txt, hom_repos.cfg, autoexec.cfg, startrec.cfg):
+; ship only the docs and examples, so an upgrade never overwrites a user's own copies.
+Source: "cfg\README.md"; DestDir: "{app}\cfg"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "cfg\*.example"; DestDir: "{app}\cfg"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "CHANGELOG.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "SUPPORT.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
