@@ -335,6 +335,7 @@ private:
     wxTimer restore_topmost_timer_;
 
     wxTaskBarIcon *tray_icon_ = nullptr;
+    bool tray_icon_rec_ = false;   // tray currently shows icons/rec.ico (resource #3)
 
     void *hotkey_handle_ = nullptr;
 

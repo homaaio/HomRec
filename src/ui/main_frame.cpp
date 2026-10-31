@@ -2563,6 +2563,10 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
 
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
+    if (tray_icon_ && tray_icon_rec_ != state_.recording) {
+        tray_icon_rec_ = state_.recording;
+        tray_icon_->SetIcon(wxIcon(tray_icon_rec_ ? "#3" : "#2", wxBITMAP_TYPE_ICO_RESOURCE), "HomRec");
+    }
     if (ws_trim_at_ != 0 && GetTickCount64() >= ws_trim_at_) {
         ws_trim_at_ = 0;
         if (!stop_pending_) TrimWorkingSet();
