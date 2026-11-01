@@ -324,7 +324,10 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
     ch.meter = new LevelMeterPanel(ch.card, vertical);
     {
         ch.menu_btn = new ColorButton(ch.card, ID_AUDIO_MENU_BASE + index, wxString::FromUTF8("\u2026"));
-        ch.menu_btn->SetMinSize(wxSize(vertical ? -1 : 28, 24));
+        // Small square (the "..." used to stretch across the whole card in the vertical layout).
+        ch.menu_btn->SetMinSize(wxSize(22, 22));
+        ch.menu_btn->SetMaxSize(wxSize(22, 22));
+        ch.menu_btn->SetDotsGlyph(true);
         ch.menu_btn->SetToolTip(is_extra ? "Rename / reconnect / remove" : "Reset volume / remove");
     }
 
@@ -348,7 +351,15 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
         root->Add(ch.fader, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 3);
     } else {
         ch.card->SetMinSize(wxSize(96, -1));
-        root->Add(makeIcon(), 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 6);
+        // Icon row: the icon stays centred, the "..." button sits in the card's top-right corner.
+        auto *iconRow = new wxBoxSizer(wxHORIZONTAL);
+        iconRow->AddSpacer(22 + 4);                      // balances the button so the icon is centred
+        iconRow->AddStretchSpacer(1);
+        iconRow->Add(makeIcon(), 0, wxALIGN_CENTRE_VERTICAL);
+        iconRow->AddStretchSpacer(1);
+        if (ch.menu_btn) iconRow->Add(ch.menu_btn, 0, wxALIGN_TOP | wxRIGHT, 4);
+        else             iconRow->AddSpacer(22 + 4);
+        root->Add(iconRow, 0, wxEXPAND | wxTOP, 4);
         ch.name_lbl->SetMinSize(wxSize(84, -1));
         root->Add(ch.name_lbl, 0, wxALIGN_CENTRE_HORIZONTAL | wxLEFT | wxRIGHT | wxTOP, 4);
 
@@ -363,7 +374,6 @@ void AudioPanel::BuildCard(Channel &ch, int index, bool vertical) {
 
         root->Add(ch.pct_lbl, 0, wxALIGN_CENTRE_HORIZONTAL | wxTOP, 3);
         root->Add(ch.mute_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 6);
-        if (ch.menu_btn) root->Add(ch.menu_btn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 3);
         root->AddSpacer(6);
     }
     ch.card->SetSizer(root);
