@@ -365,7 +365,9 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
             } else {
                 // Thumbnail size differs (capped by the preview-quality setting, or the pane just
                 // changed size and the next thumbnail isn't here yet).
-                wxImage scaled = img.Scale(dw, dh, wxIMAGE_QUALITY_NORMAL);
+                // wxIMAGE_QUALITY_NORMAL is nearest-neighbour; averaging when shrinking keeps small detail.
+                wxImage scaled = img.Scale(dw, dh, (dw < w || dh < h) ? wxIMAGE_QUALITY_BOX_AVERAGE
+                                                                      : wxIMAGE_QUALITY_BILINEAR);
                 cached_bmp_ = wxBitmap(scaled);
             }
             cached_src_w_ = w; cached_src_h_ = h;
