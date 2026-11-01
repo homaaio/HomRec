@@ -1077,11 +1077,6 @@ void HomRecMainFrame::BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer) {
         lbl->SetFont(SectionFont());
         return lbl;
     };
-    section_status_lbl_ = makeSection(wxString::FromUTF8(lang_.Get("status")));
-    status_dot_ = new StatusDot(left_panel_, FromColorref(theme_.text_secondary), 14);
-    status_lbl_ = new wxStaticText(left_panel_, wxID_ANY, wxString::FromUTF8(lang_.Get("ready")));
-    status_lbl_->SetFont(BodyFont());
-
     section_time_lbl_ = makeSection(wxString::FromUTF8(lang_.Get("time")));
     time_lbl_ = new wxStaticText(left_panel_, wxID_ANY, "00:00:00", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTRE_HORIZONTAL);
     time_lbl_->SetFont(wxFont(wxFontInfo(24).FaceName("Consolas").Bold()));
@@ -1113,17 +1108,11 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
     title_lbl_->SetFont(wxFont(wxFontInfo(horizontal ? 16 : 22).FaceName("Segoe UI").Bold()));
     time_lbl_->SetFont(wxFont(wxFontInfo(horizontal ? 18 : 24).FaceName("Consolas").Bold()));
 
-    auto *statusRow = new wxBoxSizer(wxHORIZONTAL);
-    statusRow->Add(status_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
-    statusRow->Add(status_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
-
     if (!horizontal) {
         auto *sizer = new wxBoxSizer(wxVERTICAL);
         // Start / Pause sit near the top of the pane (they used to hang ~120 px down, "halfway down the menu").
         sizer->Add(start_color_btn_, 0, wxEXPAND | wxTOP, 16);
         sizer->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
-        sizer->Add(section_status_lbl_, 0, wxEXPAND | wxTOP, 15);
-        sizer->Add(statusRow, 0, wxEXPAND | wxTOP, 8);
         sizer->Add(section_time_lbl_, 0, wxEXPAND | wxTOP, 15);
         sizer->Add(time_lbl_, 0, wxEXPAND | wxTOP, 8);
         sizer->Add(section_stats_lbl_, 0, wxEXPAND | wxTOP, 15);
@@ -1140,10 +1129,6 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
         c2->Add(start_color_btn_, 0, wxEXPAND);
         c2->Add(pause_color_btn_, 0, wxEXPAND | wxTOP, 4);
         c2->SetMinSize(wxSize(170, -1));
-        auto *c3 = new wxBoxSizer(wxVERTICAL);
-        c3->Add(section_status_lbl_, 0, wxEXPAND);
-        c3->Add(statusRow, 0, wxEXPAND | wxTOP, 6);
-        c3->SetMinSize(wxSize(120, -1));
         auto *c4 = new wxBoxSizer(wxVERTICAL);
         c4->Add(section_time_lbl_, 0, wxEXPAND);
         c4->Add(time_lbl_, 0, wxEXPAND | wxTOP, 4);
@@ -1154,7 +1139,6 @@ void HomRecMainFrame::LayoutControlsPanel(bool horizontal) {
         c5->Add(res_lbl_, 0, wxEXPAND | wxTOP, 2);
         c5->SetMinSize(wxSize(150, -1));
         wrap->Add(c2, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
-        wrap->Add(c3, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
         wrap->Add(c4, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 28);
         wrap->Add(c5, 0, wxALIGN_CENTRE_VERTICAL);
         auto *padded = new wxBoxSizer(wxVERTICAL);
@@ -1309,13 +1293,14 @@ void HomRecMainFrame::BuildBottomBar(wxWindow *parent, wxSizer *parentSizer) {
     bottom_bar_ = new wxPanel(parent, wxID_ANY, wxDefaultPosition, wxSize(-1, 32));
     auto *sizer = new wxBoxSizer(wxHORIZONTAL);
 
-    bottom_dot_ = new StatusDot(bottom_bar_, FromColorref(theme_.text_secondary), 12);
-    sizer->Add(bottom_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT | wxRIGHT, 6);
-    sizer->AddSpacer(kOuterPad - 6);
+    // Same dot and text as the STATUS row that used to sit in the Controls pane (that row is gone):
+    // SetStatusState() drives both, so this bar always shows exactly what that row showed.
+    bottom_dot_ = new StatusDot(bottom_bar_, FromColorref(theme_.text_secondary), 14);
+    sizer->Add(bottom_dot_, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, kOuterPad);
 
     file_lbl_ = new wxStaticText(bottom_bar_, wxID_ANY, wxString::FromUTF8(lang_.Get("ready")));
-    file_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI")));
-    sizer->Add(file_lbl_, 1, wxALIGN_CENTRE_VERTICAL);
+    file_lbl_->SetFont(BodyFont());
+    sizer->Add(file_lbl_, 1, wxALIGN_CENTRE_VERTICAL | wxLEFT, 8);
 
     // Empty (and therefore invisible - wxStaticText with no text takes no visible space) until
     // CheckHomUpdatesAsync() finds something to report.
@@ -1355,7 +1340,6 @@ void HomRecMainFrame::ApplyThemeColours() {
 
     if (title_lbl_) { title_lbl_->SetForegroundColour(accent); title_lbl_->SetBackgroundColour(surface); }
     if (version_lbl_) { version_lbl_->SetForegroundColour(textSecondary); version_lbl_->SetBackgroundColour(surface); }
-    if (status_lbl_) { status_lbl_->SetForegroundColour(text); status_lbl_->SetBackgroundColour(surface); }
     if (time_lbl_) { time_lbl_->SetForegroundColour(accent); time_lbl_->SetBackgroundColour(surface); }
     if (fps_lbl_) { fps_lbl_->SetForegroundColour(text); fps_lbl_->SetBackgroundColour(surface); }
     if (res_lbl_) { res_lbl_->SetForegroundColour(text); res_lbl_->SetBackgroundColour(surface); }
@@ -1368,7 +1352,7 @@ void HomRecMainFrame::ApplyThemeColours() {
     if (left_panel_) {
         for (wxWindow *child : left_panel_->GetChildren()) {
             if (auto *st = dynamic_cast<wxStaticText *>(child)) {
-                if (st != title_lbl_ && st != version_lbl_ && st != status_lbl_ &&
+                if (st != title_lbl_ && st != version_lbl_ &&
                     st != time_lbl_ && st != fps_lbl_ && st != res_lbl_) {
                     st->SetForegroundColour(accent);
                     st->SetBackgroundColour(surface);
@@ -1638,7 +1622,6 @@ void HomRecMainFrame::ApplyLanguageText() {
         aui_.Update();
     }
 
-    if (section_status_lbl_) section_status_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("status")));
     if (section_time_lbl_) section_time_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("time")));
     if (section_stats_lbl_) section_stats_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("stats")));
 
@@ -1656,14 +1639,10 @@ void HomRecMainFrame::ApplyLanguageText() {
             if (pause_color_btn_) pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
             SetStatusState(wxString::FromUTF8(lang_.Get("recording")), theme_.success);
         }
-        // file_lbl_ during an active recording is overwritten again on the very next OnStatsTimer
-        // tick (500ms), so it isn't touched here - doing so would just race that tick and
-        // occasionally show the stale state_word for a moment.
     } else {
         if (start_color_btn_) start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("start")));
         if (pause_color_btn_) pause_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("pause")));
         SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
-        if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
     }
 
     // Translated strings vary a lot in length ("STATISTICS" vs "STATS" vs
@@ -1730,11 +1709,8 @@ void HomRecMainFrame::ConfigureHotkeysFromState() {
 
 void HomRecMainFrame::SetStatusState(const wxString &text, COLORREF dotColor) {
     // Called every stats tick while the overload warning is up - skip all work when nothing changed.
-    bool changed = false;
-    if (status_lbl_ && status_lbl_->GetLabel() != text) { status_lbl_->SetLabel(text); changed = true; }
-    if (status_dot_) status_dot_->SetColor(FromColorref(dotColor));   // no-op for an unchanged colour
-    if (bottom_dot_) bottom_dot_->SetColor(FromColorref(dotColor));
-    if (changed && left_panel_) left_panel_->Layout();
+    if (file_lbl_ && file_lbl_->GetLabel() != text) file_lbl_->SetLabel(text);
+    if (bottom_dot_) bottom_dot_->SetColor(FromColorref(dotColor));   // no-op for an unchanged colour
 }
 
 void HomRecMainFrame::RequestStart() {
@@ -1745,7 +1721,6 @@ void HomRecMainFrame::RequestStart() {
         // stacking a second countdown or being ignored silently.
         countdown_timer_.Stop();
         SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
-        if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
         return;
     }
 
@@ -1757,7 +1732,6 @@ void HomRecMainFrame::RequestStart() {
     countdown_remaining_ = 3;
     wxString msg = wxString::Format(wxString::FromUTF8("Starting in %d\u2026"), countdown_remaining_);
     SetStatusState(msg, theme_.warning);
-    if (file_lbl_) file_lbl_->SetLabel(msg);
     countdown_timer_.Start(1000);
 }
 
@@ -1770,7 +1744,6 @@ void HomRecMainFrame::OnCountdownTimer(wxTimerEvent &) {
     }
     wxString msg = wxString::Format(wxString::FromUTF8("Starting in %d\u2026"), countdown_remaining_);
     SetStatusState(msg, theme_.warning);
-    if (file_lbl_) file_lbl_->SetLabel(msg);
 }
 
 static bool ParseScheduledTime(const std::string &raw, int &hh, int &mm) {
@@ -1851,7 +1824,6 @@ void HomRecMainFrame::DoStop() {
     stop_pending_ = true;     // OnStatsTimer must not keep ticking the Time label while finalizing
     SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
-    if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
     start_color_btn_->Enable2(false);
     pause_color_btn_->Enable2(false);
     Update();
@@ -1873,7 +1845,6 @@ void HomRecMainFrame::HandleRecordingCrashed() {
     stop_pending_ = true;
     SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
-    if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8("Processing\u2026"));
     start_color_btn_->Enable2(false);
     pause_color_btn_->Enable2(false);
     Update();
@@ -1895,7 +1866,6 @@ void HomRecMainFrame::OnRecordingFinalized() {
     pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
     pause_color_btn_->Enable2(false);
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
-    if (file_lbl_) file_lbl_->SetLabel(wxString::FromUTF8(lang_.Get("ready")));
     if (plugins_) plugins_->EmitHook("on_recording_stop");
 
     // Came from HandleRecordingCrashed() rather than a normal DoStop() - let the user know
@@ -2635,8 +2605,6 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
                        wxString::Format(" %dx%d", rec_ ? rec_->output_width() : 0,
                                         rec_ ? rec_->output_height() : 0);
         setLabel(res_lbl_, res);
-        wxString state_word = wxString::FromUTF8(lang_.Get(state_.paused ? "paused" : "recording"));
-        setLabel(file_lbl_, state_word + wxString::FromUTF8(" \u2014 ") + t);
         if (rec_ && rec_->overloaded()) {
             SetStatusState(wxString::FromUTF8("\u26A0 System overloaded \u2014 dropping frames"),
                             theme_.warning);

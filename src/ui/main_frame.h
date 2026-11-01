@@ -304,12 +304,9 @@ private:
     ColorButton *start_color_btn_ = nullptr;
     ColorButton *preview_toggle_btn_ = nullptr;   // "Preview: ON / OFF" in the preview header
     ColorButton *pause_color_btn_ = nullptr;
-    StatusDot *status_dot_ = nullptr;
-    wxStaticText *status_lbl_ = nullptr;
     wxStaticText *time_lbl_ = nullptr;
     wxStaticText *fps_lbl_ = nullptr;
     wxStaticText *res_lbl_ = nullptr;
-    wxStaticText *section_status_lbl_ = nullptr;
     wxStaticText *section_time_lbl_ = nullptr;
     wxStaticText *section_stats_lbl_ = nullptr;
 
