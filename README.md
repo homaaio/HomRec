@@ -45,7 +45,7 @@ HomRec targets a specific problem: general-purpose screen recorders (OBS, Bandic
 
 The application is 100% native C/C++: UI (wxWidgets), capture pipeline, audio, plugin host (Lua 5.4), and console all compile into `hr.exe`. At runtime it needs FFmpeg for encoding and the runtime `.dll` files that ship beside it (wxWidgets and the MinGW runtime); the installer and the portable archive include both. Note that this refers to the *application* - a small number of Python scripts exist under `tools/` for maintainer use (build packaging, environment checking, language file conversion) and are not part of `hr.exe` or required to run it.
 
-HomRec is currently **Windows-only**: the capture engine uses DXGI/D3D11/Win32. Linux (X11 and Wayland) is planned but there is no Linux build yet - see [`src/platform/linux/`](src/platform/linux/x11/README.md) for the intended design.
+HomRec is currently **Windows-only**: the capture engine uses DXGI/D3D11/Win32. Linux (X11 and Wayland) is in early preparation on the `linux-raw` branch: there is no usable Linux recorder yet, only the groundwork (platform interfaces, a `homrec doctor` command, CI) - see [`docs/LINUX_PORT_PLAN.md`](docs/LINUX_PORT_PLAN.md).
 
 ## Features
 
@@ -264,7 +264,7 @@ src/
   utils/       logging, crash handler, updater, system integration, archives
   plugins/     Lua engine and the homrec.* API
   commands/    console commands (ls)
-  platform/    placeholders for future Linux (X11 / Wayland) capture
+  platform/    OS-neutral interfaces + the Linux groundwork (X11 / Wayland backends to come)
 ffmpeg/        ffmpeg process runner
 Hom/           prebuilt hom.exe and its version file
 tools/         hom source, homrec_build.py, homrec_check.py, hrl_tool.py
@@ -272,6 +272,8 @@ installer/     Inno Setup script and notes
 cfg/           example console startup scripts
 docs/          project website and command reference
 scripts/tests/ unit tests
+scripts/linux/ Linux build / test helpers (raw port)
+cmake/         CMake include for the Linux build
 icons/         app, tray, overlay and mixer icons
 ```
 
@@ -284,6 +286,8 @@ g++ -O2 -c src/core/encoder_helpers.c -o /tmp/hr_encoder_helpers.o
 g++ -std=c++17 -Iscripts/tests scripts/tests/test_encoder_helpers.cpp /tmp/hr_encoder_helpers.o -o /tmp/hr_tests.exe
 /tmp/hr_tests.exe
 ```
+
+On Linux `scripts/linux/test.sh` builds and runs all five suites (with AddressSanitizer + UBSan) in one go.
 
 ### Packaging and releases
 
