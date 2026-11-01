@@ -915,9 +915,20 @@ void DrawSourceIcon(HDC dc, int x, int y, int kind, COLORREF c) {
     HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
     HBRUSH old = (HBRUSH)SelectObject(dc, nb);
     if (kind == 0) {                       // monitor with a stand
-        Rectangle(dc, x, y + 1, x + 18, y + 13);
-        MoveToEx(dc, x + 9, y + 13, nullptr); LineTo(dc, x + 9, y + 17);
-        MoveToEx(dc, x + 5, y + 17, nullptr); LineTo(dc, x + 14, y + 17);
+        // Built from exact 2-px rectangles. With a 2-px GDI pen the stand sat on one side of the
+        // centre and LineTo() leaves out its last pixel, so the base came out lopsided.
+        HBRUSH fb = CreateSolidBrush(c);
+        auto fr = [&](int l, int t, int r, int b) {
+            RECT q = { x + l, y + t, x + r, y + b };
+            FillRect(dc, &q, fb);
+        };
+        fr(0, 1, 18, 3);      // top edge
+        fr(0, 11, 18, 13);    // bottom edge
+        fr(0, 1, 2, 13);      // left edge
+        fr(16, 1, 18, 13);    // right edge
+        fr(8, 13, 10, 16);    // neck   (centred on the 18-px body)
+        fr(4, 16, 14, 18);    // base   (10 px wide, centred as well)
+        DeleteObject(fb);
     } else if (kind == 1) {                // window with a title bar
         Rectangle(dc, x, y + 2, x + 18, y + 16);
         MoveToEx(dc, x, y + 6, nullptr); LineTo(dc, x + 18, y + 6);
