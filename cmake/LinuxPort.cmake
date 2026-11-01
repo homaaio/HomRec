@@ -5,6 +5,8 @@
 #
 # What it builds today:
 #   hr_platform     static library: src/platform/linux/* (session detection, XDG paths, backend stubs)
+#   hr_core         static library: the Windows-era engine files that already compile on Linux
+#                   (.hrc read/write, settings table, app logic, input overlay, ls command ...)
 #   homrec    the raw Linux CLI (doctor / paths / start)
 #   test_*          the platform-independent doctest suites from scripts/tests/ (run with `ctest`)
 #
@@ -33,6 +35,24 @@ add_library(hr_platform STATIC ${HR_PLATFORM_SOURCES})
 target_include_directories(hr_platform PUBLIC src src/platform)
 target_compile_options(hr_platform PRIVATE -Wall -Wextra)
 
+# Files from the original (Windows) tree that need no change to build here. Move more in as they
+# get fixed - see "Moved to Linux" in docs/LINUX_PORT_PLAN.md.
+set(HR_CORE_SOURCES
+    src/core/profile_io.cpp
+    src/core/settings_registry.cpp
+    src/core/app_logic.cpp
+    src/core/input_overlay.cpp
+    src/core/input_overlay_registry.cpp
+    src/commands/ls.cpp
+    src/utils/system_integration.cpp
+    src/utils/ui_utils.cpp
+)
+find_package(ZLIB REQUIRED)   # profile_io.cpp (.hrc compression)
+add_library(hr_core STATIC ${HR_CORE_SOURCES})
+target_include_directories(hr_core PUBLIC src src/core src/utils src/ui)
+target_link_libraries(hr_core PUBLIC ZLIB::ZLIB)
+target_compile_options(hr_core PRIVATE -Wall)
+
 add_executable(homrec src/platform/linux/main.cpp)
 target_link_libraries(homrec PRIVATE hr_platform)
 target_compile_options(homrec PRIVATE -Wall -Wextra)
@@ -46,13 +66,14 @@ if(HOMREC_BUILD_TESTS)
     target_include_directories(hr_encoder_helpers PUBLIC src/core)
     target_compile_options(hr_encoder_helpers PRIVATE -O2 -Wall)
 
-    foreach(t wav_util audio_mixer overlay_canvas replay_ring encoder_helpers)
+    foreach(t wav_util audio_mixer overlay_canvas replay_ring encoder_helpers settings_registry)
         add_executable(test_${t} scripts/tests/test_${t}.cpp)
         target_include_directories(test_${t} PRIVATE src src/core src/utils scripts/tests)
         target_compile_options(test_${t} PRIVATE -Wall -Wextra)
         add_test(NAME ${t} COMMAND test_${t})
     endforeach()
     target_link_libraries(test_encoder_helpers PRIVATE hr_encoder_helpers)
+    target_link_libraries(test_settings_registry PRIVATE hr_core)
 endif()
 
 message(STATUS "HomRec: Linux build -> homrec (+ tests: ${HOMREC_BUILD_TESTS}). hr.exe / hom / homrec are Windows-only.")
