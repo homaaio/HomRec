@@ -275,6 +275,14 @@ bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstrin
     return true;
 }
 
+bool IsInstalledCopy() {
+    wchar_t exe[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    std::error_code ec;
+    return std::filesystem::exists(std::filesystem::path(exe).parent_path() / L"unins000.exe", ec);
+}
+
 bool LaunchInstaller(const std::wstring &installer_path) {
     if (installer_path.empty()) return false;
     HINSTANCE result = ShellExecuteW(nullptr, L"open", installer_path.c_str(),

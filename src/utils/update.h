@@ -48,6 +48,11 @@ bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstrin
 // DownloadInstaller().
 bool DownloadExeFile(const std::wstring &url, const std::wstring &dest_path, DownloadState *state);
 
+// true iff hr.exe sits next to Inno Setup's uninstaller (unins000.exe), i.e. this copy was put there by
+// the installer. A portable (unzipped) copy has none: the installer would not recognise that folder
+// and would install a second copy into its default directory instead of updating this one.
+bool IsInstalledCopy();
+
 // Starts a downloaded installer (from DownloadInstaller) with Inno Setup's silent-upgrade
 // flags and returns immediately.
 bool LaunchInstaller(const std::wstring &installer_path);
