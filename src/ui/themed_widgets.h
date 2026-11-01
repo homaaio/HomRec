@@ -22,6 +22,8 @@ public:
     ColorButton(wxWindow *parent, wxWindowID id, const wxString &label);
     void SetColours(wxColour bg, wxColour fg);
     void SetLabelText2(const wxString &label) { label_ = label; Refresh(); }
+    // Draws three centred dots instead of the label text (the "..." glyph of a font sits on the baseline).
+    void SetDotsGlyph(bool on) { dots_ = on; Refresh(); }
     void Enable2(bool enabled);
     bool IsEnabled2() const { return enabled_; }
 
@@ -35,6 +37,7 @@ private:
     wxColour bg_, fg_, disabled_bg_;
     bool enabled_ = true;
     bool hover_ = false;
+    bool dots_ = false;
     wxWindowID cmd_id_;
 };
 

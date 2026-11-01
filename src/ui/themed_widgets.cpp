@@ -124,6 +124,16 @@ void ColorButton::OnPaint(wxPaintEvent &) {
     dc.SetBrush(wxBrush(fill));
     dc.SetPen(*wxTRANSPARENT_PEN);
     dc.DrawRoundedRectangle(GetClientRect(), radius);
+    if (dots_) {
+        const wxSize cd = GetClientSize();
+        const int d = 4, gap = 3;                       // dot size / space between dots
+        const int total = 3 * d + 2 * gap;
+        const int x0 = (cd.GetWidth() - total) / 2, y0 = (cd.GetHeight() - d) / 2;
+        dc.SetBrush(wxBrush(enabled_ ? fg_ : wxColour(120, 120, 120)));
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        for (int i = 0; i < 3; ++i) dc.DrawEllipse(x0 + i * (d + gap), y0, d, d);
+        return;
+    }
     dc.SetTextForeground(enabled_ ? fg_ : wxColour(120, 120, 120));
     dc.SetFont(GetFont());
     wxSize ext = dc.GetTextExtent(label_);
