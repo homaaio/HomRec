@@ -18,6 +18,8 @@
 #  include <unistd.h>
 #  include <sys/sysinfo.h>
 #  include <sys/statvfs.h>
+#  include <sys/stat.h>      /* mkdir, stat */
+#  include <cerrno>          /* errno, EEXIST */
 #  define HR_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
