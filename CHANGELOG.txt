@@ -1,5 +1,26 @@
 welcome to changelog :D
 
+[Version 3.0.1] - 2026-11-01
+Fix for Help > Check for Updates in a portable copy, a sharper Live Preview, and two small interface fixes.
+
+### Fixed
+- A portable (unzipped) copy: the update was downloaded, HomRec closed, but nothing changed in its folder. The
+  installer does not know that folder and put a second copy into its default directory. HomRec now looks for
+  unins000.exe next to hr.exe; without it the update is not started, and the release page is offered instead.
+- Live Preview looked blocky even at 100% quality (the Windows logo turned into a square). When the preview pane size
+  did not divide the screen size evenly, each preview pixel was copied from a single screen pixel, so fine detail was
+  lost. Now every preview pixel averages up to 4x4 screen pixels, on both the normal and the GPU path, and the preview
+  pane scales the picture with averaging instead of nearest neighbour. Slightly more CPU per preview frame.
+- Desktop layer: the monitor icon's stand and base were off-centre, so the bottom looked uneven. The icon is now drawn
+  pixel-exact and symmetric.
+
+### Changed
+- The STATUS block (heading, dot and text) is gone from the Controls pane - the bottom bar already showed it. The bottom
+  bar now looks exactly like that block did (same dot size, font and colours) and shows the same text: Ready,
+  Recording, Paused, Saving..., Starting in N..., warnings. It no longer shows "Recording - 00:00:12" or "Processing...".
+- Audio Mixer: the "..." button is a small 22x22 square with three dots drawn in its centre. In the vertical layout it
+  moved from under Mute to the top-right corner of the card, level with the icon.
+
 [Version 3.0] - 2026-10-31
 The performance release: recording and Instant Replay put much less load on the CPU and the disk, the sound is
 mixed while you record (no waiting for it after Stop), and very long recordings are no longer lost.
