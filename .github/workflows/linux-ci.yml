@@ -1,0 +1,51 @@
+name: Linux (raw port)
+
+# Builds the Linux target (homrec) and runs the platform-independent unit tests on Ubuntu.
+# Runs only for the Linux port: pushes to linux-* branches, pull requests that touch the Linux /
+# platform files, and by hand from the Actions tab. It never builds hr.exe and never creates a
+# release - that stays in release.yml.
+
+on:
+  push:
+    branches:
+      - "linux-*"
+  pull_request:
+    paths:
+      - "src/platform/**"
+      - "src/core/encoder_helpers.c"
+      - "cmake/**"
+      - "CMakeLists.txt"
+      - "scripts/linux/**"
+      - "scripts/tests/**"
+      - ".github/workflows/linux-ci.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: scripts/linux/install-deps-debian.sh
+
+      - name: Unit tests (plain g++, AddressSanitizer + UBSan)
+        run: scripts/linux/test.sh
+
+      - name: Build with CMake and run ctest
+        run: scripts/linux/build.sh --test
+
+      - name: Smoke-test homrec
+        run: |
+          set -euo pipefail
+          BIN=build-linux/homrec
+          "$BIN" --version
+          "$BIN" doctor
+          "$BIN" paths
+          # `start` is not implemented yet and must say so with exit code 2 (not crash, not 0).
+          set +e; "$BIN" start; rc=$?; set -e
+          test "$rc" -eq 2

@@ -7,7 +7,12 @@
 #include <vector>
 #include <utility>
 #include <unordered_map>
+#ifdef _WIN32
 #include <windows.h>
+#else
+// Linux: HWND does not exist. Opaque pointer stand-in so the header compiles; it is always null there.
+typedef void *HWND;
+#endif
 
 enum class CaptureMode { Desktop, Window, Region };
 enum class RecordingMode { Ultra, Turbo, Balanced, Eco };
