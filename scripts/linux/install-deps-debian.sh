@@ -11,7 +11,7 @@ SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
 # Phase 0-1: toolchain + ffmpeg (HomRec drives the ffmpeg binary, it does not link libav*).
-PKGS=(build-essential cmake pkg-config ffmpeg)
+PKGS=(build-essential cmake pkg-config ffmpeg zlib1g-dev)
 
 if [ "${1:-}" = "--future" ]; then
     PKGS+=(
