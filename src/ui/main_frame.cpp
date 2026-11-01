@@ -2513,7 +2513,8 @@ void HomRecMainFrame::OnCheckForUpdates() {
             wxString msg = wxString::Format(
                 "A new version is available: %s (you have " HR_APP_VERSION ").\n\n",
                 wxString::FromUTF8(info.latest_version));
-            if (!info.download_url.empty()) {
+            const bool installed_copy = HrUpdate::IsInstalledCopy();
+            if (!info.download_url.empty() && installed_copy) {
                 msg += "Download and install it now? HomRec will close to finish updating.";
                 int choice = wxMessageBox(msg, "Update Available", wxYES_NO | wxICON_INFORMATION, this);
                 if (choice != wxYES) return;
@@ -2539,7 +2540,13 @@ void HomRecMainFrame::OnCheckForUpdates() {
                                  "release page.", "Update Available", wxOK | wxICON_ERROR, this);
                 }
             } else {
-                msg += "No installer was found in that release - open its page in your browser?";
+                if (!installed_copy) {
+                    HrLog::Info("Update: portable copy (no unins000.exe next to hr.exe), not running the installer");
+                    msg += "This is a portable copy, so it can't update itself - download the new archive from the "
+                           "release page and unpack it over this folder. Open the page in your browser?";
+                } else {
+                    msg += "No installer was found in that release - open its page in your browser?";
+                }
                 int choice = wxMessageBox(msg, "Update Available", wxYES_NO | wxICON_INFORMATION, this);
                 if (choice == wxYES && !info.html_url.empty()) {
                     std::wstring urlW = wxString::FromUTF8(info.html_url).ToStdWstring();
