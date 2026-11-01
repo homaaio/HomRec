@@ -299,6 +299,18 @@ private:
 };
 #endif  // _WIN32
 
+// Source indices for thumbnail sampling: for each of `dst` destination pixels, `n` points spread evenly
+// across its footprint in a source row/column of length `src` (out[d*n + k] is the k-th sample).
+static void build_thumb_sample_idx(std::vector<int>& out, int dst, int src, int n)
+{
+    out.resize((size_t)dst * (size_t)n);
+    for (int d = 0; d < dst; ++d)
+        for (int k = 0; k < n; ++k) {
+            int64_t v = ((int64_t)(2 * n * d + 2 * k + 1) * src) / ((int64_t)2 * n * dst);
+            out[(size_t)d * n + k] = (int)(v >= src ? src - 1 : v);
+        }
+}
+
 // ---------------------------------------------------------------------------
 // BGRA→thumbnail (box-filter, no intermediate RGB buffer)
 // ---------------------------------------------------------------------------
@@ -366,21 +378,39 @@ static void bgra_to_thumb(const uint8_t* __restrict bgra,
             }
         }
     } else {
-        // Nearest-neighbour fallback (non-integer ratio)
-        float rx = (float)sw / dw, ry = (float)sh / dh;
+        // Non-integer ratio (the usual case: the pane size rarely divides the screen size). This was
+        // plain nearest-neighbour, which drops most source pixels, so fine detail (a logo, small
+        // text) turned into blocks. Each destination pixel now averages up to 4x4 samples spread over
+        // its source footprint; the cap keeps the cost bounded.
+        const int nx = std::min(4, std::max(1, (sw + dw - 1) / dw));
+        const int ny = std::min(4, std::max(1, (sh + dh - 1) / dh));
+        static thread_local std::vector<int> xs, ys;
+        build_thumb_sample_idx(xs, dw, sw, nx);
+        build_thumb_sample_idx(ys, dh, sh, ny);
+        const uint32_t cnt = (uint32_t)(nx * ny);
         for (int y = 0; y < dh; ++y) {
-            int sy = (int)(y * ry); if (sy >= sh) sy = sh - 1;
+            uint8_t* orow = dst + (size_t)y * dw * 3;
             for (int x = 0; x < dw; ++x) {
-                int sx = (int)(x * rx); if (sx >= sw) sx = sw - 1;
-                const uint8_t* s = bgra + ((size_t)sy * sw + sx) * 4;
-                uint8_t*       d = dst  + ((size_t)y  * dw + x ) * 3;
-                d[0] = s[2]; d[1] = s[1]; d[2] = s[0];  // BGR→RGB
+                uint32_t r = 0, g = 0, b = 0;
+                for (int j = 0; j < ny; ++j) {
+                    const uint8_t* row = bgra + (size_t)ys[(size_t)y * ny + j] * sw * 4;
+                    for (int i = 0; i < nx; ++i) {
+                        const uint8_t* px = row + (size_t)xs[(size_t)x * nx + i] * 4;
+                        b += px[0]; g += px[1]; r += px[2];
+                    }
+                }
+                uint8_t* o = orow + (size_t)x * 3;
+                o[0] = (uint8_t)(r / cnt);
+                o[1] = (uint8_t)(g / cnt);
+                o[2] = (uint8_t)(b / cnt);
             }
         }
     }
 }
 
-// NV12 -> thumbnail (RGB), nearest-neighbour.
+// NV12 -> thumbnail (RGB). Luma is averaged over up to 4x4 samples per destination pixel (same idea as
+// bgra_to_thumb()'s non-integer path); chroma is already half-resolution, so it is taken at the
+// footprint's centre.
 static void nv12_to_thumb(const uint8_t* __restrict nv12,
                            uint8_t*       __restrict dst,
                            int sw, int sh, int dw, int dh)
@@ -389,16 +419,28 @@ static void nv12_to_thumb(const uint8_t* __restrict nv12,
     const uint8_t* Y  = nv12;
     const uint8_t* UV = nv12 + (size_t)sw * (size_t)sh;
     auto c8 = [](int v) -> uint8_t { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); };
+    const int nx = std::min(4, std::max(1, (sw + dw - 1) / dw));
+    const int ny = std::min(4, std::max(1, (sh + dh - 1) / dh));
+    static thread_local std::vector<int> xs, ys;
+    build_thumb_sample_idx(xs, dw, sw, nx);
+    build_thumb_sample_idx(ys, dh, sh, ny);
+    const int cnt = nx * ny;
     for (int y = 0; y < dh; ++y) {
-        int sy = (int)((int64_t)y * sh / dh); if (sy >= sh) sy = sh - 1;
-        const uint8_t* yrow  = Y  + (size_t)sy * sw;
-        const uint8_t* uvrow = UV + (size_t)(sy / 2) * sw;
+        const int* yi = &ys[(size_t)y * ny];
+        const uint8_t* uvrow = UV + (size_t)(yi[ny / 2] / 2) * sw;
         uint8_t* o = dst + (size_t)y * dw * 3;
         for (int x = 0; x < dw; ++x) {
-            int sx = (int)((int64_t)x * sw / dw); if (sx >= sw) sx = sw - 1;
-            const int l  = ((int)yrow[sx] - 16) * 298;
-            const int cb = (int)uvrow[(sx & ~1) + 0] - 128;
-            const int cr = (int)uvrow[(sx & ~1) + 1] - 128;
+            const int* xi = &xs[(size_t)x * nx];
+            int ysum = 0;
+            for (int j = 0; j < ny; ++j) {
+                const uint8_t* yrow = Y + (size_t)yi[j] * sw;
+                for (int i = 0; i < nx; ++i) ysum += yrow[xi[i]];
+            }
+            const int yavg = (ysum + cnt / 2) / cnt;
+            const int cx = xi[nx / 2] & ~1;
+            const int l  = (yavg - 16) * 298;
+            const int cb = (int)uvrow[cx + 0] - 128;
+            const int cr = (int)uvrow[cx + 1] - 128;
             o[0] = c8((l + 409 * cr + 128) >> 8);
             o[1] = c8((l - 100 * cb - 208 * cr + 128) >> 8);
             o[2] = c8((l + 516 * cb + 128) >> 8);
