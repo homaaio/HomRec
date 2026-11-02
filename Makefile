@@ -3,6 +3,10 @@
 CXX := g++
 CC  := cc
 
+# Optimisation level shared by every target below. LTO needs gcc 10+; if it gives trouble:
+#   make OPT=-O2
+OPT ?= -O3 -flto=auto -ffunction-sections -fdata-sections
+
 LUA_CFLAGS  ?= -IC:/lua54/include
 LUA_LDFLAGS ?= -LC:/lua54/lib
 
@@ -16,7 +20,7 @@ HOM_LDLIBS   := -lwinhttp -lshlwapi -ldbghelp
 # a wide wmain() so non-ASCII paths in arguments work, hence -municode. No wxWidgets/Lua - but
 # 'homrec start' records with the same RecordingController as hr.exe, so homrec.exe links the
 # wx-free engine objects below (they are the very same .o files hr.exe is built from).
-HOMREC_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc -static-libgcc -static-libstdc++
+HOMREC_CXXFLAGS := -std=c++17 $(OPT) -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -Isrc -static-libgcc -static-libstdc++
 HOMREC_OBJS := \
 	ffmpeg/ffmpeg_runner.o \
 	src/core/audio.o src/core/audio_pipe.o src/core/capture_ctl.o src/core/display_info.o \
@@ -25,18 +29,18 @@ HOMREC_OBJS := \
 	src/core/settings_registry.o src/core/tools.o src/core/webcam_capture.o src/core/wgc_capture.o \
 	src/ui/hrc_config.o src/ui/recording_controller.o src/ui/win32_theme.o src/ui/window_picker_dialog.o \
 	src/utils/log.o src/utils/log_paths.o src/utils/stopwatch.o src/utils/ui_utils.o src/utils/wgc_log.o
-HOMREC_LDLIBS := -Wl,-Bstatic,-lpthread,-Bdynamic \
+HOMREC_LDLIBS := -Wl,--gc-sections -Wl,-Bstatic,-lpthread,-Bdynamic \
 	-lcomctl32 -lcomdlg32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet -lwinhttp -ld3d11 -ldxgi -lpdh \
 	-lwinmm -lole32 -luuid -ldwmapi -luxtheme -lwindowscodecs -lstrmiids -loleaut32 \
 	-lmfplat -lmfreadwrite -lmf -lmfuuid
 
-CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 \
+CXXFLAGS := -std=c++17 $(OPT) -Wall -Wextra -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 \
             -Isrc -IC:/msys64/mingw64/lib/wx/include/msw-unicode-3.2 \
             -IC:/msys64/mingw64/include/wx-3.2 -DWXUSINGDLL -D__WXMSW__ $(LUA_CFLAGS)
 
-CFLAGS := -O2 -Wall
+CFLAGS := $(OPT) -Wall
 
-LDFLAGS := -mwindows -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bdynamic $(LUA_LDFLAGS) \
+LDFLAGS := -mwindows $(OPT) -Wl,--gc-sections -static-libgcc -static-libstdc++ -Wl,-Bstatic,-lpthread,-Bdynamic $(LUA_LDFLAGS) \
            -lcomctl32 -lcomdlg32 -lgdi32 -lshell32 -luser32 -lpsapi -lwininet -lwinhttp -ld3d11 -ldxgi -lpdh \
            -lwinmm -lole32 -luuid -llua -ldwmapi -luxtheme -lwindowscodecs -lstrmiids -loleaut32 \
            -lmfplat -lmfreadwrite -lmf -lmfuuid \
