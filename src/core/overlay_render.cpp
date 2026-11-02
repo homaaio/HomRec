@@ -995,7 +995,8 @@ void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays,
 
     PruneStaleCaches(overlays.size());
 
-    for (size_t i = 0; i < overlays.size(); ++i) {
+    // The first overlay in the list is drawn last, i.e. in front of the others.
+    for (size_t i = overlays.size(); i-- > 0;) {
         const HrOverlayDesc &ov = overlays[i];
         // Hidden, zero-sized or fully faded-out (opacity 0) overlays draw nothing - don't render
         // them either.
