@@ -535,7 +535,7 @@ int L_add_overlay(lua_State *L) {
         ov.webcam_name = getStr("webcam_name", "");
     }
 
-    rec->state().overlays.push_back(ov);
+    rec->state().overlays.insert(rec->state().overlays.begin(), ov);   // top row = in front
     // Same lifecycle hook a hand-added overlay fires (see overlays_dock_panel.h's
     // on_overlay_added, wired in main_frame.cpp) - a plugin-added overlay never goes through
     // that panel, so it's fired directly here instead.
