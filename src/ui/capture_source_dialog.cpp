@@ -176,7 +176,7 @@ public:
                 for (int i = 0; i < 4; ++i) monitor_choice_->Append(wxString::Format("%s %d", T("src_monitor_word"), i + 1));
             } else {
                 for (size_t i = 0; i < mons.size(); ++i) {
-                    wxString l = wxString::Format("%s %d — %dx%d", T("src_monitor_word"), (int)i + 1, mons[i].w, mons[i].h);
+                    wxString l = wxString::Format(wxT("%s %d \u2014 %dx%d"), T("src_monitor_word"), (int)i + 1, mons[i].w, mons[i].h);
                     if (mons[i].primary) l += " " + T("src_primary");
                     monitor_choice_->Append(l);
                 }
@@ -328,7 +328,8 @@ public:
             smart_hint_->Hide();
         }
         root->Add(scroll_, 1, wxEXPAND | wxALL, 4);
-        root->Add(new wxStaticLine(this), 0, wxEXPAND);
+        auto *sep_line = new wxStaticLine(this);
+        root->Add(sep_line, 0, wxEXPAND);
         auto *btnRow = new wxBoxSizer(wxHORIZONTAL);
         btnRow->AddStretchSpacer(1);
         btnRow->Add(new wxButton(this, wxID_CANCEL, T("cancel")), 0, wxALL, 8);
@@ -370,8 +371,16 @@ public:
         wxSize best = GetBestSize();
         const wxRect disp = wxGetClientDisplayRect();
         if (fixed_ == CaptureMode::Desktop) {
-            best.x = std::max(best.x, kThumbW + 80);
-            best.y = std::min(std::max(best.y, 260), std::max(260, disp.height - 80));
+            // Fit the content: the scroll area's sizer minimum (+ its 4 px border on each side), the
+            // separator line and the button row. Taken from the sizers directly (the old
+            // GetBestSize() + 260 px floor opened the dialog with the preview cut off). A few extra
+            // pixels keep the scrollbar away; it only shows when the screen is too short.
+            const wxSize content = scroll_->GetSizer()->CalcMin();
+            const wxSize btns = btnRow->CalcMin();
+            const int want_w = std::max(content.x + 8, btns.x);
+            const int want_h = content.y + 8 + sep_line->GetBestSize().y + btns.y + 4;
+            best.x = std::max(want_w, kThumbW + 80);
+            best.y = std::min(want_h, std::max(260, disp.height - 80));
         } else {
             best.x = std::max(best.x, 700);
             best.y = std::min(std::max(best.y, 520), std::max(420, disp.height - 80));
