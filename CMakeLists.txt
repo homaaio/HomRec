@@ -23,6 +23,15 @@ set(WX_LIB_DIR      "C:/msys64/mingw64/lib" CACHE PATH "wx/mingw64 lib dir")
 
 enable_language(RC)
 
+# Shared optimisation flags (hr + homrec). Turn LTO off with -DHR_LTO=OFF if the link gets slow/fails.
+option(HR_LTO "Link-time optimisation" ON)
+set(HR_OPT -O3 -ffunction-sections -fdata-sections)
+set(HR_OPT_LINK -Wl,--gc-sections)
+if(HR_LTO)
+    list(APPEND HR_OPT -flto=auto)
+    list(APPEND HR_OPT_LINK -flto=auto)
+endif()
+
 # hr.exe - the main app. Source list copied verbatim from Makefile's $(OBJS),
 # just with .o -> .cpp/.c and stripping the src/ prefix duplication.
 set(HR_SOURCES
@@ -104,7 +113,7 @@ target_include_directories(hr PRIVATE
 target_compile_features(hr PRIVATE cxx_std_17)
 
 target_compile_options(hr PRIVATE
-    -O2 -Wall -Wextra
+    ${HR_OPT} -Wall -Wextra
     $<$<COMPILE_LANGUAGE:CXX>:-municode>
 )
 
@@ -119,7 +128,7 @@ target_link_directories(hr PRIVATE ${WX_LIB_DIR} ${LUA_LIB_DIR})
 
 target_link_options(hr PRIVATE
     -municode -mwindows -static-libgcc -static-libstdc++
-    -Wl,-Bstatic,-lpthread,-Bdynamic
+    -Wl,-Bstatic,-lpthread,-Bdynamic ${HR_OPT_LINK}
 )
 
 target_link_libraries(hr PRIVATE
@@ -183,11 +192,11 @@ target_include_directories(homrec PRIVATE src)
 
 target_compile_features(homrec PRIVATE cxx_std_17)
 
-target_compile_options(homrec PRIVATE -O2 -Wall -Wextra -municode -static-libgcc -static-libstdc++)
+target_compile_options(homrec PRIVATE ${HR_OPT} -Wall -Wextra -municode -static-libgcc -static-libstdc++)
 
 target_compile_definitions(homrec PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0601)
 
-target_link_options(homrec PRIVATE -municode -static-libgcc -static-libstdc++)
+target_link_options(homrec PRIVATE -municode -static-libgcc -static-libstdc++ ${HR_OPT_LINK})
 
 target_link_libraries(homrec PRIVATE
     comctl32 comdlg32 gdi32 shell32 user32 psapi wininet winhttp d3d11 dxgi pdh
