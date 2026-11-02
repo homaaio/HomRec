@@ -1498,6 +1498,20 @@ void HomRecMainFrame::SetupDocking() {
     if (left_panel_) UpdateControlsOrientation();
 }
 
+// The "controls" pane has CloseButton(false), but when it is floating wx creates a native frame
+// whose close box stays visible (and OnAuiPaneClose vetoes it). Dropping WS_SYSMENU removes it.
+static void StripControlsFloatCloseBox(wxAuiManager &aui) {
+    wxAuiPaneInfo &p = aui.GetPane("controls");
+    if (!p.IsOk() || !p.IsFloating() || !p.frame) return;
+    HWND h = (HWND)p.frame->GetHWND();
+    if (!h) return;
+    const LONG_PTR st = GetWindowLongPtr(h, GWL_STYLE);
+    if (!(st & WS_SYSMENU)) return;
+    SetWindowLongPtr(h, GWL_STYLE, st & ~(LONG_PTR)WS_SYSMENU);
+    SetWindowPos(h, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
 void HomRecMainFrame::ApplyUiLock() {
     if (!dock_ready_) return;
     const bool lock = state_.ui_locked;
@@ -1515,6 +1529,7 @@ void HomRecMainFrame::ApplyUiLock() {
         p.Gripper(false);
     }
     aui_.Update();
+    StripControlsFloatCloseBox(aui_);
 }
 
 void HomRecMainFrame::SaveDockLayoutToState() {
@@ -2542,6 +2557,7 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
 
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
+    if (dock_ready_) StripControlsFloatCloseBox(aui_);
     if (tray_icon_ && tray_icon_rec_ != state_.recording) {
         tray_icon_rec_ = state_.recording;
         tray_icon_->SetIcon(wxIcon(tray_icon_rec_ ? "#3" : "#2", wxBITMAP_TYPE_ICO_RESOURCE), "HomRec");
