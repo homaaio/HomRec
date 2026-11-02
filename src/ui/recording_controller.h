@@ -121,6 +121,7 @@ public:
     // preview pipeline wouldn't otherwise pick up on its own.
     void RefreshPreviewSettings();
     void SetPreviewVisible(bool visible);
+    void SetPreviewLow(bool low);   // true = main window is not the active window
 
     // Tells the pipeline how big the on-screen preview pane is, so it can produce the thumbnail at
     // that size (no UI-side rescale). Cheap; callers throttle it themselves.
@@ -253,6 +254,7 @@ private:
     // Last visibility reported through SetPreviewVisible() (false = window minimized / hidden
     // in the tray).
     bool   preview_window_visible_ = true;
+    bool   preview_low_ = false;   // main window inactive: preview capped at 10 fps
     // Value to pass to hr_pl_set_preview_needed(): 0 when the live preview is
     // disabled in Settings OR the window can't be seen, 1 otherwise.
     int    PreviewNeededFlag() const { return (state_.disable_preview || !preview_window_visible_) ? 0 : 1; }

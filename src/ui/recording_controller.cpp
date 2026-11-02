@@ -121,6 +121,7 @@ extern "C" {
     void hr_pl_set_preview_size(void *handle, int pw, int ph);
     void hr_pl_set_fps(void *handle, int fps);
     void hr_pl_set_preview_needed(void *handle, int enabled);
+    void hr_pl_set_preview_low(void *handle, int low);
     int hr_pl_end_recording_segment(void *handle, int timeout_ms);
 
     // ffmpeg_runner.cpp
@@ -1405,6 +1406,7 @@ bool RecordingController::Start(std::wstring &error_out) {
             hr_pl_pause(pipeline_, 0);
             hr_pl_set_recording(pipeline_, /*active=*/0, /*pipe_fd=*/0);
             hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+            hr_pl_set_preview_low(pipeline_, preview_low_ ? 1 : 0);
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
     } else {
@@ -1520,6 +1522,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         }
         if (pipeline_) {
             hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+            hr_pl_set_preview_low(pipeline_, preview_low_ ? 1 : 0);
             hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
         }
         if (!pipeline_ || !pipeline_started) {
@@ -2568,6 +2571,7 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     hr_pl_set_output_size(pipeline_, output_w_, output_h_);
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+    hr_pl_set_preview_low(pipeline_, preview_low_ ? 1 : 0);
     hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
 
     if (!StartInstantReplayEncoder(error_out)) return false;
@@ -2883,6 +2887,7 @@ void RecordingController::EnsurePreview() {
     // Same crop rect ResolveCaptureSize() above just resolved for Start()
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
     hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+    hr_pl_set_preview_low(pipeline_, preview_low_ ? 1 : 0);
     // EnsurePreview() already bailed out above when state_.disable_preview
     // is set, so reaching here means the preview genuinely is wanted.
     hr_pl_set_preview_needed(pipeline_, 1);
@@ -3168,6 +3173,7 @@ void RecordingController::RefreshPreviewSettings() {
         // ffmpeg was already started with the old rate).
         if (!state_.recording) hr_pl_set_fps(pipeline_, state_.target_fps);
         hr_pl_set_preview_fps(pipeline_, state_.preview_fps);
+        hr_pl_set_preview_low(pipeline_, preview_low_ ? 1 : 0);
         // Covers the case TeardownPreview()/EnsurePreview() above don't:
         hr_pl_set_preview_needed(pipeline_, PreviewNeededFlag());
     }
@@ -3181,6 +3187,12 @@ void RecordingController::RefreshPreviewSettings() {
                         WideFromNarrow(state_.mic_device_id).c_str());
         applied_mic_device_id_ = state_.mic_device_id;
     }
+}
+
+// Window open but not in the foreground -> thumbnail capped at 10 fps (see Pipeline::preview_low).
+void RecordingController::SetPreviewLow(bool low) {
+    preview_low_ = low;
+    if (pipeline_) hr_pl_set_preview_low(pipeline_, low ? 1 : 0);
 }
 
 void RecordingController::SetPreviewVisible(bool visible) {
