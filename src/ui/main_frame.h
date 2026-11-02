@@ -272,6 +272,7 @@ private:
     unsigned long long ws_trim_at_ = 0;   // GetTickCount64() deadline, 0 = nothing scheduled
     void OnClose(wxCloseEvent &evt);
     void OnIconize(wxIconizeEvent &evt);
+    void OnActivate(wxActivateEvent &evt);
     void OnShowEvent(wxShowEvent &evt);
     void OnHotkeyEvent(wxThreadEvent &evt); // posted from hotkey.cpp's background thread
 

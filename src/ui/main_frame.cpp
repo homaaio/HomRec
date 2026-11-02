@@ -908,6 +908,7 @@ HomRecMainFrame::HomRecMainFrame()
     aui_.Bind(wxEVT_AUI_PANE_CLOSE, &HomRecMainFrame::OnAuiPaneClose, this);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
     Bind(wxEVT_ICONIZE, &HomRecMainFrame::OnIconize, this);
+    Bind(wxEVT_ACTIVATE, &HomRecMainFrame::OnActivate, this);
     Bind(wxEVT_SHOW, &HomRecMainFrame::OnShowEvent, this);
     Bind(EVT_HOTKEY_START_STOP, &HomRecMainFrame::OnHotkeyEvent, this);
     Bind(EVT_HOTKEY_PAUSE, &HomRecMainFrame::OnHotkeyEvent, this);
@@ -2682,6 +2683,11 @@ void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
     // "shown" as far as wx is concerned, just iconized in the taskbar.
     if (rec_) rec_->SetPreviewVisible(!evt.IsIconized());
     ApplyVisibilityTimers(!evt.IsIconized() && IsShown());
+    evt.Skip();
+}
+
+void HomRecMainFrame::OnActivate(wxActivateEvent &evt) {
+    if (rec_) rec_->SetPreviewLow(!evt.GetActive());
     evt.Skip();
 }
 
