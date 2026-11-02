@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.15)
 project(HomRec LANGUAGES C CXX)
 
+# Anything that is not Windows (i.e. Linux) is built by cmake/LinuxPort.cmake and stops here:
+# the rest of this file is the Windows build (hr.exe / hom.exe / homrec.exe) and needs windres, wxMSW, the
+# Windows SDK import libraries ... none of which exist elsewhere. See docs/LINUX_PORT_PLAN.md.
+if(NOT WIN32)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/LinuxPort.cmake)
+    return()
+endif()
+
 # This file is a 1:1 port of the existing ./Makefile - same source list, same compiler
 # flags, same libraries.
 

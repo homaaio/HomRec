@@ -137,4 +137,14 @@ clean:
 
 clwexe: # clear without exe
 	rm -f $(OBJS) resource.o
-.PHONY: all clean hom homrec FORCE
+# --- Linux (raw port, see docs/LINUX_PORT_PLAN.md) ---------------------------------------
+# These two only delegate to the scripts; none of the Windows rules above is involved.
+#   make linux        configure + build homrec and the unit tests into ./build-linux
+#   make linux-test   build and run the platform-independent unit tests (plain g++, no CMake)
+linux:
+	scripts/linux/build.sh
+
+linux-test:
+	scripts/linux/test.sh
+
+.PHONY: all clean hom homrec FORCE linux linux-test
