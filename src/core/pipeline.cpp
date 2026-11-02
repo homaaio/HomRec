@@ -538,6 +538,11 @@ struct Pipeline {
     // produces (hr_pl_get_preview()).
     std::atomic<bool> preview_needed{true};
 
+    // The HomRec window is open but not the foreground window: nobody is watching closely, so the
+    // thumbnail is capped at kPreviewLowFps (set by the UI through hr_pl_set_preview_low()).
+    std::atomic<bool> preview_low{false};
+    static constexpr int kPreviewLowFps = 10;
+
     // pipe_handle and `recording` are written by the UI thread
     // (hr_pl_set_recording()/hr_pl_end_recording_segment()) while the capture and writer
     // threads read - and the writer thread also zeroes - them, with no synchronisation at all.
@@ -1138,6 +1143,7 @@ struct Pipeline {
         // already throttled by the preview-fps check further down.
         auto compute_frame_ns_idle = [&]() {
             int want_fps = preview_fps.load(std::memory_order_relaxed);
+            if (preview_low.load(std::memory_order_relaxed) && want_fps > kPreviewLowFps) want_fps = kPreviewLowFps;
             if (want_fps < 1) want_fps = 1;
             return std::max(frame_ns_recording, (int64_t)(1'000'000'000LL / want_fps));
         };
@@ -1348,6 +1354,7 @@ struct Pipeline {
                                   ? g_libs.sw_elapsed_ns(sw_ctx)
                                   : next_frame_ns; // fallback: still monotonic
             int want_fps = preview_fps.load(std::memory_order_relaxed);
+            if (preview_low.load(std::memory_order_relaxed) && want_fps > kPreviewLowFps) want_fps = kPreviewLowFps;
             if (want_fps < 1) want_fps = 1;
             int64_t preview_interval_ns = 1'000'000'000LL / want_fps;
             if (preview_needed.load(std::memory_order_relaxed) &&
@@ -2796,6 +2803,16 @@ HR_EXPORT void hr_pl_set_preview_fps(void* handle, int fps) {
     if (!handle || fps <= 0) return;
 #ifdef _WIN32
     static_cast<Pipeline*>(handle)->preview_fps.store(fps, std::memory_order_relaxed);
+#endif
+}
+
+// See Pipeline::preview_low. low=1 while the HomRec window is not the foreground window.
+HR_EXPORT void hr_pl_set_preview_low(void* handle, int low) {
+    if (!handle) return;
+#ifdef _WIN32
+    static_cast<Pipeline*>(handle)->preview_low.store(low != 0, std::memory_order_relaxed);
+#else
+    (void)low;
 #endif
 }
 
