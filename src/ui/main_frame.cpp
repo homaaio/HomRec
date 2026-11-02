@@ -471,8 +471,8 @@ bool PreviewPanel::GetPreviewRect(wxRect &out) const {
     return true;
 }
 
-// Topmost overlay under (mx,my), or -1. Later entries paint on top of
-// earlier ones, so walk backwards to grab the one the user actually sees.
+// Topmost overlay under (mx,my), or -1. Earlier entries paint on top of
+// later ones, so walk forwards to grab the one the user actually sees.
 // `corner` reports whether a resize handle (vs. the plain body) was hit.
 int PreviewPanel::HitTestOverlay(int mx, int my, Corner &corner) const {
     corner = Corner::kNone;
@@ -482,7 +482,7 @@ int PreviewPanel::HitTestOverlay(int mx, int my, Corner &corner) const {
     double sx = (double)prevRect.GetWidth() / nw;
     double sy = (double)prevRect.GetHeight() / nh;
 
-    for (int i = (int)state_.overlays.size() - 1; i >= 0; --i) {
+    for (int i = 0; i < (int)state_.overlays.size(); ++i) {
         const auto &ov = state_.overlays[(size_t)i];
         if (!ov.visible && !snapshot_mode_) continue;
         wxRect r = OverlayScreenRect(ov, prevRect, sx, sy);
