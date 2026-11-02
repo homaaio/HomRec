@@ -15,6 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <vector>
 #include "wgc_capture.h"   // 8th pass: window layers that capture the window itself (after NOMINMAX above)
 
 namespace {
@@ -130,22 +131,33 @@ static void CompositeBgraNv12(uint8_t *nv12, int w, int h,
 #ifdef _WIN32
 
 // Nearest-neighbor resample of a BGRA buffer, alpha included.
+// The source column of every destination column is the same on every row, so it is computed once per
+// call into a table (O(dw)) instead of an int64 divide per pixel (O(dw*dh)).
 static void ScaleBgraNearest(const std::vector<uint8_t> &src, int sw, int sh,
                               std::vector<uint8_t> &dst, int dw, int dh)
 {
-    dst.assign((size_t)dw * dh * 4, 0);
-    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
+        dst.assign((size_t)std::max(dw, 0) * (size_t)std::max(dh, 0) * 4, 0);
+        return;
+    }
+    dst.resize((size_t)dw * dh * 4);   // every pixel is written below - no zero-fill pass
+
+    static thread_local std::vector<int> xt;   // byte offset of the source pixel, per destination column
+    xt.resize((size_t)dw);
+    for (int x = 0; x < dw; ++x) {
+        int sx = (int)((int64_t)x * sw / dw);
+        if (sx >= sw) sx = sw - 1;
+        xt[(size_t)x] = sx * 4;
+    }
+    const int *xo = xt.data();
 
     for (int y = 0; y < dh; ++y) {
         int sy = (int)((int64_t)y * sh / dh);
         if (sy >= sh) sy = sh - 1;
         const uint8_t *srow = src.data() + (size_t)sy * sw * 4;
         uint8_t *drow = dst.data() + (size_t)y * dw * 4;
-        for (int x = 0; x < dw; ++x) {
-            int sx = (int)((int64_t)x * sw / dw);
-            if (sx >= sw) sx = sw - 1;
-            std::memcpy(drow + (size_t)x * 4, srow + (size_t)sx * 4, 4);
-        }
+        for (int x = 0; x < dw; ++x)
+            std::memcpy(drow + (size_t)x * 4, srow + xo[x], 4);
     }
 }
 
@@ -154,6 +166,20 @@ static void ScaleRectBox(const uint8_t *src, size_t src_stride, int sx, int sy, 
 {
     if (!src || !dst || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
     const bool avg_x = sw >= dw * 3 / 2, avg_y = sh >= dh * 3 / 2;
+
+    // Per-column byte offsets (first sample and second sample), built once - see ScaleBgraNearest().
+    static thread_local std::vector<int> xa, xb;
+    xa.resize((size_t)dw);
+    xb.resize((size_t)dw);
+    for (int x = 0; x < dw; ++x) {
+        const int x0 = sx + (int)((int64_t)x * sw / dw);
+        int x1 = avg_x ? sx + (int)((int64_t)(x + 1) * sw / dw) - 1 : x0;
+        if (x1 < x0) x1 = x0;
+        xa[(size_t)x] = x0 * 4;
+        xb[(size_t)x] = std::min(x1, x0 + 1 + (x1 - x0) / 2) * 4;
+    }
+    const int *oa = xa.data(), *ob = xb.data();
+
     for (int y = 0; y < dh; ++y) {
         const int y0 = sy + (int)((int64_t)y * sh / dh);
         int y1 = avg_y ? sy + (int)((int64_t)(y + 1) * sh / dh) - 1 : y0;
@@ -162,12 +188,8 @@ static void ScaleRectBox(const uint8_t *src, size_t src_stride, int sx, int sy, 
         const uint8_t *r1 = src + (size_t)std::min(y1, y0 + 1 + (y1 - y0) / 2) * src_stride;
         uint8_t *drow = dst + (size_t)y * dw * 4;
         for (int x = 0; x < dw; ++x) {
-            const int x0 = sx + (int)((int64_t)x * sw / dw);
-            int x1 = avg_x ? sx + (int)((int64_t)(x + 1) * sw / dw) - 1 : x0;
-            if (x1 < x0) x1 = x0;
-            const int xb = std::min(x1, x0 + 1 + (x1 - x0) / 2);
-            const uint8_t *p00 = r0 + (size_t)x0 * 4, *p01 = r0 + (size_t)xb * 4;
-            const uint8_t *p10 = r1 + (size_t)x0 * 4, *p11 = r1 + (size_t)xb * 4;
+            const uint8_t *p00 = r0 + oa[x], *p01 = r0 + ob[x];
+            const uint8_t *p10 = r1 + oa[x], *p11 = r1 + ob[x];
             uint8_t *d = drow + (size_t)x * 4;
             d[0] = (uint8_t)((p00[0] + p01[0] + p10[0] + p11[0] + 2) >> 2);
             d[1] = (uint8_t)((p00[1] + p01[1] + p10[1] + p11[1] + 2) >> 2);
