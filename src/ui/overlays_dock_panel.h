@@ -126,4 +126,6 @@ enum OverlaysDockPanelControlId {
     ID_OVDOCK_ADD      = 3001,
     ID_OVDOCK_CLOSE    = 3003,
     ID_OVDOCK_LIST     = 3004,
+    ID_OVDOCK_UP       = 3005,   // selected layer one row up   (= more in front)
+    ID_OVDOCK_DOWN     = 3006,   // selected layer one row down (= further back)
 };

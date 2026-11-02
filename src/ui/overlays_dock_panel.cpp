@@ -201,6 +201,15 @@ HWND OverlaysDockPanel::Create(HWND parent, HINSTANCE hInst, int x, int y, int w
                      x + 6, cy, 28, 24, parent, (HMENU)ID_OVDOCK_ADD, hInst, nullptr);
     if (HFONT bf = AddButtonFont()) SendMessageW(add_btn, WM_SETFONT, (WPARAM)bf, FALSE);
     HrWin32Theme::ThemeButton(add_btn);
+    // Layer order buttons on the right of the same row (placed for real in Resize()).
+    for (int id : { ID_OVDOCK_UP, ID_OVDOCK_DOWN }) {
+        HWND b = CreateWindowExW(0, L"BUTTON", id == ID_OVDOCK_UP ? L"\u2191" : L"\u2193",
+                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_PUSHBUTTON,
+                     x + w - 6 - 28 * (id == ID_OVDOCK_UP ? 2 : 1) - (id == ID_OVDOCK_UP ? 4 : 0), cy, 28, 24,
+                     parent, (HMENU)(INT_PTR)id, hInst, nullptr);
+        if (HFONT bf = AddButtonFont()) SendMessageW(b, WM_SETFONT, (WPARAM)bf, FALSE);
+        HrWin32Theme::ThemeButton(b);
+    }
     // 2.4: no "x" button of our own any more - the dock pane's caption (and the floating
     // window's title bar) already has one, and having two was confusing.
 
@@ -603,10 +612,10 @@ void OverlaysDockPanel::AddWindowLayer(HWND parent, HINSTANCE hInst) {
     OverlayDef ov;
     if (!HrBuildWindowLayer(scratch, cw, ch, /*allow_upscale=*/false, ov)) return;
     ov.id = NewOverlayId();
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
-    SelectOverlay(state_.overlays.size() - 1);
+    SelectOverlay(0);
 }
 
 void OverlaysDockPanel::AddRegionLayer(HWND parent, HINSTANCE hInst) {
@@ -622,10 +631,10 @@ void OverlaysDockPanel::AddRegionLayer(HWND parent, HINSTANCE hInst) {
     OverlayDef ov;
     if (!HrBuildRegionLayer(scratch, cw, ch, /*allow_upscale=*/false, ov)) return;
     ov.id = NewOverlayId();
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
-    SelectOverlay(state_.overlays.size() - 1);
+    SelectOverlay(0);
 }
 
 void OverlaysDockPanel::AddTextOverlay(HWND parent, HINSTANCE hInst) {
@@ -638,7 +647,7 @@ void OverlaysDockPanel::AddTextOverlay(HWND parent, HINSTANCE hInst) {
     ov.text = NarrowFromWide(text);
     ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 60;
     ov.visible = true;
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
 }
@@ -656,7 +665,7 @@ void OverlaysDockPanel::AddImageOverlay(HWND parent, HINSTANCE hInst) {
     ov.image_path = path;
     ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 150;
     ov.visible = true;
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
 }
@@ -674,7 +683,7 @@ void OverlaysDockPanel::AddGifOverlay(HWND parent, HINSTANCE hInst) {
     ov.image_path = path;
     ov.x = 40; ov.y = 40; ov.w = 200; ov.h = 150;
     ov.visible = true;
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
 }
@@ -702,7 +711,7 @@ void OverlaysDockPanel::AddWebcamOverlay(HWND parent, HINSTANCE hInst) {
     ov.webcam_name  = devices[chosen].name;
     ov.x = 40; ov.y = 40; ov.w = 240; ov.h = 180;
     ov.visible = true;
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
 }
@@ -733,7 +742,7 @@ void OverlaysDockPanel::AddExternalOverlay(HWND parent, HINSTANCE hInst) {
     ov.w = layout.width  > 0 ? layout.width  : 300;
     ov.h = layout.height > 0 ? layout.height : 150;
     ov.visible = true;
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
 }
@@ -760,7 +769,7 @@ void OverlaysDockPanel::AddFromInputOverlayRegistry(HWND parent, HINSTANCE hInst
     ov.w = layout.width  > 0 ? layout.width  : 300;
     ov.h = layout.height > 0 ? layout.height : 150;
     ov.visible = true;
-    state_.overlays.push_back(ov);
+    state_.overlays.insert(state_.overlays.begin(), ov);   // top row = in front
     if (on_overlay_added) on_overlay_added();
     Refresh();
 }
@@ -836,8 +845,10 @@ void OverlaysDockPanel::Resize(int w, int h) {
     if (!hwnd_ || w < 40 || h < 60) return;
     HWND parent = GetParent(hwnd_);
     HWND add = GetDlgItem(parent, ID_OVDOCK_ADD);
+    HWND up = GetDlgItem(parent, ID_OVDOCK_UP);
+    HWND down = GetDlgItem(parent, ID_OVDOCK_DOWN);
     // Batched so a sash drag repositions all three children with one repaint pass.
-    HDWP dwp = BeginDeferWindowPos(3);
+    HDWP dwp = BeginDeferWindowPos(5);
     auto place = [&](HWND win, int px, int py, int pw, int ph) {
         if (!win) return;
         if (dwp) dwp = DeferWindowPos(dwp, win, nullptr, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -845,10 +856,14 @@ void OverlaysDockPanel::Resize(int w, int h) {
     };
     place(hwnd_, 0, 0, w, h);
     place(add, 6, 6, 28, 24);
+    place(up, std::max(40, w - 6 - 28 - 4 - 28), 6, 28, 24);
+    place(down, std::max(72, w - 6 - 28), 6, 28, 24);
     place(list_, 6, 36, std::max(20, w - 12), std::max(20, h - 42));
     if (dwp) EndDeferWindowPos(dwp);
     // The sunken STATIC is the lowest sibling; raise the controls above it.
     if (add)   SetWindowPos(add,   HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (up)    SetWindowPos(up,    HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (down)  SetWindowPos(down,  HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if (list_) SetWindowPos(list_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
@@ -1054,7 +1069,7 @@ void OverlaysDockPanel::SetVisible(bool visible) {
     // hwnd_ (a plain STATIC used only as a visual frame here), so they
     // have to be hidden individually too.
     HWND parent = GetParent(hwnd_);
-    for (int id : { ID_OVDOCK_ADD, ID_OVDOCK_LIST }) {
+    for (int id : { ID_OVDOCK_ADD, ID_OVDOCK_UP, ID_OVDOCK_DOWN, ID_OVDOCK_LIST }) {
         HWND ctrl = GetDlgItem(parent, id);
         if (ctrl) ShowWindow(ctrl, cmd);
     }
@@ -1065,6 +1080,14 @@ void OverlaysDockPanel::OnCommand(int id) {
     HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE);
     switch (id) {
         case ID_OVDOCK_ADD:      ShowAddMenu(parent, hInst); break;
+        case ID_OVDOCK_UP:
+        case ID_OVDOCK_DOWN: {
+            // Only overlays move: row 0 (Desktop) has no overlay index, so it is left alone.
+            const int ov = list_ ? OverlayOfRow((int)SendMessageW(list_, LB_GETCURSEL, 0, 0)) : -1;
+            if (ov >= 0) MoveBy((size_t)ov, id == ID_OVDOCK_UP ? -1 : +1);
+            if (list_) SetFocus(list_);
+            break;
+        }
         case ID_OVDOCK_CLOSE:    ClosePanel(); break;
         default: break;
     }

@@ -982,9 +982,9 @@ void HrMigrateCaptureSourceToLayers(AppState &state) {
     if (state.capture_mode == CaptureMode::Window) made = HrBuildWindowLayer(state, cw, ch, true, layer);
     else if (state.capture_mode == CaptureMode::Region) made = HrBuildRegionLayer(state, cw, ch, true, layer);
     if (made) {
-        // Layers further down the list are drawn over the ones above: the picture the old recording WAS
+        // Layers higher in the list are drawn over the ones below: the picture the old recording WAS
         // goes under the overlays that were already set up.
-        state.overlays.insert(state.overlays.begin(), layer);
+        state.overlays.push_back(layer);
         state.desktop_visible = false;
         HrWgcLog::Note(std::string("Capture source migrated: the old \"") +
                        (state.capture_mode == CaptureMode::Window ? "window" : "region") +
