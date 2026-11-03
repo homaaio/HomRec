@@ -131,7 +131,7 @@ target_compile_definitions(hr PRIVATE
 target_link_directories(hr PRIVATE ${WX_LIB_DIR} ${LUA_LIB_DIR})
 
 target_link_options(hr PRIVATE
-    -municode -mwindows -static-libgcc -static-libstdc++
+    -mwindows -static-libgcc -static-libstdc++
     -Wl,-Bstatic,-lpthread,-Bdynamic ${HR_OPT_LINK}
 )
 
