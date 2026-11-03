@@ -23,7 +23,7 @@ cd "$ROOT"
 "$CC" -O2 -Wall "${SAN[@]}" -c src/core/encoder_helpers.c -o "$OUT/encoder_helpers.o"
 
 fail=0
-for t in wav_util audio_mixer overlay_canvas replay_ring encoder_helpers settings_registry; do
+for t in wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry; do
     extra=()
     [ "$t" = "encoder_helpers" ] && extra=("$OUT/encoder_helpers.o")
     [ "$t" = "settings_registry" ] && extra=(src/core/settings_registry.cpp)
