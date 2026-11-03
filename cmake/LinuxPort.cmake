@@ -68,23 +68,9 @@ if(HR_LTO AND HR_IPO_OK)
     set_property(TARGET homrec hr_platform hr_core PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)
 endif()
 
-# ---- tests -------------------------------------------------------------------------------------
+# ---- tests + bench ----------------------------------------------------------------------------
 if(HOMREC_BUILD_TESTS)
-    enable_testing()
-
-    # encoder_helpers.c is plain C (BGRA <-> YUV/NV12 converters, SSE2/SSE4.1 where available).
-    add_library(hr_encoder_helpers STATIC src/core/encoder_helpers.c)
-    target_include_directories(hr_encoder_helpers PUBLIC src/core)
-    target_compile_options(hr_encoder_helpers PRIVATE -O3 -Wall)
-
-    foreach(t wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry)
-        add_executable(test_${t} scripts/tests/test_${t}.cpp)
-        target_include_directories(test_${t} PRIVATE src src/core src/utils scripts/tests)
-        target_compile_options(test_${t} PRIVATE -Wall -Wextra)
-        add_test(NAME ${t} COMMAND test_${t})
-    endforeach()
-    target_link_libraries(test_encoder_helpers PRIVATE hr_encoder_helpers)
-    target_link_libraries(test_settings_registry PRIVATE hr_core)
+    include(${CMAKE_CURRENT_LIST_DIR}/Tests.cmake)
 endif()
 
 message(STATUS "HomRec: Linux build -> homrec (+ tests: ${HOMREC_BUILD_TESTS}). hr.exe / hom / homrec are Windows-only.")
