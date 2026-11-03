@@ -13,12 +13,18 @@ if(NOT WIN32)
     return()
 endif()
 
-# This file is a 1:1 port of the existing ./Makefile - same source list, same compiler
-# flags, same libraries.
+# The Windows build (CMake is the only build system now - the old Makefile is gone).
+#
+#   cmake -S . -B build -G "MinGW Makefiles"            (MSYS2 MINGW64 shell)
+#   cmake --build build -j                              -> hr.exe, hom.exe, homrec.exe in the repo root
+#   cmake --build build --target hr                     just hr.exe (also: hom, homrec)
+#   cmake -S . -B build -DHOMREC_BUILD_TESTS=ON         + unit tests (ctest --test-dir build) and the bench target
+#
+# When you add or remove a source file, update the lists below (HR_SOURCES / homrec).
 
-# Paths that were hardcoded in the Makefile (LUA_CFLAGS/LUA_LDFLAGS, wx
-# include/lib dirs). Kept as cache variables here so you can override them
+# Where the build looks for libraries. Cache variables, so you can override them
 # on the command line instead of editing the file, e.g.:
+#   cmake -S . -B build -DLUA_INCLUDE_DIR=D:/lua/include -DLUA_LIB_DIR=D:/lua/lib
 set(LUA_INCLUDE_DIR "C:/lua54/include" CACHE PATH "Lua headers")
 set(LUA_LIB_DIR     "C:/lua54/lib"     CACHE PATH "Lua import lib dir")
 set(WX_INCLUDE_DIR  "C:/msys64/mingw64/lib/wx/include/msw-unicode-3.2" CACHE PATH "wx build-specific headers")
@@ -26,6 +32,13 @@ set(WX_INCLUDE_DIR2 "C:/msys64/mingw64/include/wx-3.2" CACHE PATH "wx headers")
 set(WX_LIB_DIR      "C:/msys64/mingw64/lib" CACHE PATH "wx/mingw64 lib dir")
 
 enable_language(RC)
+
+# hr.exe / hom.exe / homrec.exe land in the repo root, like they always did: installer/HomRec.iss and
+# tools/homrec_build.py pick them up from there. -DHR_EXE_IN_ROOT=OFF keeps them in the build folder.
+option(HR_EXE_IN_ROOT "Put the .exe files in the source folder instead of the build folder" ON)
+if(HR_EXE_IN_ROOT)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
 
 # Shared optimisation flags (hr + homrec). Turn LTO off with -DHR_LTO=OFF if the link gets slow/fails.
 option(HR_LTO "Link-time optimisation" ON)
@@ -36,8 +49,7 @@ if(HR_LTO)
     list(APPEND HR_OPT_LINK -flto=auto)
 endif()
 
-# hr.exe - the main app. Source list copied verbatim from Makefile's $(OBJS),
-# just with .o -> .cpp/.c and stripping the src/ prefix duplication.
+# hr.exe - the main app.
 set(HR_SOURCES
     src/win_main.cpp
     src/commands/ls.cpp
@@ -130,9 +142,12 @@ target_compile_definitions(hr PRIVATE
 
 target_link_directories(hr PRIVATE ${WX_LIB_DIR} ${LUA_LIB_DIR})
 
+# hr.map: linker map. Keep it next to every released hr.exe - it turns a crash offset into a function name
+# (see src/utils/crash_handler.cpp).
 target_link_options(hr PRIVATE
     -mwindows -static-libgcc -static-libstdc++
     -Wl,-Bstatic,-lpthread,-Bdynamic ${HR_OPT_LINK}
+    -Wl,-Map=${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/hr.map
 )
 
 target_link_libraries(hr PRIVATE
@@ -146,7 +161,7 @@ target_link_libraries(hr PRIVATE
 
 # hom.exe - standalone plugin-manager CLI tool. Deliberately NOT municode
 # (plain `main`, not `wWinMain`) and does NOT link wx/Lua - see the comment
-# in the original Makefile explaining why it has its own flag set.
+# below explaining why it has its own flag set (plain narrow main, no wx / Lua).
 add_executable(hom tools/hom/hom.cpp)
 
 target_compile_features(hom PRIVATE cxx_std_17)
@@ -161,7 +176,7 @@ target_link_libraries(hom PRIVATE winhttp shlwapi dbghelp)
 
 # homrec.exe - standalone command-line interface (tools/homrec). No wx/Lua, and a wide wmain(), so
 # it IS built with -municode. 'homrec start' records with the same RecordingController as hr.exe,
-# so the wx-free engine sources are compiled into it too (same list as HOMREC_OBJS in the Makefile).
+# so the wx-free engine sources are compiled into it too (the list below).
 add_executable(homrec
     tools/homrec/homrec.cpp
     ffmpeg/ffmpeg_runner.cpp
@@ -206,3 +221,9 @@ target_link_libraries(homrec PRIVATE
     comctl32 comdlg32 gdi32 shell32 user32 psapi wininet winhttp d3d11 dxgi pdh
     winmm ole32 uuid dwmapi uxtheme windowscodecs strmiids oleaut32
     mfplat mfreadwrite mf mfuuid)
+
+# ---- unit tests + benchmark (off by default on Windows; ON on Linux) --------------------------------------
+option(HOMREC_BUILD_TESTS "Build the unit tests (scripts/tests) and the bench target" OFF)
+if(HOMREC_BUILD_TESTS)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Tests.cmake)
+endif()
