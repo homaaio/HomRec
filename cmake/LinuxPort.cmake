@@ -31,9 +31,16 @@ set(HR_PLATFORM_SOURCES
     # phase 3: src/platform/linux/wayland/portal_capture.cpp ...
 )
 
+# Same optimisation set as the Windows targets: -O3, per-function sections + --gc-sections, LTO when the
+# toolchain supports it (turn off with -DHR_LTO=OFF).
+option(HR_LTO "Link-time optimisation" ON)
+set(HR_OPT_LINUX -O3 -ffunction-sections -fdata-sections)
+include(CheckIPOSupported)
+check_ipo_supported(RESULT HR_IPO_OK OUTPUT HR_IPO_MSG LANGUAGES C CXX)
+
 add_library(hr_platform STATIC ${HR_PLATFORM_SOURCES})
 target_include_directories(hr_platform PUBLIC src src/platform)
-target_compile_options(hr_platform PRIVATE -Wall -Wextra)
+target_compile_options(hr_platform PRIVATE -Wall -Wextra ${HR_OPT_LINUX})
 
 # Files from the original (Windows) tree that need no change to build here. Move more in as they
 # get fixed - see "Moved to Linux" in docs/LINUX_PORT_PLAN.md.
@@ -51,11 +58,15 @@ find_package(ZLIB REQUIRED)   # profile_io.cpp (.hrc compression)
 add_library(hr_core STATIC ${HR_CORE_SOURCES})
 target_include_directories(hr_core PUBLIC src src/core src/utils src/ui)
 target_link_libraries(hr_core PUBLIC ZLIB::ZLIB)
-target_compile_options(hr_core PRIVATE -Wall)
+target_compile_options(hr_core PRIVATE -Wall ${HR_OPT_LINUX})
 
 add_executable(homrec src/platform/linux/main.cpp)
 target_link_libraries(homrec PRIVATE hr_platform)
-target_compile_options(homrec PRIVATE -Wall -Wextra)
+target_compile_options(homrec PRIVATE -Wall -Wextra ${HR_OPT_LINUX})
+target_link_options(homrec PRIVATE -Wl,--gc-sections)
+if(HR_LTO AND HR_IPO_OK)
+    set_property(TARGET homrec hr_platform hr_core PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)
+endif()
 
 # ---- tests -------------------------------------------------------------------------------------
 if(HOMREC_BUILD_TESTS)
@@ -64,9 +75,9 @@ if(HOMREC_BUILD_TESTS)
     # encoder_helpers.c is plain C (BGRA <-> YUV/NV12 converters, SSE2/SSE4.1 where available).
     add_library(hr_encoder_helpers STATIC src/core/encoder_helpers.c)
     target_include_directories(hr_encoder_helpers PUBLIC src/core)
-    target_compile_options(hr_encoder_helpers PRIVATE -O2 -Wall)
+    target_compile_options(hr_encoder_helpers PRIVATE -O3 -Wall)
 
-    foreach(t wav_util audio_mixer overlay_canvas replay_ring encoder_helpers settings_registry)
+    foreach(t wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry)
         add_executable(test_${t} scripts/tests/test_${t}.cpp)
         target_include_directories(test_${t} PRIVATE src src/core src/utils scripts/tests)
         target_compile_options(test_${t} PRIVATE -Wall -Wextra)
