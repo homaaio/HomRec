@@ -30,6 +30,9 @@ void _scopy_local(char *dst, size_t dstlen, const char *src) {
 }
 }
 
+extern "C" void hr_blend_bgra(uint8_t *dst, size_t dst_stride, const uint8_t *src, size_t src_stride,
+                              int w, int h, int opacity);
+
 // Composite: alpha-blend an RGBA/BGRA overlay buffer onto a BGRA base buffer at (dst_x,
 // dst_y), clipping to the base's bounds.
 static void CompositeBgra(uint8_t *base, int base_w, int base_h, int base_stride,
@@ -46,26 +49,10 @@ static void CompositeBgra(uint8_t *base, int base_w, int base_h, int base_stride
     int copy_h = std::min(ov_h - src_y0, base_h - dy0);
     if (copy_w <= 0 || copy_h <= 0) return;
 
-    for (int row = 0; row < copy_h; ++row) {
-        uint8_t *dst_row = base + (size_t)(dy0 + row) * base_stride + (size_t)dx0 * 4;
-        const uint8_t *src_row = overlay + (size_t)(src_y0 + row) * (size_t)ov_w * 4 + (size_t)src_x0 * 4;
-        for (int col = 0; col < copy_w; ++col) {
-            const uint8_t *o = src_row + (size_t)col * 4;
-            uint8_t *d = dst_row + (size_t)col * 4;
-            uint32_t a = o[3];
-            if (extra_opacity != 255) a = (a * extra_opacity + 127u) / 255u;
-            if (a == 0) continue;               // fully transparent
-            if (a == 255) {                      // fully opaque
-                d[0] = o[0]; d[1] = o[1]; d[2] = o[2];
-                continue;
-            }
-            uint32_t a1 = 255u - a;
-            // Rounded alpha blend (same rounding fix as hr_blend_rgba).
-            d[0] = (uint8_t)((o[0] * a + d[0] * a1 + 128u) >> 8u);
-            d[1] = (uint8_t)((o[1] * a + d[1] * a1 + 128u) >> 8u);
-            d[2] = (uint8_t)((o[2] * a + d[2] * a1 + 128u) >> 8u);
-        }
-    }
+    // SSE4.1 / AVX2 blend in encoder_helpers.c (runtime dispatch, skips transparent/opaque runs).
+    hr_blend_bgra(base + (size_t)dy0 * base_stride + (size_t)dx0 * 4, (size_t)base_stride,
+                  overlay + (size_t)src_y0 * (size_t)ov_w * 4 + (size_t)src_x0 * 4, (size_t)ov_w * 4,
+                  copy_w, copy_h, (int)extra_opacity);
 }
 
 // Composite: alpha-blend a BGRA overlay layer straight into an NV12 frame.
