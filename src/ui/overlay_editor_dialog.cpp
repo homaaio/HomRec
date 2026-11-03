@@ -16,6 +16,58 @@
 
 namespace {
 
+wxImage ComposeInputOverlayPreview(const std::string &json_path, const std::string &png_path) {
+    if (json_path.empty() || png_path.empty()) return wxImage();
+    wxImage sheet;
+    if (!sheet.LoadFile(wxString::FromUTF8(png_path.c_str())) || !sheet.IsOk()) return wxImage();
+    HrInputOverlayLayout layout;
+    if (!layout.Load(json_path)) return wxImage();
+    constexpr int kMaxDim = 8192;   // тот же предел, что в OverlayCompositor
+    if (layout.width <= 0 || layout.height <= 0 || layout.width > kMaxDim || layout.height > kMaxDim)
+        return wxImage();
+
+    if (!sheet.HasAlpha()) sheet.InitAlpha();
+    const int sw = sheet.GetWidth(), sh = sheet.GetHeight();
+    const unsigned char *srgb = sheet.GetData();
+    const unsigned char *sa = sheet.GetAlpha();
+
+    wxImage out(layout.width, layout.height);
+    out.InitAlpha();
+    unsigned char *drgb = out.GetData();
+    unsigned char *da = out.GetAlpha();
+    std::memset(drgb, 0, (size_t)layout.width * layout.height * 3);
+    std::memset(da, 0, (size_t)layout.width * layout.height);
+
+    for (const auto &el : layout.elements) {
+        for (int row = 0; row < el.map_h; ++row) {
+            const int sy = el.map_y + row, dy = el.pos_y + row;
+            if (sy < 0 || sy >= sh || dy < 0 || dy >= layout.height) continue;
+            for (int col = 0; col < el.map_w; ++col) {
+                const int sx = el.map_x + col, dx = el.pos_x + col;
+                if (sx < 0 || sx >= sw || dx < 0 || dx >= layout.width) continue;
+                const size_t si = (size_t)sy * sw + sx, di = (size_t)dy * layout.width + dx;
+                const unsigned a = sa[si];
+                if (a == 0) continue;
+                if (a == 255 || da[di] == 0) {
+                    drgb[di * 3 + 0] = srgb[si * 3 + 0];
+                    drgb[di * 3 + 1] = srgb[si * 3 + 1];
+                    drgb[di * 3 + 2] = srgb[si * 3 + 2];
+                    da[di] = (unsigned char)a;
+                    continue;
+                }
+                const unsigned dA = da[di];
+                const unsigned outA = a + dA * (255u - a) / 255u;
+                for (int c = 0; c < 3; ++c) {
+                    const unsigned num = srgb[si * 3 + c] * a + drgb[di * 3 + c] * dA * (255u - a) / 255u;
+                    drgb[di * 3 + c] = (unsigned char)(num / outA);
+                }
+                da[di] = (unsigned char)outA;
+            }
+        }
+    }
+    return out;
+}
+
 class SingleOverlayCanvas : public wxPanel {
 public:
     SingleOverlayCanvas(wxWindow *parent, OverlayDef &ov)
@@ -49,10 +101,11 @@ public:
 
     void ReloadContentImage() {
         content_img_ = wxImage();
-        std::string path = (ov_.type == "input_overlay") ? ov_.input_png_path : ov_.image_path;
-        if (!path.empty()) {
+        if (ov_.type == "input_overlay") {
+            content_img_ = ComposeInputOverlayPreview(ov_.input_json_path, ov_.input_png_path);
+        } else if (!ov_.image_path.empty()) {
             wxImage img;
-            if (img.LoadFile(wxString::FromUTF8(path.c_str()))) content_img_ = img;
+            if (img.LoadFile(wxString::FromUTF8(ov_.image_path.c_str()))) content_img_ = img;
         }
         Refresh();
     }
@@ -119,7 +172,7 @@ private:
         wxRect imgRect;
         if (!GetImageRect(imgRect)) {
             dc.SetTextForeground(wxColour(180, 180, 190));
-            wxString msg = "No screenshot yet \u2013 click Refresh below.";
+            wxString msg = wxString::FromUTF8("No screenshot yet \u2013 click Refresh below.");
             wxSize ext = dc.GetTextExtent(msg);
             wxSize cs = GetClientSize();
             dc.DrawText(msg, (cs.GetWidth() - ext.GetWidth()) / 2, (cs.GetHeight() - ext.GetHeight()) / 2);
@@ -322,7 +375,7 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
     wxColour accent = FromColorref(theme.accent);
     wxColour surface = FromColorref(theme.surface);
 
-    wxString title = "Edit Overlay \u2013 " +
+    wxString title = wxString::FromUTF8("Edit Overlay \u2013 ") +
         wxString::FromUTF8((working.name.empty() ? working.type : working.name).c_str());
     wxDialog dlg(parent, wxID_ANY, title, wxDefaultPosition, wxSize(980, 800),
                  wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
@@ -333,10 +386,10 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
     // ---- Position (top) --------------------------------------------
     AddSectionHeading(&dlg, root, accent, bg, "Position");
     root->AddSpacer(-2);
-    auto *hint = new wxStaticText(&dlg, wxID_ANY,
+    auto *hint = new wxStaticText(&dlg, wxID_ANY, wxString::FromUTF8(
         "This is the overlay itself, shown over a screenshot \u2013 drag it to move (it snaps to the exact "
         "centre; hold Alt to move freely), drag a corner handle to resize (hold Shift to keep the "
-        "proportions). Refresh re-takes the screenshot.");
+        "proportions). Refresh re-takes the screenshot."));
     hint->SetForegroundColour(text2);
     hint->SetBackgroundColour(bg);
     hint->Wrap(940);
@@ -443,7 +496,7 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
         imagePathLbl->SetForegroundColour(text2);
         imagePathLbl->SetBackgroundColour(bg);
         row->Add(imagePathLbl, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
-        imageBrowseBtn = new wxButton(settingsScroll, wxID_ANY, "Browse\u2026");
+        imageBrowseBtn = new wxButton(settingsScroll, wxID_ANY, wxString::FromUTF8("Browse\u2026"));
         row->Add(imageBrowseBtn, 0);
         grid->Add(row, 1, wxEXPAND);
     } else if (working.type == "webcam") {
@@ -471,7 +524,7 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
         jsonPathLbl->SetForegroundColour(text2);
         jsonPathLbl->SetBackgroundColour(bg);
         jsonRow->Add(jsonPathLbl, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
-        jsonBrowseBtn = new wxButton(settingsScroll, wxID_ANY, "Browse\u2026");
+        jsonBrowseBtn = new wxButton(settingsScroll, wxID_ANY, wxString::FromUTF8("Browse\u2026"));
         jsonRow->Add(jsonBrowseBtn, 0);
         grid->Add(jsonRow, 1, wxEXPAND);
 
@@ -482,7 +535,7 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
         pngPathLbl->SetForegroundColour(text2);
         pngPathLbl->SetBackgroundColour(bg);
         pngRow->Add(pngPathLbl, 1, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 8);
-        pngBrowseBtn = new wxButton(settingsScroll, wxID_ANY, "Browse\u2026");
+        pngBrowseBtn = new wxButton(settingsScroll, wxID_ANY, wxString::FromUTF8("Browse\u2026"));
         pngRow->Add(pngBrowseBtn, 0);
         grid->Add(pngRow, 1, wxEXPAND);
     }
@@ -557,6 +610,7 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
         }
         working.input_json_path = path;
         jsonPathLbl->SetLabel(wxString::FromUTF8(PathBaseName(path).c_str()));
+        canvas->ReloadContentImage();
     });
     if (pngBrowseBtn) pngBrowseBtn->Bind(wxEVT_BUTTON, [&](wxCommandEvent &) {
         wxFileDialog fd(&dlg, "Choose the .png spritesheet", "", "",
