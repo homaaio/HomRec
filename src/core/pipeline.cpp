@@ -36,6 +36,7 @@
 #include "wgc_capture.h"   // 2.4: Windows.Graphics.Capture window source
 #include "nut_mux.h"       // timestamped pipe to ffmpeg (see hr_pl_set_timestamped_pipe)
 #include "mf_encoder.h"   // in-process hardware encoder (see hr_pl_set_mf_sink)
+#include "pic_pool.h"     // converted pictures shared with the writer (no per-frame 3 MB copies)
 
 static constexpr int HR_DX_OK      =  0;
 static constexpr int HR_DX_TIMEOUT =  1;
@@ -65,6 +66,8 @@ extern "C" {
                                     float scale_x, float scale_y);
     void  hr_composite_cursor_yuv(uint8_t *yuv, int width, int height, int origin_x, int origin_y,
                                    float scale_x, float scale_y, int nv12);
+    void  hr_composite_cursor_yuv_rows(uint8_t *yuv, int width, int height, int origin_x, int origin_y,
+                                        float scale_x, float scale_y, int nv12, int *row0, int *row1);
     void  hr_composite_cursor_rgb24(uint8_t *rgb, int width, int height, int origin_x, int origin_y,
                                      float scale_x, float scale_y);
     int   hr_cursor_state(int *visible, int *x, int *y, unsigned long long *handle);
@@ -86,6 +89,9 @@ extern "C" {
     void  hr_bgra_to_yuv420p(const uint8_t *bgra, uint8_t *yuv, int w, int h);
     void  hr_bgra_to_yuv420p_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
     void  hr_bgra_to_nv12_band(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1);
+    // Same, reading the BGRA picture with a row pitch (a crop rectangle is converted in place, no copy first).
+    void  hr_bgra_to_yuv420p_band_s(const uint8_t *bgra, size_t stride, uint8_t *yuv, int w, int h, int y0, int y1);
+    void  hr_bgra_to_nv12_band_s(const uint8_t *bgra, size_t stride, uint8_t *yuv, int w, int h, int y0, int y1);
     void *hr_sw_create();
     void  hr_sw_destroy(void *handle);
     void  hr_sw_start(void *handle);
@@ -144,7 +150,7 @@ static bool ensure_libs() {
     return g_libs.loaded;
 }
 
-static void bgra_downscale_band(const uint8_t* __restrict src,
+static void bgra_downscale_band(const uint8_t* __restrict src, size_t src_stride,
                                  uint8_t*       __restrict dst,
                                  int sw, int sh, int dw, int dh,
                                  int dy0, int dy1);
@@ -156,7 +162,7 @@ public:
     ~Yuv420pWorkerPool() { Stop(); }
 
     void SetUseNv12(bool nv12) {
-        convert_band_ = nv12 ? &hr_bgra_to_nv12_band : &hr_bgra_to_yuv420p_band;
+        convert_band_ = nv12 ? &hr_bgra_to_nv12_band_s : &hr_bgra_to_yuv420p_band_s;
     }
 
     // PERF: the capture thread (HIGHEST while recording) blocks in Convert()
@@ -207,32 +213,38 @@ public:
         cv_done_.wait(lk, [this] { return pending_ == 0; });
     }
 
-    void Convert(const uint8_t *bgra, uint8_t *yuv, int w, int h) {
+    // `stride` = bytes between rows of the BGRA picture (w*4 when packed; the big frame's pitch when `bgra`
+    // points at a crop rectangle inside it).
+    void Convert(const uint8_t *bgra, size_t stride, uint8_t *yuv, int w, int h) {
         auto band_fn = convert_band_;
         RunBanded((long long)w * h, h, 2,
-                  [bgra, yuv, w, h, band_fn](int y0, int y1) {
-                      band_fn(bgra, yuv, w, h, y0, y1);
+                  [bgra, stride, yuv, w, h, band_fn](int y0, int y1) {
+                      band_fn(bgra, stride, yuv, w, h, y0, y1);
                   });
     }
 
     // Parallel replacement for the old single-threaded bgra_downscale() -
     // banded by DESTINATION row (each output row is fully independent, no
     // chroma-pairing constraint, hence row_align=1). See bgra_downscale_band()
-    void ConvertRows(const uint8_t *bgra, uint8_t *yuv, int w, int h, int y0, int y1) {
+    void ConvertRows(const uint8_t *bgra, size_t stride, uint8_t *yuv, int w, int h, int y0, int y1) {
         if (y1 <= y0) return;
         auto band_fn = convert_band_;
         RunBanded((long long)w * (y1 - y0), y1 - y0, 2,
-                  [bgra, yuv, w, h, y0, band_fn](int a, int b) {
-                      band_fn(bgra, yuv, w, h, y0 + a, y0 + b);
+                  [bgra, stride, yuv, w, h, y0, band_fn](int a, int b) {
+                      band_fn(bgra, stride, yuv, w, h, y0 + a, y0 + b);
                   });
     }
 
-    bool IsNv12() const { return convert_band_ == &hr_bgra_to_nv12_band; }
+    bool IsNv12() const { return convert_band_ == &hr_bgra_to_nv12_band_s; }
 
-    void Downscale(const uint8_t *src, uint8_t *dst, int sw, int sh, int dw, int dh) {
-        RunBanded((long long)dw * dh, dh, 1,
-                  [src, dst, sw, sh, dw, dh](int y0, int y1) {
-                      bgra_downscale_band(src, dst, sw, sh, dw, dh, y0, y1);
+    // Output rows [dy0,dy1) only (all rows by default) - a partial update of a scaled picture.
+    void Downscale(const uint8_t *src, size_t src_stride, uint8_t *dst, int sw, int sh, int dw, int dh,
+                   int dy0 = 0, int dy1 = -1) {
+        if (dy1 < 0 || dy1 > dh) dy1 = dh;
+        if (dy1 <= dy0) return;
+        RunBanded((long long)dw * (dy1 - dy0), dy1 - dy0, 1,
+                  [src, src_stride, dst, sw, sh, dw, dh, dy0](int a, int b) {
+                      bgra_downscale_band(src, src_stride, dst, sw, sh, dw, dh, dy0 + a, dy0 + b);
                   });
     }
 
@@ -295,7 +307,7 @@ private:
     int pending_ = 0;
     std::function<void(int, int)> job_;
     int total_rows_ = 0, band_h_ = 0;
-    void (*convert_band_)(const uint8_t*, uint8_t*, int, int, int, int) = &hr_bgra_to_yuv420p_band;
+    void (*convert_band_)(const uint8_t*, size_t, uint8_t*, int, int, int, int) = &hr_bgra_to_yuv420p_band_s;
 };
 #endif  // _WIN32
 
@@ -314,102 +326,17 @@ static void build_thumb_sample_idx(std::vector<int>& out, int dst, int src, int 
 // ---------------------------------------------------------------------------
 // BGRA→thumbnail (box-filter, no intermediate RGB buffer)
 // ---------------------------------------------------------------------------
-static void bgra_to_thumb(const uint8_t* __restrict bgra,
-                           uint8_t*       __restrict dst,
-                           int sw, int sh, int dw, int dh)
-{
-    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+extern "C" void hr_bgra_to_thumb(const uint8_t *bgra, size_t stride, uint8_t *rgb, int sw, int sh, int dw, int dh);
 
-    if ((sw % dw) == 0 && (sh % dh) == 0) {
-        // Integer ratio. The full box filter below reads EVERY source pixel (8 MB at 1080p, scalar, on
-        // the capture thread, every Preview-FPS tick - a measurable share of a weak CPU while the
-        // preview is on). A thumbnail does not need that: average at most 2x2 samples per block
-        // (spread over it), which touches ~1/(rx*ry/4) of the memory for the same picture.
-        const int rx0 = sw / dw, ry0 = sh / dh;
-        if (rx0 * ry0 > 4) {
-            const int nx = std::min(rx0, 2), ny = std::min(ry0, 2);
-            const int ox[2] = {rx0 / 4, (rx0 * 3) / 4};
-            const int oy[2] = {ry0 / 4, (ry0 * 3) / 4};
-            const uint32_t cnt = (uint32_t)(nx * ny);
-            for (int y = 0; y < dh; ++y) {
-                uint8_t* orow = dst + (size_t)y * dw * 3;
-                const int sy0 = y * ry0;
-                for (int x = 0; x < dw; ++x) {
-                    uint32_t r = 0, g = 0, b = 0;
-                    const int sx0 = x * rx0;
-                    for (int j = 0; j < ny; ++j) {
-                        const uint8_t* row = bgra + ((size_t)(sy0 + oy[j]) * sw + sx0) * 4;
-                        for (int i = 0; i < nx; ++i) {
-                            const uint8_t* px = row + (size_t)ox[i] * 4;
-                            b += px[0]; g += px[1]; r += px[2];
-                        }
-                    }
-                    uint8_t* o = orow + (size_t)x * 3;
-                    o[0] = (uint8_t)(r / cnt);
-                    o[1] = (uint8_t)(g / cnt);
-                    o[2] = (uint8_t)(b / cnt);
-                }
-            }
-            return;
-        }
-        // Fast integer-ratio box filter
-        int rx = sw / dw, ry = sh / dh;
-        int bsz = rx * ry;
-        for (int y = 0; y < dh; ++y) {
-            // hoist the destination row base out of the x loop -
-            // was recomputed (y*dw+x)*3 from scratch for every pixel.
-            uint8_t* orow = dst + (size_t)y * dw * 3;
-            int sy0 = y * ry;
-            for (int x = 0; x < dw; ++x) {
-                uint32_t r = 0, g = 0, b = 0;
-                int sx0 = x * rx;
-                for (int by = 0; by < ry; ++by) {
-                    const uint8_t* row = bgra + ((size_t)(sy0 + by) * sw + sx0) * 4;
-                    for (int bx = 0; bx < rx; ++bx) {
-                        b += row[bx*4+0];
-                        g += row[bx*4+1];
-                        r += row[bx*4+2];
-                    }
-                }
-                uint8_t* o = orow + (size_t)x * 3;
-                o[0] = (uint8_t)(r / (uint32_t)bsz);
-                o[1] = (uint8_t)(g / (uint32_t)bsz);
-                o[2] = (uint8_t)(b / (uint32_t)bsz);
-            }
-        }
-    } else {
-        // Non-integer ratio (the usual case: the pane size rarely divides the screen size). This was
-        // plain nearest-neighbour, which drops most source pixels, so fine detail (a logo, small
-        // text) turned into blocks. Each destination pixel now averages up to 4x4 samples spread over
-        // its source footprint; the cap keeps the cost bounded.
-        const int nx = std::min(4, std::max(1, (sw + dw - 1) / dw));
-        const int ny = std::min(4, std::max(1, (sh + dh - 1) / dh));
-        static thread_local std::vector<int> xs, ys;
-        build_thumb_sample_idx(xs, dw, sw, nx);
-        build_thumb_sample_idx(ys, dh, sh, ny);
-        const uint32_t cnt = (uint32_t)(nx * ny);
-        for (int y = 0; y < dh; ++y) {
-            uint8_t* orow = dst + (size_t)y * dw * 3;
-            for (int x = 0; x < dw; ++x) {
-                uint32_t r = 0, g = 0, b = 0;
-                for (int j = 0; j < ny; ++j) {
-                    const uint8_t* row = bgra + (size_t)ys[(size_t)y * ny + j] * sw * 4;
-                    for (int i = 0; i < nx; ++i) {
-                        const uint8_t* px = row + (size_t)xs[(size_t)x * nx + i] * 4;
-                        b += px[0]; g += px[1]; r += px[2];
-                    }
-                }
-                uint8_t* o = orow + (size_t)x * 3;
-                o[0] = (uint8_t)(r / cnt);
-                o[1] = (uint8_t)(g / cnt);
-                o[2] = (uint8_t)(b / cnt);
-            }
-        }
-    }
+// `stride` = bytes per source row (the big frame's pitch when `bgra` points at a crop rectangle inside it).
+// The sampling and the SSE4.1 code live in encoder_helpers.c (hr_bgra_to_thumb).
+static void bgra_to_thumb(const uint8_t* bgra, size_t stride, uint8_t* dst, int sw, int sh, int dw, int dh)
+{
+    hr_bgra_to_thumb(bgra, stride, dst, sw, sh, dw, dh);
 }
 
 // NV12 -> thumbnail (RGB). Luma is averaged over up to 4x4 samples per destination pixel (same idea as
-// bgra_to_thumb()'s non-integer path); chroma is already half-resolution, so it is taken at the
+// hr_bgra_to_thumb()'s non-integer path); chroma is already half-resolution, so it is taken at the
 // footprint's centre.
 static void nv12_to_thumb(const uint8_t* __restrict nv12,
                            uint8_t*       __restrict dst,
@@ -449,7 +376,7 @@ static void nv12_to_thumb(const uint8_t* __restrict nv12,
     }
 }
 
-static void bgra_downscale_band(const uint8_t* __restrict src,
+static void bgra_downscale_band(const uint8_t* __restrict src, size_t src_stride,
                                  uint8_t*       __restrict dst,
                                  int sw, int sh, int dw, int dh,
                                  int dy0, int dy1)
@@ -464,7 +391,7 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
         // rather than special-casing a single whole-buffer memcpy (this path can now be entered
         // from several worker threads at once, each with its own [dy0,dy1)).
         std::memcpy(dst + (size_t)dy0 * dw * 4,
-                    src + (size_t)dy0 * sw * 4,
+                    src + (size_t)dy0 * src_stride,
                     (size_t)(dy1 - dy0) * dw * 4);
         return;
     }
@@ -480,7 +407,7 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
                 uint32_t b = 0, g = 0, r = 0;
                 int sx0 = x * rx;
                 for (int by = 0; by < ry; ++by) {
-                    const uint8_t* row = src + ((size_t)(sy0 + by) * sw + sx0) * 4;
+                    const uint8_t* row = src + (size_t)(sy0 + by) * src_stride + (size_t)sx0 * 4;
                     for (int bx = 0; bx < rx; ++bx) {
                         b += row[bx*4+0];
                         g += row[bx*4+1];
@@ -499,7 +426,7 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
         float rx = (float)sw / dw, ry = (float)sh / dh;
         for (int y = dy0; y < dy1; ++y) {
             int sy = (int)(y * ry); if (sy >= sh) sy = sh - 1;
-            const uint8_t* srow = src + (size_t)sy * sw * 4;
+            const uint8_t* srow = src + (size_t)sy * src_stride;
             uint8_t*       orow = dst + (size_t)y  * dw * 4;
             for (int x = 0; x < dw; ++x) {
                 int sx = (int)(x * rx); if (sx >= sw) sx = sw - 1;
@@ -515,7 +442,7 @@ static void bgra_downscale_band(const uint8_t* __restrict src,
                             uint8_t*       __restrict dst,
                             int sw, int sh, int dw, int dh)
 {
-    bgra_downscale_band(src, dst, sw, sh, dw, dh, 0, dh);
+    bgra_downscale_band(src, (size_t)sw * 4, dst, sw, sh, dw, dh, 0, dh);
 }
 
 // Outstanding "handed-off" Pipelines - see hr_pl_destroy()'s handed_off/
@@ -586,6 +513,7 @@ struct Pipeline {
     // bgra_buf.data() (no crop/overlay/cursor -- zero extra cost) or
     // work_buf.data(). Set each tick in capture_loop(); read by update_preview().
     const uint8_t* frame_ptr = nullptr;
+    size_t         frame_stride = 0;          // bytes per row of frame_ptr (a crop is read in place, so not always w*4)
     // The CPU path no longer bakes the pointer into the capture buffer (it is blended into the
     // converted YUV frame), so the live preview stamps it onto its own small thumbnail instead.
     bool pv_cursor = false;
@@ -674,8 +602,20 @@ struct Pipeline {
             p = nullptr;
         }
     };
+    // What the writer thread holds: an owned buffer (recycled through free_bufs) or a read-only picture shared
+    // with the capture thread's PicPool.
+    struct Pic {
+        std::vector<uint8_t> own;
+        PicPool::Buf sh;
+        const uint8_t *data() const { return sh ? sh->data() : own.data(); }
+        size_t size() const { return sh ? sh->size() : own.size(); }
+        bool empty() const { return size() == 0; }
+        void swap(Pic &o) { own.swap(o.own); sh.swap(o.sh); }
+        void clear() { own.clear(); sh.reset(); }
+    };
     struct QueuedFrame {
         std::vector<uint8_t> data;
+        PicPool::Buf sh;         // shared picture: used instead of `data` when set
         TexRef tex;              // texture path: the picture IS this texture and `data` stays empty
         int repeat = 1;          // raw pipe: how many times the writer sends `data`
         // Timestamped pipe (ts_fps > 0): slot on the constant-fps timeline this picture starts at, or
@@ -713,13 +653,19 @@ struct Pipeline {
                                                   // game stealing the CPU) evicted frames -> "Recording overloaded".
                                                   // Latency is irrelevant when recording to a file.
 
-    std::vector<uint8_t> last_yuv;
-    bool last_yuv_valid = false;
-    int  last_yuv_w = 0, last_yuv_h = 0;
-    // true when last_yuv was converted straight from bgra_buf (no crop,
-    // overlay, cursor or scaling in between) - only then can DXGI's "these
-    // rows changed" hint be applied on top of it (partial re-conversion).
-    bool last_yuv_direct = false;
+    // The converted (pointer-free, overlay-free) picture of the current bgra_buf, shared with the writer
+    // thread, and what it was made from. Replaces the old per-frame last_yuv copies: an unchanged screen re-sends the same
+    // shared buffer, a partly changed one converts just the dirty rows into a recycled buffer (pic_pool.h).
+    PicPool pic_pool;
+    struct PicKey {                           // everything besides bgra_buf's pixels the picture depends on
+        int src_w = 0, src_h = 0, cx = 0, cy = 0, cw = 0, ch = 0, ow = 0, oh = 0;
+        bool nv12 = false;
+        bool operator==(const PicKey &o) const {
+            return src_w == o.src_w && src_h == o.src_h && cx == o.cx && cy == o.cy && cw == o.cw && ch == o.ch &&
+                   ow == o.ow && oh == o.oh && nv12 == o.nv12;
+        }
+        bool operator!=(const PicKey &o) const { return !(*this == o); }
+    } pic_key;
 
     std::atomic<bool> gpu_convert{false};
     // Blend the overlays on the GPU (before the NV12 conversion) instead of on the CPU (ApplyNv12).
@@ -821,7 +767,7 @@ struct Pipeline {
 
         // ---- timestamped (NUT) pipe state; only touched by this thread ----
         std::vector<uint8_t> nut_prefix;       // sync point + frame header scratch
-        std::vector<uint8_t> nut_last;         // the picture most recently written (kept for the tail/heartbeat)
+        Pic nut_last;                          // the picture most recently written (kept for the tail/heartbeat)
         int64_t  nut_last_pts = -1;
         bool     nut_header_done = false;
         intptr_t nut_pipe = 0;                 // the pipe handle the header went to
@@ -869,7 +815,7 @@ struct Pipeline {
                                       : THREAD_PRIORITY_ABOVE_NORMAL);
             }
 #endif
-            std::vector<uint8_t> frame;
+            Pic frame;
             int frame_repeat = 1;
             int64_t frame_pts = -1;
             int  frame_w = 0, frame_h = 0;
@@ -935,7 +881,8 @@ struct Pipeline {
                     heartbeat = true;
                 } else {
                 // Move frame out of queue (no copy)
-                frame = std::move(pipe_queue.front().data);
+                frame.own = std::move(pipe_queue.front().data);
+                frame.sh  = std::move(pipe_queue.front().sh);
                 frame_repeat = pipe_queue.front().repeat;
                 frame_pts = pipe_queue.front().pts;
                 frame_w = pipe_queue.front().w;
@@ -967,9 +914,10 @@ struct Pipeline {
                     } else {
                         ok = hr_mf_write_sysmem(mfw, frame.data(), frame_w, frame_h, slot) != 0;
                     }
-                    if (!frame.empty()) {
+                    frame.sh.reset();
+                    if (!frame.own.empty()) {
                         std::lock_guard<std::mutex> lock(free_bufs_mtx);
-                        if (free_bufs.size() < MAX_FREE_BUFS) free_bufs.push(std::move(frame));
+                        if (free_bufs.size() < MAX_FREE_BUFS) free_bufs.push(std::move(frame.own));
                     }
                     if (!ok && !logged_mf_fail && recording.load(std::memory_order_relaxed) &&
                         writer_running.load(std::memory_order_relaxed)) {
@@ -1014,10 +962,11 @@ struct Pipeline {
                 // Hand the buffer back to the free-list instead of letting
                 // it fall out of scope and get freed - the capture thread
                 // will reuse it for the next frame (no realloc/memcpy).
-                if (!frame.empty()) {
+                frame.sh.reset();
+                if (!frame.own.empty()) {
                     std::lock_guard<std::mutex> lock(free_bufs_mtx);
                     if (free_bufs.size() < MAX_FREE_BUFS)
-                        free_bufs.push(std::move(frame));
+                        free_bufs.push(std::move(frame.own));
                 }
 
                 // A failed write used to be swallowed without a trace, so "the recording just stops
@@ -1095,7 +1044,8 @@ struct Pipeline {
         if (frame_nv12 && nv12_w > 0 && nv12_h > 0)
             nv12_to_thumb(frame_nv12, pv_buf.data(), nv12_w, nv12_h, tw, th);
         else {
-            bgra_to_thumb(frame_ptr ? frame_ptr : bgra_buf.data(), pv_buf.data(), eff_w, eff_h, tw, th);
+            bgra_to_thumb(frame_ptr ? frame_ptr : bgra_buf.data(), frame_ptr ? frame_stride : (size_t)eff_w * 4,
+                          pv_buf.data(), eff_w, eff_h, tw, th);
 #ifdef _WIN32
             if (pv_cursor && eff_w > 0 && eff_h > 0)
                 hr_composite_cursor_rgb24(pv_buf.data(), tw, th, pv_cursor_ox, pv_cursor_oy,
@@ -1209,8 +1159,8 @@ struct Pipeline {
         };
         CursorSig gpu_emit_sig;      // pointer state baked into the last GPU-path frame we queued
         bool gpu_emit_valid = false; // the picture at the back of the queue came from the GPU path
-        // CPU path: last_yuv is the converted picture WITHOUT the pointer (it is blended into each
-        // outgoing copy), so what the last queued frame shows is tracked separately.
+        // CPU path: the pool's picture is the converted picture WITHOUT the pointer (it is blended into a
+        // private copy), so what the last queued frame shows is tracked separately.
         CursorSig cpu_emit_sig;
         bool cpu_emit_valid = false;
         int  cpu_emit_w = 0, cpu_emit_h = 0;
@@ -1257,25 +1207,8 @@ struct Pipeline {
             if (b.size() != needed) b.resize(needed);
             return b;
         };
-        // Copy rows [y0,y1) (both even) of a planar-I420 / NV12 frame.
-        auto copy_yuv_rows = [](uint8_t *dst, const uint8_t *src, int w, int h, int y0, int y1, bool nv12) {
-            if (y1 <= y0) return;
-            std::memcpy(dst + (size_t)y0 * w, src + (size_t)y0 * w, (size_t)(y1 - y0) * w);
-            const size_t base = (size_t)w * h;
-            if (nv12) {
-                std::memcpy(dst + base + (size_t)(y0 / 2) * w, src + base + (size_t)(y0 / 2) * w,
-                            (size_t)((y1 - y0) / 2) * w);
-            } else {
-                const size_t cw = (size_t)w / 2, plane = cw * (size_t)(h / 2);
-                for (int pl = 0; pl < 2; ++pl) {
-                    const size_t off = base + (size_t)pl * plane + (size_t)(y0 / 2) * cw;
-                    std::memcpy(dst + off, src + off, (size_t)((y1 - y0) / 2) * cw);
-                }
-            }
-        };
-        // Hand a finished frame to the writer thread (moved, not copied).
-        auto enqueue_frame = [&](std::vector<uint8_t> &yuv_frame, int extra_slots_,
-                                 int fw, int fh, bool fnv12, int64_t pts) {
+        // Hand a finished frame to the writer thread (moved, not copied). `qf` carries the picture (owned or shared).
+        auto enqueue_qf = [&](QueuedFrame qf, int extra_slots_, int64_t pts) {
             std::vector<uint8_t> dropped;  // popped outside free_bufs_mtx to avoid nested locks
             int carried_repeat = 0;        // timeline slots owned by an evicted entry
             {
@@ -1287,16 +1220,13 @@ struct Pipeline {
                     // Raw pipe: the evicted picture's slots move to the new one. Timestamped pipe: its
                     // slots are simply covered by the picture before it (ffmpeg fills the gap).
                     carried_repeat = (pts < 0) ? pipe_queue.front().repeat : 0;
-                    pipe_queue.pop();
+                    pipe_queue.pop();      // an evicted shared picture just drops its reference here
                     frames_dropped.fetch_add(1, std::memory_order_relaxed);
                     frames_stalled.fetch_add(1, std::memory_order_relaxed);
                 }
 
-                QueuedFrame qf;
-                qf.data   = std::move(yuv_frame);
                 qf.repeat = (pts < 0) ? std::min(1 + extra_slots_ + carried_repeat, 240) : 1;
                 qf.pts    = pts;
-                qf.w = fw; qf.h = fh; qf.nv12 = fnv12;
                 pipe_queue.push(std::move(qf));
                 pipe_queue_cv.notify_one();
             }
@@ -1306,6 +1236,20 @@ struct Pipeline {
                 if (free_bufs.size() < MAX_FREE_BUFS)
                     free_bufs.push(std::move(dropped));
             }
+        };
+        auto enqueue_frame = [&](std::vector<uint8_t> &yuv_frame, int extra_slots_,
+                                 int fw, int fh, bool fnv12, int64_t pts) {
+            QueuedFrame qf;
+            qf.data = std::move(yuv_frame);
+            qf.w = fw; qf.h = fh; qf.nv12 = fnv12;
+            enqueue_qf(std::move(qf), extra_slots_, pts);
+        };
+        // Same for a picture shared with the PicPool: nothing is copied, the writer reads it in place.
+        auto enqueue_pic = [&](PicPool::Buf pic, int extra_slots_, int fw, int fh, bool fnv12, int64_t pts) {
+            QueuedFrame qf;
+            qf.sh = std::move(pic);
+            qf.w = fw; qf.h = fh; qf.nv12 = fnv12;
+            enqueue_qf(std::move(qf), extra_slots_, pts);
         };
 
         // Texture twin of enqueue_frame(): the queue entry owns one reference to the NV12 texture.
@@ -1416,7 +1360,7 @@ struct Pipeline {
                                     " (worst " + std::to_string((long long)hitch_worst_ms) + " ms between two capture ticks)");
                     }
                     hitch_count = 0; hitch_logged = 0; hitch_worst_ms = 0.0; hitch_last_valid = false;
-                    last_yuv_valid = false;   // pixel format / size may differ next recording
+                    pic_pool.Drop();          // pixel format / size may differ next recording
                     cpu_emit_valid = false;
                     gpu_emit_valid = false;
                     ts_next_slot = 0;         // a new recording starts a new timeline
@@ -1794,7 +1738,7 @@ struct Pipeline {
                 frame_nv12 = tex_tick ? nullptr : nv12_buf.data();   // live preview reads this
                 tex_pv_tick = tex_tick;
                 nv12_w = gpu_enc_w; nv12_h = gpu_enc_h;
-                last_yuv_valid = false;              // classic path's cached picture is now stale
+                pic_pool.Drop();                     // classic path's cached picture is now stale
                 cpu_emit_valid = false;
 #ifdef _WIN32
                 if (sw_ctx && g_libs.sw_elapsed_ns) {
@@ -1895,33 +1839,36 @@ struct Pipeline {
             // between, the recorded signature is the older one and the next tick
             // simply re-converts - never the other way round.
             const CursorSig cur_sig_now = cursor_on_now ? read_cursor_sig() : CursorSig{};
-            uint8_t* frame = bgra_buf.data();   // what overlays/cursor/encode read this tick
+            uint8_t* frame = bgra_buf.data();   // what overlays/preview/encode read this tick
+            size_t   frame_pitch = (size_t)src_w * 4;   // bytes per row of `frame`
+            bool     in_src = true;                     // `frame` still points into the pristine bgra_buf
             if (do_crop) {
+                // PERF: the crop rectangle is read IN PLACE (converter / downscaler / thumbnail take a row pitch);
+                // it used to be copied row by row into work_buf every tick.
                 eff_w = c_w;
                 eff_h = c_h;
-                const size_t need = (size_t)c_w * c_h * 4;
-                if (work_buf.size() != need) work_buf.resize(need);
-                const uint8_t* full = bgra_buf.data();
-                uint8_t* wb = work_buf.data();
-                for (int y = 0; y < c_h; ++y) {
-                    std::memcpy(wb + (size_t)y * c_w * 4,
-                                full + ((size_t)(c_y + y) * src_w + c_x) * 4,
-                                (size_t)c_w * 4);
-                }
-                frame = wb;
+                frame += ((size_t)c_y * src_w + c_x) * 4;
             } else {
                 eff_w = src_w;
                 eff_h = src_h;
             }
 
-            // Copy-on-write for the non-cropped case: overlays/cursor draw in place, so if `frame`
-            // still points at the pristine bgra_buf, duplicate it into work_buf first.
+            // Copy-on-write: overlays draw in place, so while `frame` still points into the pristine bgra_buf
+            // (whole frame or crop rectangle) duplicate just the visible rectangle into work_buf first.
             auto ensure_work_copy = [&](uint8_t*& f) {
-                if (f != bgra_buf.data()) return;
-                const size_t need = (size_t)eff_w * eff_h * 4;
+                if (!in_src) return;
+                const size_t row = (size_t)eff_w * 4;
+                const size_t need = row * (size_t)eff_h;
                 if (work_buf.size() != need) work_buf.resize(need);
-                std::memcpy(work_buf.data(), bgra_buf.data(), need);
+                if (frame_pitch == row) {
+                    std::memcpy(work_buf.data(), f, need);
+                } else {
+                    for (int y = 0; y < eff_h; ++y)
+                        std::memcpy(work_buf.data() + (size_t)y * row, f + (size_t)y * frame_pitch, row);
+                }
                 f = work_buf.data();
+                frame_pitch = row;
+                in_src = false;
             };
 
             {
@@ -1933,8 +1880,8 @@ struct Pipeline {
                     try {
                         // The pristine capture buffer is the source of region / window layers (it is
                         // untouched while `frame` is the work copy of it and nothing was cropped).
-                        const uint8_t *pristine = (!do_crop && frame != bgra_buf.data()) ? bgra_buf.data() : nullptr;
-                        overlay_compositor.Apply(frame, eff_w, eff_h, eff_w * 4, overlays_snapshot,
+                        const uint8_t *pristine = (!do_crop && !in_src) ? bgra_buf.data() : nullptr;
+                        overlay_compositor.Apply(frame, eff_w, eff_h, (int)frame_pitch, overlays_snapshot,
                                                   fps_actual.load(std::memory_order_relaxed), pristine);
                     } catch (const std::exception &e) {
                         HrLog::Error(std::string("Overlay compositing threw (") + e.what() +
@@ -1956,6 +1903,7 @@ struct Pipeline {
             pv_cursor_ox = cap_origin_x + (do_crop ? c_x : 0);
             pv_cursor_oy = cap_origin_y + (do_crop ? c_y : 0);
             frame_ptr = frame;
+            frame_stride = frame_pitch;
 #ifdef _WIN32
             if (recording.load(std::memory_order_acquire) && sw_ctx && g_libs.sw_elapsed_ns) {
                 static constexpr int kMaxCatchupFrames = 90; // ~1.5-3s of duplicate frames, whichever fps
@@ -1972,20 +1920,38 @@ struct Pipeline {
             if (recording.load(std::memory_order_acquire) && g_libs.bgra_to_yuv) {
                 int req_w = out_w.load(std::memory_order_relaxed);
                 int req_h = out_h.load(std::memory_order_relaxed);
-                const uint8_t* enc_src = frame;
                 int enc_w = eff_w, enc_h = eff_h;
                 const bool scaling = req_w > 0 && req_h > 0 && (req_w != eff_w || req_h != eff_h);
                 if (scaling) { enc_w = req_w; enc_h = req_h; }
                 const bool overlays_on = overlays_active;
-                // `frame` still IS bgra_buf: no crop, overlay or pointer was
-                // baked in, and (below) no scaling -> the converted picture is a
-                // pure function of bgra_buf, so DXGI's changed-rows hint applies. (The pointer is no
-                // longer baked in, so this now holds with the cursor on as well.)
-                const bool direct = (frame == bgra_buf.data()) && !scaling;
+                const bool nv12_out = yuv_pool.IsNv12();
 
-                // PERF: static desktop (DXGI timeout) -> last_yuv (pointer-free) is still the right base.
-                const bool same_base = (ret == HR_DX_TIMEOUT) && last_yuv_valid && !overlays_on &&
-                                       last_yuv_w == enc_w && last_yuv_h == enc_h;
+                // The cached picture is a pure function of bgra_buf plus this key. A different key (new size,
+                // crop moved, format) or animated overlays make it unusable.
+                PicKey key;
+                key.src_w = src_w; key.src_h = src_h;
+                key.cx = do_crop ? c_x : 0; key.cy = do_crop ? c_y : 0; key.cw = eff_w; key.ch = eff_h;
+                key.ow = enc_w; key.oh = enc_h; key.nv12 = nv12_out;
+                if (key != pic_key) { pic_pool.Reset(enc_w, enc_h, nv12_out); pic_pool.Drop(); pic_key = key; }
+                if (overlays_on) pic_pool.Drop();
+                const bool have_pic = pic_pool.Has();
+
+                // PERF: for a fresh DXGI delivery the driver says which rows of bgra_buf changed. Map them through
+                // the crop and the scaling to rows of the picture [d0,d1); nothing inside the crop -> d1 <= d0.
+                bool rows_known = false;
+                int  d0 = 0, d1 = 0;
+                if (have_pic && !wgc_mode && ret == HR_DX_OK) {
+                    int sy0 = 0, sy1 = 0;
+                    if (hr_dx_get_dirty_rows(dx_ctx, &sy0, &sy1)) {
+                        rows_known = true;
+                        PicDirtyRows(sy0, sy1, key.cy, eff_h, enc_h, &d0, &d1);   // d1 <= d0: nothing inside the crop changed
+                    }
+                }
+                // PERF: nothing changed (static desktop = DXGI timeout, or only rows outside the crop changed) ->
+                // the cached picture (pointer-free) is still the right base and is re-sent as it is.
+                const bool same_base = have_pic && (ret == HR_DX_TIMEOUT || (rows_known && d1 <= d0));
+                // Some rows changed: keep the cached picture and re-convert only those (also when scaling or cropping).
+                const bool partial = have_pic && !same_base && rows_known && d1 > d0 && !(d0 == 0 && d1 >= enc_h);
                 // ...and the frame we queued last already shows the pointer exactly as it is now.
                 const bool same_emit = cpu_emit_valid && cpu_emit_w == enc_w && cpu_emit_h == enc_h &&
                                        (!cursor_on_now || cur_sig_now == cpu_emit_sig);
@@ -1998,65 +1964,51 @@ struct Pipeline {
                 }
                 const int64_t pts = tsm ? ts_take_slot(extra_slots) : -1;
 
-                std::vector<uint8_t> yuv_frame;
                 if (!merged_into_queue) {
-                    const size_t needed = (size_t)enc_w * enc_h * 3 / 2;
-                    yuv_frame = take_free_buf(needed);
-
+                    PicPool::Buf pic;               // read-only once queued: the writer reads it in place
+                    bool own_pic = false;           // not the pool's current picture -> may be drawn on directly
                     if (same_base) {
-                        std::memcpy(yuv_frame.data(), last_yuv.data(), needed);   // 3MB copy vs full convert
+                        pic = pic_pool.Cur();       // no copy at all
                     } else {
-                        // PERF: DXGI reported exactly which rows changed since the
-                        // previous delivery, and last_yuv is the conversion of that
-                        // previous picture -> keep it and re-convert only those rows.
-                        int dy0 = 0, dy1 = 0;
-                        const bool partial = !wgc_mode && direct && ret == HR_DX_OK && !overlays_on &&
-                                             last_yuv_valid && last_yuv_direct &&
-                                             last_yuv_w == enc_w && last_yuv_h == enc_h &&
-                                             hr_dx_get_dirty_rows(dx_ctx, &dy0, &dy1);
-                        if (partial) {
-                            dy0 = std::max(0, dy0) & ~1;
-                            dy1 = std::min(enc_h, (dy1 + 1) & ~1);
-                            std::memcpy(yuv_frame.data(), last_yuv.data(), needed);
-                            yuv_pool.ConvertRows(enc_src, yuv_frame.data(), enc_w, enc_h, dy0, dy1);
-                            ++st_partial_conv;
-                            // Keep the cached picture current with just the touched rows.
-                            copy_yuv_rows(last_yuv.data(), yuv_frame.data(), enc_w, enc_h, dy0, dy1,
-                                          yuv_pool.IsNv12());
-                        } else {
-                            if (scaling) {
-                                const size_t scaled_needed = (size_t)req_w * req_h * 4;
-                                if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
-                                // PERF: was bgra_downscale(...) - a single-threaded
-                                // pass on this (already highest/boosted-priority)
-                                yuv_pool.Downscale(frame, scaled_buf.data(), eff_w, eff_h, req_w, req_h);
-                                enc_src = scaled_buf.data();
-                            }
-                            yuv_pool.Convert(enc_src, yuv_frame.data(), enc_w, enc_h);
-                            // Keep a private (pointer-free) copy so a following static tick can reuse
-                            // it - for ANY conversion whose result depends only on bgra_buf (i.e. no
-                            // overlays: those animate).
-                            if (!overlays_on) {
-                                last_yuv.assign(yuv_frame.begin(), yuv_frame.end());
-                                last_yuv_valid = true;
-                                last_yuv_w = enc_w; last_yuv_h = enc_h;
-                                last_yuv_direct = direct;
-                            } else {
-                                last_yuv_valid = false;
-                            }
+                        const uint8_t *enc_src = frame;
+                        size_t enc_pitch = frame_pitch;
+                        const int w0 = partial ? d0 : 0, w1 = partial ? d1 : enc_h;   // picture rows written now
+                        if (scaling) {
+                            const size_t scaled_needed = (size_t)req_w * req_h * 4;
+                            if (scaled_buf.size() != scaled_needed) scaled_buf.resize(scaled_needed);
+                            // PERF: parallel, and only the rows that are about to be converted.
+                            yuv_pool.Downscale(frame, frame_pitch, scaled_buf.data(), eff_w, eff_h, req_w, req_h, w0, w1);
+                            enc_src = scaled_buf.data();
+                            enc_pitch = (size_t)req_w * 4;
                         }
+                        if (partial) {
+                            pic = pic_pool.Next(d0, d1);    // = cached picture, rows [d0,d1) are written below
+                            yuv_pool.ConvertRows(enc_src, enc_pitch, pic->data(), enc_w, enc_h, d0, d1);
+                            ++st_partial_conv;
+                        } else {
+                            pic = pic_pool.Full();
+                            yuv_pool.Convert(enc_src, enc_pitch, pic->data(), enc_w, enc_h);
+                        }
+                        // It becomes the cached picture for any conversion that depends only on bgra_buf
+                        // (no overlays: those animate).
+                        if (!overlays_on) pic_pool.Done(pic, w0, w1); else own_pic = true;
                     }
-                    // Pointer: blended into the outgoing copy only, so last_yuv stays clean. Scale maps the
-                    // capture area's pixels onto the encoded size (Settings > Resolution).
+                    // Pointer: blended into a private copy only, so the cached picture stays clean. Only the rows
+                    // the pointer touches differ from the cached picture. Scale maps the capture area's pixels
+                    // onto the encoded size (Settings > Resolution).
                     if (cursor_on_now) {
-                        hr_composite_cursor_yuv(yuv_frame.data(), enc_w, enc_h,
-                                                 cap_origin_x + (do_crop ? c_x : 0),
-                                                 cap_origin_y + (do_crop ? c_y : 0),
-                                                 (float)enc_w / (float)std::max(1, eff_w),
-                                                 (float)enc_h / (float)std::max(1, eff_h),
-                                                 yuv_pool.IsNv12() ? 1 : 0);
+                        PicPool::Buf cpic = own_pic ? pic : pic_pool.Copy();
+                        int cr0 = 0, cr1 = 0;
+                        hr_composite_cursor_yuv_rows(cpic->data(), enc_w, enc_h,
+                                                      cap_origin_x + (do_crop ? c_x : 0),
+                                                      cap_origin_y + (do_crop ? c_y : 0),
+                                                      (float)enc_w / (float)std::max(1, eff_w),
+                                                      (float)enc_h / (float)std::max(1, eff_h),
+                                                      nv12_out ? 1 : 0, &cr0, &cr1);
+                        if (!own_pic) pic_pool.Taint(cpic, cr0, cr1);
+                        pic = std::move(cpic);
                     }
-                    enqueue_frame(yuv_frame, extra_slots, enc_w, enc_h, yuv_pool.IsNv12(), pts);
+                    enqueue_pic(std::move(pic), extra_slots, enc_w, enc_h, nv12_out, pts);
                     if (pts >= 0) ts_have_frame = true;
                 }
                 // What the newest queued picture shows (overlays animate, so they never match).
