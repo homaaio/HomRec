@@ -1,5 +1,59 @@
 welcome to changelog :D
 
+[Version 3.0.2] - 2026-11-03
+Less CPU per frame: overlays, the Live Preview, window/crop capture and the converted-picture copies.
+
+### Changed
+- Overlay blending (text / image / gif / webcam / input layers on the CPU path) uses SSE4.1 / AVX2, picked at run
+  time like the colour converters, and skips fully transparent and fully opaque runs. Output is bit-identical to the
+  old per-pixel loop.
+- Live Preview thumbnail: SSE4.1 sampler (about 2x faster for any pane size). The same picture as before.
+- Window / crop capture: the crop rectangle is converted, scaled and previewed in place instead of being copied row by
+  row into a work buffer every tick. A copy is only made while overlays are drawn on the CPU.
+- The converted picture is shared with the writer thread instead of being copied: an unchanged screen re-sends the
+  same buffer (no 3 MB copy), a partly changed one only copies and converts the rows that changed. The cursor is drawn
+  on a private copy and only the rows it touches are repaired afterwards.
+- Partial conversion now also works with scaling (Settings > Resolution) and with window/crop capture: only the dirty
+  rows are downscaled and converted. A change outside the crop rectangle re-sends the previous picture.
+- GPU colour conversion tooltip: it is on by default and engages by itself with a hardware encoder; overlays are
+  blended on the GPU too.
+- Linux build: -O3, per-function sections with --gc-sections and LTO, like the Windows targets.
+- Layer order: the higher a layer is in the Layers list, the more in front it is drawn (it used to be the other
+  way round). New layers (any type, also from plugins) are added at the top of the list; a window/region capture
+  migrated from an old settings file goes to the bottom, under the other layers. The Live Preview picks the
+  frontmost layer under the mouse by the same rule. "Move up" / "Move down" in the row menu follow it too.
+  Saved profiles / .hrc files keep their list order, so overlapping layers in old layouts are stacked the other
+  way round than before.
+
+### Fixed
+- Edit Overlay (input-overlay layers): the settings preview now draws the keyboard/mouse layout from the layout .json
+  and spritesheet, placed the same way as the live overlay, instead of stretching the whole spritesheet. The preview
+  also refreshes when a new .json is chosen.
+- Edit Overlay: the "Browse…" buttons, the dialog title, the hint text and the "No screenshot yet" message showed
+  mojibake for the ellipsis and dash characters; they are now decoded as UTF-8.
+- Capture source (Desktop): the dialog opened too small, with the monitor preview cut off and a scrollbar. It now sizes
+  itself to its content instead of the old 260 px minimum.
+- Capture source (Desktop): the monitor list showed mojibake for the dash ("Monitor 1 вЂ” 1600x900"); the dash is now
+  written as a Unicode escape, so it displays correctly.
+
+### Build
+- The Makefile is gone: CMake is the only build system. CMakeLists.txt now sets C++17 globally, writes hr.exe /
+  hom.exe / homrec.exe to the repo root as before (-DHR_EXE_IN_ROOT=OFF to keep them in build/), and links hr.map.
+  Build: cmake -S . -B build -G "MinGW Makefiles" && cmake --build build -j  (single target: --target hr|hom|homrec).
+- -DHOMREC_BUILD_TESTS=ON builds the unit tests (ctest --test-dir build) and the bench target on Windows too
+  (cmake/Tests.cmake, shared with the Linux build).
+- tools/homrec_build.py, README, installer notes, docs and code comments point at CMake instead of make.
+
+### Added
+- src/core/pic_pool.h (+ scripts/tests/test_pic_pool.cpp): the shared picture pool and the dirty-row mapping.
+- encoder_helpers.c: hr_blend_bgra(), hr_bgra_to_thumb(), hr_bgra_to_nv12_band_s() / hr_bgra_to_yuv420p_band_s()
+  (converters with a row pitch). New tests for all of them (SIMD vs scalar vs the old code).
+- Bench: scripts/tests/bench.cpp times overlay scaling and blending, the preview thumbnail, crop conversion and
+  picture copies, old vs new in one run; tools/bench_compare.py prints that table
+  (python tools/bench_compare.py run.txt), compares two runs with a geometric mean, and --fail-above PCT for scripts.
+- Layers panel: "up" / "down" buttons on the right of the "+" button move the selected layer one row up or
+  down. The Desktop row is not affected (the buttons do nothing while it is selected).
+
 [Version 3.0.1] - 2026-11-01
 Fix for Help > Check for Updates in a portable copy, a sharper Live Preview, and two small interface fixes.
 
