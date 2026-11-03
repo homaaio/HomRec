@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
 project(HomRec LANGUAGES C CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # Anything that is not Windows (i.e. Linux) is built by cmake/LinuxPort.cmake and stops here:
 # the rest of this file is the Windows build (hr.exe / hom.exe / homrec.exe) and needs windres, wxMSW, the
 # Windows SDK import libraries ... none of which exist elsewhere. See docs/LINUX_PORT_PLAN.md.
