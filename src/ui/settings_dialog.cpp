@@ -459,8 +459,9 @@ private:
         gpu_convert_chk_->SetToolTip(
             "Uses the D3D11 video processor (works on integrated GPUs too) to turn the desktop into NV12\n"
             "on the GPU. Only 1.5 bytes/pixel are read back instead of 4 and the CPU does no conversion.\n"
-            "Used automatically while no overlay is visible; overlays are drawn on the CPU, so showing\n"
-            "one switches back to the CPU converter by itself. Software encoders (libx264/libx265) keep the CPU path.");
+            "On by default and used automatically whenever a hardware encoder (NVENC / QSV / AMF) is found.\n"
+            "Overlays are alpha-blended on the GPU too (the CPU compositor only takes over if the GPU\n"
+            "blend is unavailable). Software encoders (libx264/libx265) keep the CPU path.");
         gpu_ddagrab_chk_ = AddCheck(page, pageRoot, text, bg,
             "Full-GPU capture via ffmpeg ddagrab (experimental, ffmpeg 6+, hardware encoders)",
             state_.gpu_capture_ddagrab);
