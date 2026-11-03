@@ -10,7 +10,7 @@
   #if defined(_MSC_VER)
     // #pragma comment(lib, ...) is an MSVC extension; MinGW/GCC ignores it
     // with a warning and links via -lwinhttp -lshlwapi on the command line
-    // instead (see HOM_LDLIBS in the Makefile).
+    // instead (see the hom target in CMakeLists.txt).
     #pragma comment(lib, "winhttp.lib")
     #pragma comment(lib, "shlwapi.lib")
   #endif

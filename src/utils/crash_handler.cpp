@@ -44,7 +44,7 @@ void AppendLogLine(const wchar_t *exe_dir, const char *line) {
 }
 
 // "module.dll+0xOFFSET" for an address, or "?" when it's not inside any loaded module. With the
-// link map (hr.map, see Makefile) an hr.exe+0x... offset resolves to a function by hand, which the
+// link map (hr.map, see CMakeLists.txt) an hr.exe+0x... offset resolves to a function by hand, which the
 // minidump alone can't do (the dump doesn't carry hr.exe's code, and nobody ships its symbols).
 void DescribeAddress(const void *addr, char *out, size_t out_len) {
     HMODULE mod = nullptr;

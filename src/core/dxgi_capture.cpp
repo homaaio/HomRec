@@ -7,7 +7,7 @@
   #include <wrl/client.h>   /* ComPtr */
   #if defined(_MSC_VER)
     // MinGW/GCC ignores #pragma comment(lib, ...) with a warning; it links
-    // via -ld3d11 -ldxgi on the command line instead (see the Makefile).
+    // via -ld3d11 -ldxgi on the command line instead (see CMakeLists.txt).
     #pragma comment(lib, "d3d11.lib")
     #pragma comment(lib, "dxgi.lib")
   #endif

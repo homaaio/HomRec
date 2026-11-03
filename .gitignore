@@ -319,6 +319,6 @@ tools/*.hrl
 tools/*.json
 crashes/*.dmp
 *.orig
-# linker map from `make` (hr.map) - keep next to each released hr.exe, it resolves crash offsets
+# linker map from the CMake build (hr.map) - keep next to each released hr.exe, it resolves crash offsets
 hr.map
 cfg/console_history.*

@@ -1,7 +1,7 @@
 // homrec.cpp - "homrec", the HomRec command-line interface.
 //
 // Standalone tool like hom.exe: it does NOT link wxWidgets or Lua and is built separately
-// (`make homrec`). Keep homrec.exe next to hr.exe and put that folder in PATH, then
+// (`cmake --build build --target homrec`). Keep homrec.exe next to hr.exe and put that folder in PATH, then
 // `homrec ...` works from any terminal location - everything it needs is looked up
 // relative to its own exe, never the current directory (see homrec_binding.h).
 //
@@ -13,7 +13,7 @@
 //   homrec pause                     pause / resume the recording started by 'homrec start'
 //
 // 'start' uses the same RecordingController as hr.exe (no wxWidgets involved), so the engine objects
-// are linked into homrec.exe - see the homrec target in the Makefile / CMakeLists.txt.
+// are linked into homrec.exe - see the homrec target in CMakeLists.txt.
 //
 // To add a command: write a `int CmdXxx(const Args &)` below and add one Leaf()/Group() line
 // to BuildCommands(). Help and error messages come from that table automatically.

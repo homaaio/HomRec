@@ -6,7 +6,7 @@
   #include <shlobj.h>
   #if defined(_MSC_VER)
     // MinGW/GCC ignores #pragma comment(lib, ...) with a warning; it links
-    // via -lshell32 on the command line instead (see the Makefile).
+    // via -lshell32 on the command line instead (see CMakeLists.txt).
     #pragma comment(lib, "shell32.lib")
   #endif
   #define HR_EXPORT extern "C" __declspec(dllexport)
