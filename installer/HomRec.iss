@@ -9,8 +9,8 @@
 ;
 ; Expects hr.exe (and its runtime DLLs, hom.exe, optionally ffmpeg.exe) to
 ; already be built and sitting in the repo root - this script does not
-; compile anything, only packages what's already there. Run `make` (and
-; `make hom`) first.
+; compile anything, only packages what's already there. Run the CMake build
+; (`cmake --build build -j`, see README.md) first.
 ;
 ; Output: dist\HomRec-Setup-<version>.exe
 ;
@@ -110,7 +110,7 @@ Name: "fileassoc"; Description: "Associate &.hrc and .hrp files with HomRec"; Gr
 Source: "hr.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "hom.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; hr.exe links wxWidgets/etc dynamically (only libgcc/libstdc++/pthread are
-; -static, see the Makefile) - the .dll's MinGW drops next to it at build
+; -static, see CMakeLists.txt) - the .dll's MinGW drops next to it at build
 ; time have to travel with it. Same reasoning tools/homrec_build.py uses
 ; for its "full"/"portable" archive presets.
 Source: "*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

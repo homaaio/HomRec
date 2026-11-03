@@ -169,7 +169,8 @@
         <h3>Option B — Build from source</h3>
         <pre>git clone https://github.com/homaaio/HomRec.git
 cd HomRec
-make
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build -j
 hr.exe</pre>
         <p>
             Requires: MinGW-w64 toolchain, Lua 5.4, FFmpeg.

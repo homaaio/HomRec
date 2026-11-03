@@ -13,7 +13,7 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/build-linux}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 
 if [ "$(uname -s)" != "Linux" ]; then
-    echo "scripts/linux/build.sh is for Linux. On Windows use 'make' or the root CMakeLists.txt as before." >&2
+    echo "scripts/linux/build.sh is for Linux. On Windows use the root CMakeLists.txt (see README.md)." >&2
     exit 1
 fi
 

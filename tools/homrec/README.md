@@ -7,12 +7,11 @@ wxWidgets, no Lua) that you keep next to `hr.exe`. `homrec start` records with t
 ## Build
 
 ```bash
-make homrec        # from the repo root -> ./homrec.exe
+cmake --build build --target homrec    # from the repo root -> ./homrec.exe
 ```
 
-(or the `homrec` target of the CMake build). `-municode` is needed because `homrec.cpp` uses a
-wide `wmain()`, so non-ASCII characters in paths survive. The engine objects are the same `.o`
-files `hr.exe` is built from, so after `make` they are not compiled twice.
+(`build` = the folder you configured with `cmake -S . -B build`). `-municode` is needed because `homrec.cpp` uses a
+wide `wmain()`, so non-ASCII characters in paths survive. The engine sources are the wx-free part of the list `hr.exe` is built from.
 
 ## Usage
 

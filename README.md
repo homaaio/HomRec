@@ -115,24 +115,28 @@ Install the toolchain and wxWidgets (via [MSYS2](https://www.msys2.org/), MinGW-
 pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-wxwidgets3.2-msw
 ```
 
-Obtain Lua 5.4 - the amalgamation or binaries from [lua.org](https://www.lua.org/download.html) (the Makefile expects `C:/lua54/include` and `C:/lua54/lib` by default), or:
+Obtain Lua 5.4 - the amalgamation or binaries from [lua.org](https://www.lua.org/download.html) (the build expects `C:/lua54/include` and `C:/lua54/lib` by default), or:
 ```bash
 vcpkg install lua:x64-mingw-dynamic
 ```
-Point the build at a different location with the Makefile's `LUA_CFLAGS`/`LUA_LDFLAGS` variables.
+Point the build at a different location with `-DLUA_INCLUDE_DIR=... -DLUA_LIB_DIR=...` (see below).
 
 Build:
 ```bash
-make            # hr.exe
-make hom        # optional: hom.exe, the plugin package manager
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build -j                   # hr.exe, hom.exe and homrec.exe, written to the repo root
+cmake --build build --target hr          # only hr.exe (other targets: hom, homrec)
 ```
 
-The Makefile assumes MSYS2 is installed at `C:\msys64` (wxWidgets paths are set at the top of the file). A CMake build that mirrors the Makefile is also provided, with the paths exposed as cache variables:
+CMake is the only build system. The paths are cache variables (defaults: MSYS2 at `C:\msys64`, Lua at `C:/lua54`), e.g. `-DLUA_INCLUDE_DIR=D:/lua/include -DLUA_LIB_DIR=D:/lua/lib -DWX_LIB_DIR=...`. `-DHR_LTO=OFF` switches link-time optimisation off if the link is slow or fails, `-DHR_EXE_IN_ROOT=OFF` keeps the .exe files in `build/`. The source files are listed by hand in `CMakeLists.txt` - when you add or remove a `.cpp`, update that list.
+
+Unit tests and the CPU benchmark (optional):
 ```bash
-cmake -B build -G "MinGW Makefiles" -DLUA_INCLUDE_DIR=C:/lua54/include -DLUA_LIB_DIR=C:/lua54/lib
-cmake --build build
+cmake -S . -B build -DHOMREC_BUILD_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+cmake --build build --target bench && build/bench.exe > run.txt && python tools/bench_compare.py run.txt
 ```
-Both build systems list the source files by hand - when you add or remove a `.cpp`, update **both** `Makefile` and `CMakeLists.txt`.
 
 To run: `hr.exe` links wxWidgets dynamically, so the wxWidgets/Lua `.dll` files from your toolchain must sit next to it (or be on `PATH`). FFmpeg is looked for next to `hr.exe`, in its `ffmpeg\` or `bin\` subfolder, in a few common `C:\` locations, and on `PATH`; ffmpeg 6+ is needed for the experimental `ddagrab` option.
 
@@ -229,7 +233,7 @@ A packaged plugin (`.hrp`, a renamed `.zip`) can be installed by:
 - **File > Import Plugin (.hrp)...** in the app, which loads it without a restart, or
 - `hom install <plugin-name>`, using the `hom` package manager
 
-**`hom`** is a small command-line package manager for `.hrp` plugins (`hom.exe`, kept next to `hr.exe`; prebuilt in [`Hom/`](Hom), or `make hom`). Besides `install`, it supports `search`, `show`, `list`, `upgrade`, `remove` and `purge`, and can update itself with `hom update`. It also runs inside HomRec's console. See [`Hom/README.md`](Hom/README.md) for the full command list.
+**`hom`** is a small command-line package manager for `.hrp` plugins (`hom.exe`, kept next to `hr.exe`; prebuilt in [`Hom/`](Hom), or `cmake --build build --target hom`). Besides `install`, it supports `search`, `show`, `list`, `upgrade`, `remove` and `purge`, and can update itself with `hom update`. It also runs inside HomRec's console. See [`Hom/README.md`](Hom/README.md) for the full command list.
 
 For the plugin API, see the plugins section of the [documentation page](docs/documentation.html).
 
@@ -247,11 +251,11 @@ For the plugin API, see the plugins section of the [documentation page](docs/doc
 
 | Dependency | Needed for |
 |---|---|
-| MinGW-w64 toolchain (g++, gcc, windres, make) | building `hr.exe` and `hom.exe` |
+| MinGW-w64 toolchain (g++, gcc, windres, mingw32-make) | building `hr.exe`, `hom.exe` and `homrec.exe` |
 | wxWidgets 3.2 (MSW, Unicode, DLL build) | UI - links `aui`, `xrc`, `html`, `qa`, `core`, `base`, `xml`, `net` |
 | Lua 5.4 (headers + library) | plugin host |
 | FFmpeg | runtime encoding (6+ for `ddagrab`) |
-| CMake 3.15+ | optional alternative to `make` |
+| CMake 3.15+ | the build system |
 | Python 3 | optional maintainer scripts in `tools/` |
 | Inno Setup 6 | optional, building the installer |
 

@@ -25,7 +25,7 @@ bug reports that turned into fixes, docs, translations, or plugins.
 ## How to work with HomRec
 
 1. **Fork** the repository and **clone** it locally (`git clone`).
-2. Make your changes. For build instructions and dependencies, please refer to [CONTRIBUTING.md](CONTRIBUTING.md) (uses `make` (See [Makefile](Makefile))).
+2. Make your changes. For build instructions and dependencies, please refer to [CONTRIBUTING.md](CONTRIBUTING.md) (uses CMake, see the "Build" section of [README.md](README.md)).
 3. Open a **Pull Request** against the `main` (or `develop`) branch.
 
 ## How this file works

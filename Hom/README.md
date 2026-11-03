@@ -11,7 +11,7 @@ Same toolchain as `hr.exe` (MinGW-w64), but `hom` doesn't need wxWidgets
 or Lua - it's a single file with no dependencies beyond WinHTTP:
 
 ```bash
-make hom          # from the repo root -- builds ./hom.exe
+cmake --build build --target hom     # from the repo root -- builds ./hom.exe
 ```
 
 or directly:
@@ -23,7 +23,7 @@ g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -o hom.exe tools/hom/hom.cpp -lwinhttp -
 (no `-municode` - `hom.cpp`'s `main()` is a plain narrow `int main(argc, argv)`,
 not `wWinMain`/`wmain`, so `-municode` would make the linker look for an
 entry point that doesn't exist here - see the comment at the top of
-`hom.cpp` and the `HOM_CXXFLAGS` comment in the top-level Makefile.)
+`hom.cpp` and the comment above the `hom` target in the top-level CMakeLists.txt.)
 
 ## Usage
 

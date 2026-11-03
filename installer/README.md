@@ -8,8 +8,8 @@ Install Inno Setup 6 (Windows only - it doesn't cross-compile), then either:
   from `src/ui/version.h`, and drops the result in `dist\`), **or**
 - Build it yourself:
   ```
-  make
-  make hom
+  cmake -S . -B build -G "MinGW Makefiles"
+  cmake --build build -j
   iscc /DMyAppVersion=2.3 installer\HomRec.iss
   ```
   matching `/DMyAppVersion` to `HR_APP_VERSION` in `src/ui/version.h`.
