@@ -330,16 +330,16 @@ def step_build():
     hom_exe = os.path.join(REPO_ROOT, "hom.exe")
 
     if ask_yes_no("Rebuild hr.exe and hom.exe now "
-                  "(make clean && make && make hom, in MSYS2 MINGW64)?"):
-        # Same LUA_CFLAGS/LUA_LDFLAGS the Makefile itself defaults to
-        # (see its `?=` lines) - overridable via env vars for anyone whose
-        # lua54 isn't installed at C:\lua54.
-        lua_cflags = os.environ.get("LUA_CFLAGS", "-IC:/lua54/include")
-        lua_ldflags = os.environ.get("LUA_LDFLAGS", "-LC:/lua54/lib")
+                  "(clean cmake build of hr, hom and homrec, in MSYS2 MINGW64)?"):
+        # Same Lua paths CMakeLists.txt defaults to - overridable via env vars
+        # for anyone whose lua54 is not installed at C:/lua54.
+        lua_inc = os.environ.get("LUA_INCLUDE_DIR", "C:/lua54/include")
+        lua_lib = os.environ.get("LUA_LIB_DIR", "C:/lua54/lib")
         make_cmd = (
-            f"make clean && "
-            f"make LUA_CFLAGS=\"{lua_cflags}\" LUA_LDFLAGS=\"{lua_ldflags}\" && "
-            f"make hom"
+            f"rm -rf build && "
+            f"cmake -S . -B build -G \"MinGW Makefiles\" "
+            f"-DLUA_INCLUDE_DIR=\"{lua_inc}\" -DLUA_LIB_DIR=\"{lua_lib}\" && "
+            f"cmake --build build -j"
         )
         ok = run_in_mingw64(make_cmd, REPO_ROOT)
         if not ok:
@@ -431,7 +431,7 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
             if not dlls:
                 warn("hr.exe is included, but no .dll was found next to it "
                      "in the repo root - if this is a dynamic build (the "
-                     "default for this Makefile), the archive won't run on "
+                     "default for this build), the archive won't run on "
                      "another machine without them.")
             for dll in dlls:
                 files.append((os.path.join(REPO_ROOT, dll), dll))
