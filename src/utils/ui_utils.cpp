@@ -987,15 +987,30 @@ void WithCursorInFrame(int width, int height, int origin_x, int origin_y,
 // range); nv12 == 0: planar I420 (software-encoder path, full range) - the same layouts and
 // matrices hr_bgra_to_nv12_band / hr_bgra_to_yuv420p write, so the result is the same picture the
 // converter would have made from a BGRA frame with the pointer already in it (+-1 level).
-HR_EXPORT void hr_composite_cursor_yuv(uint8_t *yuv, int width, int height,
-                                        int origin_x, int origin_y,
-                                        float scale_x, float scale_y, int nv12) {
+// hr_composite_cursor_yuv_rows - same, and reports the luma rows [*row0,*row1) it may have drawn on (0,0 = nothing),
+// so the capture loop can repair just those rows of a shared picture instead of copying the whole frame.
+HR_EXPORT void hr_composite_cursor_yuv_rows(uint8_t *yuv, int width, int height,
+                                             int origin_x, int origin_y,
+                                             float scale_x, float scale_y, int nv12,
+                                             int *row0, int *row1) {
+    if (row0) *row0 = 0;
+    if (row1) *row1 = 0;
     if (!yuv) return;
     WithCursorInFrame(width, height, origin_x, origin_y, scale_x, scale_y,
         [&](const hrcursor::Bitmap &bm, int lx, int ly, int dw, int dh) {
             hrcursor::blend_yuv420(yuv, width, height, nv12 != 0, /*full_range=*/nv12 == 0,
                                    bm, lx, ly, dw, dh);
+            if (ly + dh > 0 && ly < height) {
+                if (row0) *row0 = std::max(0, ly - 2);
+                if (row1) *row1 = std::min(height, ly + dh + 2);
+            }
         });
+}
+
+HR_EXPORT void hr_composite_cursor_yuv(uint8_t *yuv, int width, int height,
+                                        int origin_x, int origin_y,
+                                        float scale_x, float scale_y, int nv12) {
+    hr_composite_cursor_yuv_rows(yuv, width, height, origin_x, origin_y, scale_x, scale_y, nv12, nullptr, nullptr);
 }
 
 HR_EXPORT void hr_composite_cursor_nv12(uint8_t *nv12, int width, int height,
@@ -1021,5 +1036,8 @@ HR_EXPORT int hr_cursor_state(int *visible, int *x, int *y, unsigned long long *
 }
 HR_EXPORT void hr_composite_cursor_nv12(uint8_t *, int, int, int, int, float, float) {}
 HR_EXPORT void hr_composite_cursor_yuv(uint8_t *, int, int, int, int, float, float, int) {}
+HR_EXPORT void hr_composite_cursor_yuv_rows(uint8_t *, int, int, int, int, float, float, int, int *row0, int *row1) {
+    if (row0) *row0 = 0; if (row1) *row1 = 0;
+}
 HR_EXPORT void hr_composite_cursor_rgb24(uint8_t *, int, int, int, int, float, float) {}
 #endif
