@@ -176,7 +176,8 @@ private:
                 dc.DrawRectangle(rects[i]);
                 dc.SetTextForeground(nb_->text_);
                 const wxSize ext = dc.GetTextExtent(nb_->labels_[i]);
-                dc.SetClippingRegion(rects[i].Deflate(1));
+                wxRect clip = rects[i]; clip.Deflate(1);
+                dc.SetClippingRegion(clip);
                 dc.DrawText(nb_->labels_[i], rects[i].x + (rects[i].width - ext.GetWidth()) / 2,
                             rects[i].y + (rects[i].height - ext.GetHeight()) / 2);
                 dc.DestroyClippingRegion();
