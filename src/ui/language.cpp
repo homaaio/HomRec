@@ -85,7 +85,7 @@ std::unordered_map<std::string, std::string> BuiltinEnglish() {
         {"overlays_panel", "Overlays Panel"},
         {"console", "Console"}, {"show_welcome", "Show Welcome Screen"}, {"about", "About"},
         {"tab_general", "General"},
-        {"tab_video", "Video && Codec"}, {"tab_audio", "Audio"}, {"tab_hotkeys", "Hotkeys"},
+        {"tab_video", "Video & Codec"}, {"tab_audio", "Audio"}, {"tab_hotkeys", "Hotkeys"},
         {"tab_security", "Security"}, {"tab_system", "System"},
         {"quality_label", "Encoding quality:"}, {"target_fps_label", "Target FPS (limit):"},
         {"resolution_mode_label", "Resolution mode:"},
