@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/linux/build.sh - configures and builds the Linux target (homrec + unit tests)
+# scripts/linux/build.sh - configures and builds the Linux targets (hr GUI, homrec CLI, unit tests)
 # into ./build-linux with CMake. Root CMakeLists.txt hands over to cmake/LinuxPort.cmake on
 # anything that is not Windows, so the Windows build files are not involved.
 #
@@ -31,3 +31,8 @@ fi
 
 echo
 echo "Built: $BUILD_DIR/homrec   (try: $BUILD_DIR/homrec doctor)"
+if [ -x "$BUILD_DIR/hr" ]; then
+    echo "       $BUILD_DIR/hr       (the window)"
+else
+    echo "       hr (the window) was skipped: wxWidgets 3.2 not found - scripts/linux/install-deps-debian.sh"
+fi
