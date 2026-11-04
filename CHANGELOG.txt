@@ -24,6 +24,7 @@ Less CPU per frame: overlays, the Live Preview, window/crop capture and the conv
   frontmost layer under the mouse by the same rule. "Move up" / "Move down" in the row menu follow it too.
   Saved profiles / .hrc files keep their list order, so overlapping layers in old layouts are stacked the other
   way round than before.
+- The shape and color of the panels used to select settings sections are now darker.
 
 ### Fixed
 - Edit Overlay (input-overlay layers): the settings preview now draws the keyboard/mouse layout from the layout .json
@@ -35,6 +36,10 @@ Less CPU per frame: overlays, the Live Preview, window/crop capture and the conv
   itself to its content instead of the old 260 px minimum.
 - Capture source (Desktop): the monitor list showed mojibake for the dash ("Monitor 1 вЂ” 1600x900"); the dash is now
   written as a Unicode escape, so it displays correctly.
+- Settings: the "Video & Codec" tab title showed two ampersands ("Video && Codec"); it now shows one.
+- Settings > Audio: on the first visit the labels and some number boxes were missing or tiny until another tab was
+  opened and Audio again. Each tab is now laid out once when the dialog is created, and the Channels / Level meter
+  number boxes have a fixed width. (Not yet confirmed in a build.)
 
 ### Build
 - The Makefile is gone: CMake is the only build system. CMakeLists.txt now sets C++17 globally, writes hr.exe /
