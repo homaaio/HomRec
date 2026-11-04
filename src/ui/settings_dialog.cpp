@@ -2,7 +2,11 @@
 #include "settings_dialog.h"
 #include "themed_widgets.h"
 #include "language.h"
+#ifdef _WIN32
 #include "recording_controller.h"
+#else
+#include "linux/rec_stub.h"
+#endif
 #include "../core/mic_enum.h"
 #include "../utils/system_integration.h"
 #include "../utils/pc_log.h"
@@ -66,7 +70,11 @@ enum {
 // Same folder LanguageTable::Load()/ScanCustomLanguages() read from
 // (main_frame.cpp's ctor uses this literal too) - kept as one constant
 // here since this dialog is now also the thing that writes into it.
+#ifdef _WIN32
 const char *const kLangsDir = "Assets\\L";
+#else
+const std::string kLangsDir = HrLangsDir();
+#endif
 
 // Old tab indices ShowSettingsDialogTab() callers still pass in (see
 // settings_dialog.h) mapped onto this version's actual notebook page
