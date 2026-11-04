@@ -1,7 +1,15 @@
 #include "language.h"
 #include "version.h"
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#include <cerrno>
+#include "../platform/paths.h"
+#endif
 #include <vector>
+#include <algorithm>
 #include <sstream>
 #include <cstdio>
 
@@ -301,6 +309,13 @@ bool ReadLanguageJson(const std::string &path, std::string &outJson, bool *outWa
     return true;
 }
 
+// Folder separator for paths built from langsDir ("Assets\\L" on Windows, an absolute path on Linux).
+#ifdef _WIN32
+const char kSep = '\\';
+#else
+const char kSep = '/';
+#endif
+
 bool EnsureDirectoryRecursive(const std::string &dir) {
     std::string partial;
     size_t pos = 0;
@@ -309,8 +324,13 @@ bool EnsureDirectoryRecursive(const std::string &dir) {
         std::string component = (next == std::string::npos) ? dir.substr(pos) : dir.substr(pos, next - pos);
         partial += component;
         if (!partial.empty()) {
+#ifdef _WIN32
             if (!CreateDirectoryA(partial.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
                 return false;
+#else
+            if (::mkdir(partial.c_str(), 0755) != 0 && errno != EEXIST)
+                return false;
+#endif
         }
         if (next == std::string::npos) break;
         partial += dir[next];
@@ -319,7 +339,35 @@ bool EnsureDirectoryRecursive(const std::string &dir) {
     return true;
 }
 
+bool CopyFileBytes(const std::string &src, const std::string &dst) {
+#ifdef _WIN32
+    return CopyFileA(src.c_str(), dst.c_str(), FALSE) != 0;
+#else
+    FILE *in = fopen(src.c_str(), "rb");
+    if (!in) return false;
+    FILE *out = fopen(dst.c_str(), "wb");
+    if (!out) { fclose(in); return false; }
+    char chunk[4096];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(chunk, 1, sizeof(chunk), in)) > 0) {
+        if (fwrite(chunk, 1, n, out) != n) { ok = false; break; }
+    }
+    fclose(in);
+    if (fclose(out) != 0) ok = false;
+    return ok;
+#endif
+}
+
 } // namespace
+
+std::string HrLangsDir() {
+#ifdef _WIN32
+    return "Assets\\L";
+#else
+    return hr::platform::DataDir() + "/langs";
+#endif
+}
 
 LanguageTable LanguageTable::Load(const std::string &code, const std::string &langsDir) {
     LanguageTable table;
@@ -334,7 +382,7 @@ LanguageTable LanguageTable::Load(const std::string &code, const std::string &la
         for (const auto &kv : ru_new) table.strings_[kv.first] = kv.second;
     }
 
-    std::string path = langsDir + "\\" + code + ".hrl";
+    std::string path = langsDir + kSep + code + ".hrl";
 
     std::string json;
     if (!ReadLanguageJson(path, json)) return table; // not found / unreadable -> English fallback
@@ -361,21 +409,21 @@ LanguageTable LanguageTable::Load(const std::string &code, const std::string &la
     if (missing > 0) {
         std::ostringstream msg;
         msg << "Language " << code << ": " << missing << " missing keys\n";
+        #ifdef _WIN32
         OutputDebugStringA(msg.str().c_str());
+#else
+        fputs(msg.str().c_str(), stderr);
+#endif
     }
     return table;
 }
 
 std::vector<std::pair<std::string, std::string>> LanguageTable::ScanCustomLanguages(const std::string &langsDir) {
     std::vector<std::pair<std::string, std::string>> result;
-    std::string pattern = langsDir + "\\*.hrl";
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return result;
-    do {
-        std::string fname = fd.cFileName;
+    auto add = [&](const std::string &fname) {
+        if (fname.size() < 5) return;
         std::string code = fname.substr(0, fname.size() - 4); // strip ".hrl"
-        std::string full = langsDir + "\\" + fname;
+        std::string full = langsDir + kSep + fname;
 
         std::string json;
         std::string display_name = code;
@@ -386,8 +434,28 @@ std::vector<std::pair<std::string, std::string>> LanguageTable::ScanCustomLangua
             }
         }
         result.emplace_back(code, display_name);
+    };
+#ifdef _WIN32
+    std::string pattern = langsDir + "\\*.hrl";
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return result;
+    do {
+        add(fd.cFileName);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+#else
+    DIR *d = opendir(langsDir.c_str());
+    if (!d) return result;
+    std::vector<std::string> names;
+    while (dirent *e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n.size() > 4 && n.compare(n.size() - 4, 4, ".hrl") == 0) names.push_back(n);
+    }
+    closedir(d);
+    std::sort(names.begin(), names.end());   // readdir order is arbitrary; the Windows scan comes sorted
+    for (const auto &n : names) add(n);
+#endif
     return result;
 }
 
@@ -442,11 +510,11 @@ bool LanguageTable::ImportLanguageFile(const std::string &srcPath, const std::st
         return false;
     }
 
-    std::string destPath = langsDir + "\\" + code + ".hrl";
+    std::string destPath = langsDir + kSep + code + ".hrl";
     bool wrote;
     if (wasHrl) {
         // Already in the on-disk .hrl format - copy the bytes as-is.
-        wrote = CopyFileA(srcPath.c_str(), destPath.c_str(), FALSE) != 0;
+        wrote = CopyFileBytes(srcPath, destPath);
     } else {
         wrote = hr_hrc_write(destPath.c_str(), json.c_str(), 1) != 0;
     }

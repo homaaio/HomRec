@@ -5,6 +5,10 @@
 #include <unordered_map>
 #include <vector>
 
+// Folder with the user's .hrl language files: "Assets\\L" next to hr.exe on Windows,
+// <data dir>/langs on Linux (see platform/paths.h).
+std::string HrLangsDir();
+
 class LanguageTable {
 public:
     static LanguageTable Load(const std::string &code, const std::string &langsDir);
