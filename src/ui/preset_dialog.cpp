@@ -8,7 +8,16 @@
 #include <wx/textdlg.h>
 #include <wx/filename.h>
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "../platform/paths.h"
+#include <cwchar>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+#include "../utils/str_convert.h"
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -16,7 +25,55 @@
 
 namespace {
 
+// Where the presets live: "presets" next to hr.exe on Windows, <data dir>/presets on Linux. The
+// little functions below are the only file-system calls in this dialog, so the rest of it is shared.
+#ifdef _WIN32
 const wchar_t kPresetsDir[] = L"presets";
+const wchar_t kSlash[] = L"\\";
+
+bool PathExists(const std::wstring &p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+bool DeleteIt(const std::wstring &p) { return DeleteFileW(p.c_str()) != 0; }
+bool CopyNew(const std::wstring &src, const std::wstring &dst) { return CopyFileW(src.c_str(), dst.c_str(), TRUE) != 0; }
+void MakePresetsDir() { CreateDirectoryW(kPresetsDir, nullptr); }
+std::vector<std::wstring> ListHrc() {
+    std::vector<std::wstring> names;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((std::wstring(kPresetsDir) + L"\\*.hrc").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) names.push_back(fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return names;
+}
+#else
+const std::wstring kPresetsDir = HrWide(hr::platform::DataDir() + "/presets");
+const wchar_t kSlash[] = L"/";
+
+bool PathExists(const std::wstring &p) { struct stat st; return ::stat(HrNarrow(p).c_str(), &st) == 0; }
+bool DeleteIt(const std::wstring &p) { return ::unlink(HrNarrow(p).c_str()) == 0; }
+bool CopyNew(const std::wstring &src, const std::wstring &dst) {
+    if (PathExists(dst)) return false;   // same as CopyFileW(..., TRUE): never overwrite
+    std::ifstream in(HrNarrow(src), std::ios::binary);
+    std::ofstream out(HrNarrow(dst), std::ios::binary);
+    if (!in || !out) return false;
+    out << in.rdbuf();
+    return (bool)out;
+}
+void MakePresetsDir() { hr::platform::EnsureDir(HrNarrow(kPresetsDir)); }
+std::vector<std::wstring> ListHrc() {
+    std::vector<std::wstring> names;
+    DIR *d = opendir(HrNarrow(kPresetsDir).c_str());
+    if (!d) return names;
+    while (dirent *e = readdir(d)) {
+        const std::string n = e->d_name;
+        if (n.size() > 4 && n.compare(n.size() - 4, 4, ".hrc") == 0) names.push_back(HrWide(n));
+    }
+    closedir(d);
+    return names;
+}
+#endif
 
 // Strips characters Windows filenames can't contain, same denylist
 // RecordingController::ResolveCaptureAppName() uses for the {app} template placeholder -
@@ -131,17 +188,15 @@ private:
     enum { IDC_SWITCH = wxID_HIGHEST + 1, IDC_SAVE_NEW, IDC_ADD, IDC_REMOVE };
 
     static void EnsurePresetsDir() {
-        // Fine if it already exists - CreateDirectoryW just fails
-        // harmlessly (ERROR_ALREADY_EXISTS) and every path built off
-        // kPresetsDir below still resolves the same either way.
-        CreateDirectoryW(kPresetsDir, nullptr);
+        // Fine if it already exists - every path built off kPresetsDir below resolves the same either way.
+        MakePresetsDir();
     }
 
     // True for a file that only has an [overlays] section (no other
     // registry keys at all) - i.e. one written by SaveOverlaysOnly() or a
     // hand-trimmed copy of one, as opposed to a full settings export.
     static bool LooksOverlayOnly(const std::wstring &path) {
-        std::ifstream f(path.c_str(), std::ios::binary);
+        std::ifstream f(HrFsPath(path).c_str(), std::ios::binary);
         if (!f) return false;
         std::string line;
         bool sawOverlaysHeader = false, sawOtherKey = false;
@@ -170,21 +225,12 @@ private:
         main.is_main = true;
         entries_.push_back(main);
 
-        std::wstring pattern = std::wstring(kPresetsDir) + L"\\*.hrc";
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
-        std::vector<std::wstring> names;
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) names.push_back(fd.cFileName);
-            } while (FindNextFileW(h, &fd));
-            FindClose(h);
-        }
+        std::vector<std::wstring> names = ListHrc();
         std::sort(names.begin(), names.end());
         for (const auto &name : names) {
             PresetEntry e;
             e.display_name = wxString(name.c_str());
-            e.path = std::wstring(kPresetsDir) + L"\\" + name;
+            e.path = std::wstring(kPresetsDir) + kSlash + name;
             entries_.push_back(e);
         }
 
@@ -257,8 +303,8 @@ private:
             wxMessageBox("That name isn't usable as a filename.", "Save Current As...", wxOK | wxICON_WARNING, this);
             return;
         }
-        std::wstring path = std::wstring(kPresetsDir) + L"\\" + name + L".hrc";
-        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::wstring path = std::wstring(kPresetsDir) + kSlash + name + L".hrc";
+        if (PathExists(path)) {
             if (wxMessageBox("A preset with that name already exists. Overwrite it?",
                               "Save Current As...", wxYES_NO | wxICON_WARNING, this) != wxYES) {
                 return;
@@ -282,15 +328,15 @@ private:
         std::wstring base = wxFileName(dlg.GetPath()).GetName().ToStdWstring();
         base = SanitizeFileNamePart(base);
         if (base.empty()) base = L"preset";
-        std::wstring dest = std::wstring(kPresetsDir) + L"\\" + base + L".hrc";
+        std::wstring dest = std::wstring(kPresetsDir) + kSlash + base + L".hrc";
         // Don't silently clobber an existing preset that happens to share
         // a name - suffix " (2)", " (3)", ... until a free name is found,
         // same de-duplication idea a Windows Explorer copy uses.
         int n = 2;
-        while (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            dest = std::wstring(kPresetsDir) + L"\\" + base + L" (" + std::to_wstring(n++) + L").hrc";
+        while (PathExists(dest)) {
+            dest = std::wstring(kPresetsDir) + kSlash + base + L" (" + std::to_wstring(n++) + L").hrc";
         }
-        if (CopyFileW(src.c_str(), dest.c_str(), TRUE)) {
+        if (CopyNew(src, dest)) {
             HrLog::Info("Preset: added " + std::string(dlg.GetPath().ToUTF8()));
             RefreshList();
         } else {
@@ -313,7 +359,7 @@ private:
                           "Remove Preset", wxYES_NO | wxICON_WARNING, this) != wxYES) {
             return;
         }
-        if (DeleteFileW(e.path.c_str())) {
+        if (DeleteIt(e.path)) {
             HrLog::Info("Preset: removed " + std::string(e.display_name.ToUTF8()));
             RefreshList();
         } else {
