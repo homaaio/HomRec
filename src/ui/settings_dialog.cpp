@@ -685,7 +685,7 @@ private:
         grid->Add(aac_bitrate_edit_, 1, wxEXPAND | wxALIGN_CENTRE_VERTICAL);
 
         AddLabel(page, grid, text, bg, "Channels:");
-        channels_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+        channels_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(80, -1),
                                          wxSP_ARROW_KEYS, 1, 8, state_.audio_out_channels);
         grid->Add(channels_spin_, 0, wxALIGN_CENTRE_VERTICAL);
 
@@ -697,7 +697,7 @@ private:
         auto *meterGrid = new wxFlexGridSizer(2, 10, 10);
         AddLabel(page, meterGrid, text, bg, "Level meter refresh rate (Hz):");
         int meter_fps = state_.level_meter_fps > 0 ? state_.level_meter_fps : 30;
-        meter_fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+        meter_fps_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(80, -1),
                                           wxSP_ARROW_KEYS, 10, 60, meter_fps);
         meterGrid->Add(meter_fps_spin_, 0, wxALIGN_CENTRE_VERTICAL);
         AddLabel(page, meterGrid, text, bg, "Mixer layout:");
