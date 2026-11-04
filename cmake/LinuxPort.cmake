@@ -7,13 +7,17 @@
 #   hr_platform     static library: src/platform/linux/* (session detection, XDG paths, backend stubs)
 #   hr_core         static library: the Windows-era engine files that already compile on Linux
 #                   (.hrc read/write, settings table, app logic, input overlay, ls command ...)
-#   homrec    the raw Linux CLI (doctor / paths / start)
+#   homrec          the raw Linux CLI (doctor / paths / start)
+#   hr              the GUI (wxGTK): main window, Settings and the windows that hang off it. Recording,
+#                   preview, audio mixer and overlays are "not now" placeholders until their backends land.
+#                   Needs libwxgtk3.2-dev; skipped with a message when wxWidgets is not found.
 #   test_*          the platform-independent doctest suites from scripts/tests/ (run with `ctest`)
 #
 # What it will build later is listed in docs/LINUX_PORT_PLAN.md - new backends are added to
 # HR_PLATFORM_SOURCES below (and their library to hr_platform's link line), nothing else moves.
 
 option(HOMREC_BUILD_TESTS "Build the platform-independent unit tests" ON)
+option(HR_GUI "Build the wxGTK GUI (hr) when wxWidgets is found" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -68,9 +72,54 @@ if(HR_LTO AND HR_IPO_OK)
     set_property(TARGET homrec hr_platform hr_core PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)
 endif()
 
+# ---- GUI (hr) ---------------------------------------------------------------------------------
+# The shared wx files from src/ui/ (they build on both systems) + the Linux-only ones in src/ui/linux/.
+set(HR_GUI_BUILT OFF)
+if(HR_GUI)
+    find_package(wxWidgets 3.2 COMPONENTS core base aui adv QUIET)
+    if(wxWidgets_FOUND)
+        include(${wxWidgets_USE_FILE})
+        set(HR_GUI_SOURCES
+            # Linux-only: app, main window, the small windows that hang off it
+            src/ui/linux/app.cpp
+            src/ui/linux/main_frame.cpp
+            src/ui/linux/about.cpp
+            src/ui/linux/welcome.cpp
+            src/ui/linux/pc_info.cpp
+            src/ui/linux/log_view.cpp
+            src/ui/linux/console.cpp
+            src/ui/linux/stubs.cpp
+            # shared with Windows (ifdef'd where the systems differ)
+            src/ui/settings_dialog.cpp
+            src/ui/preset_dialog.cpp
+            src/ui/hrc_config.cpp
+            src/ui/language.cpp
+            src/ui/theme.cpp
+            src/ui/themed_widgets.cpp
+            src/core/settings.cpp
+            src/core/display_info.cpp
+            # Linux versions of the engine helpers the windows above call
+            src/platform/linux/log_linux.cpp
+            src/platform/linux/mic_linux.cpp
+        )
+        add_executable(hr ${HR_GUI_SOURCES})
+        target_include_directories(hr PRIVATE src src/ui src/core src/utils)
+        target_link_libraries(hr PRIVATE hr_core hr_platform ${wxWidgets_LIBRARIES} ZLIB::ZLIB)
+        target_compile_options(hr PRIVATE -Wall ${HR_OPT_LINUX})
+        target_link_options(hr PRIVATE -Wl,--gc-sections)
+        if(HR_LTO AND HR_IPO_OK)
+            set_property(TARGET hr PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)
+        endif()
+        set(HR_GUI_BUILT ON)
+    else()
+        message(STATUS "HomRec: wxWidgets 3.2 not found - skipping the GUI (hr). "
+                       "Debian/Ubuntu: sudo apt install libwxgtk3.2-dev (scripts/linux/install-deps-debian.sh)")
+    endif()
+endif()
+
 # ---- tests + bench ----------------------------------------------------------------------------
 if(HOMREC_BUILD_TESTS)
     include(${CMAKE_CURRENT_LIST_DIR}/Tests.cmake)
 endif()
 
-message(STATUS "HomRec: Linux build -> homrec (+ tests: ${HOMREC_BUILD_TESTS}). hr.exe / hom / homrec are Windows-only.")
+message(STATUS "HomRec: Linux build -> homrec (+ GUI hr: ${HR_GUI_BUILT}, tests: ${HOMREC_BUILD_TESTS}). hr.exe / hom are Windows-only.")
