@@ -7,9 +7,16 @@
 #include "hrc_config.h"
 #include "../utils/str_convert.h"
 #include "../core/settings_registry.h"
+#ifdef _WIN32
 #include "window_picker_dialog.h"   // HrMigrateCaptureSourceToLayers()
-
 #include <windows.h>
+#else
+#include "../platform/paths.h"
+#include <cstdio>
+#include <sys/stat.h>
+// Linux: there are no window / region layers yet (see ui/linux/stubs.cpp).
+void HrMigrateCaptureSourceToLayers(AppState &state);
+#endif
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -239,8 +246,18 @@ static bool WriteAtomically(const std::wstring &path, WriteFn write) {
             return true;
     }
     DeleteFileW(tmp.c_str());
+#else
+    // Linux: the config folder may not exist yet (first start), then write next to it and rename().
+    const std::string npath = HrNarrow(path);
+    const size_t slash = npath.rfind('/');
+    if (slash != std::string::npos && slash > 0) hr::platform::EnsureDir(npath.substr(0, slash));
+    const std::wstring tmp = path + L".tmp";
+    if (write(tmp)) {
+        if (std::rename(HrNarrow(tmp).c_str(), npath.c_str()) == 0) return true;
+        std::remove(HrNarrow(tmp).c_str());
+    }
 #endif
-    return write(path); // fallback: previous behaviour (also the non-Windows path)
+    return write(path); // fallback: previous behaviour
 }
 
 bool Save(const AppState &state, const std::wstring &path) {
@@ -248,7 +265,7 @@ bool Save(const AppState &state, const std::wstring &path) {
 }
 
 static bool SaveDirect(const AppState &state, const std::wstring &path) {
-    std::ofstream f(path.c_str(), std::ios::trunc | std::ios::binary);
+    std::ofstream f(HrFsPath(path).c_str(), std::ios::trunc | std::ios::binary);
     if (!f) return false;
 
     f << "# HomRec Config (.hrc) v1\n"
@@ -275,7 +292,7 @@ static bool SaveDirect(const AppState &state, const std::wstring &path) {
 }
 
 bool Load(AppState &state, const std::wstring &path, bool allow_sensitive_fields) {
-    std::ifstream f(path.c_str(), std::ios::binary);
+    std::ifstream f(HrFsPath(path).c_str(), std::ios::binary);
     if (!f) return false;
 
     std::unordered_map<std::string, std::string> kv;
@@ -320,7 +337,7 @@ bool SaveOverlaysOnly(const std::vector<OverlayDef> &overlays, const std::wstrin
 }
 
 static bool SaveOverlaysDirect(const std::vector<OverlayDef> &overlays, const std::wstring &path) {
-    std::ofstream f(path.c_str(), std::ios::trunc | std::ios::binary);
+    std::ofstream f(HrFsPath(path).c_str(), std::ios::trunc | std::ios::binary);
     if (!f) return false;
     f << "# HomRec Overlays (auto-saved) v1\n"
       << "# Lines starting with # are comments. Format: key=value\n\n";
@@ -329,7 +346,7 @@ static bool SaveOverlaysDirect(const std::vector<OverlayDef> &overlays, const st
 }
 
 bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &path) {
-    std::ifstream f(path.c_str(), std::ios::binary);
+    std::ifstream f(HrFsPath(path).c_str(), std::ios::binary);
     if (!f) return false; // no autosave yet (fresh install, or never had an overlay) - not an error
 
     std::unordered_map<std::string, std::string> kv;
@@ -351,11 +368,21 @@ bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &pat
 
 bool RenameSettingsFile(const std::wstring &old_path, const std::wstring &new_path) {
     if (old_path == new_path) return false;
+#ifndef _WIN32
+    struct stat st;
+    if (::stat(HrNarrow(old_path).c_str(), &st) != 0) return false;   // nothing there yet to move
+    if (::stat(HrNarrow(new_path).c_str(), &st) == 0) return false;   // don't clobber an existing file
+    const std::string nnew = HrNarrow(new_path);
+    const size_t slash = nnew.rfind('/');
+    if (slash != std::string::npos && slash > 0) hr::platform::EnsureDir(nnew.substr(0, slash));
+    return std::rename(HrNarrow(old_path).c_str(), nnew.c_str()) == 0;
+#else
     DWORD oldAttrs = GetFileAttributesW(old_path.c_str());
     if (oldAttrs == INVALID_FILE_ATTRIBUTES) return false; // nothing there yet to move
     DWORD newAttrs = GetFileAttributesW(new_path.c_str());
     if (newAttrs != INVALID_FILE_ATTRIBUTES) return false; // don't clobber an existing file
     return MoveFileW(old_path.c_str(), new_path.c_str()) != 0;
+#endif
 }
 
 std::wstring ResolveSettingsPath(const AppState &state) {
@@ -364,10 +391,19 @@ std::wstring ResolveSettingsPath(const AppState &state) {
     // OneLine()'s comment above), converted here rather than at each call site so
     // main_frame.cpp and settings_dialog.cpp can't disagree on how.
     const std::string &s = state.settings_path;
+#ifndef _WIN32
+    return HrWide(s);
+#else
     int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
     std::wstring w(len > 0 ? len - 1 : 0, L'\0');
     if (len > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
     return w;
+#endif
 }
+
+#ifndef _WIN32
+const std::wstring kDefaultSettingsPath   = HrWide(hr::platform::ConfigDir() + "/homrec.hrc");
+const std::wstring kOverlaysAutosavePath  = HrWide(hr::platform::ConfigDir() + "/homrec_overlays.hrc");
+#endif
 
 } // namespace HrcConfig
