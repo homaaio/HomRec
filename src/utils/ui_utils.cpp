@@ -405,10 +405,16 @@ HR_EXPORT int hr_get_sys_stats(const char *disk_path, HrSysStats *out) {
         if (d_total > 0)
             out->cpu_percent = (float)(d_total - d_idle) / (float)d_total * 100.0f;
     }
-    /* Disk */
+    // Disk - the recordings folder may not exist yet (first start): ask the nearest folder above it that does
     if (disk_path && disk_path[0]) {
         struct statvfs sv;
-        if (statvfs(disk_path, &sv) == 0) {
+        std::string probe = disk_path;
+        while (statvfs(probe.c_str(), &sv) != 0 && probe.size() > 1) {
+            size_t slash = probe.find_last_of('/');
+            if (slash == std::string::npos) break;
+            probe.resize(slash == 0 ? 1 : slash);
+        }
+        if (statvfs(probe.c_str(), &sv) == 0) {
             uint64_t total = (uint64_t)sv.f_blocks * sv.f_frsize;
             uint64_t free  = (uint64_t)sv.f_bfree  * sv.f_frsize;
             out->disk_total_gb = total / (1024ULL*1024*1024);
