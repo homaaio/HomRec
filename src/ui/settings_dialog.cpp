@@ -15,6 +15,7 @@
 #include <wx/combobox.h>
 #include <wx/choice.h>
 #include <wx/notebook.h>
+#include <wx/dcbuffer.h>
 #include <wx/scrolwin.h>
 #include <wx/statline.h>
 #include <wx/timer.h>
@@ -102,10 +103,105 @@ wxStaticText *AddSectionHeading(wxWindow *page, wxSizer *sizer, wxColour accent,
     return lbl;
 }
 
+// wxNotebook's tab strip is drawn by the OS and ignores colours, so this is a minimal
+// replacement with the same AddPage/SetSelection/GetPageCount surface: a custom-painted
+// tab strip (lighter-than-background fill, white border) above the stacked pages.
+class ThemedNotebook : public wxPanel {
+public:
+    ThemedNotebook(wxWindow *parent, wxColour bg, wxColour tabBg, wxColour tabSel,
+                   wxColour border, wxColour text)
+        : wxPanel(parent, wxID_ANY), tab_bg_(tabBg), tab_sel_(tabSel), border_(border),
+          text_(text), bg_(bg) {
+        SetBackgroundColour(bg);
+        auto *root = new wxBoxSizer(wxVERTICAL);
+        strip_ = new Strip(this, this);
+        root->Add(strip_, 0, wxEXPAND | wxBOTTOM, 6);
+        pages_sizer_ = new wxBoxSizer(wxVERTICAL);
+        root->Add(pages_sizer_, 1, wxEXPAND);
+        SetSizer(root);
+    }
+
+    void AddPage(wxWindow *page, const wxString &label) {
+        pages_.push_back(page);
+        labels_.push_back(label);
+        pages_sizer_->Add(page, 1, wxEXPAND);
+        page->Show(pages_.size() == 1);
+        strip_->Refresh();
+    }
+    size_t GetPageCount() const { return pages_.size(); }
+    void SetSelection(int i) {
+        if (i < 0 || i >= (int)pages_.size() || i == sel_) return;
+        pages_[sel_]->Hide();
+        sel_ = i;
+        pages_[sel_]->Show();
+        strip_->Refresh();
+        Layout();
+    }
+
+private:
+    class Strip : public wxPanel {
+    public:
+        Strip(wxWindow *parent, ThemedNotebook *nb) : wxPanel(parent, wxID_ANY), nb_(nb) {
+            SetBackgroundStyle(wxBG_STYLE_PAINT);
+            SetMinSize(wxSize(-1, 28));
+            Bind(wxEVT_PAINT, &Strip::OnPaint, this);
+            Bind(wxEVT_LEFT_DOWN, &Strip::OnClick, this);
+            Bind(wxEVT_SIZE, [this](wxSizeEvent &e) { Refresh(true); e.Skip(); });
+        }
+
+    private:
+        // Natural width per tab; shrunk evenly if they don't fit.
+        std::vector<wxRect> Rects() {
+            const int h = GetClientSize().GetHeight(), pad = 12;
+            std::vector<int> w;
+            int total = 0;
+            for (const auto &l : nb_->labels_) { w.push_back(GetTextExtent(l).GetWidth() + 2 * pad); total += w.back(); }
+            const int avail = GetClientSize().GetWidth();
+            if (total > avail && total > 0)
+                for (auto &x : w) x = x * avail / total;
+            std::vector<wxRect> r;
+            int x = 0;
+            for (int ww : w) { r.emplace_back(x, 0, ww, h); x += ww - 1; }   // -1: neighbours share a border
+            return r;
+        }
+        void OnPaint(wxPaintEvent &) {
+            wxAutoBufferedPaintDC dc(this);
+            dc.SetBackground(wxBrush(nb_->bg_));
+            dc.Clear();
+            dc.SetFont(GetFont());
+            const auto rects = Rects();
+            for (size_t i = 0; i < rects.size(); ++i) {
+                dc.SetBrush(wxBrush((int)i == nb_->sel_ ? nb_->tab_sel_ : nb_->tab_bg_));
+                dc.SetPen(wxPen(nb_->border_, 1));
+                dc.DrawRectangle(rects[i]);
+                dc.SetTextForeground(nb_->text_);
+                const wxSize ext = dc.GetTextExtent(nb_->labels_[i]);
+                dc.SetClippingRegion(rects[i].Deflate(1));
+                dc.DrawText(nb_->labels_[i], rects[i].x + (rects[i].width - ext.GetWidth()) / 2,
+                            rects[i].y + (rects[i].height - ext.GetHeight()) / 2);
+                dc.DestroyClippingRegion();
+            }
+        }
+        void OnClick(wxMouseEvent &e) {
+            const auto rects = Rects();
+            for (size_t i = 0; i < rects.size(); ++i)
+                if (rects[i].Contains(e.GetPosition())) { nb_->SetSelection((int)i); return; }
+        }
+        ThemedNotebook *nb_;
+    };
+
+    Strip *strip_ = nullptr;
+    wxBoxSizer *pages_sizer_ = nullptr;
+    std::vector<wxWindow *> pages_;
+    std::vector<wxString> labels_;
+    int sel_ = 0;
+    wxColour tab_bg_, tab_sel_, border_, text_, bg_;
+};
+
 // Every tab is a plain scrolled page inside the notebook - some (Video & Codec, Security)
 // have enough fields to need scrolling on a small screen, and using the same widget for
 // every tab keeps them visually consistent.
-wxScrolledWindow *NewTabPage(wxNotebook *nb, wxColour bg) {
+wxScrolledWindow *NewTabPage(wxWindow *nb, wxColour bg) {
     auto *page = new wxScrolledWindow(nb);
     page->SetBackgroundColour(bg);
     page->SetScrollRate(0, 12);
@@ -138,8 +234,8 @@ public:
         titleLbl->SetBackgroundColour(bg);
         root->Add(titleLbl, 0, wxALL, 12);
 
-        notebook_ = new wxNotebook(this, wxID_ANY);
-        notebook_->SetBackgroundColour(bg);
+        notebook_ = new ThemedNotebook(this, bg, bg.ChangeLightness(118), bg.ChangeLightness(135),
+                                       *wxWHITE, text);
 
         auto *generalPage = NewTabPage(notebook_, bg);
         { auto *r = new wxBoxSizer(wxVERTICAL); BuildGeneralTab(generalPage, r, bg, surface, accent, text, textDim); generalPage->SetSizer(r); }
@@ -1148,7 +1244,7 @@ private:
     ThemeColors theme_;
     const LanguageTable &lang_;
     RecordingController *rec_ = nullptr; // see settings_dialog.h's doc comment - may be null
-    wxNotebook *notebook_ = nullptr;
+    ThemedNotebook *notebook_ = nullptr;
     size_t kTabGeneral = 0, kTabVideo = 0, kTabAdvanced = 0;
 
     // General
