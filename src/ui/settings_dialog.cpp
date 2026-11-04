@@ -136,6 +136,15 @@ public:
         pages_[sel_]->Show();
         strip_->Refresh();
         Layout();
+        pages_[sel_]->Layout();
+        pages_[sel_]->Refresh();
+    }
+    // Pages are created hidden and are only laid out/painted properly from their second
+    // visit (the first one showed blank labels and tiny number boxes on Audio). Visit each
+    // page once while the dialog is still invisible, then return to the first.
+    void PrewarmPages() {
+        for (size_t i = 1; i < pages_.size(); ++i) SetSelection((int)i);
+        SetSelection(0);
     }
 
 private:
@@ -284,6 +293,8 @@ public:
         root->Add(btnRow, 0, wxEXPAND | wxALL, 16);
 
         SetSizer(root);
+        Layout();
+        notebook_->PrewarmPages();
 
         // Scrolling a page with the cursor over a number box / drop-down must not change it.
         HrInstallWheelGuard(this);
