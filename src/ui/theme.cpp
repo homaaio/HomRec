@@ -58,6 +58,7 @@ const ThemeColors &GetBuiltinTheme(const std::string &name) {
     return kDark; // default
 }
 
+#ifdef _WIN32
 void ThemeBrushes::Rebuild(const ThemeColors &c) {
     Release();
     bg = CreateSolidBrush(c.bg);
@@ -72,3 +73,4 @@ void ThemeBrushes::Release() {
     if (surface_light) { DeleteObject(surface_light); surface_light = nullptr; }
     if (preview_bg) { DeleteObject(preview_bg); preview_bg = nullptr; }
 }
+#endif // _WIN32
