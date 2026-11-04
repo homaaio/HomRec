@@ -10,8 +10,9 @@ set -euo pipefail
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
-# Phase 0-1: toolchain + ffmpeg (HomRec drives the ffmpeg binary, it does not link libav*).
-PKGS=(build-essential cmake pkg-config ffmpeg zlib1g-dev)
+# Phase 0-1 + GUI: toolchain + ffmpeg (HomRec drives the ffmpeg binary, it does not link libav*),
+# wxGTK for the window, pactl (pulseaudio-utils) for the microphone list, xdg-utils for "open folder".
+PKGS=(build-essential cmake pkg-config ffmpeg zlib1g-dev libwxgtk3.2-dev pulseaudio-utils xdg-utils)
 
 if [ "${1:-}" = "--future" ]; then
     PKGS+=(
@@ -19,7 +20,6 @@ if [ "${1:-}" = "--future" ]; then
         libpipewire-0.3-dev libdbus-1-dev                                                      # Wayland portal + PipeWire (phases 3-4)
         libpulse-dev                                                                           # PulseAudio fallback (phase 4)
         liblua5.4-dev                                                                          # plugin host (phase 5)
-        libwxgtk3.2-dev                                                                        # GUI (phase 7)
     )
 fi
 
