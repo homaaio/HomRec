@@ -10,6 +10,14 @@
 #endif
 
 #include <cstring>
+#ifndef _WIN32
+#include <cerrno>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -57,6 +65,107 @@ struct ComScope {
 constexpr wchar_t kRunKeyPath[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValueName[] = L"HomRec";
 
+#else // Linux: a .desktop file on the Desktop, and one in ~/.config/autostart
+
+std::string Env(const char *name) {
+    const char *v = std::getenv(name);
+    return v ? std::string(v) : std::string();
+}
+
+std::string Home() {
+    std::string h = Env("HOME");
+    return h.empty() ? std::string("/tmp") : h;
+}
+
+std::string CurrentExePath() {
+    char buf[4096];
+    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return std::string();
+    buf[n] = '\0';
+    return std::string(buf);
+}
+
+bool IsFile(const std::string &p) {
+    struct stat st;
+    return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+bool MakeDirs(const std::string &path) {
+    for (size_t i = 1; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            if (::mkdir(path.substr(0, i).c_str(), 0755) != 0 && errno != EEXIST) return false;
+        }
+    }
+    return true;
+}
+
+// XDG_DESKTOP_DIR="$HOME/Desktop" from ~/.config/user-dirs.dirs, "" when absent.
+std::string UserDirsDesktop() {
+    std::string cfg = Env("XDG_CONFIG_HOME");
+    if (cfg.empty() || cfg[0] != '/') cfg = Home() + "/.config";
+    std::ifstream in(cfg + "/user-dirs.dirs");
+    std::string line;
+    const std::string key = "XDG_DESKTOP_DIR=";
+    while (std::getline(in, line)) {
+        if (line.compare(0, key.size(), key) != 0) continue;
+        std::string v = line.substr(key.size());
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+        if (v.compare(0, 5, "$HOME") == 0) v = Home() + v.substr(5);
+        return (!v.empty() && v[0] == '/') ? v : std::string();
+    }
+    return std::string();
+}
+
+// The Exec= value: quoted, with the characters the Desktop Entry spec wants escaped.
+std::string ExecValue(const std::string &exe) {
+    std::string out = "\"";
+    for (char c : exe) {
+        if (c == '"' || c == '`' || c == '$' || c == '\\') out += '\\';
+        out += c;
+    }
+    return out + "\"";
+}
+
+// Icon next to the program (icons/hom.png in the source tree / a tarball), else the theme name.
+std::string IconValue(const std::string &exe) {
+    const std::string dir = exe.substr(0, exe.rfind('/'));
+    for (const char *rel : { "/icons/hom.png", "/../icons/hom.png", "/homrec.png" }) {
+        if (IsFile(dir + rel)) return dir + rel;
+    }
+    return "homrec";
+}
+
+bool WriteDesktopFile(const std::string &path, bool autostart) {
+    const std::string exe = CurrentExePath();
+    if (exe.empty()) return false;
+    std::ofstream f(path, std::ios::trunc | std::ios::binary);
+    if (!f) return false;
+    f << "[Desktop Entry]\n"
+      << "Type=Application\n"
+      << "Name=HomRec\n"
+      << "Comment=HomRec - Screen Recorder\n"
+      << "Exec=" << ExecValue(exe) << "\n"
+      << "Icon=" << IconValue(exe) << "\n"
+      << "Terminal=false\n"
+      << "Categories=AudioVideo;Recorder;\n";
+    if (autostart) f << "X-GNOME-Autostart-enabled=true\n";
+    f.close();
+    if (!f) return false;
+    ::chmod(path.c_str(), 0755);   // some desktops only trust executable launchers on the Desktop
+    return true;
+}
+
+std::string AutostartPath() {
+    std::string cfg = Env("XDG_CONFIG_HOME");
+    if (cfg.empty() || cfg[0] != '/') cfg = Home() + "/.config";
+    return cfg + "/autostart/homrec.desktop";
+}
+
+std::string ShortcutPath(const std::string &dir_utf8) {
+    if (dir_utf8.empty()) return std::string();
+    return dir_utf8 + (dir_utf8.back() == '/' ? "" : "/") + "HomRec.desktop";
+}
+
 #endif // _WIN32
 
 } // namespace
@@ -70,7 +179,9 @@ std::string GetDefaultDesktopPath() {
         return WideToUtf8(buf);
     return {};
 #else
-    return {};
+    std::string d = UserDirsDesktop();
+    if (d.empty()) d = Home() + "/Desktop";
+    return d;
 #endif
 }
 
@@ -105,8 +216,10 @@ bool CreateDesktopShortcut(const std::string &dir_utf8) {
     shellLink->Release();
     return ok;
 #else
-    (void)dir_utf8;
-    return false;
+    const std::string path = ShortcutPath(dir_utf8);
+    if (path.empty()) return false;
+    if (!MakeDirs(dir_utf8)) return false;
+    return WriteDesktopFile(path, false);
 #endif
 }
 
@@ -118,8 +231,9 @@ bool RemoveDesktopShortcut(const std::string &dir_utf8) {
         return true; // already gone
     return DeleteFileW(linkPath.c_str()) != 0;
 #else
-    (void)dir_utf8;
-    return true;
+    const std::string path = ShortcutPath(dir_utf8);
+    if (path.empty() || !IsFile(path)) return true;   // already gone
+    return ::unlink(path.c_str()) == 0;
 #endif
 }
 
@@ -147,8 +261,10 @@ bool SetAutostart(bool enable) {
     RegCloseKey(key);
     return ok;
 #else
-    (void)enable;
-    return false;
+    const std::string path = AutostartPath();
+    if (!enable) return !IsFile(path) || ::unlink(path.c_str()) == 0;
+    if (!MakeDirs(path.substr(0, path.rfind('/')))) return false;
+    return WriteDesktopFile(path, true);
 #endif
 }
 
@@ -171,6 +287,14 @@ bool IsAutostartEnabled() {
     std::wstring stored(val);
     return !exePath.empty() && stored.find(exePath) != std::wstring::npos;
 #else
+    // Still there, and still pointing at this executable (not a stale / moved install).
+    const std::string exe = CurrentExePath();
+    std::ifstream in(AutostartPath());
+    if (!in || exe.empty()) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.compare(0, 5, "Exec=") == 0) return line.find(exe) != std::string::npos;
+    }
     return false;
 #endif
 }
