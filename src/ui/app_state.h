@@ -163,6 +163,8 @@ struct AppState {
     bool        game_friendly_priority = false;
     bool        qsv_low_power          = false;
     bool        gpu_low_priority       = false;
+    bool        crash_safe             = true;
+    int         flush_sec              = 2;
 
     int         audio_sample_rate   = 44100;
     std::string audio_aac_bitrate   = "192k";

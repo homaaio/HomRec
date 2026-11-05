@@ -173,6 +173,8 @@ const std::vector<SettingDef> &All() {
                               {"game_priority"}));
         v.push_back(BoolField("qsv_low_power", "video", &AppState::qsv_low_power, {"low_power"}));
         v.push_back(BoolField("gpu_low_priority", "video", &AppState::gpu_low_priority, {"low_gpu_priority"}));
+        v.push_back(BoolField("crash_safe", "video", &AppState::crash_safe));
+        v.push_back(IntField("flush_sec", "video", &AppState::flush_sec));
         {
             Def d;
             d.key = "video_format"; d.section = "video";
