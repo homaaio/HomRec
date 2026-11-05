@@ -27,6 +27,9 @@ void   hr_mf_destroy(void *h);                       // finalizes a still-open f
 // out_path_utf8 must end in .mp4. kbps = target bitrate (peak = 2x). fps = constant output frame rate.
 int    hr_mf_configure(void *h, const char *out_path_utf8, int w, int h_px, int fps, int kbps);
 
+// Call BEFORE hr_mf_start(): 1 = fragmented .mp4 (a crash keeps what was already written), 0 = classic .mp4.
+int    hr_mf_set_fragmented(void *h, int on);
+
 // Creates the sink writer + hardware encoder and starts writing. d3d11_device (ID3D11Device*, may be
 // NULL) enables GPU-texture input when want_textures != 0. Returns 1 on success, 0 on failure
 // (reason: hr_mf_last_error). Fails - on purpose - when only a SOFTWARE H.264 encoder is available.

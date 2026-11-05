@@ -159,6 +159,7 @@ struct MfEnc {
     uint64_t audio_skip = 0;                    // leading frames to drop (video's first picture came at slot > 0)
     int      audio_fail = 0;
     bool     pre_flushed = false;               // the first picture has fixed the video's time zero
+    bool     fragmented = false;                // fragmented .mp4: a crash keeps what was already written
     std::vector<int16_t> pre_audio;             // audio that arrived before that picture (lock: wmu)
 
     // reusable system-memory buffers (a buffer is free again once nobody but this pool references it)
@@ -253,7 +254,9 @@ HRESULT build_writer(MfEnc &e, bool with_manager) {
     HRESULT hr = MFCreateAttributes(&attrs, 4);
     if (FAILED(hr)) return hr;
     attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-    attrs->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4);
+    // Fragmented MPEG-4 (Windows 10+). Defined here because older MinGW headers lack the constant.
+    static const GUID kContainerFMP4 = {0x9ba876f1, 0x419f, 0x4b77, {0xa1, 0xe0, 0x35, 0x95, 0x9d, 0x9d, 0x40, 0x04}};
+    attrs->SetGUID(MF_TRANSCODE_CONTAINERTYPE, e.fragmented ? kContainerFMP4 : MFTranscodeContainerType_MPEG4);
 
     if (with_manager && e.device) {
         MfApi &api = mf_api();
@@ -549,6 +552,13 @@ int hr_mf_configure(void *h, const char *out_path_utf8, int w, int h_px, int fps
     return 1;
 }
 
+int hr_mf_set_fragmented(void *h, int on) {
+    auto e = lookup(h);
+    if (!e) return 0;
+    e->fragmented = on != 0;
+    return 1;
+}
+
 int hr_mf_audio_configure(void *h, int rate_hz, int kbps) {
     auto e = lookup(h);
     if (!e || (rate_hz != 44100 && rate_hz != 48000)) return 0;
@@ -826,6 +836,7 @@ extern "C" {
 void *hr_mf_create(void) { return nullptr; }
 void  hr_mf_destroy(void *) {}
 int   hr_mf_configure(void *, const char *, int, int, int, int) { return 0; }
+int   hr_mf_set_fragmented(void *, int) { return 0; }
 int   hr_mf_audio_configure(void *, int, int) { return 0; }
 int   hr_mf_audio_enabled(const void *) { return 0; }
 void  hr_mf_write_audio(void *, const int16_t *, size_t) {}
