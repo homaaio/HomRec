@@ -144,6 +144,7 @@ extern "C" {
     void hr_ff_set_output_size(void *h, int out_w, int out_h);
     void hr_ff_set_pipe_input(void *h, int enable);
     void hr_ff_set_normal_priority(void *h, int enable);
+    void hr_ff_set_flush_ms(void *h, int ms);   // crash-safe muxing (AppState::crash_safe), 0 = off
     // Opt-in (AppState::gpu_low_priority): ffmpeg child one GPU scheduling class below normal
     void hr_ff_set_gpu_low_priority(void *h, int enable);
     int  hr_ff_gpu_priority_applied(const void *h);
@@ -245,6 +246,57 @@ bool RenameFileUtf8(const std::string &from, const std::string &to) {
                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0;
 }
 
+// Crash-safe saving: ms between flushes to disk (AppState::flush_sec, 1..10), 0 = off.
+int HrFlushMs(const AppState &st) {
+    if (!st.crash_safe) return 0;
+    const int s = st.flush_sec < 1 ? 1 : (st.flush_sec > 10 ? 10 : st.flush_sec);
+    return s * 1000;
+}
+
+// "<video>.hrrec" sits next to a recording while it is being written and is removed after a clean stop.
+// One left over at the next start means the app died mid-recording (see HrRecoverCrashed).
+std::wstring HrMarkerPath(const std::wstring &video) { return video + L".hrrec"; }
+void HrMarkerSet(const std::wstring &video) {
+    HANDLE h = CreateFileW(HrMarkerPath(video).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+}
+void HrMarkerClear(const std::wstring &video) { DeleteFileW(HrMarkerPath(video).c_str()); }
+
+// Runs once at startup on its own thread (never while recording): every recording that still has a marker
+// is stream-copied into "<name>_recovered.mp4" (no re-encode). The original file is never touched.
+void HrRecoverCrashed(std::wstring folder, std::wstring ffmpeg) {
+    if (folder.empty()) return;
+    if (folder.back() != L'\\' && folder.back() != L'/') folder += L'\\';
+    std::vector<std::wstring> markers;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((folder + L"*.hrrec").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) markers.push_back(folder + fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+
+    for (const std::wstring &m : markers) {
+        const std::wstring video = m.substr(0, m.size() - 6);   // strip ".hrrec"
+        WIN32_FILE_ATTRIBUTE_DATA ad{};
+        const bool has_data = GetFileAttributesExW(video.c_str(), GetFileExInfoStandard, &ad) &&
+                              (ad.nFileSizeHigh > 0 || ad.nFileSizeLow > 0);
+        DeleteFileW(m.c_str());   // one try per crash, whatever the outcome
+        if (!has_data) continue;
+        const size_t dot = video.find_last_of(L'.');
+        const std::wstring out = (dot == std::wstring::npos ? video : video.substr(0, dot)) + L"_recovered.mp4";
+        if (ffmpeg.empty()) {
+            HrLog::Warn("Recovery: ffmpeg not found - the interrupted recording is left as it is: " + NarrowFromWide(video));
+        } else if (hr_remux_copy(ffmpeg.c_str(), video.c_str(), out.c_str())) {
+            HrLog::Info("Recovery: interrupted recording saved -> " + NarrowFromWide(out));
+        } else {
+            HrLog::Warn("Recovery: could not repair " + NarrowFromWide(video) +
+                        " (a classic .mp4 without its end is not readable) - the file is left as it is.");
+        }
+    }
+}
+
 void DeleteReplayDir(const std::wstring &dir) {
     if (dir.empty()) return;
     WIN32_FIND_DATAW fd;
@@ -313,6 +365,8 @@ void RecordingController::Initialize() {
             }
         }
     }
+    // A recording that was cut short by a crash is repaired now, off the UI thread and before any new recording.
+    std::thread(HrRecoverCrashed, WideFromNarrow(state_.output_folder), ffmpeg_found_ ? ffmpeg_path_ : std::wstring()).detach();
     hr_audio_init();
     hr_audio_start(1.0f, 1.0f, 0, 0, WideFromNarrow(state_.mic_device_id).c_str());
     applied_mic_device_id_ = state_.mic_device_id;
@@ -414,6 +468,7 @@ bool RecordingController::StartMfEncoder() {
     if (ok && state_.mf_gpu_texture) dev = hr_pl_get_d3d_device(pipeline_);
     // AAC stream in the same .mp4 writer (the audio mixer feeds it live).
     if (ok && live_audio_rate_ > 0) hr_mf_audio_configure(mfenc_, live_audio_rate_, HrAacKbps(state_.audio_aac_bitrate));
+    if (ok) hr_mf_set_fragmented(mfenc_, HrFlushMs(state_) > 0 ? 1 : 0);
     if (ok) ok = hr_mf_start(mfenc_, dev, dev ? 1 : 0) != 0;
     if (!ok) {
         char err[256] = {};
@@ -1028,6 +1083,7 @@ void *RecordingController::SpawnDdagrabFfmpeg(const std::wstring &out_path, bool
     hr_ff_set_ffmpeg_path(ff, NarrowFromWide(ffmpeg_path_).c_str());
     hr_ff_set_output_path(ff, NarrowFromWide(out_path).c_str());
     hr_ff_set_codec_args(ff, NarrowFromWide(ddagrab_codec_args_).c_str());
+    hr_ff_set_flush_ms(ff, HrFlushMs(state_));
     hr_ff_set_normal_priority(ff, state_.game_friendly_priority ? 1 : 0);
     hr_ff_set_gpu_low_priority(ff, state_.gpu_low_priority ? 1 : 0);
     hr_ff_set_video_params(ff, ddagrab_src_w_, ddagrab_src_h_, state_.target_fps);
@@ -1427,6 +1483,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         hr_ff_set_ffmpeg_path(ffproc_, NarrowFromWide(ffmpeg_path_).c_str());
         hr_ff_set_output_path(ffproc_, NarrowFromWide(current_output_path_).c_str());
         hr_ff_set_codec_args(ffproc_, NarrowFromWide(codec_args).c_str());
+        hr_ff_set_flush_ms(ffproc_, HrFlushMs(state_));
         hr_ff_set_normal_priority(ffproc_, state_.game_friendly_priority ? 1 : 0);
         hr_ff_set_gpu_low_priority(ffproc_, state_.gpu_low_priority ? 1 : 0);
         int pipe_w = output_w_;
@@ -1619,6 +1676,7 @@ bool RecordingController::Start(std::wstring &error_out) {
     start_timer.mark("audio_begin");
     hr_ctl_set_output_path(ctl_, NarrowFromWide(current_output_path_).c_str());
     hr_ctl_start(ctl_);
+    HrMarkerSet(current_output_path_);
 
     start_guard.armed = false; // recording is really running now
     state_.recording = true;
@@ -1984,6 +2042,7 @@ void RecordingController::StopFinalizeTail(bool /*keep_for_preview*/, double rec
     state_.paused = false;
     overloaded_ = false;
     overload_streak_ = 0;
+    HrMarkerClear(last_output_path_);
     HrLog::Info("Recording stopped -> " + base);
 
     RunPostRecordHook(last_output_path_);
