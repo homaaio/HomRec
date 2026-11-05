@@ -1,5 +1,16 @@
 welcome to changelog :D
 
+[Version 3.0.3] - 2026-11-07
+
+### Added
+- Crash-safe saving (settings `crash_safe`, default on, and `flush_sec`, default 2, range 1-10; terminal / cfg / .hrc).
+  ffmpeg writes .mp4 as fragmented MP4 (a fragment about every `flush_sec` s, only appended) and .mkv with clusters
+  of that length; the in-process Media Foundation encoder writes fragmented MP4. A crash or power loss keeps what was
+  written up to the last fragment. Not measured yet: the fragment length of the Media Foundation writer, and the
+  effect on frame drops with a slow disk.
+- Recovery at the next start: a recording that was not stopped cleanly (a `<file>.hrrec` marker is left next to it) is
+  stream-copied to `<file>_recovered.mp4` in the background; the original is not touched.
+
 [Version 3.0.2] - 2026-11-03
 Less CPU per frame: overlays, the Live Preview, window/crop capture and the converted-picture copies.
 
@@ -50,6 +61,13 @@ Less CPU per frame: overlays, the Live Preview, window/crop capture and the conv
 - tools/homrec_build.py, README, installer notes, docs and code comments point at CMake instead of make.
 
 ### Added
+- Crash-safe saving (settings `crash_safe`, default on, and `flush_sec`, default 2, range 1-10; terminal / cfg / .hrc).
+  ffmpeg writes .mp4 as fragmented MP4 (a fragment about every `flush_sec` s, only appended) and .mkv with clusters
+  of that length; the in-process Media Foundation encoder writes fragmented MP4. A crash or power loss keeps what was
+  written up to the last fragment. Not measured yet: the fragment length of the Media Foundation writer, and the
+  effect on frame drops with a slow disk.
+- Recovery at the next start: a recording that was not stopped cleanly (a `<file>.hrrec` marker is left next to it) is
+  stream-copied to `<file>_recovered.mp4` in the background; the original is not touched.
 - src/core/pic_pool.h (+ scripts/tests/test_pic_pool.cpp): the shared picture pool and the dirty-row mapping.
 - encoder_helpers.c: hr_blend_bgra(), hr_bgra_to_thumb(), hr_bgra_to_nv12_band_s() / hr_bgra_to_yuv420p_band_s()
   (converters with a row pitch). New tests for all of them (SIMD vs scalar vs the old code).
