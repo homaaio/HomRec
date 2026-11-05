@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -73,6 +74,9 @@ struct FfmpegCtx {
     int  grab_w{0}, grab_h{0};   /* 0x0 = the whole output */
     bool grab_cursor{true};
     bool normal_priority{false};
+    /* > 0: the muxer pushes finished data to disk about this often (ms) and a crash keeps everything up to
+     * the last push (fragmented .mp4 / short .mkv clusters). 0 = ffmpeg's defaults. */
+    int  flush_ms{0};
     /* Opt-in: put the ffmpeg child one GPU scheduling class below normal (see
      * hr_gpu_sched_set_process() in dxgi_capture.cpp) so a game on a shared iGPU
      * gets the GPU first. Applied right after CreateProcess. */
@@ -348,6 +352,23 @@ static bool _wants_hw_pixfmt(const std::string &codec_args) {
 
 // In that path the frames are D3D11/QSV BGRA surfaces and the HARDWARE ENCODER does the
 // RGB -> YUV conversion itself (Intel MFX / NVENC / AMF).
+// Muxer flags for crash-safe files. Only for a plain file output (Instant Replay brings its own -f / pipe).
+static std::wstring _safe_mux_args(const FfmpegCtx *ctx) {
+    if (ctx->flush_ms <= 0 || !ctx->extra_output_args.empty()) return L"";
+    if (ctx->codec_args.find("movflags") != std::string::npos) return L"";
+    const std::string &p = ctx->output_path;
+    const size_t d = p.find_last_of('.');
+    if (d == std::string::npos) return L"";
+    std::string ext = p.substr(d + 1);
+    for (char &c : ext) c = (char)tolower((unsigned char)c);
+    if (ext == "mp4")
+        return L" -movflags +frag_keyframe+empty_moov+default_base_moof -frag_duration " +
+               std::to_wstring((long long)ctx->flush_ms * 1000);
+    if (ext == "mkv")
+        return L" -cluster_time_limit " + std::to_wstring(ctx->flush_ms);
+    return L"";
+}
+
 static std::wstring _ddagrab_vui_bsf(const std::string &codec_args) {
     // 6 = smpte170m (BT.601), same tag the pipe path writes for its own data.
     if (codec_args.find("h264") != std::string::npos) {
@@ -412,6 +433,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
         if (!ctx->codec_args.empty()) ss << L" " << _utf8_to_wide(ctx->codec_args);
         // Fix the colour tags of the encoded stream (limited range, BT.601) - see _ddagrab_vui_bsf().
         ss << _ddagrab_vui_bsf(ctx->codec_args);
+        ss << _safe_mux_args(ctx);
         ss << L" -y " << Q(ctx->output_path);
         return ss.str();
     }
@@ -486,6 +508,7 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
     }
 
     /* Output */
+    ss << _safe_mux_args(ctx);
     ss << L" -y " << Q(ctx->output_path);
 
     return ss.str();
@@ -570,6 +593,12 @@ HR_EXPORT void hr_ff_set_output_size(void *h, int out_w, int out_h) {
 // hr_ff_set_gpu_capture  (ffmpeg "ddagrab" fast path, ffmpeg 6.0+)
 // enable   : 1 = ffmpeg captures + encodes on the GPU by itself (no pipe).
 // output_idx : DXGI output index (same numbering as hr_dx_create()).
+// hr_ff_set_flush_ms: crash-safe muxing, see FfmpegCtx::flush_ms. 0 turns it off.
+HR_EXPORT void hr_ff_set_flush_ms(void *h, int ms) {
+    if (!h) return;
+    static_cast<FfmpegCtx *>(h)->flush_ms = ms > 0 ? ms : 0;
+}
+
 HR_EXPORT void hr_ff_set_normal_priority(void *h, int enable) {
     if (!h) return;
     static_cast<FfmpegCtx *>(h)->normal_priority = (enable != 0);
