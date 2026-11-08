@@ -164,7 +164,29 @@ ALWAYS_SKIP_DIRS = {".git", "__pycache__", "dist", "build", "Build", ".github", 
 ALWAYS_SKIP_SUFFIXES = (".o", ".obj", ".pdb", ".log")
 ALWAYS_SKIP_FILES = {
     "homrec.hrc", "homrec_settings.json", "homrec_overlays.hrc",
+    "hr.map", "desktop.ini", "Thumbs.db", ".DS_Store",
 }
+
+# Runtime/output folders that must never end up in a source release.
+SOURCE_SKIP_DIRS = {
+    "recordings",   # captured videos
+    "crashes",      # crash dumps
+    ".vscode",      # editor state
+    ".claude",
+    ".idea",
+}
+
+# Binaries and media don't belong in the source archive. Filtering by suffix
+# (instead of only at the repo root) keeps e.g. ffmpeg/ffmpeg_runner.cpp while
+# dropping ffmpeg/ffmpeg.exe.
+SOURCE_SKIP_SUFFIXES = ALWAYS_SKIP_SUFFIXES + (
+    ".exe", ".dll", ".com", ".msi", ".lib", ".a", ".so", ".dylib", ".dmp",
+    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".mp3", ".wav", ".flac",
+)
+
+def _is_build_dir(name):
+    """True for build trees such as build, build-linux, build_release."""
+    return name in ("build", "Build") or name.lower().startswith(("build-", "build_"))
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -406,13 +428,23 @@ def discover_root_dlls():
         if f.lower().endswith(".dll") and os.path.isfile(os.path.join(REPO_ROOT, f))
     )
 
-def iter_tree(root_dir, arc_prefix=""):
+def iter_tree(root_dir, arc_prefix="", skip_dirs=None, skip_suffixes=None,
+              skip_files=None):
     """Yield (abs_path, arcname) for every file under root_dir, skipping
-    build artifacts and VCS metadata."""
+    build artifacts and VCS metadata.
+
+    The skip_* arguments default to the ALWAYS_SKIP_* sets; source archives
+    pass their own, narrower file-type filters so nested binaries and media
+    are dropped too.
+    """
+    skip_dirs = ALWAYS_SKIP_DIRS if skip_dirs is None else skip_dirs
+    skip_suffixes = ALWAYS_SKIP_SUFFIXES if skip_suffixes is None else skip_suffixes
+    skip_files = ALWAYS_SKIP_FILES if skip_files is None else skip_files
     for dirpath, dirnames, filenames in os.walk(root_dir):
-        dirnames[:] = [d for d in dirnames if d not in ALWAYS_SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames
+                       if d not in skip_dirs and not _is_build_dir(d)]
         for fname in filenames:
-            if fname.endswith(ALWAYS_SKIP_SUFFIXES) or fname in ALWAYS_SKIP_FILES:
+            if fname.endswith(tuple(skip_suffixes)) or fname in skip_files:
                 continue
             abs_path = os.path.join(dirpath, fname)
             rel = os.path.relpath(abs_path, root_dir)
@@ -449,13 +481,20 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
                 files.extend(iter_tree(p, arc_prefix=d))
 
     elif preset == "source":
+        skip_dirs = ALWAYS_SKIP_DIRS | SOURCE_SKIP_DIRS
         for entry in sorted(os.listdir(REPO_ROOT)):
-            if entry in ALWAYS_SKIP_DIRS or entry == "dist" or entry in ALWAYS_SKIP_FILES:
+            if (entry in skip_dirs or entry in ALWAYS_SKIP_FILES
+                    or _is_build_dir(entry)):
                 continue
             abs_path = os.path.join(REPO_ROOT, entry)
             if os.path.isdir(abs_path):
-                files.extend(iter_tree(abs_path, arc_prefix=entry))
-            elif not abs_path.endswith((".exe", ".dll") + ALWAYS_SKIP_SUFFIXES):
+                files.extend(iter_tree(
+                    abs_path,
+                    arc_prefix=entry,
+                    skip_dirs=skip_dirs,
+                    skip_suffixes=SOURCE_SKIP_SUFFIXES,
+                ))
+            elif not abs_path.lower().endswith(SOURCE_SKIP_SUFFIXES):
                 files.append((abs_path, entry))
 
     return files
