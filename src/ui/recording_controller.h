@@ -27,6 +27,9 @@ public:
     bool ffmpeg_found() const { return ffmpeg_found_; }
     const std::wstring &resolved_ffmpeg_path() const { return ffmpeg_path_; }
     const std::wstring &resolved_hw_encoder() const { return hw_encoder_; }
+    // Non-empty when Initialize() found the explicitly chosen hardware encoder unusable and switched
+    // to libx264: the UI shows this once at startup (see main_frame.cpp).
+    const std::wstring &codec_fallback_note() const { return codec_fallback_note_; }
 
     // Start/stop/pause - return false with `error_out` populated on failure
     // (folder missing, ffmpeg missing, pipeline create failed, etc.).
@@ -160,6 +163,13 @@ public:
     // then restarts the recording at once with the normal pipeline (ddagrab is blocked for the
     // rest of the session). Stays valid after AcknowledgeCrash(); reset by the next Start().
     bool crash_was_ddagrab() const { return crash_was_ddagrab_; }
+    // True when the crash was an early (< 5 s) hardware-encoder failure: the UI restarts the
+    // recording once with software libx264 instead of only reporting a crash. Stays valid after
+    // AcknowledgeCrash(); reset by the next Start().
+    bool crash_needs_codec_fallback() const { return crash_needs_codec_fallback_; }
+    // Emergency fallback for the above: the rest of this session records with libx264 only, even
+    // when a GPU encoder was auto-detected (see hw_encoder_).
+    void ForceSoftwareEncoder() { hw_encoder_.clear(); state_.video_codec = "libx264"; }
 
     // True once the preview-only pipeline has failed to (re)start several times in a row (e.g.
     bool preview_capture_unavailable() const {
@@ -361,6 +371,7 @@ private:
     bool ffmpeg_found_ = false;
     std::wstring ffmpeg_path_;
     std::wstring hw_encoder_;    // empty if no GPU encoder available -> software fallback
+    std::wstring codec_fallback_note_;  // see codec_fallback_note() above
     std::wstring current_output_path_;
 
     // See last_output_path()/last_duration_formatted()/last_output_size_mb()
@@ -469,6 +480,9 @@ private:
     int overload_streak_ = 0;
     bool overloaded_ = false;
     bool crashed_ = false; // see crashed()/AcknowledgeCrash() above
+    bool current_codec_is_hw_ = false;       // the running recording uses a GPU encoder
+    bool codec_retried_ = false;             // one automatic libx264 retry per recording
+    bool crash_needs_codec_fallback_ = false; // see crash_needs_codec_fallback()
 
     // -- Quick codec test state (see StartQuickTest() above) ------------ Entirely separate
     // from pipeline_/ffproc_ (the real recording/ preview pipeline) so a test can never be

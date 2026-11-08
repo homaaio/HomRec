@@ -26,6 +26,7 @@ extern "C" {
     // tools.cpp (wide-string API)
     int hr_check_ffmpeg(const wchar_t *hint, wchar_t *out, int out_len);
     int hr_probe_gpu(const wchar_t *ffpath, wchar_t *out_enc, int out_len);
+    int hr_probe_encoder(const wchar_t *ffpath, const wchar_t *encoder, wchar_t *reason, int reason_len);
     int hr_probe_ddagrab(const wchar_t *ffpath);
     int hr_build_codec_args(const wchar_t *codec, int quality, int fps, int cpu_count,
                              wchar_t *out_buf, int buf_chars, const wchar_t *preset_override);
@@ -339,6 +340,13 @@ RecordingController::~RecordingController() {
     hr_audio_stop(nullptr, nullptr);
 }
 
+// True for the GPU encoder names HomRec offers in Settings > Video > Codec.
+static bool HrIsHardwareCodecName(const std::string &codec) {
+    return codec.find("nvenc") != std::string::npos ||
+           codec.find("qsv")   != std::string::npos ||
+           codec.find("amf")   != std::string::npos;
+}
+
 void RecordingController::Initialize() {
     // Capture devices created from now on (the live-preview pipeline included) can be shared with the in-process
     // encoder - see Start() / dxgi_capture.cpp.
@@ -362,6 +370,25 @@ void RecordingController::Initialize() {
                             "is noticeably heavier on CPU. If you have a GPU that should support "
                             "one of those, check its drivers and that this ffmpeg build was "
                             "compiled with that encoder.");
+            }
+        }
+        // A hardware encoder picked explicitly in Settings > Video > Codec was never checked before
+        // the first recording: a driver without NVENC, a missing AMF runtime or an ffmpeg build
+        // without that encoder then just crashed on the first frame. Probe it now, once.
+        if (HrIsHardwareCodecName(state_.video_codec)) {
+            const std::wstring want = WideFromNarrow(state_.video_codec);
+            wchar_t why[256] = {};
+            if (!hr_probe_encoder(ffmpeg_path_.c_str(), want.c_str(), why, 256)) {
+                const std::string why_utf8 = NarrowFromWide(why);
+                HrLog::Warn("Startup: " + state_.video_codec + " does not work on this system (" +
+                            (why_utf8.empty() ? std::string("probe failed") : why_utf8) +
+                            ") -- using libx264 instead. Update the GPU driver or pick another "
+                            "encoder in Settings > Video.");
+                codec_fallback_note_ = L"The hardware encoder " + want +
+                                       L" does not work on this system \u2014 recordings use libx264.";
+                state_.video_codec = "libx264";
+            } else {
+                HrLog::Info("Startup: hardware encoder available (" + state_.video_codec + ").");
             }
         }
     }
@@ -1039,11 +1066,46 @@ void RecordingController::RetargetWindowCapture() {
     hr_pl_set_capture_rect(pipeline_, crop_x_, crop_y_, crop_w_, crop_h_);
 }
 
+// Turns ffmpeg's exit code into something a person can act on. A GUI app has no console, so
+// "exit code -1073741819" alone tells the user nothing (see LogFfmpegDeathDetails()).
+static std::string DescribeFfmpegExit(int code) {
+    switch (code) {
+    case -13:   // EACCES
+        return "EACCES: no access to the output file or folder. Pick a folder inside your "
+               "profile (Settings > Output folder), e.g. C:\\Users\\<you>\\Videos.";
+    case -2:    // ENOENT
+        return "ENOENT: file or folder not found. Create the output folder, or check that "
+               "ffmpeg.exe is next to the HomRec executable.";
+    case -22:   // EINVAL
+        return "EINVAL: ffmpeg rejected an argument. Switch the codec to libx264 and clear "
+               "Custom ffmpeg args.";
+    case -28:   // ENOSPC
+        return "ENOSPC: the disk is full.";
+    case -32:   // EPIPE
+        return "EPIPE: ffmpeg stopped reading frames - see the last ffmpeg output above.";
+    case -40:   // ENOSYS
+        return "ENOSYS: the hardware encoder is unavailable. NVENC needs NVIDIA driver 570.0+ "
+               "(update the driver); QSV/AMF need matching hardware - or use libx264.";
+    case -1073741819:   // 0xC0000005
+        return "0xC0000005: access violation. Update the graphics driver, or switch to libx264.";
+    case -1073741515:   // 0xC0000135
+        return "0xC0000135: a DLL is missing next to ffmpeg.exe. Use a full ffmpeg build with "
+               "its bin folder.";
+    case -1073741795:   // 0xC000001D
+        return "0xC000001D: this CPU does not support the instructions in this ffmpeg build.";
+    default:
+        return "";
+    }
+}
+
 // Writes the reason an ffmpeg process died into homrec.log: its exit code plus the last lines of
 // its stderr (only the full-GPU/ddagrab ffmpeg has a stderr log - see hr_ff_set_diag_paths()).
 // A GUI app has no console, so before this the reason was simply lost.
 static void LogFfmpegDeathDetails(void *ff, const std::string &what) {
-    std::string msg = what + " - ffmpeg exit code " + std::to_string(hr_ff_exit_code(ff));
+    const int code = hr_ff_exit_code(ff);
+    std::string msg = what + " - ffmpeg exit code " + std::to_string(code);
+    const std::string hint = DescribeFfmpegExit(code);
+    if (!hint.empty()) msg += " - " + hint;
     char buf[4096] = {};
     const int n = hr_ff_read_log_tail(ff, buf, (int)sizeof(buf));
     if (n > 0) {
@@ -1435,6 +1497,7 @@ bool RecordingController::Start(std::wstring &error_out) {
                               : WideFromNarrow(state_.video_codec);
     std::wstring codec_args = BuildCodecArgs(codec);
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
+    current_codec_is_hw_ = codec_is_hw;   // PollStats()'s early-crash fallback needs to know
     HrLog::Info("Recording: encoding with " + NarrowFromWide(codec) +
                 (codec_is_hw ? " (hardware)" : " (software)"));
     // The in-process encoder shares the capture device with its own threads: every capture device created from
@@ -1447,6 +1510,8 @@ bool RecordingController::Start(std::wstring &error_out) {
     live_audio_ = false;          // decided below, per recording
     live_audio_rate_ = 0;
     crash_was_ddagrab_ = false;
+    crash_needs_codec_fallback_ = false;
+    codec_retried_ = false;
     crash_video_elapsed_sec_ = 0.0;
     ddagrab_last_frames_ = -1;
     current_fps_ = 0.0;
@@ -2178,6 +2243,15 @@ void RecordingController::PollStats() {
             ddagrab_blocked_ = true;
             HrLog::Warn("Recording: full-GPU (ddagrab) capture is switched off for the rest of this "
                         "session - the next recording uses the normal capture pipeline.");
+        } else if (current_codec_is_hw_ && !codec_retried_ && elapsed_seconds() < 5.0) {
+            // A hardware encoder that dies right at the start is usually simply unsupported here
+            // (old driver, encoder session limit, GPU in a bad state). Give this recording one
+            // automatic retry with libx264 - the UI finalizes what was captured and starts a new
+            // file with the software encoder (see main_frame.cpp / OnRecordingFinalized()).
+            codec_retried_ = true;
+            crash_needs_codec_fallback_ = true;
+            HrLog::Warn("Recording: the hardware encoder died in the first seconds - this recording will "
+                        "continue in a new file with software libx264.");
         }
         crashed_ = true;
         return;
