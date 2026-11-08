@@ -658,7 +658,7 @@ bool ShowOverlayEditorDialog(wxWindow *parent, AppState &state, size_t idx,
     if (result == wxID_OK) {
         working.name = nameCtrl->GetValue().ToUTF8().data();
         state.overlays[idx] = working;
-        HrcConfig::SaveOverlaysOnly(state.overlays, HrcConfig::kOverlaysAutosavePath);
+        HrcConfig::SaveActiveOverlays(state);
         return true;
     }
     return false;

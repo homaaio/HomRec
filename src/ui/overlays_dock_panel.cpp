@@ -519,7 +519,7 @@ void OverlaysDockPanel::Refresh() {
     // state_.overlays used to only ever be written out via the manual "Export Settings
     // (.hrc)..." menu item - anything set up here (add/remove/rename/toggle/edit) silently
     // vanished the moment the app was closed and reopened.
-    HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
+    HrcConfig::SaveActiveOverlays(state_);
     RebuildList();
 }
 
