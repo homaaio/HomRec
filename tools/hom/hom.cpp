@@ -1,4 +1,4 @@
-// hom.cpp - "hom", the HomRec plugin package manager  (v0.5.3)
+// hom.cpp - "hom", the HomRec plugin package manager  (v0.6.0)
 
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -29,6 +29,7 @@
 #include <regex>
 #include <chrono>
 #include <functional>
+#include <map>
 
 #include "hom_common.h"
 
@@ -36,7 +37,7 @@
 // Constants
 // -----------------------------------------------------------------------
 
-static constexpr char k_hom_version[] = "0.5.3";
+static constexpr char k_hom_version[] = "0.6.0";
 
 // If an install/update would grow disk usage by at least this much, CmdInstall() asks for
 // confirmation first (Y/n) instead of just doing it - unless -y or -f/--force was passed.
@@ -66,6 +67,8 @@ void PrintUsage(FILE *out = stderr) {
     std::fprintf(out,
         "hom %s -- the HomRec plugin package manager\n\n"
         "Usage:\n"
+        "  hom                              Open the interactive TUI (in a terminal)\n"
+        "  hom tui                          Same, explicitly\n"
         "  hom --version                    Show the hom version\n"
         "  hom update [-f|--force]          Update hom itself from the repo\n"
         "                                      (-f: reinstall even if already latest)\n"
@@ -228,9 +231,72 @@ std::string ExtractJsonString(const std::string &json, const std::string &key,
     if (pos == std::string::npos) return {};
     pos = json.find('"', pos);
     if (pos == std::string::npos) return {};
-    size_t end = json.find('"', pos + 1);
-    if (end == std::string::npos) return {};
-    return json.substr(pos + 1, end - pos - 1);
+
+    // Walk the value instead of taking everything up to the next quote:
+    // plugin descriptions contain escaped quotes (\"...\"), and a plain
+    // find('"') would stop at the backslash.
+    std::string out;
+    auto hex4 = [&](size_t at, unsigned *v) -> bool {
+        if (at + 4 > json.size()) return false;
+        unsigned n = 0;
+        for (size_t k = 0; k < 4; ++k) {
+            char h = json[at + k];
+            n <<= 4;
+            if (h >= '0' && h <= '9') n |= (unsigned)(h - '0');
+            else if (h >= 'a' && h <= 'f') n |= (unsigned)(h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F') n |= (unsigned)(h - 'A' + 10);
+            else return false;
+        }
+        *v = n;
+        return true;
+    };
+    for (size_t i = pos + 1; i < json.size(); ++i) {
+        char c = json[i];
+        if (c == '"') return out;
+        if (c != '\\') { out.push_back(c); continue; }
+        if (++i >= json.size()) break;
+        switch (json[i]) {
+            case '"':  out.push_back('"');  break;
+            case '\\': out.push_back('\\'); break;
+            case '/':  out.push_back('/');  break;
+            case 'b':  out.push_back('\b'); break;
+            case 'f':  out.push_back('\f'); break;
+            case 'n':  out.push_back('\n'); break;
+            case 'r':  out.push_back('\r'); break;
+            case 't':  out.push_back('\t'); break;
+            case 'u': {
+                unsigned cp = 0;
+                if (!hex4(i + 1, &cp)) break;
+                i += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < json.size() &&
+                    json[i + 1] == '\\' && json[i + 2] == 'u') {
+                    unsigned lo = 0;
+                    if (hex4(i + 3, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        i += 6;
+                    }
+                }
+                if (cp < 0x80) {
+                    out.push_back((char)cp);
+                } else if (cp < 0x800) {
+                    out.push_back((char)(0xC0 | (cp >> 6)));
+                    out.push_back((char)(0x80 | (cp & 0x3F)));
+                } else if (cp < 0x10000) {
+                    out.push_back((char)(0xE0 | (cp >> 12)));
+                    out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                    out.push_back((char)(0x80 | (cp & 0x3F)));
+                } else {
+                    out.push_back((char)(0xF0 | (cp >> 18)));
+                    out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+                    out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                    out.push_back((char)(0x80 | (cp & 0x3F)));
+                }
+                break;
+            }
+            default: out.push_back(json[i]); break;
+        }
+    }
+    return {};
 }
 
 // One entry from Hom/plugins/index.json's "plugins" array.
@@ -1150,6 +1216,889 @@ int CmdRepoRemove(const std::string &name) {
 }
 
 // -----------------------------------------------------------------------
+// Interactive TUI (`hom tui`, or plain `hom` in a real console)
+//
+// A small full-screen package browser in the spirit of `pacman`/`aptitude`:
+// the repo index and the local plugins folder are merged into one list,
+// Up/Down selects, i installs/upgrades, r/p remove/purge, u upgrades all,
+// / filters, Tab switches the view. All drawing goes through the Win32
+// console API (WriteConsoleOutputW), so it needs a real console and is
+// deliberately unavailable when stdout is a pipe (e.g. HomRec's in-app
+// console) -- plain commands keep working there exactly as before.
+// -----------------------------------------------------------------------
+
+#ifdef _WIN32
+namespace tui {
+
+constexpr WORD kAttrText    = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+constexpr WORD kAttrDim     = FOREGROUND_INTENSITY;
+constexpr WORD kAttrBold    = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+constexpr WORD kAttrGreen   = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+constexpr WORD kAttrYellow  = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+constexpr WORD kAttrCyan    = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+constexpr WORD kAttrRed     = FOREGROUND_RED | FOREGROUND_INTENSITY;
+constexpr WORD kAttrHeader  = BACKGROUND_BLUE | FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+constexpr WORD kAttrSel     = BACKGROUND_BLUE | BACKGROUND_GREEN | FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+constexpr WORD kAttrBox     = FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+constexpr WORD kAttrDialog  = BACKGROUND_BLUE | FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+
+// True when the process' own std handles are consoles. Used for the
+// "bare `hom` opens the TUI" shortcut: with redirected output (a pipe or a
+// file) we must not take over a screen the caller isn't looking at.
+bool IsConsole() {
+    DWORD mode = 0;
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode) &&
+           GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) != 0;
+}
+
+// -- Small text helpers ------------------------------------------------------
+
+std::wstring Fit(const std::wstring &s, int w) {
+    if (w <= 0) return {};
+    if ((int)s.size() <= w) return s;
+    if (w <= 3) return s.substr(0, (size_t)w);
+    return s.substr(0, (size_t)(w - 3)) + L"...";
+}
+
+std::wstring PadLeft(const std::wstring &s, int w) {
+    if ((int)s.size() >= w) return Fit(s, w);
+    return std::wstring((size_t)(w - (int)s.size()), L' ') + s;
+}
+
+std::vector<std::wstring> Wrap(const std::wstring &text, int width) {
+    std::vector<std::wstring> lines;
+    if (width <= 0) return lines;
+    size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && text[i] == L' ') ++i;
+        if (i >= text.size()) break;
+        size_t end = i;
+        size_t last_space = std::wstring::npos;
+        while (end < text.size() && (int)(end - i) < width) {
+            if (text[end] == L' ') last_space = end;
+            ++end;
+        }
+        if (end < text.size() && text[end] != L' ' && last_space != std::wstring::npos && last_space > i)
+            end = last_space;
+        lines.push_back(text.substr(i, end - i));
+        i = end;
+        if (i < text.size() && text[i] == L' ') ++i;
+    }
+    if (lines.empty()) lines.push_back(L"");
+    return lines;
+}
+
+std::string LowerAscii(std::string s) {
+    for (char &c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+// -- Console screen ----------------------------------------------------------
+
+class Screen {
+public:
+    void Attach(HANDLE out) {
+        out_ = out;
+        w_ = h_ = 0;
+        Resize();
+    }
+
+    void Resize() {
+        if (!out_) return;
+        CONSOLE_SCREEN_BUFFER_INFO csbi{};
+        if (!GetConsoleScreenBufferInfo(out_, &csbi)) return;
+        int nw = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        int nh = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+        if (nw == w_ && nh == h_) return;
+        w_ = nw;
+        h_ = nh;
+        cells_.assign((size_t)w_ * (size_t)h_, CHAR_INFO{});
+    }
+
+    int width() const { return w_; }
+    int height() const { return h_; }
+
+    void Clear(WORD attr = kAttrText) {
+        for (auto &c : cells_) { c.Char.UnicodeChar = L' '; c.Attributes = attr; }
+    }
+
+    void Put(int x, int y, wchar_t ch, WORD attr) {
+        if (x < 0 || y < 0 || x >= w_ || y >= h_) return;
+        CHAR_INFO &c = cells_[(size_t)y * (size_t)w_ + (size_t)x];
+        c.Char.UnicodeChar = ch;
+        c.Attributes = attr;
+    }
+
+    void Text(int x, int y, const std::wstring &s, WORD attr) {
+        for (wchar_t ch : s) { Put(x, y, ch, attr); ++x; }
+    }
+
+    void Fill(int x, int y, int w, int h, wchar_t ch, WORD attr) {
+        for (int yy = y; yy < y + h; ++yy)
+            for (int xx = x; xx < x + w; ++xx)
+                Put(xx, yy, ch, attr);
+    }
+
+    void HLine(int x, int y, int w, wchar_t ch, WORD attr) {
+        for (int i = 0; i < w; ++i) Put(x + i, y, ch, attr);
+    }
+
+    void Flush() {
+        if (!out_ || w_ <= 0 || h_ <= 0 || cells_.empty()) return;
+        CONSOLE_SCREEN_BUFFER_INFO csbi{};
+        if (!GetConsoleScreenBufferInfo(out_, &csbi)) return;
+        SMALL_RECT region{};
+        region.Left   = csbi.srWindow.Left;
+        region.Top    = csbi.srWindow.Top;
+        region.Right  = csbi.srWindow.Right;
+        region.Bottom = csbi.srWindow.Bottom;
+        COORD size{ (SHORT)w_, (SHORT)h_ };
+        COORD origin{ 0, 0 };
+        WriteConsoleOutputW(out_, cells_.data(), size, origin, &region);
+    }
+
+private:
+    HANDLE out_ = nullptr;
+    int w_ = 0, h_ = 0;
+    std::vector<CHAR_INFO> cells_;
+};
+
+// -- The merged package list -------------------------------------------------
+
+enum class Status { NotInstalled, Installed, Upgrade, LocalOnly, Unknown };
+enum class View   { All, Installed, Upgrades };
+enum class Mode   { Browse, Filter, Confirm };
+enum class Pending { None, Remove, Purge, UpgradeAll };
+
+struct Row {
+    std::string name;
+    std::string file;
+    std::string desc;
+    std::string author;
+    std::string local_ver;
+    std::string repo_ver;
+    bool installed = false;
+    bool in_repo   = false;
+    bool folder    = false;
+    Status status  = Status::NotInstalled;
+};
+
+const wchar_t *StatusText(Status s) {
+    switch (s) {
+        case Status::Installed: return L"installed";
+        case Status::Upgrade:   return L"upgrade available";
+        case Status::LocalOnly: return L"local only (not in the repo)";
+        case Status::Unknown:   return L"installed, version unknown";
+        default:                return L"not installed";
+    }
+}
+
+WORD StatusAttr(Status s) {
+    switch (s) {
+        case Status::Installed: return kAttrGreen;
+        case Status::Upgrade:   return kAttrYellow;
+        case Status::LocalOnly: return kAttrCyan;
+        case Status::Unknown:   return kAttrDim;
+        default:                return kAttrText;
+    }
+}
+
+wchar_t Marker(Status s) {
+    switch (s) {
+        case Status::Installed: return L'*';
+        case Status::Upgrade:   return L'^';
+        case Status::LocalOnly: return L'~';
+        case Status::Unknown:   return L'?';
+        default:                return L'+';
+    }
+}
+
+class App {
+public:
+    int Run() {
+        if (!IsConsole()) {
+            std::fprintf(stderr, "hom: tui needs an interactive console "
+                                 "(stdin/stdout are not a terminal).\n");
+            return 1;
+        }
+        if (!InitConsole()) {
+            std::fprintf(stderr, "hom: couldn't set up the console for the TUI.\n");
+            return 1;
+        }
+
+        RebuildRows();
+        SetStatus("Loading package index...", kAttrDim);
+        Draw();
+        SyncIndex(true);
+
+        while (!quit_) {
+            Draw();
+            INPUT_RECORD rec{};
+            DWORD n = 0;
+            if (!ReadConsoleInputW(hin_, &rec, 1, &n)) break;
+            if (rec.EventType == KEY_EVENT) HandleKey(rec.Event.KeyEvent);
+        }
+
+        RestoreConsole();
+        return 0;
+    }
+
+private:
+    // -- console setup -------------------------------------------------------
+    bool InitConsole() {
+        hout_orig_ = GetStdHandle(STD_OUTPUT_HANDLE);
+        hin_       = GetStdHandle(STD_INPUT_HANDLE);
+        if (!GetConsoleMode(hout_orig_, &old_out_mode_) || !GetConsoleMode(hin_, &old_in_mode_))
+            return false;
+        if (!GetConsoleCursorInfo(hout_orig_, &old_cursor_)) {
+            old_cursor_.dwSize = 25;
+            old_cursor_.bVisible = TRUE;
+        }
+
+        CONSOLE_SCREEN_BUFFER_INFO csbi{};
+        GetConsoleScreenBufferInfo(hout_orig_, &csbi);
+
+        hbuf_ = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                          CONSOLE_TEXTMODE_BUFFER, nullptr);
+        if (hbuf_ == INVALID_HANDLE_VALUE) { hbuf_ = nullptr; return false; }
+        SetConsoleScreenBufferSize(hbuf_, csbi.dwSize);
+        if (!SetConsoleActiveScreenBuffer(hbuf_)) {
+            CloseHandle(hbuf_);
+            hbuf_ = nullptr;
+            return false;
+        }
+
+        // No line input / echo / processed input: every key arrives as an
+        // event (so Ctrl+C can be handled here instead of killing the app).
+        SetConsoleMode(hin_, ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS);
+        CONSOLE_CURSOR_INFO hide{ 1, FALSE };
+        SetConsoleCursorInfo(hbuf_, &hide);
+        scr_.Attach(hbuf_);
+        return true;
+    }
+
+    void RestoreConsole() {
+        if (hbuf_) {
+            SetConsoleActiveScreenBuffer(hout_orig_);
+            SetConsoleCursorInfo(hout_orig_, &old_cursor_);
+            CloseHandle(hbuf_);
+            hbuf_ = nullptr;
+        }
+        if (hin_) SetConsoleMode(hin_, old_in_mode_);
+    }
+
+    void HideCursor() {
+        if (!hbuf_) return;
+        CONSOLE_CURSOR_INFO hide{ 1, FALSE };
+        SetConsoleCursorInfo(hbuf_, &hide);
+    }
+
+    // -- data ----------------------------------------------------------------
+    void RebuildRows() {
+        std::string keep = SelectedName();
+
+        std::map<std::string, Row> merged;
+        for (const auto &e : index_) {
+            Row r;
+            r.name     = e.name;
+            r.file     = e.file.empty() ? (e.name + ".hrp") : e.file;
+            r.desc     = e.description;
+            r.author   = e.author;
+            r.repo_ver = e.version;
+            r.in_repo  = true;
+            merged[e.name] = std::move(r);
+        }
+        for (const auto &p : ListLocalPlugins()) {
+            Row &r = merged[p.name];
+            if (r.name.empty()) r.name = p.name;
+            r.installed = true;
+            r.folder    = (p.kind == "folder");
+            r.local_ver = p.version;
+            if (r.local_ver.empty()) { // installed this session: trust what we downloaded
+                auto it = assumed_versions_.find(p.name);
+                if (it != assumed_versions_.end()) r.local_ver = it->second;
+            }
+        }
+
+        rows_.clear();
+        for (auto &kv : merged) {
+            Row &r = kv.second;
+            if (r.file.empty()) r.file = r.name + ".hrp";
+            if (r.desc.empty() && !r.in_repo) r.desc = "Local plugin (not in the repo index).";
+            if (!r.in_repo) {
+                r.status = Status::LocalOnly;
+            } else if (!r.installed) {
+                r.status = Status::NotInstalled;
+            } else if (r.local_ver.empty() || r.repo_ver.empty()) {
+                r.status = Status::Unknown;
+            } else {
+                r.status = VersionGt(r.repo_ver, r.local_ver) ? Status::Upgrade : Status::Installed;
+            }
+            rows_.push_back(std::move(r));
+        }
+        RebuildView(keep);
+    }
+
+    void RebuildView(const std::string &keep = "") {
+        std::string q = LowerAscii(filter_);
+        view_.clear();
+        for (size_t i = 0; i < rows_.size(); ++i) {
+            const Row &r = rows_[i];
+            if (view_mode_ == View::Installed && !r.installed) continue;
+            if (view_mode_ == View::Upgrades && r.status != Status::Upgrade) continue;
+            if (!q.empty() &&
+                LowerAscii(r.name).find(q) == std::string::npos &&
+                LowerAscii(r.desc).find(q) == std::string::npos) continue;
+            view_.push_back(i);
+        }
+        cursor_ = 0;
+        if (!keep.empty()) {
+            for (size_t i = 0; i < view_.size(); ++i) {
+                if (rows_[view_[i]].name == keep) { cursor_ = i; break; }
+            }
+        }
+        if (cursor_ >= view_.size()) cursor_ = view_.empty() ? 0 : view_.size() - 1;
+        if (top_ >= view_.size()) top_ = 0;
+    }
+
+    const Row *Selected() const {
+        if (view_.empty() || cursor_ >= view_.size()) return nullptr;
+        return &rows_[view_[cursor_]];
+    }
+
+    std::string SelectedName() const {
+        const Row *r = Selected();
+        return r ? r->name : std::string();
+    }
+
+    const Row *FindRow(const std::string &name) const {
+        for (const auto &r : rows_) if (r.name == name) return &r;
+        return nullptr;
+    }
+
+    void SetStatus(const std::string &s, WORD attr = kAttrText) {
+        status_ = s;
+        status_attr_ = attr;
+    }
+
+    // -- index ---------------------------------------------------------------
+    void SyncIndex(bool initial) {
+        SetStatus(initial ? "Loading package index..." : "Refreshing package index...", kAttrDim);
+        Draw();
+
+        bool ok = false;
+        std::vector<IndexEntry> idx = FetchIndex(&ok);
+        if (ok) {
+            index_ = std::move(idx);
+            RebuildRows();
+            SetStatus("Index: " + std::to_string(index_.size()) + " package(s) from repo '" +
+                      g_repo_name + "'.", kAttrGreen);
+        } else {
+            RebuildRows();
+            SetStatus("Could not reach repo '" + g_repo_name +
+                      "'; showing locally installed plugins only.", kAttrRed);
+        }
+    }
+
+    // -- actions -------------------------------------------------------------
+    bool InstallOne(const Row &row, std::string *msg) {
+        if (row.folder) {
+            *msg = "'" + row.name + "' is installed as a folder; remove it first "
+                   "to switch to the repo package.";
+            return false;
+        }
+        std::string file = row.file.empty() ? (row.name + ".hrp") : row.file;
+        SetStatus("Downloading " + row.name + "...", kAttrYellow);
+        Draw();
+
+        FetchResult res = FetchFromRepo(g_repo_prefix + L"plugins/" + Widen(file));
+        if (!res.ok) {
+            *msg = "Network request failed for '" + row.name + "'.";
+            return false;
+        }
+        if (res.status == 404) {
+            *msg = "No package '" + file + "' in the repo.";
+            return false;
+        }
+        if (res.status != 200 || res.body.empty()) {
+            *msg = "Download failed for '" + row.name + "' (HTTP " + std::to_string(res.status) + ").";
+            return false;
+        }
+        if (!CreateDirRecursive("plugins")) {
+            *msg = "Couldn't create the 'plugins' folder here.";
+            return false;
+        }
+
+        std::string dest = "plugins\\" + row.name + ".hrp";
+        bool existed = FileExistsA(dest);
+        if (!WriteFileBytes(dest, res.body)) {
+            *msg = "Couldn't write '" + dest + "'.";
+            return false;
+        }
+        if (!row.repo_ver.empty()) assumed_versions_[row.name] = row.repo_ver;
+
+        std::string verb = !existed ? "Installed"
+                          : (row.status == Status::Upgrade ? "Upgraded" : "Reinstalled");
+        *msg = verb + " " + row.name;
+        if (!row.repo_ver.empty()) *msg += " " + row.repo_ver;
+        return true;
+    }
+
+    void InstallSelected() {
+        const Row *sel = Selected();
+        if (!sel) return;
+        Row row = *sel; // actions rebuild rows_, so keep a copy
+
+        if (!row.in_repo) {
+            SetStatus("'" + row.name + "' is not in the repo index.", kAttrYellow);
+            return;
+        }
+        if (row.folder) {
+            SetStatus("'" + row.name + "' is installed as a folder; remove it first (r) "
+                      "to switch to the repo package.", kAttrYellow);
+            return;
+        }
+
+        std::string msg;
+        if (InstallOne(row, &msg)) {
+            RebuildRows();
+            SetStatus(msg + " - restart HomRec to load it.", kAttrGreen);
+        } else {
+            SetStatus(msg, kAttrRed);
+        }
+    }
+
+    void RequestRemove(bool purge) {
+        const Row *r = Selected();
+        if (!r || !r->installed) {
+            SetStatus("Select an installed plugin first.", kAttrYellow);
+            return;
+        }
+        pending_ = purge ? Pending::Purge : Pending::Remove;
+        pending_name_ = r->name;
+        mode_ = Mode::Confirm;
+    }
+
+    void DoRemove(bool purge) {
+        std::string name = pending_name_;
+        FoundPluginPaths p = LocatePluginPaths(name);
+        if (!p.has_hrp && !p.has_installed && !p.has_plain) {
+            SetStatus("No plugin named '" + name + "' is installed here.", kAttrYellow);
+            return;
+        }
+
+        if (p.has_hrp && !DeleteFileA(p.hrp_path.c_str())) {
+            SetStatus("Couldn't delete '" + p.hrp_path + "' (error " +
+                      std::to_string(GetLastError()) + ").", kAttrRed);
+            return;
+        }
+        for (const std::string &dir : { p.installed_dir, p.plain_dir }) {
+            if (!DirExistsA(dir)) continue;
+            bool ok = purge ? DeleteDirRecursive(dir) : DeleteDirContentsExcept(dir, ".store");
+            if (!ok) {
+                SetStatus("Couldn't fully clean up '" + dir + "'.", kAttrRed);
+                return;
+            }
+        }
+
+        assumed_versions_.erase(name);
+        RebuildRows();
+        SetStatus((purge ? "Purged " : "Removed ") + name +
+                  (purge ? "." : " (saved settings kept; use p to purge)."), kAttrGreen);
+    }
+
+    void RequestUpgradeAll() {
+        int n = 0;
+        for (const auto &r : rows_) if (r.status == Status::Upgrade && !r.folder) ++n;
+        if (!n) {
+            SetStatus("Everything is up to date.", kAttrGreen);
+            return;
+        }
+        pending_ = Pending::UpgradeAll;
+        mode_ = Mode::Confirm;
+    }
+
+    void DoUpgradeAll() {
+        std::vector<std::string> names;
+        for (const auto &r : rows_) if (r.status == Status::Upgrade && !r.folder) names.push_back(r.name);
+
+        int ok = 0, failed = 0;
+        for (const auto &name : names) {
+            const Row *r = FindRow(name);
+            if (!r) continue;
+            std::string msg;
+            if (InstallOne(*r, &msg)) ++ok; else ++failed;
+        }
+        RebuildRows();
+        SetStatus("Upgrade finished: " + std::to_string(ok) + " done, " +
+                  std::to_string(failed) + " failed.", failed ? kAttrRed : kAttrGreen);
+    }
+
+    void StartFilter() {
+        filter_before_ = filter_;
+        mode_ = Mode::Filter;
+        SetStatus("Type to filter; Enter applies, Esc cancels.", kAttrDim);
+    }
+
+    void MoveCursor(int delta) {
+        if (view_.empty()) return;
+        int c = (int)cursor_ + delta;
+        if (c < 0) c = 0;
+        if (c >= (int)view_.size()) c = (int)view_.size() - 1;
+        cursor_ = (size_t)c;
+    }
+
+    int PageSize() const {
+        int h = scr_.height() - 5;
+        return h > 1 ? h : 1;
+    }
+
+    // -- input ---------------------------------------------------------------
+    void HandleKey(const KEY_EVENT_RECORD &k) {
+        if (!k.bKeyDown) return;
+
+        if (mode_ == Mode::Confirm) {
+            wchar_t c = (wchar_t)std::tolower((unsigned char)k.uChar.UnicodeChar);
+            if (c == L'y') {
+                Pending p = pending_;
+                pending_ = Pending::None;
+                mode_ = Mode::Browse;
+                if (p == Pending::Remove) DoRemove(false);
+                else if (p == Pending::Purge) DoRemove(true);
+                else if (p == Pending::UpgradeAll) DoUpgradeAll();
+            } else if (c == L'n' || k.wVirtualKeyCode == VK_ESCAPE ||
+                       k.wVirtualKeyCode == VK_RETURN) {
+                pending_ = Pending::None;
+                mode_ = Mode::Browse;
+                SetStatus("Cancelled.", kAttrDim);
+            }
+            return;
+        }
+
+        if (mode_ == Mode::Filter) {
+            if (k.wVirtualKeyCode == VK_ESCAPE) {
+                filter_ = filter_before_;
+                mode_ = Mode::Browse;
+                RebuildView();
+                SetStatus("Filter cancelled.", kAttrDim);
+            } else if (k.wVirtualKeyCode == VK_RETURN) {
+                mode_ = Mode::Browse;
+                SetStatus(filter_.empty() ? "Filter cleared." : "Filter: " + filter_, kAttrDim);
+            } else if (k.wVirtualKeyCode == VK_BACK) {
+                if (!filter_.empty()) {
+                    filter_.pop_back();
+                    RebuildView();
+                }
+            } else if (k.uChar.UnicodeChar >= 32 && k.uChar.UnicodeChar < 127) {
+                filter_ += (char)k.uChar.UnicodeChar;
+                RebuildView();
+            }
+            return;
+        }
+
+        switch (k.wVirtualKeyCode) {
+            case VK_UP:    MoveCursor(-1); return;
+            case VK_DOWN:  MoveCursor(1);  return;
+            case VK_PRIOR: MoveCursor(-PageSize()); return;
+            case VK_NEXT:  MoveCursor(PageSize());  return;
+            case VK_HOME:  cursor_ = 0; return;
+            case VK_END:   cursor_ = view_.empty() ? 0 : view_.size() - 1; return;
+            case VK_TAB: {
+                std::string keep = SelectedName();
+                view_mode_ = view_mode_ == View::All ? View::Installed
+                           : view_mode_ == View::Installed ? View::Upgrades : View::All;
+                RebuildView(keep);
+                SetStatus(ViewName() + ".", kAttrDim);
+                return;
+            }
+            case VK_RETURN: InstallSelected(); return;
+            case VK_ESCAPE:
+                if (!filter_.empty()) {
+                    filter_.clear();
+                    RebuildView();
+                    SetStatus("Filter cleared.", kAttrDim);
+                }
+                return;
+            case VK_F5: SyncIndex(false); return;
+            default: break;
+        }
+
+        wchar_t c = (wchar_t)std::tolower((unsigned char)k.uChar.UnicodeChar);
+        if ((k.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) &&
+            (c == L'c' || k.uChar.UnicodeChar == 3)) {
+            quit_ = true;
+            return;
+        }
+        switch (c) {
+            case L'q': quit_ = true; break;
+            case L'i': InstallSelected(); break;
+            case L'r': RequestRemove(false); break;
+            case L'p': RequestRemove(true); break;
+            case L'u': RequestUpgradeAll(); break;
+            case L'/': StartFilter(); break;
+            case L's': SyncIndex(false); break;
+            default: break;
+        }
+    }
+
+    std::string ViewName() const {
+        switch (view_mode_) {
+            case View::Installed: return "View: installed";
+            case View::Upgrades:  return "View: upgradable";
+            default:              return "View: all packages";
+        }
+    }
+
+    // -- drawing -------------------------------------------------------------
+    void Draw() {
+        scr_.Resize();
+        const int W = scr_.width();
+        const int H = scr_.height();
+        scr_.Clear(kAttrText);
+
+        if (W < 76 || H < 14) {
+            std::wstring msg = L"Terminal too small: need at least 76x14, now " +
+                               std::to_wstring(W) + L"x" + std::to_wstring(H) + L".";
+            scr_.Text(1, 0, Fit(msg, W - 2), kAttrRed);
+            scr_.Text(1, 2, L"Resize the window, or press q to quit.", kAttrDim);
+            HideCursor();
+            scr_.Flush();
+            return;
+        }
+
+        int installed = 0, upgradable = 0;
+        for (const auto &r : rows_) {
+            if (r.installed) ++installed;
+            if (r.status == Status::Upgrade) ++upgradable;
+        }
+
+        // Header
+        scr_.Fill(0, 0, W, 1, L' ', kAttrHeader);
+        scr_.Text(1, 0, std::wstring(L"hom ") + Widen(k_hom_version), kAttrHeader);
+        std::wstring right = L"repo: " + Widen(g_repo_name) + L"   " +
+                             std::to_wstring(rows_.size()) + L" packages   " +
+                             std::to_wstring(installed) + L" installed   " +
+                             std::to_wstring(upgradable) + L" upgradable";
+        right = Fit(right, W - 14);
+        scr_.Text(W - (int)right.size() - 1, 0, right, kAttrHeader);
+
+        int split = W * 58 / 100;
+        if (split > W - 32) split = W - 32;
+        if (split < 42) split = 42;
+
+        int ver_w = 20;
+        if (split < 50) ver_w = 14;
+        int ver_x = split - 1 - ver_w;
+        int name_w = ver_x - 4;
+        if (name_w < 8) name_w = 8;
+
+        // Column headers
+        scr_.Text(3, 1, L"NAME", kAttrDim);
+        scr_.Text(ver_x, 1, PadLeft(L"VERSION", ver_w), kAttrDim);
+        scr_.Text(split + 2, 1, L"DETAILS", kAttrDim);
+
+        // Vertical separator
+        for (int y = 1; y <= H - 3; ++y) scr_.Put(split, y, L'|', kAttrBox);
+
+        // List
+        int y0 = 2;
+        int list_h = H - 4; // rows 2 .. H-3
+        if (list_h < 1) list_h = 1;
+        if (cursor_ < top_) top_ = cursor_;
+        if ((int)cursor_ >= (int)top_ + list_h) top_ = cursor_ - (size_t)list_h + 1;
+        if (top_ > 0 && view_.size() > (size_t)list_h) {
+            scr_.Put(split - 2, 1, L'^', kAttrDim);
+        }
+        if (top_ + (size_t)list_h < view_.size()) {
+            scr_.Put(split - 2, H - 3, L'v', kAttrDim);
+        }
+
+        for (size_t i = top_; i < view_.size() && (int)i < (int)top_ + list_h; ++i) {
+            int y = y0 + (int)(i - top_);
+            const Row &r = rows_[view_[i]];
+            bool sel = (i == cursor_);
+            WORD attr = sel ? kAttrSel : kAttrText;
+            if (sel) scr_.Fill(0, y, split, 1, L' ', kAttrSel);
+            scr_.Put(1, y, Marker(r.status), sel ? kAttrSel : StatusAttr(r.status));
+            scr_.Text(3, y, Fit(Widen(r.name), name_w), attr);
+            scr_.Text(ver_x, y, PadLeft(VersionCell(r), ver_w), attr);
+        }
+        if (view_.empty()) {
+            scr_.Text(3, y0, filter_.empty() ? L"Nothing to show." : L"No packages match the filter.",
+                      kAttrDim);
+        }
+
+        DrawDetails(split + 2, W - split - 3, H);
+
+        // Status + help
+        scr_.Fill(0, H - 2, W, 1, L' ', kAttrText);
+        scr_.Text(1, H - 2, Fit(Widen(status_), W - 2), status_attr_);
+
+        scr_.Fill(0, H - 1, W, 1, L' ', kAttrDim);
+        if (mode_ == Mode::Filter) {
+            scr_.Text(1, H - 1, L"Filter: ", kAttrBold);
+            scr_.Text(9, H - 1, Fit(Widen(filter_), W - 30), kAttrBold);
+            scr_.Text(10 + (int)filter_.size(), H - 1, L"  Enter apply, Esc cancel", kAttrDim);
+        } else {
+            const wchar_t *keys = W >= 100
+                ? L"Up/Down move  i install  r remove  p purge  u upgrade all  / filter  Tab view  s sync  q quit"
+                : L"Up/Dn move  i install  r remove  p purge  u upgrade  / filter  Tab  s sync  q quit";
+            scr_.Text(1, H - 1, Fit(keys, W - 2), kAttrDim);
+        }
+
+        if (mode_ == Mode::Confirm) DrawConfirm(W, H);
+
+        scr_.Flush();
+
+        if (mode_ == Mode::Filter) {
+            CONSOLE_SCREEN_BUFFER_INFO csbi{};
+            if (GetConsoleScreenBufferInfo(hbuf_, &csbi)) {
+                COORD pos{};
+                pos.X = (SHORT)(csbi.srWindow.Left + 9 + (SHORT)filter_.size());
+                pos.Y = (SHORT)(csbi.srWindow.Top + H - 1);
+                SetConsoleCursorPosition(hbuf_, pos);
+            }
+            CONSOLE_CURSOR_INFO show{ 25, TRUE };
+            SetConsoleCursorInfo(hbuf_, &show);
+        } else {
+            HideCursor();
+        }
+    }
+
+    std::wstring VersionCell(const Row &r) const {
+        if (r.status == Status::Upgrade) {
+            return Widen(r.local_ver) + L" -> " + Widen(r.repo_ver);
+        }
+        if (r.installed) {
+            return r.local_ver.empty() ? L"?" : Widen(r.local_ver);
+        }
+        return r.repo_ver.empty() ? L"-" : Widen(r.repo_ver);
+    }
+
+    void DrawDetails(int x, int w, int H) {
+        if (w < 10) return;
+        const Row *r = Selected();
+        int y = 3; // row 1 is the pane header, row 2 is left blank
+        if (!r) {
+            scr_.Text(x, y + 1, L"No package selected.", kAttrDim);
+            return;
+        }
+
+        auto field = [&](const wchar_t *label, const std::wstring &value, WORD attr) {
+            if (y >= H - 3) return;
+            scr_.Text(x, y, label, kAttrDim);
+            scr_.Text(x + 12, y, Fit(value.empty() ? L"-" : value, w - 12), attr);
+            ++y;
+        };
+
+        field(L"Name",     Widen(r->name), kAttrBold);
+        field(L"Status",   StatusText(r->status), StatusAttr(r->status));
+        field(L"Installed", r->local_ver.empty() ? (r->installed ? L"unknown" : L"not installed")
+                                                 : Widen(r->local_ver),
+              r->installed ? kAttrText : kAttrDim);
+        field(L"Available", r->repo_ver.empty() ? L"-" : Widen(r->repo_ver), kAttrText);
+        field(L"Author",    Widen(r->author), kAttrText);
+        field(L"Package",   Widen(r->file), kAttrText);
+        field(L"Kind",      r->folder ? L"folder" : L".hrp", kAttrText);
+
+        y++;
+        if (y < H - 3) {
+            scr_.Text(x, y++, L"DESCRIPTION", kAttrDim);
+            for (const auto &line : Wrap(Widen(r->desc), w)) {
+                if (y >= H - 3) break;
+                scr_.Text(x, y++, line, kAttrText);
+            }
+        }
+
+        y++;
+        const wchar_t *hint = nullptr;
+        if (!r->in_repo)              hint = L"Local plugin: no repo package to install.";
+        else if (r->folder)           hint = L"Folder install: remove it first to use the repo package.";
+        else if (r->status == Status::Upgrade) hint = L"Press i to upgrade to the repo version.";
+        else if (!r->installed)       hint = L"Press i to install.";
+        else                          hint = L"Press i to reinstall, r to remove, p to purge.";
+        if (hint && y < H - 3) scr_.Text(x, y, hint, kAttrDim);
+    }
+
+    void DrawConfirm(int W, int H) {
+        std::wstring line1, line2, line3;
+        if (pending_ == Pending::Remove) {
+            line1 = L"Remove plugin '" + Widen(pending_name_) + L"'?";
+            line2 = L"Saved settings (.store) are kept.";
+            line3 = L"Use purge (p) instead to delete them too.";
+        } else if (pending_ == Pending::Purge) {
+            line1 = L"Purge plugin '" + Widen(pending_name_) + L"'?";
+            line2 = L"The package, extracted files and saved settings";
+            line3 = L"will all be deleted.";
+        } else {
+            int n = 0;
+            for (const auto &r : rows_) if (r.status == Status::Upgrade && !r.folder) ++n;
+            line1 = L"Upgrade " + std::to_wstring(n) + L" plugin(s)?";
+            line2 = L"Each package is downloaded from repo '" + Widen(g_repo_name) + L"'.";
+            line3 = L"HomRec needs a restart (or plugin reload) afterwards.";
+        }
+
+        int bw = (int)std::max({ line1.size(), line2.size(), line3.size() }) + 6;
+        if (bw < 42) bw = 42;
+        if (bw > W - 4) bw = W - 4;
+        int bh = 7;
+        int bx = (W - bw) / 2;
+        int by = (H - bh) / 2;
+
+        scr_.Fill(bx, by, bw, bh, L' ', kAttrDialog);
+        scr_.HLine(bx, by, bw, L'-', kAttrDialog);
+        scr_.HLine(bx, by + bh - 1, bw, L'-', kAttrDialog);
+        for (int yy = by + 1; yy < by + bh - 1; ++yy) {
+            scr_.Put(bx, yy, L'|', kAttrDialog);
+            scr_.Put(bx + bw - 1, yy, L'|', kAttrDialog);
+        }
+        scr_.Put(bx, by, L'+', kAttrDialog);
+        scr_.Put(bx + bw - 1, by, L'+', kAttrDialog);
+        scr_.Put(bx, by + bh - 1, L'+', kAttrDialog);
+        scr_.Put(bx + bw - 1, by + bh - 1, L'+', kAttrDialog);
+
+        scr_.Text(bx + 2, by + 1, Fit(line1, bw - 4), kAttrDialog);
+        scr_.Text(bx + 2, by + 2, Fit(line2, bw - 4), kAttrDialog);
+        scr_.Text(bx + 2, by + 3, Fit(line3, bw - 4), kAttrDialog);
+        scr_.Text(bx + 2, by + 5, L"[y] yes      [n] no", kAttrDialog);
+    }
+
+    // -- state ---------------------------------------------------------------
+    HANDLE hout_orig_ = nullptr;
+    HANDLE hin_ = nullptr;
+    HANDLE hbuf_ = nullptr;
+    DWORD  old_out_mode_ = 0;
+    DWORD  old_in_mode_ = 0;
+    CONSOLE_CURSOR_INFO old_cursor_{ 25, TRUE };
+    Screen scr_;
+
+    std::vector<IndexEntry> index_;
+    std::vector<Row> rows_;
+    std::vector<size_t> view_;
+    std::map<std::string, std::string> assumed_versions_;
+
+    size_t cursor_ = 0;
+    size_t top_ = 0;
+    View view_mode_ = View::All;
+    Mode mode_ = Mode::Browse;
+    Pending pending_ = Pending::None;
+    std::string pending_name_;
+    std::string filter_;
+    std::string filter_before_;
+    std::string status_;
+    WORD status_attr_ = kAttrText;
+    bool quit_ = false;
+};
+
+int RunTui() {
+    App app;
+    return app.Run();
+}
+
+} // namespace tui
+#endif // _WIN32
+
+// -----------------------------------------------------------------------
 // Crash handler
 // -----------------------------------------------------------------------
 
@@ -1242,9 +2191,24 @@ int main(int argc_in, char **argv_in) {
         g_progress_mode = GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) ? ProgressMode::Bar : ProgressMode::None;
     }
 
-    if (argc < 2) { PrintUsage(); return 1; }
+    if (argc < 2) {
+        // In a real terminal, plain `hom` opens the package browser; when
+        // stdout is a pipe (scripts, HomRec's in-app console) keep printing
+        // usage instead of trying to take over a screen that isn't there.
+        if (tui::IsConsole()) {
+            SelectActiveRepoFromConfig();
+            return tui::RunTui();
+        }
+        PrintUsage();
+        return 1;
+    }
 
     std::string cmd = argv[1];
+
+    if (cmd == "tui" || cmd == "ui") {
+        SelectActiveRepoFromConfig();
+        return tui::RunTui();
+    }
 
     if (cmd == "--version" || cmd == "-v" || cmd == "-V") return CmdVersion();
 

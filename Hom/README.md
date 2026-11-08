@@ -17,7 +17,7 @@ cmake --build build --target hom     # from the repo root -- builds ./hom.exe
 or directly:
 
 ```bash
-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -o hom.exe tools/hom/hom.cpp -lwinhttp -lshlwapi
+g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -static -o hom.exe tools/hom/hom.cpp -lwinhttp -lshlwapi
 ```
 
 (no `-municode` - `hom.cpp`'s `main()` is a plain narrow `int main(argc, argv)`,
@@ -28,6 +28,8 @@ entry point that doesn't exist here - see the comment at the top of
 ## Usage
 
 ```
+hom, hom tui                           Open the full-screen package browser
+                                          (needs a real console, see below)
 hom --version                          Show the hom version
 hom update [-f|--force]                Update hom itself from the repo
                                           (-f: reinstall even if already latest)
@@ -48,6 +50,19 @@ hom show <plugin-name>                 Show details about a plugin
 hom list --installed                   List plugins installed here
 hom list --upgradable                  List installed plugins with a newer version
 ```
+
+### Interactive TUI (`hom tui`)
+
+`hom` with no arguments (or `hom tui`) opens a full-screen package browser in a
+real console: repo packages and local plugins in one list, a details pane, and
+one-key actions - `i`/Enter install or upgrade, `r` remove, `p` purge,
+`u` upgrade all, `/` filter, Tab switch all/installed/upgradable, `s` refresh
+the index, `q` quit. Destructive actions ask for confirmation.
+
+It is deliberately disabled when stdin/stdout is a pipe (scripts, HomRec's
+in-app console): those keep getting the normal line-based output, and
+`hom tui` there exits with an error. See
+[`tools/hom/README.md`](../../tools/hom/README.md) for the full key list.
 
 ```
 > hom search overlay
