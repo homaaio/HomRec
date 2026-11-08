@@ -1460,6 +1460,7 @@ struct Pipeline {
                         if (HrOverlayDrawsAnything(o)) overlays_active = true;
                         if (HrOverlayNeedsBgraBase(o)) overlays_need_base = true;
                     }
+                    if (!overlays_active) overlay_compositor.ReleaseLiveSources();
                 }
             }
 
