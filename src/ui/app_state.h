@@ -71,6 +71,13 @@ struct OverlayDef {
     HWND        win_hwnd = nullptr;           // runtime only (a handle means nothing after a restart)
 };
 
+// One scene: a named set of overlays kept in its own file (see the scene functions in hrc_config.h).
+// Only the active scene's overlays are held in memory (AppState::overlays).
+struct SceneInfo {
+    std::string id;     // file name stem, only [A-Za-z0-9_-]
+    std::string name;   // shown in the Scenes menu
+};
+
 // One extra audio source in the Audio Mixer (2.4). The built-in "Microphone"
 // and "Desktop Audio" strips are NOT in this list - they always exist.
 struct AudioSourceDef {
@@ -307,7 +314,9 @@ struct AppState {
     int preview_height = 500;
 
     // -- overlays -------------------------------------------------------------
-    std::vector<OverlayDef> overlays;
+    std::vector<OverlayDef> overlays;   // the active scene's overlays
+    std::vector<SceneInfo>  scenes;
+    std::string             active_scene_id;
 
     // -- misc -------------------------------------------------------------------
     std::string ffmpeg_path;      // resolved at startup via hr_find_ffmpeg
