@@ -17,7 +17,7 @@ cmake --build build --target hom     # from the repo root -- builds ./hom.exe
 or directly:
 
 ```bash
-g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -o hom.exe tools/hom/hom.cpp -lwinhttp -lshlwapi
+g++ -O2 -std=c++17 -DUNICODE -D_UNICODE -static -o hom.exe tools/hom/hom.cpp -lwinhttp -lshlwapi
 ```
 
 (no `-municode` - `hom.cpp`'s `main()` is a plain narrow `int main(argc, argv)`,
@@ -28,6 +28,8 @@ entry point that doesn't exist here - see the comment at the top of
 ## Usage
 
 ```
+hom, hom tui                           Open the full-screen package browser
+                                          (needs a real console, see below)
 hom --version                          Show the hom version
 hom update [-f|--force]                Update hom itself from the repo
                                           (-f: reinstall even if already latest)
@@ -42,6 +44,36 @@ hom repo set <name>                    Download from that repo from now on
 hom repo remove <name>                 Forget a repo
 --progress=bar|lines|none              (any command) how downloads report progress
 ```
+
+### TUI (`hom tui`)
+
+Run `hom` with no arguments (or `hom tui`) in PowerShell, Windows Terminal or
+cmd and hom opens a full-screen package browser instead of printing usage:
+a merged list of repo packages and locally installed plugins, a details pane,
+and one-key actions.
+
+```
+Up/Down, PgUp/PgDn, Home/End   move
+i or Enter                     install / upgrade the selected package
+r                              remove it (saved settings are kept)
+p                              purge it (package + extracted files + settings)
+u                              upgrade every package that has a newer version
+/                              filter by name/description (Enter applies, Esc cancels)
+Tab                            switch view: all / installed / upgradable
+s or F5                        refresh the repo index
+q or Ctrl+C                    quit
+```
+
+The status markers are `*` installed, `^` upgrade available, `+` not installed,
+`~` local-only plugin and `?` installed with an unknown local version (HomRec
+has not extracted its `plugin.json` yet; after a TUI install the downloaded
+repo version is shown for the rest of the session). Destructive actions and
+"upgrade all" ask for confirmation first.
+
+The TUI is only enabled when a real console is attached. When hom is piped or
+started by HomRec's in-app console it prints the normal line-based output and
+`hom tui` exits with an error, so scripts and the console keep working exactly
+as before.
 
 ### Forks and mirrors (`hom repo`)
 
