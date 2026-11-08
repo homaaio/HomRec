@@ -56,6 +56,14 @@ enum MenuCommandId {
     ID_PREVIEW_TOGGLE_BTN   = 1037,
     ID_VIEW_DOCK_FIRST      = 1040,
     ID_VIEW_DOCK_LAST       = 1069,
+    // Scenes menu: ID_SCENE_FIRST + i switches to scene i, ID_SCENE_DELETE_FIRST + i deletes it (64 scenes at most).
+    ID_SCENE_NEW            = 1070,
+    ID_SCENE_DUPLICATE      = 1071,
+    ID_SCENE_RENAME         = 1072,
+    ID_SCENE_FIRST          = 1100,
+    ID_SCENE_LAST           = 1163,
+    ID_SCENE_DELETE_FIRST   = 1200,
+    ID_SCENE_DELETE_LAST    = 1263,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
@@ -75,6 +83,8 @@ public:
 
     // Writes any debounced overlay edit (arrow-key nudges) to disk right now.
     void FlushOverlaySave();
+    // Forgets the clicked / dragged overlay (a scene switch puts other overlays at the same list positions).
+    void ClearOverlaySelection() { drag_overlay_index_ = -1; selected_overlay_index_ = -1; drag_corner_ = Corner::kNone; }
 
     void EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h,
                            int native_w = 0, int native_h = 0);
@@ -158,6 +168,10 @@ public:
 
 private:
     void BuildMenuBar();
+    void FillScenesMenu();                         // (re)builds the Scenes menu from state_.scenes
+    void SwitchToScene(const std::string &id);
+    void OnSceneMenu(wxCommandEvent &evt);
+    wxMenu *scenes_menu_ = nullptr;
     void BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer);
     void BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer);
     void BuildBottomBar(wxWindow *parent, wxSizer *parentSizer);

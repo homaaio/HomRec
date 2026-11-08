@@ -20,6 +20,7 @@
 #include "../utils/plugin_log.h"
 #include "../utils/wgc_log.h"
 #include "../utils/update.h"
+#include <chrono>
 #include <wx/dcbuffer.h>
 #include <wx/accel.h>
 #include <wx/msw/private.h>
@@ -30,6 +31,7 @@
 #include <atomic>
 #include <sstream>
 #include <wx/msgdlg.h>
+#include <wx/textdlg.h>
 #include <wx/progdlg.h>
 #include <functional>
 #include <algorithm>
@@ -230,7 +232,7 @@ void PreviewPanel::FlushOverlaySave() {
     overlay_save_timer_.Stop();
     if (!overlay_save_pending_) return;
     overlay_save_pending_ = false;
-    HrcConfig::SaveOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
+    HrcConfig::SaveActiveOverlays(state_);
 }
 
 void PreviewPanel::PollRefresh() {
@@ -824,7 +826,7 @@ HomRecMainFrame::HomRecMainFrame()
         hr_settings_destroy(settings);
     }
 
-    HrcConfig::LoadOverlaysOnly(state_.overlays, HrcConfig::kOverlaysAutosavePath);
+    HrcConfig::LoadScenes(state_);
 
     // Apply the Security tab's logging toggles immediately at startup -
     // both loggers default to enabled internally, so this is a no-op
@@ -904,6 +906,7 @@ HomRecMainFrame::HomRecMainFrame()
 
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_SELECT_REGION);
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_VIEW_LOCK_UI, ID_VIEW_DOCK_LAST);
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnSceneMenu, this, ID_SCENE_NEW, ID_SCENE_DELETE_LAST);
     // wxAuiManagerEvents are not command events: they do not bubble up to the frame, so bind on the manager.
     aui_.Bind(wxEVT_AUI_PANE_CLOSE, &HomRecMainFrame::OnAuiPaneClose, this);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
@@ -1016,6 +1019,10 @@ void HomRecMainFrame::BuildMenuBar() {
     viewMenu->Append(ID_VIEW_PC_ANALYTICS, wxString::FromUTF8(lang_.Get("pc_analytics")));
     viewMenu->Append(ID_VIEW_LOG, wxString::FromUTF8(lang_.Get("show_log")));
     menuBar->Append(viewMenu, wxString::FromUTF8(lang_.Get("view_menu")));
+
+    scenes_menu_ = new wxMenu();
+    FillScenesMenu();
+    menuBar->Append(scenes_menu_, "Scenes");
 
     // // Quick FPS presets. The "ultra"/"turbo"/"balanced"/"eco" strings (each
     // // naming its own target FPS - see language.cpp) and AppState::
@@ -2277,6 +2284,97 @@ void HomRecMainFrame::RunSourceAction(int action) {
         default: return;
     }
     if (overlays_panel_) overlays_panel_->RefreshSourceRow();
+}
+
+void HomRecMainFrame::FillScenesMenu() {
+    if (!scenes_menu_) return;
+    while (scenes_menu_->GetMenuItemCount() > 0)
+        scenes_menu_->Destroy(scenes_menu_->FindItemByPosition(0));
+
+    const size_t max_scenes = (size_t)(ID_SCENE_LAST - ID_SCENE_FIRST) + 1;
+    auto label = [](const std::string &name) { return wxControl::EscapeMnemonics(wxString::FromUTF8(name.c_str())); };
+    for (size_t i = 0; i < state_.scenes.size() && i < max_scenes; ++i) {
+        wxMenuItem *it = scenes_menu_->AppendRadioItem(ID_SCENE_FIRST + (int)i, label(state_.scenes[i].name));
+        if (state_.scenes[i].id == state_.active_scene_id) it->Check(true);
+    }
+    scenes_menu_->AppendSeparator();
+    scenes_menu_->Append(ID_SCENE_NEW, "New scene...");
+    scenes_menu_->Append(ID_SCENE_DUPLICATE, "Duplicate current scene...");
+    scenes_menu_->Append(ID_SCENE_RENAME, "Rename current scene...");
+    auto *del = new wxMenu();
+    for (size_t i = 0; i < state_.scenes.size() && i < max_scenes; ++i)
+        if (state_.scenes[i].id != state_.active_scene_id) del->Append(ID_SCENE_DELETE_FIRST + (int)i, label(state_.scenes[i].name));
+    const bool any_deletable = del->GetMenuItemCount() > 0;
+    wxMenuItem *del_item = scenes_menu_->AppendSubMenu(del, "Delete scene");
+    del_item->Enable(any_deletable);
+}
+
+void HomRecMainFrame::SwitchToScene(const std::string &id) {
+    if (id == state_.active_scene_id) return;
+    if (state_.recording && rec_ && rec_->PlainDdagrabActive()) {
+        wxMessageBox("This recording runs on the full-GPU ffmpeg path, which doesn't draw overlays, so a scene switch "
+                     "would only change the preview, not the video. Switch scenes before you start recording.",
+                     "HomRec", wxOK | wxICON_INFORMATION, this);
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    if (preview_panel_) preview_panel_->FlushOverlaySave();
+    if (!HrcConfig::SwitchScene(state_, id)) {
+        wxMessageBox("Couldn't switch the scene: its file is missing or can't be read.", "HomRec", wxOK | wxICON_WARNING, this);
+        FillScenesMenu();
+        return;
+    }
+    if (preview_panel_) preview_panel_->ClearOverlaySelection();
+    if (overlays_panel_) overlays_panel_->Refresh();
+    if (rec_) rec_->SyncOverlays();   // hands the new list to the running pipeline; nothing is restarted
+    FillScenesMenu();
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    std::string name = id;
+    for (const auto &sc : state_.scenes) if (sc.id == id) name = sc.name;
+    HrLog::Info("Scene: switched to \"" + name + "\" in " + std::to_string(ms) +
+                " ms (file load + list swap on the UI thread; pictures are decoded afterwards on the capture thread if they are not cached)");
+}
+
+void HomRecMainFrame::OnSceneMenu(wxCommandEvent &evt) {
+    const int id = evt.GetId();
+    const size_t max_scenes = (size_t)(ID_SCENE_LAST - ID_SCENE_FIRST) + 1;
+    if (id >= ID_SCENE_FIRST && id <= ID_SCENE_LAST) {
+        const size_t i = (size_t)(id - ID_SCENE_FIRST);
+        if (i < state_.scenes.size()) SwitchToScene(state_.scenes[i].id);
+        return;
+    }
+    if (id >= ID_SCENE_DELETE_FIRST && id <= ID_SCENE_DELETE_LAST) {
+        const size_t i = (size_t)(id - ID_SCENE_DELETE_FIRST);
+        if (i >= state_.scenes.size() || i >= max_scenes) return;
+        const SceneInfo sc = state_.scenes[i];
+        if (wxMessageBox("Delete the scene \"" + wxString::FromUTF8(sc.name.c_str()) + "\"? Its overlays are lost.",
+                         "HomRec", wxYES_NO | wxICON_QUESTION, this) != wxYES) return;
+        HrcConfig::DeleteScene(state_, sc.id);
+        FillScenesMenu();
+        return;
+    }
+    if (id == ID_SCENE_NEW || id == ID_SCENE_DUPLICATE) {
+        wxTextEntryDialog dlg(this, "Scene name:", id == ID_SCENE_NEW ? "New scene" : "Duplicate scene",
+                              "Scene " + wxString::Format("%d", (int)state_.scenes.size() + 1));
+        if (dlg.ShowModal() != wxID_OK) return;
+        if (preview_panel_) preview_panel_->FlushOverlaySave();
+        const std::string nid = HrcConfig::AddScene(state_, dlg.GetValue().ToUTF8().data(), id == ID_SCENE_DUPLICATE);
+        if (nid.empty()) {
+            wxMessageBox("Couldn't create the scene.", "HomRec", wxOK | wxICON_WARNING, this);
+            return;
+        }
+        FillScenesMenu();
+        if (!state_.recording) SwitchToScene(nid);   // while recording, the new scene is only added: picking it changes the video
+        return;
+    }
+    if (id == ID_SCENE_RENAME) {
+        wxString cur;
+        for (const auto &sc : state_.scenes) if (sc.id == state_.active_scene_id) cur = wxString::FromUTF8(sc.name.c_str());
+        wxTextEntryDialog dlg(this, "Scene name:", "Rename scene", cur);
+        if (dlg.ShowModal() != wxID_OK) return;
+        HrcConfig::RenameScene(state_, state_.active_scene_id, dlg.GetValue().ToUTF8().data());
+        FillScenesMenu();
+    }
 }
 
 void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
