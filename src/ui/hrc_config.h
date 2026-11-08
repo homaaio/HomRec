@@ -22,6 +22,30 @@ extern const std::wstring kOverlaysAutosavePath;
 bool SaveOverlaysOnly(const std::vector<OverlayDef> &overlays, const std::wstring &path);
 bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &path);
 
+// ---- Scenes -----------------------------------------------------------------------------------
+// A scene is an overlays-only .hrc (the same format SaveOverlaysOnly() writes) in the "scenes" folder next
+// to homrec_overlays.hrc, plus scenes/scenes.index with the names and the active id. Only the active
+// scene is held in AppState::overlays; the others stay on disk until they are switched to.
+
+// Startup: reads the scene list and loads the active scene's overlays into `state.overlays`. On the first
+// start with scenes it makes "Scene 1" out of the old homrec_overlays.hrc (which is left in place).
+void LoadScenes(AppState &state);
+
+// Writes `state.overlays` to the active scene's file (this replaces the old homrec_overlays.hrc autosave).
+bool SaveActiveOverlays(const AppState &state);
+
+// Saves the active scene, loads scene `id` into `state.overlays` and makes it the active one. Returns
+// false, with `state` unchanged, when the scene doesn't exist or its file can't be read or the current
+// scene can't be saved.
+bool SwitchScene(AppState &state, const std::string &id);
+
+// Adds a scene (empty, or a copy of the active one) and returns its id; "" on failure.
+// Does not switch to it.
+std::string AddScene(AppState &state, const std::string &name, bool copy_active);
+bool RenameScene(AppState &state, const std::string &id, const std::string &name);
+// Not allowed for the active scene or when it is the only one.
+bool DeleteScene(AppState &state, const std::string &id);
+
 #ifdef _WIN32
 constexpr wchar_t kDefaultSettingsPath[] = L"homrec.hrc";
 #else

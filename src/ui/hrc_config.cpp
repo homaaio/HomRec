@@ -366,6 +366,182 @@ bool LoadOverlaysOnly(std::vector<OverlayDef> &overlays, const std::wstring &pat
     return true;
 }
 
+// ---- Scenes --------------------------------------------------------------------------------------
+
+static std::wstring SceneDir() {
+#ifdef _WIN32
+    return L"scenes";   // relative to the working directory, like homrec_overlays.hrc
+#else
+    return HrWide(hr::platform::ConfigDir() + "/scenes");
+#endif
+}
+static std::wstring SceneIndexPath() { return SceneDir() + L"/scenes.index"; }
+static std::wstring SceneFilePath(const std::string &id) { return SceneDir() + L"/" + HrWide(id) + L".hrc"; }
+
+static bool FileExistsW(const std::wstring &p) {
+#ifdef _WIN32
+    return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return ::stat(HrNarrow(p).c_str(), &st) == 0;
+#endif
+}
+
+static void EnsureSceneDir() {
+#ifdef _WIN32
+    CreateDirectoryW(SceneDir().c_str(), nullptr);   // already there: fine
+#else
+    hr::platform::EnsureDir(HrNarrow(SceneDir()));
+#endif
+}
+
+static void RemoveFileW(const std::wstring &p) {
+#ifdef _WIN32
+    DeleteFileW(p.c_str());
+#else
+    std::remove(HrNarrow(p).c_str());
+#endif
+}
+
+// The id becomes part of a file name, and scenes.index can be edited by hand.
+static bool ValidSceneId(const std::string &id) {
+    if (id.empty() || id.size() > 64) return false;
+    for (unsigned char c : id)
+        if (!std::isalnum(c) && c != '_' && c != '-') return false;
+    return true;
+}
+
+static bool HasScene(const AppState &state, const std::string &id) {
+    for (const auto &sc : state.scenes) if (sc.id == id) return true;
+    return false;
+}
+
+static bool SaveSceneIndex(const AppState &state) {
+    EnsureSceneDir();
+    return WriteAtomically(SceneIndexPath(), [&](const std::wstring &p) {
+        std::ofstream f(HrFsPath(p).c_str(), std::ios::trunc | std::ios::binary);
+        if (!f) return false;
+        f << "# HomRec scenes v1\n"
+          << "active=" << state.active_scene_id << "\n"
+          << "scene_count=" << state.scenes.size() << "\n\n";
+        for (size_t i = 0; i < state.scenes.size(); ++i) {
+            f << "scene_" << i << "_id=" << state.scenes[i].id << "\n"
+              << "scene_" << i << "_name=" << OneLine(state.scenes[i].name) << "\n";
+        }
+        return true;
+    });
+}
+
+static bool ReadSceneIndex(AppState &state) {
+    std::ifstream f(HrFsPath(SceneIndexPath()).c_str(), std::ios::binary);
+    if (!f) return false;
+    std::unordered_map<std::string, std::string> kv;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::string t = Trim(line);
+        if (t.empty() || t[0] == '#') continue;
+        const size_t eq = t.find('=');
+        if (eq == std::string::npos) continue;
+        kv[Trim(t.substr(0, eq))] = Trim(t.substr(eq + 1));
+    }
+    auto get = [&](const std::string &k) { auto it = kv.find(k); return it == kv.end() ? std::string() : it->second; };
+
+    int n = atoi(get("scene_count").c_str());
+    if (n < 0) n = 0;
+    if (n > 64) n = 64;   // as many as the Scenes menu has ids for
+    state.scenes.clear();
+    for (int i = 0; i < n; ++i) {
+        SceneInfo sc;
+        sc.id = get("scene_" + std::to_string(i) + "_id");
+        if (!ValidSceneId(sc.id) || HasScene(state, sc.id)) continue;
+        sc.name = get("scene_" + std::to_string(i) + "_name");
+        if (sc.name.empty()) sc.name = sc.id;
+        state.scenes.push_back(sc);
+    }
+    if (state.scenes.empty()) return false;
+    state.active_scene_id = get("active");
+    if (!HasScene(state, state.active_scene_id)) state.active_scene_id = state.scenes[0].id;
+    return true;
+}
+
+void LoadScenes(AppState &state) {
+    if (ReadSceneIndex(state)) {
+        // A missing file leaves state.overlays as it is (what homrec.hrc had).
+        LoadOverlaysOnly(state.overlays, SceneFilePath(state.active_scene_id));
+        return;
+    }
+    // First start with scenes: the old single overlay list becomes "Scene 1".
+    LoadOverlaysOnly(state.overlays, kOverlaysAutosavePath);
+    state.scenes.assign(1, SceneInfo{"scene_1", "Scene 1"});
+    state.active_scene_id = "scene_1";
+    SaveActiveOverlays(state);
+    SaveSceneIndex(state);
+}
+
+bool SaveActiveOverlays(const AppState &state) {
+    if (state.active_scene_id.empty())   // LoadScenes() has not run: the old single file
+        return SaveOverlaysOnly(state.overlays, kOverlaysAutosavePath);
+    EnsureSceneDir();
+    return SaveOverlaysOnly(state.overlays, SceneFilePath(state.active_scene_id));
+}
+
+bool SwitchScene(AppState &state, const std::string &id) {
+    if (id == state.active_scene_id) return true;
+    if (!HasScene(state, id)) return false;
+    // Read the target first, so a damaged file leaves the current scene alone.
+    std::vector<OverlayDef> next;
+    if (!LoadOverlaysOnly(next, SceneFilePath(id))) return false;
+    if (!SaveActiveOverlays(state)) return false;   // switching must not lose what was just edited
+    state.overlays = std::move(next);
+    state.active_scene_id = id;
+    SaveSceneIndex(state);
+    return true;
+}
+
+static std::string CleanSceneName(const AppState &state, const std::string &name) {
+    std::string n = Trim(OneLine(name));
+    if (n.size() > 64) n.resize(64);
+    if (n.empty()) n = "Scene " + std::to_string(state.scenes.size() + 1);
+    return n;
+}
+
+std::string AddScene(AppState &state, const std::string &name, bool copy_active) {
+    if (state.scenes.size() >= 64) return "";
+    std::string id;
+    for (int n = 1;; ++n) {
+        id = "scene_" + std::to_string(n);
+        if (!HasScene(state, id) && !FileExistsW(SceneFilePath(id))) break;
+    }
+    EnsureSceneDir();
+    const std::vector<OverlayDef> none;
+    if (!SaveOverlaysOnly(copy_active ? state.overlays : none, SceneFilePath(id))) return "";
+    state.scenes.push_back(SceneInfo{id, CleanSceneName(state, name)});
+    SaveSceneIndex(state);
+    return id;
+}
+
+bool RenameScene(AppState &state, const std::string &id, const std::string &name) {
+    for (auto &sc : state.scenes) {
+        if (sc.id != id) continue;
+        sc.name = CleanSceneName(state, name);
+        SaveSceneIndex(state);
+        return true;
+    }
+    return false;
+}
+
+bool DeleteScene(AppState &state, const std::string &id) {
+    if (id == state.active_scene_id || state.scenes.size() <= 1) return false;
+    for (size_t i = 0; i < state.scenes.size(); ++i) {
+        if (state.scenes[i].id != id) continue;
+        state.scenes.erase(state.scenes.begin() + (std::ptrdiff_t)i);
+        RemoveFileW(SceneFilePath(id));
+        SaveSceneIndex(state);
+        return true;
+    }
+    return false;
+}
+
 bool RenameSettingsFile(const std::wstring &old_path, const std::wstring &new_path) {
     if (old_path == new_path) return false;
 #ifndef _WIN32
