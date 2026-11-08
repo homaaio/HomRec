@@ -100,6 +100,10 @@ public:
     // recording, the encoded output).
     void SyncOverlays();
 
+    // True while the running recording is captured and encoded entirely by ffmpeg's ddagrab without the overlay
+    // feed: nothing is drawn onto that picture, so a changed overlay list only shows in the preview.
+    bool PlainDdagrabActive() const { return ddagrab_active_ && !ddagrab_overlay_; }
+
     // 7th pass: what the window source is doing right now (for the Layers panel's capture-source row):
     // 0 = not recording a window itself, 1 = native Windows.Graphics.Capture, 2 = exact window capture
     // (PrintWindow), 3 = smart mode, currently reading the cheap screen duplication.
