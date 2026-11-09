@@ -8,6 +8,8 @@
 #include <wx/filedlg.h>
 #include <wx/choicdlg.h>
 #include <wx/textdlg.h>
+#include <wx/dialog.h>
+#include <wx/choice.h>
 #include <wx/filename.h>
 #include <cmath>
 #include <cstdio>
@@ -26,6 +28,7 @@ extern "C" {
     void hr_audio_extra_set_volume(int id, float vol, int mute);
     int  hr_audio_extra_level(int id);
     int  hr_decode_audio_to_wav(const wchar_t *ffpath, const wchar_t *in_path, const wchar_t *wav_path);
+    int  hr_audio_test_record(const wchar_t *mic_device_id, int ms, void *out, int cap_bytes, int *out_bytes);
 }
 
 namespace {
@@ -599,25 +602,165 @@ void AudioPanel::ShowAddMenu() {
     AddSource(def, /*persist=*/true);
 }
 
+namespace {
+// winmm is loaded on demand so the build needs no extra -lwinmm.
+void PlayWavFromMemory(const void *wav) {
+    typedef BOOL (WINAPI *PlaySoundW_t)(LPCWSTR, HMODULE, DWORD);
+    static PlaySoundW_t fn = [] {
+        HMODULE m = LoadLibraryW(L"winmm.dll");
+        return m ? (PlaySoundW_t)GetProcAddress(m, "PlaySoundW") : nullptr;
+    }();
+    // SND_ASYNC | SND_MEMORY | SND_NODEFAULT; a null pointer stops whatever is playing.
+    if (fn) fn((LPCWSTR)wav, nullptr, wav ? (0x0001 | 0x0004 | 0x0002) : 0);
+}
+
+// The window behind a built-in strip's "..." button: for the microphone an input-device choice with a
+// Test button next to it (records 3 s, plays it back), for Desktop Audio just the strip actions.
+class SourceSettingsDialog : public wxDialog {
+public:
+    enum { kReset = wxID_HIGHEST + 41, kRemove, kTest };
+
+    SourceSettingsDialog(wxWindow *parent, const wxString &title, bool is_mic, bool recording,
+                         const std::string &cur_id, const ThemeColors &th)
+        : wxDialog(parent, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE) {
+        const wxColour bg = FromColorref(th.bg), fg = FromColorref(th.text);
+        SetBackgroundColour(bg);
+        SetForegroundColour(fg);
+        auto *root = new wxBoxSizer(wxVERTICAL);
+
+        if (is_mic) {
+            auto *lbl = new wxStaticText(this, wxID_ANY, "Input device");
+            lbl->SetForegroundColour(fg);
+            root->Add(lbl, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+
+            auto *row = new wxBoxSizer(wxHORIZONTAL);
+            choice_ = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(300), -1));
+            ids_.push_back("");                       // empty id = keep following Windows' default
+            choice_->Append("System Default");
+            int sel = 0;
+            for (const auto &m : HrEnumerateMics()) {
+                ids_.push_back(m.id);
+                choice_->Append(wxString::FromUTF8(m.name));
+                if (m.id == cur_id) sel = (int)ids_.size() - 1;
+            }
+            choice_->SetSelection(sel);
+            choice_->Enable(!recording);
+            row->Add(choice_, 1, wxALIGN_CENTER_VERTICAL);
+            test_ = new wxButton(this, kTest, "Test");
+            test_->Enable(!recording);
+            row->Add(test_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+            root->Add(row, 0, wxEXPAND | wxALL, FromDIP(12));
+
+            status_ = new wxStaticText(this, wxID_ANY,
+                recording ? "The device can't be changed or tested while a recording is running."
+                          : "Test records 3 seconds from the selected device and plays it back (headphones recommended).");
+            status_->SetForegroundColour(FromColorref(th.text_secondary));
+            status_->Wrap(FromDIP(380));
+            root->Add(status_, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+        } else {
+            auto *info = new wxStaticText(this, wxID_ANY,
+                "Records everything Windows plays through its default output device.");
+            info->SetForegroundColour(fg);
+            info->Wrap(FromDIP(380));
+            root->Add(info, 0, wxALL, FromDIP(12));
+        }
+
+        auto *btns = new wxBoxSizer(wxHORIZONTAL);
+        btns->Add(new wxButton(this, kReset, "Reset volume"), 0, wxRIGHT, FromDIP(6));
+        btns->Add(new wxButton(this, kRemove, "Remove source"), 0);
+        btns->AddStretchSpacer(1);
+        auto *ok = new wxButton(this, wxID_OK, "OK");
+        btns->Add(ok, 0, wxRIGHT, FromDIP(6));
+        btns->Add(new wxButton(this, wxID_CANCEL, "Cancel"), 0);
+        root->Add(btns, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+        ok->SetDefault();
+        SetSizerAndFit(root);
+
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(kReset); }, kReset);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(kRemove); }, kRemove);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { StartTest(); }, kTest);
+    }
+
+    ~SourceSettingsDialog() override {
+        *alive_ = false;
+        if (playing_) PlayWavFromMemory(nullptr);   // stop playback before its buffer goes away
+    }
+
+    // "" = System Default (or the device was not offered).
+    std::string SelectedDeviceId() const {
+        const int i = choice_ ? choice_->GetSelection() : -1;
+        return (i >= 0 && (size_t)i < ids_.size()) ? ids_[(size_t)i] : std::string();
+    }
+
+private:
+    void StartTest() {
+        if (testing_ || !test_) return;
+        testing_ = true;
+        test_->Enable(false);
+        status_->SetLabel("Recording 3 seconds - say something...");
+        const std::wstring dev = WideOf(SelectedDeviceId());
+        std::shared_ptr<bool> alive = alive_;
+        SourceSettingsDialog *self = this;
+        std::thread([dev, alive, self]() {
+            std::vector<char> buf(1 << 20);          // 3 s of 48 kHz stereo 16-bit is ~0.55 MB
+            int bytes = 0;
+            bool ok = false;
+            try { ok = hr_audio_test_record(dev.c_str(), 3000, buf.data(), (int)buf.size(), &bytes) != 0; } catch (...) {}
+            buf.resize(ok ? (size_t)bytes : 0);
+            if (wxTheApp) {
+                wxTheApp->CallAfter([alive, self, ok, b = std::move(buf)]() mutable {
+                    if (alive && *alive) self->FinishTest(ok, std::move(b));
+                });
+            }
+        }).detach();
+    }
+
+    void FinishTest(bool ok, std::vector<char> wav) {
+        testing_ = false;
+        test_->Enable(true);
+        if (!ok || wav.empty()) {
+            status_->SetLabel("Couldn't record from this device.");
+            return;
+        }
+        play_buf_ = std::move(wav);
+        playing_ = true;
+        status_->SetLabel("Playing back what was recorded...");
+        PlayWavFromMemory(play_buf_.data());
+    }
+
+    wxChoice *choice_ = nullptr;
+    wxButton *test_ = nullptr;
+    wxStaticText *status_ = nullptr;
+    std::vector<std::string> ids_;
+    std::vector<char> play_buf_;
+    bool testing_ = false, playing_ = false;
+    std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+};
+} // namespace
+
 void AudioPanel::ShowBuiltinMenu(int index) {
     if (index < 0 || index > 1) return;
-    wxPoint pos = wxGetMousePosition();
-    if (slot_[index].menu_btn)
-        pos = slot_[index].menu_btn->GetScreenPosition() + wxPoint(0, slot_[index].menu_btn->GetSize().GetHeight());
-    enum { kReset = 1, kRemove };
-    wxMenu menu;
-    menu.Append(kReset, "Reset volume to 100%");
-    menu.AppendSeparator();
-    menu.Append(kRemove, "Remove source");
-    const int cmd = GetPopupMenuSelectionFromUser(menu, ScreenToClient(pos));
-    // slot_ is a fixed array, but the layout may have been rebuilt while the popup was up - read the widgets now.
+    const bool is_mic = index == 0;
+    SourceSettingsDialog dlg(this, is_mic ? "Microphone" : "Desktop Audio", is_mic, state_.recording,
+                             state_.mic_device_id, theme_);
+    dlg.CenterOnParent();
+    const int cmd = dlg.ShowModal();
+    // slot_ is a fixed array, but the layout may have been rebuilt while the dialog was up - read the widgets now.
     Channel &ch = slot_[index];
-    if (cmd == kReset) {
+    if (cmd == wxID_OK) {
+        if (is_mic && !state_.recording) {
+            const std::string id = dlg.SelectedDeviceId();
+            if (id != state_.mic_device_id) {
+                state_.mic_device_id = id;
+                if (on_mic_device_changed) on_mic_device_changed();
+            }
+        }
+    } else if (cmd == SourceSettingsDialog::kReset) {
         ch.vol = 1.0f;
         if (ch.fader) ch.fader->SetValue(100);
         UpdateCardState(ch);
         PushBuiltinVolumes();
-    } else if (cmd == kRemove) {
+    } else if (cmd == SourceSettingsDialog::kRemove) {
         RemoveBuiltin(index);
     }
 }

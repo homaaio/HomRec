@@ -60,6 +60,9 @@ public:
     // The mixer changed something that should be saved (a source was added/removed/renamed or
     // a fader moved on an extra source). main_frame persists the settings.
     std::function<void()> on_changed;
+    // The microphone picked in a strip's "..." window changed (state_.mic_device_id is already updated);
+    // main_frame re-opens the capture device.
+    std::function<void()> on_mic_device_changed;
 
 private:
     // One mixer channel. Slots 0/1 are the built-in Microphone and Desktop Audio; the extras
