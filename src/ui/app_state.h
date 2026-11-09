@@ -75,7 +75,7 @@ struct OverlayDef {
 // Only the active scene's overlays are held in memory (AppState::overlays).
 struct SceneInfo {
     std::string id;     // file name stem, only [A-Za-z0-9_-]
-    std::string name;   // shown in the Scenes menu
+    std::string name;   // shown in the Scenes panel
 };
 
 // One extra audio source in the Audio Mixer (2.4). The built-in "Microphone"
@@ -255,6 +255,7 @@ struct AppState {
     bool cursor_enabled     = false;
     bool show_audio_panel    = true;
     bool show_overlays_panel = true;
+    bool show_scenes_panel   = true;
     bool disable_preview     = false; // skip capturing/rendering the live preview, for lower-end machines
     bool hint_no_overlay     = true;  // show the "don't see your overlay?" hint under the disabled-preview ':)' -
                                        // togglable from the bter plugin console ("edit settings hint-no-overlay false")

@@ -241,6 +241,7 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("cursor_enabled", "ui_toggles", &AppState::cursor_enabled, {"cursor"}));
         v.push_back(BoolField("show_audio_panel", "ui_toggles", &AppState::show_audio_panel));
         v.push_back(BoolField("show_overlays_panel", "ui_toggles", &AppState::show_overlays_panel));
+        v.push_back(BoolField("show_scenes_panel", "ui_toggles", &AppState::show_scenes_panel));
         v.push_back(BoolField("notify_sound", "ui_toggles", &AppState::notify_sound));
         v.push_back(BoolField("notify_flash", "ui_toggles", &AppState::notify_flash));
         v.push_back(BoolField("hint_no_overlay", "ui_toggles", &AppState::hint_no_overlay));
