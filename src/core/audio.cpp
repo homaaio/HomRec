@@ -750,6 +750,63 @@ HR_EXPORT void hr_audio_get_levels(int* out_mic, int* out_sys)
     if (out_sys) *out_sys = g_state->sys_level.load();
 }
 
+// hr_audio_test_record(mic_device_id, ms, out, cap_bytes, out_bytes)
+// Records `ms` milliseconds from the given capture endpoint ("" = Windows default) on its own WASAPI
+// stream - g_state, the recording buffers and the running meters are not touched. The result is a
+// complete in-memory WAV file (44-byte header + 16-bit stereo PCM, cut to cap_bytes), so the caller can
+// play it with PlaySound(SND_MEMORY) and no temp file / non-ASCII path is involved.
+// Blocks for `ms`: call it from a worker thread. Returns 1 when audio was captured.
+HR_EXPORT int hr_audio_test_record(const wchar_t* mic_device_id, int ms,
+                                   void* out, int cap_bytes, int* out_bytes)
+{
+    if (out_bytes) *out_bytes = 0;
+    if (!out || ms <= 0 || cap_bytes <= (int)sizeof(WavHeader)) return 0;
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool co_ok = SUCCEEDED(co);
+    int ok = 0;
+    IMMDeviceEnumerator* e = make_enumerator();
+    if (e) {
+        IMMDevice* dev = find_input_by_id(e, mic_device_id);
+        if (!dev) dev = get_default_input(e);
+        if (dev) {
+            WasapiStream st;
+            if (st.open(false, dev)) {
+                std::vector<int16_t> pcm, tmp;
+                const DWORD t0 = GetTickCount();
+                while (GetTickCount() - t0 < (DWORD)ms) {
+                    if (st.data_event) WaitForSingleObject(st.data_event, 20);
+                    else Sleep(20);
+                    tmp.clear();
+                    st.read(tmp);
+                    pcm.insert(pcm.end(), tmp.begin(), tmp.end());
+                }
+                const uint32_t rate = st.rate;
+                st.close();
+                const size_t room = (size_t)cap_bytes - sizeof(WavHeader);
+                size_t bytes = std::min(pcm.size() * 2, room) & ~(size_t)3;   // whole stereo frames
+                if (bytes > 0 && rate > 0) {
+                    WavHeader h;
+                    h.num_channels = 2;
+                    h.sample_rate  = rate;
+                    h.bits_per_smp = 16;
+                    h.block_align  = 4;
+                    h.byte_rate    = rate * 4;
+                    h.data_size    = (uint32_t)bytes;
+                    h.chunk_size   = 36 + (uint32_t)bytes;
+                    std::memcpy(out, &h, sizeof(h));
+                    std::memcpy((char*)out + sizeof(h), pcm.data(), bytes);
+                    if (out_bytes) *out_bytes = (int)(sizeof(h) + bytes);
+                    ok = 1;
+                }
+            }
+            dev->Release();
+        }
+        e->Release();
+    }
+    if (co_ok) CoUninitialize();
+    return ok;
+}
+
 static void extra_on_pause(bool paused);   // audio_extra.inc
 
 HR_EXPORT void hr_audio_pause(int paused)
