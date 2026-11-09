@@ -202,6 +202,44 @@ HR_EXPORT int hr_probe_gpu(const wchar_t* ffpath, wchar_t* out_enc, int out_len)
     return 0;
 }
 
+// hr_probe_encoder
+// Opens one named encoder through ffmpeg once (a 0.2 s nullsrc frame) and returns 1 when it
+// works. Unlike hr_probe_gpu() this does not depend on scanning an error text: the ffmpeg exit
+// status decides, so "Unknown encoder ..." and a driver that refuses the GPU both count as a
+// failure. `reason` (optional) receives the first interesting line of ffmpeg's output.
+HR_EXPORT int hr_probe_encoder(const wchar_t* ffpath, const wchar_t* encoder,
+                               wchar_t* reason, int reason_len)
+{
+    if (reason && reason_len > 0) reason[0] = L'\0';
+    if (!ffpath || !*ffpath || !encoder || !*encoder) return 0;
+
+    std::wstring cmd = L"\"" + std::wstring(ffpath) + L"\" -hide_banner -y -f lavfi"
+                       L" -i nullsrc=s=1280x720:d=0.2 -c:v " + std::wstring(encoder) +
+                       L" -f null -";
+    RunResult rr;
+    std::wstring out = run_cmd_ex(cmd, 10000, &rr);
+    if (rr.ok()) return 1;
+
+    if (reason && reason_len > 0 && !out.empty()) {
+        std::wstring low = out;
+        std::transform(low.begin(), low.end(), low.begin(), ::towlower);
+        static const wchar_t* const kKeys[] = {
+            L"unknown encoder", L"error", L"failed", L"not found", L"not supported"
+        };
+        size_t p = std::wstring::npos;
+        for (const wchar_t* k : kKeys) {
+            const size_t q = low.find(k);
+            if (q != std::wstring::npos && (p == std::wstring::npos || q < p)) p = q;
+        }
+        if (p == std::wstring::npos) p = 0;   // no recognizable word: keep the first line
+        std::wstring line = out.substr(p, 200);
+        const size_t nl = line.find_first_of(L"\r\n");
+        if (nl != std::wstring::npos) line.resize(nl);
+        wcsncpy_s(reason, reason_len, line.c_str(), _TRUNCATE);
+    }
+    return 0;
+}
+
 // hr_probe_ddagrab 1 if this ffmpeg build has the "ddagrab" source filter (ffmpeg 6.0+
 // with D3D11 support): DXGI desktop capture whose frames stay on the GPU.
 HR_EXPORT int hr_probe_ddagrab(const wchar_t* ffpath)
