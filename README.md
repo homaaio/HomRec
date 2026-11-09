@@ -103,16 +103,16 @@ Settings (`homrec.hrc`), logs and plugins live next to `hr.exe`, so keep them if
 
 ### From source
 
-Requirements: an MSYS2 MinGW-w64 toolchain, wxWidgets 3.2 (MSW, Unicode, DLL build) and Lua 5.4 (headers + library). See [Build dependencies](#build-dependencies).
+Requirements: an MSYS2 **UCRT64** toolchain, wxWidgets 3.2 (MSW, Unicode, DLL build) and Lua 5.4 (headers + library). See [Build dependencies](#build-dependencies). Use the **MSYS2 UCRT64** shell: the DLLs that ship with HomRec and the default `C:/lua54` are UCRT builds, and mixing them with the MINGW64 (MSVCRT) toolchain fails at link time.
 
 ```bash
 git clone https://github.com/homaaio/HomRec.git
 cd HomRec
 ```
 
-Install the toolchain and wxWidgets (via [MSYS2](https://www.msys2.org/), MinGW-w64 shell):
+Install the toolchain and wxWidgets (via [MSYS2](https://www.msys2.org/), **UCRT64** shell):
 ```bash
-pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-wxwidgets3.2-msw
+pacman -S mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-wxwidgets3.2-msw
 ```
 
 Obtain Lua 5.4 - the amalgamation or binaries from [lua.org](https://www.lua.org/download.html) (the build expects `C:/lua54/include` and `C:/lua54/lib` by default), or:
@@ -128,7 +128,7 @@ cmake --build build -j                   # hr.exe and homrec.exe, written to the
 cmake --build build --target hr          # only hr.exe (other target: homrec)
 ```
 
-CMake is the only build system. The paths are cache variables (defaults: MSYS2 at `C:\msys64`, Lua at `C:/lua54`), e.g. `-DLUA_INCLUDE_DIR=D:/lua/include -DLUA_LIB_DIR=D:/lua/lib -DWX_LIB_DIR=...`. `-DHR_LTO=OFF` switches link-time optimisation off if the link is slow or fails, `-DHR_EXE_IN_ROOT=OFF` keeps the .exe files in `build/`. The source files are listed by hand in `CMakeLists.txt` - when you add or remove a `.cpp`, update that list.
+CMake is the only build system. The paths are cache variables (defaults: MSYS2 at `C:\msys64`, Lua at `C:/lua54`; the `WX_*` paths follow the MSYS2 environment of the compiler CMake picked), e.g. `-DLUA_INCLUDE_DIR=D:/lua/include -DLUA_LIB_DIR=D:/lua/lib -DWX_LIB_DIR=...`. `-DHR_LTO=OFF` switches link-time optimisation off if the link is slow or fails, `-DHR_EXE_IN_ROOT=OFF` keeps the .exe files in `build/`. The source files are listed by hand in `CMakeLists.txt` - when you add or remove a `.cpp`, update that list.
 
 Unit tests and the CPU benchmark (optional):
 ```bash
