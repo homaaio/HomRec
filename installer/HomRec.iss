@@ -108,6 +108,7 @@ Name: "fileassoc"; Description: "Associate &.hrc and .hrp files with HomRec"; Gr
 
 [Files]
 Source: "hr.exe"; DestDir: "{app}"; Flags: ignoreversion
+; hom.exe is built from github.com/homaaio/hom; put its latest release next to hr.exe before compiling.
 Source: "hom.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; hr.exe links wxWidgets/etc dynamically (only libgcc/libstdc++/pthread are
 ; -static, see CMakeLists.txt) - the .dll's MinGW drops next to it at build

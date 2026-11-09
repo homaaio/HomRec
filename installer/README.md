@@ -14,7 +14,7 @@ Install Inno Setup 6 (Windows only - it doesn't cross-compile), then either:
   ```
   matching `/DMyAppVersion` to `HR_APP_VERSION` in `src/ui/version.h`.
 
-Either way, `hr.exe` (and `hom.exe`, and any runtime `.dll`s next to it,
+Either way, `hr.exe` (and `hom.exe` - download it from github.com/homaaio/hom/releases, it is not built here any more - and any runtime `.dll`s next to it,
 and `ffmpeg\ffmpeg.exe` if you want it bundled) need to already be built and
 sitting in the repo root first - the script only packages what it finds,
 it doesn't compile anything.
