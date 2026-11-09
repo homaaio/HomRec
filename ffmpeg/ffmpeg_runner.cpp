@@ -74,12 +74,7 @@ struct FfmpegCtx {
     int  grab_w{0}, grab_h{0};   /* 0x0 = the whole output */
     bool grab_cursor{true};
     bool normal_priority{false};
-    /* > 0: the muxer pushes finished data to disk about this often (ms) and a crash keeps everything up to
-     * the last push (fragmented .mp4 / short .mkv clusters). 0 = ffmpeg's defaults. */
     int  flush_ms{0};
-    /* Opt-in: put the ffmpeg child one GPU scheduling class below normal (see
-     * hr_gpu_sched_set_process() in dxgi_capture.cpp) so a game on a shared iGPU
-     * gets the GPU first. Applied right after CreateProcess. */
     bool gpu_low_priority{false};
     bool gpu_priority_applied{false};   /* result of the call above, for hr_ff_gpu_priority_applied() */
 
@@ -89,10 +84,6 @@ struct FfmpegCtx {
     std::string log_path;
     std::string progress_path;
 
-    /* In-process audio: the mixed recording audio reaches ffmpeg as a SECOND input over a named pipe
-     * (the pipe is created in hr_ff_start() BEFORE the process is launched; core/audio_pipe.cpp writes to it)
-     * and is encoded to AAC + muxed live, so there is no WAV file and no merge pass after Stop.
-     * audio_rate > 0 asks for it (pipe_input only, never ddagrab); audio_active says it really happened. */
     int         audio_rate{0};
     int         audio_kbps{160};
     bool        audio_active{false};
@@ -209,14 +200,8 @@ static bool _launch_win(FfmpegCtx *ctx, const std::wstring &cmdline) {
     const bool want_stdin = ctx->pipe_input || ctx->gpu_capture;
 
     if (ctx->pipe_input) {
-        // hRead comes back already inheritable (sa_inherit above); hWrite
-        // (CreateNamedPipeW's server handle) is not inheritable by default,
-        // same as the SetHandleInformation(..., 0) call this replaces.
         if (!_create_overlapped_stdin_pipe(&hReadStdin, &hWriteStdin)) return false;
     } else if (ctx->gpu_capture) {
-        // Plain synchronous anonymous pipe: hr_ff_stop_graceful() writes the
-        // two bytes "q\n" with an ordinary WriteFile(), which is not allowed on
-        // an overlapped handle.
         SECURITY_ATTRIBUTES sa_inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
         if (!CreatePipe(&hReadStdin, &hWriteStdin, &sa_inherit, 0)) return false;
         SetHandleInformation(hWriteStdin, HANDLE_FLAG_INHERIT, 0);   // child must only inherit the read end
@@ -472,15 +457,9 @@ static std::wstring _build_cmdline(const FfmpegCtx *ctx) {
        hardware encoders receive NV12 directly instead of ffmpeg silently
        re-converting from yuv420p. */
     ss << L" -pix_fmt " << raw_pixfmt;
-    // BUGFIX: this used to always say "-color_range pc" for both paths.
-    const wchar_t *out_color_range = _wants_hw_pixfmt(ctx->codec_args) ? L"tv" : L"pc";
-    ss << L" -color_range " << out_color_range << L" -colorspace smpte170m"
+    ss << L" -color_range tv -colorspace smpte170m"
           L" -color_primaries smpte170m -color_trc smpte170m";
-
-    // Encode-time downscale (AppState's Settings > Resolution, e.g.
-    // Filter chain: scale (only when the size differs) first so it runs once per REAL frame, then `fps`
-    // (timestamped pipe only) which turns the sparse timestamps back into constant frame rate by
-    // repeating the previous frame - a repeat is a reference, not another scale/convert.
+          
     {
         std::wstring vf;
         if (ctx->output_width > 0 && ctx->output_height > 0 &&
@@ -985,8 +964,6 @@ HR_EXPORT void hr_ff_kill(void *handle) {
         ctx->hThread  = nullptr;
         CloseHandle(hp);
         if (ht) CloseHandle(ht);
-        // BUGFIX: this used to CloseHandle(ctx->hStdin) unconditionally, same as
-        // hr_ff_stop_graceful() did before *its* pipe_input fix (see the big comment over there).
         if (ctx->hStdin) {
             if (!ctx->pipe_input) CloseHandle(ctx->hStdin);
             ctx->hStdin = nullptr;
