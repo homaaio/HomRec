@@ -120,7 +120,7 @@ void ColorButton::OnPaint(wxPaintEvent &) {
         fill = wxColour(std::max(0, fill.Red() - 20), std::max(0, fill.Green() - 20), std::max(0, fill.Blue() - 20));
     }
     wxSize cs0 = GetClientSize();
-    double radius = std::min(8.0, std::min(cs0.GetWidth(), cs0.GetHeight()) / 2.0);
+    double radius = std::min(radius_, std::min(cs0.GetWidth(), cs0.GetHeight()) / 2.0);
     dc.SetBrush(wxBrush(fill));
     dc.SetPen(*wxTRANSPARENT_PEN);
     dc.DrawRoundedRectangle(GetClientRect(), radius);
@@ -132,6 +132,35 @@ void ColorButton::OnPaint(wxPaintEvent &) {
         dc.SetBrush(wxBrush(enabled_ ? fg_ : wxColour(120, 120, 120)));
         dc.SetPen(*wxTRANSPARENT_PEN);
         for (int i = 0; i < 3; ++i) dc.DrawEllipse(x0 + i * (d + gap), y0, d, d);
+        return;
+    }
+    if (glyph_ != Glyph::None) {
+        const wxSize cd = GetClientSize();
+        const wxColour gc = enabled_ ? fg_ : wxColour(120, 120, 120);
+        const int pw = std::max(2, FromDIP(2));                  // stroke width
+        const int half = std::max(4, std::min(cd.GetWidth(), cd.GetHeight()) * 3 / 10);   // arm length
+        const int cx = cd.GetWidth() / 2, cy = cd.GetHeight() / 2;
+        wxPen pen(gc, pw);
+        pen.SetCap(wxCAP_BUTT);
+        dc.SetPen(pen);
+        switch (glyph_) {
+            case Glyph::Plus:
+                dc.DrawLine(cx - half, cy, cx + half + 1, cy);
+                dc.DrawLine(cx, cy - half, cx, cy + half + 1);
+                break;
+            case Glyph::Minus:
+                dc.DrawLine(cx - half, cy, cx + half + 1, cy);
+                break;
+            case Glyph::Up:
+            case Glyph::Down: {
+                const int dy = (glyph_ == Glyph::Up) ? 1 : -1;   // chevron tip is on the far side
+                const int h2 = half * 2 / 3 + 1;
+                dc.DrawLine(cx - half, cy + dy * h2, cx, cy - dy * h2);
+                dc.DrawLine(cx, cy - dy * h2, cx + half, cy + dy * h2);
+                break;
+            }
+            default: break;
+        }
         return;
     }
     dc.SetTextForeground(enabled_ ? fg_ : wxColour(120, 120, 120));

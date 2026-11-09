@@ -24,6 +24,11 @@ public:
     void SetLabelText2(const wxString &label) { label_ = label; Refresh(); }
     // Draws three centred dots instead of the label text (the "..." glyph of a font sits on the baseline).
     void SetDotsGlyph(bool on) { dots_ = on; Refresh(); }
+    // Vector symbol drawn instead of the label text (sized to the button, so it stays crisp and large).
+    enum class Glyph { None, Plus, Minus, Up, Down };
+    void SetGlyph(Glyph g) { glyph_ = g; Refresh(); }
+    // Corner radius in px (default 8 = the usual pill look; small values give a squarer button).
+    void SetCornerRadius(double r) { radius_ = r; Refresh(); }
     void Enable2(bool enabled);
     bool IsEnabled2() const { return enabled_; }
 
@@ -38,6 +43,8 @@ private:
     bool enabled_ = true;
     bool hover_ = false;
     bool dots_ = false;
+    Glyph glyph_ = Glyph::None;
+    double radius_ = 8.0;
     wxWindowID cmd_id_;
 };
 
