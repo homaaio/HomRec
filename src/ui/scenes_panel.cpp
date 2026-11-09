@@ -24,11 +24,18 @@ ScenesPanel::ScenesPanel(wxWindow *parent, AppState &state)
     list_->Bind(wxEVT_LEAVE_WINDOW, &ScenesPanel::OnMouse, this);
     list_->Bind(wxEVT_KEY_DOWN, &ScenesPanel::OnKey, this);
 
-    add_btn_  = new ColorButton(this, kBtnNew,  "+");
-    del_btn_  = new ColorButton(this, kBtnDel,  wxString(L"\u2212"));
-    up_btn_   = new ColorButton(this, kBtnUp,   wxString(L"\u25B2"));
-    down_btn_ = new ColorButton(this, kBtnDown, wxString(L"\u25BC"));
-    for (ColorButton *b : { add_btn_, del_btn_, up_btn_, down_btn_ }) b->SetMinSize(wxSize(FromDIP(30), FromDIP(26)));
+    add_btn_  = new ColorButton(this, kBtnNew,  wxString());
+    del_btn_  = new ColorButton(this, kBtnDel,  wxString());
+    up_btn_   = new ColorButton(this, kBtnUp,   wxString());
+    down_btn_ = new ColorButton(this, kBtnDown, wxString());
+    add_btn_->SetGlyph(ColorButton::Glyph::Plus);
+    del_btn_->SetGlyph(ColorButton::Glyph::Minus);
+    up_btn_->SetGlyph(ColorButton::Glyph::Up);
+    down_btn_->SetGlyph(ColorButton::Glyph::Down);
+    for (ColorButton *b : { add_btn_, del_btn_, up_btn_, down_btn_ }) {
+        b->SetMinSize(wxSize(FromDIP(40), FromDIP(32)));
+        b->SetCornerRadius(2.0);   // nearly square corners
+    }
 
     auto *bar = new wxBoxSizer(wxHORIZONTAL);
     bar->Add(add_btn_, 0, wxALL, 3);
