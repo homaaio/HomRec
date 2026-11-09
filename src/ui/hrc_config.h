@@ -42,9 +42,13 @@ bool SwitchScene(AppState &state, const std::string &id);
 // Adds a scene (empty, or a copy of the active one) and returns its id; "" on failure.
 // Does not switch to it.
 std::string AddScene(AppState &state, const std::string &name, bool copy_active);
+// Adds a copy of scene `src_id` (any scene, not only the active one) and returns its id; "" on failure.
+std::string CopyScene(AppState &state, const std::string &src_id, const std::string &name);
 bool RenameScene(AppState &state, const std::string &id, const std::string &name);
 // Not allowed for the active scene or when it is the only one.
 bool DeleteScene(AppState &state, const std::string &id);
+// Moves a scene `delta` rows up (-1) or down (+1) in the list; false at either end.
+bool MoveScene(AppState &state, const std::string &id, int delta);
 
 #ifdef _WIN32
 constexpr wchar_t kDefaultSettingsPath[] = L"homrec.hrc";

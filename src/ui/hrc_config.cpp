@@ -448,7 +448,7 @@ static bool ReadSceneIndex(AppState &state) {
 
     int n = atoi(get("scene_count").c_str());
     if (n < 0) n = 0;
-    if (n > 64) n = 64;   // as many as the Scenes menu has ids for
+    if (n > 64) n = 64;   // upper limit of the scene list
     state.scenes.clear();
     for (int i = 0; i < n; ++i) {
         SceneInfo sc;
@@ -505,16 +505,33 @@ static std::string CleanSceneName(const AppState &state, const std::string &name
     return n;
 }
 
-std::string AddScene(AppState &state, const std::string &name, bool copy_active) {
-    if (state.scenes.size() >= 64) return "";
+static std::string NewSceneId(const AppState &state) {
     std::string id;
     for (int n = 1;; ++n) {
         id = "scene_" + std::to_string(n);
-        if (!HasScene(state, id) && !FileExistsW(SceneFilePath(id))) break;
+        if (!HasScene(state, id) && !FileExistsW(SceneFilePath(id))) return id;
     }
+}
+
+std::string AddScene(AppState &state, const std::string &name, bool copy_active) {
+    if (state.scenes.size() >= 64) return "";
+    const std::string id = NewSceneId(state);
     EnsureSceneDir();
     const std::vector<OverlayDef> none;
     if (!SaveOverlaysOnly(copy_active ? state.overlays : none, SceneFilePath(id))) return "";
+    state.scenes.push_back(SceneInfo{id, CleanSceneName(state, name)});
+    SaveSceneIndex(state);
+    return id;
+}
+
+std::string CopyScene(AppState &state, const std::string &src_id, const std::string &name) {
+    if (src_id == state.active_scene_id) return AddScene(state, name, true);
+    if (state.scenes.size() >= 64 || !HasScene(state, src_id)) return "";
+    std::vector<OverlayDef> src;
+    if (!LoadOverlaysOnly(src, SceneFilePath(src_id))) return "";
+    const std::string id = NewSceneId(state);
+    EnsureSceneDir();
+    if (!SaveOverlaysOnly(src, SceneFilePath(id))) return "";
     state.scenes.push_back(SceneInfo{id, CleanSceneName(state, name)});
     SaveSceneIndex(state);
     return id;
@@ -536,6 +553,18 @@ bool DeleteScene(AppState &state, const std::string &id) {
         if (state.scenes[i].id != id) continue;
         state.scenes.erase(state.scenes.begin() + (std::ptrdiff_t)i);
         RemoveFileW(SceneFilePath(id));
+        SaveSceneIndex(state);
+        return true;
+    }
+    return false;
+}
+
+bool MoveScene(AppState &state, const std::string &id, int delta) {
+    for (size_t i = 0; i < state.scenes.size(); ++i) {
+        if (state.scenes[i].id != id) continue;
+        const long long j = (long long)i + delta;
+        if (j < 0 || j >= (long long)state.scenes.size()) return false;
+        std::swap(state.scenes[i], state.scenes[(size_t)j]);
         SaveSceneIndex(state);
         return true;
     }
