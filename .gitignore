@@ -322,4 +322,4 @@ crashes/*.dmp
 # linker map from the CMake build (hr.map) - keep next to each released hr.exe, it resolves crash offsets
 hr.map
 cfg/console_history.*
-scenes/
+scenes/*
