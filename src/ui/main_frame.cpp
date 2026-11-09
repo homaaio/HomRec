@@ -1224,6 +1224,10 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     // any more: the dock pane's caption provides both (OnAuiPaneClose keeps state_ in sync).
     audio_panel_ = std::make_unique<AudioPanel>(parent, state_, *rec_);
     audio_panel_->on_changed = [this]() { PersistSettings(); };
+    audio_panel_->on_mic_device_changed = [this]() {
+        PersistSettings();
+        if (!state_.recording && rec_raw_) rec_raw_->RefreshPreviewSettings();   // re-opens the capture device
+    };
 
     // Overlays dock - still raw Win32 inside a host panel; the host forwards its size to
     // OverlaysDockPanel::Resize() so the list/buttons follow the pane when it is resized.
@@ -1472,7 +1476,7 @@ void HomRecMainFrame::SetupDocking() {
                      .Left().Layer(1).Position(0)
                      .BestSize(wxSize(kLeftPanelW + 30, 520)).MinSize(wxSize(kLeftPanelW, 340))
                      .FloatingSize(wxSize(kLeftPanelW + 50, 580))
-                     .Fixed().CloseButton(false).MaximizeButton(false).PinButton(false));
+                     .Resizable(true).CloseButton(false).MaximizeButton(false).PinButton(false));
 
     aui_.AddPane(audio_panel_.get(), wxAuiPaneInfo().Name("audio")
                      .Caption(wxString::FromUTF8(lang_.Get("audio_mixer")))
@@ -1557,9 +1561,7 @@ void HomRecMainFrame::ApplyUiLock() {
         const bool is_controls = (p.name == "controls");
         p.Movable(!lock).Floatable(!lock).Dockable(!lock);
         p.CloseButton(!lock && !is_controls);
-        // Controls is a fixed-size pane by design (its size follows its contents); the others
-        // are resizable unless the layout is locked.
-        p.Resizable(!lock && !is_controls);
+        p.Resizable(!lock);
         p.Gripper(false);
     }
     aui_.Update();
