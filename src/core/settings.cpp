@@ -107,6 +107,7 @@ struct HrSettings {
     int   show_summary;        /* bool - "recording saved" popup */
     int   show_overlays_panel; /* bool - persistent overlays dock panel, see overlays_dock_panel.cpp */
     int   show_audio_panel;    /* bool - audio mixer strip below the preview, see audio_panel.cpp */
+    int   show_scenes_panel;   /* bool - scenes dock panel, see scenes_panel.cpp */
     int   resolution_pct;      /* 25/50/75/100 - % of native monitor resolution to capture at */
     int   disable_preview;     /* bool - skip live preview capture/render for lower-end machines */
     int   hint_no_overlay;
@@ -153,6 +154,7 @@ static void _defaults(HrSettings *s) {
     s->show_summary        = 1; // matches AppState::show_summary's default (app_state.h)
     s->show_overlays_panel = 1; // matches AppState::show_overlays_panel's default (app_state.h)
     s->show_audio_panel    = 1; // matches AppState::show_audio_panel's default (app_state.h)
+    s->show_scenes_panel   = 1; // matches AppState::show_scenes_panel's default (app_state.h)
     s->resolution_pct      = 75; // matches AppState::scale_factor's existing default of 0.75
     s->resolution_mode     = 0;  // Percent - matches AppState::resolution_mode's default
     s->resolution_w        = 1280; // matches AppState::resolution_w's default
@@ -228,6 +230,7 @@ HR_EXPORT int hr_settings_load(void *handle, const char *path) {
     s->show_summary        = _json_get_bool(json, "show_summary",        s->show_summary)        ? 1 : 0;
     s->show_overlays_panel = _json_get_bool(json, "show_overlays_panel", s->show_overlays_panel) ? 1 : 0;
     s->show_audio_panel    = _json_get_bool(json, "show_audio_panel",    s->show_audio_panel)    ? 1 : 0;
+    s->show_scenes_panel   = _json_get_bool(json, "show_scenes_panel",   s->show_scenes_panel)   ? 1 : 0;
     s->resolution_pct      = _json_get_int(json,  "resolution_pct",      s->resolution_pct);
     s->resolution_mode     = _json_get_int(json,  "resolution_mode",     s->resolution_mode);
     s->resolution_w        = _json_get_int(json,  "resolution_w",        s->resolution_w);
@@ -276,6 +279,7 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         "  \"show_summary\":        %s,\n"
         "  \"show_overlays_panel\": %s,\n"
         "  \"show_audio_panel\":    %s,\n"
+        "  \"show_scenes_panel\":   %s,\n"
         "  \"resolution_pct\":      %d,\n"
         "  \"resolution_mode\":     %d,\n"
         "  \"resolution_w\":        %d,\n"
@@ -307,6 +311,7 @@ HR_EXPORT int hr_settings_save(const void *handle, const char *path) {
         s->show_summary        ? "true" : "false",
         s->show_overlays_panel ? "true" : "false",
         s->show_audio_panel    ? "true" : "false",
+        s->show_scenes_panel   ? "true" : "false",
         s->resolution_pct,
         s->resolution_mode,
         s->resolution_w,
@@ -468,6 +473,7 @@ HR_EXPORT int hr_settings_get_flag(const void *h, const char *name) {
     if (strcmp(name, "show_summary")        == 0) return s->show_summary;
     if (strcmp(name, "show_overlays_panel") == 0) return s->show_overlays_panel;
     if (strcmp(name, "show_audio_panel") == 0) return s->show_audio_panel;
+    if (strcmp(name, "show_scenes_panel") == 0) return s->show_scenes_panel;
     if (strcmp(name, "disable_preview")     == 0) return s->disable_preview;
     if (strcmp(name, "hint_no_overlay")     == 0) return s->hint_no_overlay;
     if (strcmp(name, "system_logging_enabled") == 0) return s->system_logging_enabled;
@@ -489,6 +495,7 @@ HR_EXPORT void hr_settings_set_flag(void *h, const char *name, int v) {
     if (strcmp(name, "show_summary")        == 0) { s->show_summary        = val; return; }
     if (strcmp(name, "show_overlays_panel") == 0) { s->show_overlays_panel = val; return; }
     if (strcmp(name, "show_audio_panel") == 0) { s->show_audio_panel = val; return; }
+    if (strcmp(name, "show_scenes_panel") == 0) { s->show_scenes_panel = val; return; }
     if (strcmp(name, "disable_preview")     == 0) { s->disable_preview     = val; return; }
     if (strcmp(name, "hint_no_overlay")     == 0) { s->hint_no_overlay     = val; return; }
     if (strcmp(name, "system_logging_enabled") == 0) { s->system_logging_enabled = val; return; }
