@@ -105,6 +105,9 @@ std::unordered_map<std::string, std::string> BuiltinEnglish() {
         // ---- 7th pass: Layers panel / capture source (keys below are NOT in kLangRequiredKeys: a language file
         // that predates them keeps working - English, or the built-in Russian table, fills the gaps) ----
         {"layers_panel", "Layers"},
+        {"scenes_panel", "Scenes"},
+        {"scene_new", "New scene"}, {"scene_dup", "Duplicate..."}, {"scene_rename", "Rename..."},
+        {"scene_delete", "Delete scene"}, {"scene_up", "Move up"}, {"scene_down", "Move down"},
         {"src_busy", "A recording is running - it keeps the source it was started with. Stop the recording to change the capture source."},
         {"layers_empty", "No overlays yet. Click + to add one."},
         {"settings_source_moved", "What is recorded (monitor, window, region) and how a window is captured now lives in the Layers panel: double-click its first row (\"Capture source\")."},
@@ -188,6 +191,9 @@ std::unordered_map<std::string, std::string> BuiltinEnglish() {
 std::unordered_map<std::string, std::string> BuiltinRussianNew() {
     return {
         {"layers_panel", "Слои"},
+        {"scenes_panel", "Сцены"},
+        {"scene_new", "Новая сцена"}, {"scene_dup", "Дублировать..."}, {"scene_rename", "Переименовать..."},
+        {"scene_delete", "Удалить сцену"}, {"scene_up", "Выше"}, {"scene_down", "Ниже"},
         {"src_busy", "Идёт запись — она продолжает с тем источником, с которым началась. Останови запись, чтобы сменить источник захвата."},
         {"layers_empty", "Оверлеев пока нет. Нажмите +, чтобы добавить."},
         {"settings_source_moved", "Что записывается (монитор, окно, область) и как захватывается окно — теперь в панели «Слои»: двойной клик по первой строке («Источник захвата»)."},
