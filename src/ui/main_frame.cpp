@@ -797,6 +797,7 @@ HomRecMainFrame::HomRecMainFrame()
             state_.show_summary = hr_settings_get_flag(settings, "show_summary") != 0;
             state_.show_overlays_panel = hr_settings_get_flag(settings, "show_overlays_panel") != 0;
             state_.show_audio_panel = hr_settings_get_flag(settings, "show_audio_panel") != 0;
+            state_.show_scenes_panel = hr_settings_get_flag(settings, "show_scenes_panel") != 0;
             state_.disable_preview = hr_settings_get_flag(settings, "disable_preview") != 0;
             state_.minimize_to_tray = hr_settings_get_flag(settings, "minimize_tray") != 0;
             state_.hint_no_overlay = hr_settings_get_flag(settings, "hint_no_overlay") != 0;
@@ -868,6 +869,10 @@ HomRecMainFrame::HomRecMainFrame()
     SetupDocking();
     ApplyLanguageText();
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
+    // Initialize() already switched to libx264 when the explicitly chosen hardware encoder does not
+    // work on this machine - say so once instead of letting the first recording crash mysteriously.
+    if (rec_ && !rec_->codec_fallback_note().empty())
+        SetStatusState(wxString(rec_->codec_fallback_note().c_str()), theme_.warning);
     HrLog::Info("HomRec " HR_APP_VERSION " started");
 
     SetupTrayIcon();
@@ -905,8 +910,7 @@ HomRecMainFrame::HomRecMainFrame()
     RestartLevelMeterTimer();
 
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_SELECT_REGION);
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_VIEW_LOCK_UI, ID_VIEW_DOCK_LAST);
-    Bind(wxEVT_MENU, &HomRecMainFrame::OnSceneMenu, this, ID_SCENE_NEW, ID_SCENE_DELETE_LAST);
+    Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_VIEW_SCENES_PANEL, ID_VIEW_DOCK_LAST);
     // wxAuiManagerEvents are not command events: they do not bubble up to the frame, so bind on the manager.
     aui_.Bind(wxEVT_AUI_PANE_CLOSE, &HomRecMainFrame::OnAuiPaneClose, this);
     Bind(wxEVT_CLOSE_WINDOW, &HomRecMainFrame::OnClose, this);
@@ -997,15 +1001,18 @@ void HomRecMainFrame::BuildMenuBar() {
     viewMenu->Check(ID_VIEW_OVERLAYS_PANEL, state_.show_overlays_panel);
     viewMenu->AppendCheckItem(ID_VIEW_AUDIO_PANEL, wxString::FromUTF8(lang_.Get("audio_mixer")));
     viewMenu->Check(ID_VIEW_AUDIO_PANEL, state_.show_audio_panel);
+    viewMenu->AppendCheckItem(ID_VIEW_SCENES_PANEL, wxString::FromUTF8(lang_.Get("scenes_panel")));
+    viewMenu->Check(ID_VIEW_SCENES_PANEL, state_.show_scenes_panel);
     {
         // 2.4: send a panel straight to a side or tear it out into its own window. (You can
         // also just drag a panel's title bar - wxAUI shows where it will dock.)
         auto *moveMenu = new wxMenu();
-        const wxString paneNames[3] = { "Controls (Start / Pause)",
+        const wxString paneNames[4] = { "Controls (Start / Pause)",
                                         wxString::FromUTF8(lang_.Get("audio_mixer")),
-                                        wxString::FromUTF8(lang_.Get("layers_panel")) };
+                                        wxString::FromUTF8(lang_.Get("layers_panel")),
+                                        wxString::FromUTF8(lang_.Get("scenes_panel")) };
         const wxString slotNames[5] = { "Left", "Right", "Top", "Bottom", "Floating window" };
-        for (int p = 0; p < 3; ++p) {
+        for (int p = 0; p < 4; ++p) {
             auto *sub = new wxMenu();
             for (int sl = 0; sl < 5; ++sl) sub->Append(ID_VIEW_DOCK_FIRST + p * 8 + sl, slotNames[sl]);
             moveMenu->AppendSubMenu(sub, paneNames[p]);
@@ -1019,10 +1026,6 @@ void HomRecMainFrame::BuildMenuBar() {
     viewMenu->Append(ID_VIEW_PC_ANALYTICS, wxString::FromUTF8(lang_.Get("pc_analytics")));
     viewMenu->Append(ID_VIEW_LOG, wxString::FromUTF8(lang_.Get("show_log")));
     menuBar->Append(viewMenu, wxString::FromUTF8(lang_.Get("view_menu")));
-
-    scenes_menu_ = new wxMenu();
-    FillScenesMenu();
-    menuBar->Append(scenes_menu_, "Scenes");
 
     // // Quick FPS presets. The "ultra"/"turbo"/"balanced"/"eco" strings (each
     // // naming its own target FPS - see language.cpp) and AppState::
@@ -1295,6 +1298,20 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     overlays_panel_->on_source_action = [this](int action) { RunSourceAction(action); };
     overlays_panel_->Refresh();    // re-read the row texts now that the language table is wired in
     overlays_panel_->SetVisible(state_.show_overlays_panel);
+
+    BuildScenesPanel(parent);
+}
+
+void HomRecMainFrame::BuildScenesPanel(wxWindow *parent) {
+    scenes_panel_ = new ScenesPanel(parent, state_);
+    scenes_panel_->tr = [this](const char *key) { return lang_.Get(key); };
+    scenes_panel_->on_switch    = [this](const std::string &id) { SwitchToScene(id); };
+    scenes_panel_->on_new       = [this]() { SceneNew(); };
+    scenes_panel_->on_duplicate = [this](const std::string &id) { SceneDuplicate(id); };
+    scenes_panel_->on_rename    = [this](const std::string &id) { SceneRename(id); };
+    scenes_panel_->on_delete    = [this](const std::string &id) { SceneDelete(id); };
+    scenes_panel_->on_move      = [this](const std::string &id, int delta) { SceneMove(id, delta); };
+    scenes_panel_->Reload();
 }
 
 void HomRecMainFrame::BuildBottomBar(wxWindow *parent, wxSizer *parentSizer) {
@@ -1373,6 +1390,7 @@ void HomRecMainFrame::ApplyThemeColours() {
     UpdatePreviewToggleButton();
     if (pause_color_btn_) pause_color_btn_->SetColours(FromColorref(theme_.warning), FromColorref(theme_.bg));
     if (audio_panel_) audio_panel_->ApplyTheme(theme_);
+    if (scenes_panel_) scenes_panel_->ApplyTheme(theme_, state_.current_theme != "light");
     if (dock_host_) dock_host_->SetBackgroundColour(bg);
     if (dock_ready_) ApplyDockArtColours();
 
@@ -1470,6 +1488,13 @@ void HomRecMainFrame::SetupDocking() {
                      .FloatingSize(wxSize(280, 460))
                      .CloseButton(true).MaximizeButton(false).PinButton(false));
 
+    aui_.AddPane(scenes_panel_, wxAuiPaneInfo().Name("scenes")
+                     .Caption(wxString::FromUTF8(lang_.Get("scenes_panel")))
+                     .Right().Layer(1).Position(1)
+                     .BestSize(wxSize(250, 170)).MinSize(wxSize(170, 90))
+                     .FloatingSize(wxSize(260, 260))
+                     .CloseButton(true).MaximizeButton(false).PinButton(false));
+
     ApplyDockArtColours();
     default_perspective_ = aui_.SavePerspective();   // the factory layout, "Reset layout" returns here
 
@@ -1487,6 +1512,7 @@ void HomRecMainFrame::SetupDocking() {
     aui_.GetPane("controls").Show(true);
     aui_.GetPane("audio").Show(state_.show_audio_panel);
     aui_.GetPane("overlays").Show(state_.show_overlays_panel);
+    aui_.GetPane("scenes").Show(state_.show_scenes_panel);
 
     // A layout saved on another monitor setup could leave a floating panel off-screen.
     const int n_displays = (int)wxDisplay::GetCount();
@@ -1555,12 +1581,15 @@ void HomRecMainFrame::SetPaneShown(const char *name, bool show, bool persist) {
         if (overlays_panel_) overlays_panel_->SetVisible(show);
     } else if (n == "audio") {
         state_.show_audio_panel = show;
+    } else if (n == "scenes") {
+        state_.show_scenes_panel = show;
     }
     p.Show(show);
     aui_.Update();
     if (auto *mb = GetMenuBar()) {
         if (n == "overlays") mb->Check(ID_VIEW_OVERLAYS_PANEL, show);
         else if (n == "audio") mb->Check(ID_VIEW_AUDIO_PANEL, show);
+        else if (n == "scenes") mb->Check(ID_VIEW_SCENES_PANEL, show);
     }
     if (persist) PersistSettings();
 }
@@ -1578,6 +1607,9 @@ void HomRecMainFrame::OnAuiPaneClose(wxAuiManagerEvent &evt) {
     } else if (p->name == "audio") {
         state_.show_audio_panel = false;
         if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_AUDIO_PANEL, false);
+    } else if (p->name == "scenes") {
+        state_.show_scenes_panel = false;
+        if (auto *mb = GetMenuBar()) mb->Check(ID_VIEW_SCENES_PANEL, false);
     }
     // The pane itself is hidden by the manager right after this handler returns; defer the
     // write so SavePerspective() sees the final (hidden) state.
@@ -1596,6 +1628,7 @@ void HomRecMainFrame::DockPaneTo(const char *name, DockSlot slot) {
     const std::string n = name;
     if (n == "audio" && !state_.show_audio_panel) SetPaneShown("audio", true, false);
     if (n == "overlays" && !state_.show_overlays_panel) SetPaneShown("overlays", true, false);
+    if (n == "scenes" && !state_.show_scenes_panel) SetPaneShown("scenes", true, false);
 
     p.Show(true);
     switch (slot) {
@@ -1625,6 +1658,7 @@ void HomRecMainFrame::ResetDockLayout() {
     aui_.GetPane("controls").Show(true);
     aui_.GetPane("audio").Show(state_.show_audio_panel);
     aui_.GetPane("overlays").Show(state_.show_overlays_panel);
+    aui_.GetPane("scenes").Show(state_.show_scenes_panel);
     ApplyUiLock();   // re-applies pane flags + Update()
     PersistSettings();
 }
@@ -1642,6 +1676,8 @@ void HomRecMainFrame::ApplyLanguageText() {
         aui_.GetPane("audio").Caption(wxString::FromUTF8(lang_.Get("audio_mixer")));
         aui_.GetPane("overlays").Caption(wxString::FromUTF8(lang_.Get("layers_panel")));
         if (overlays_panel_) overlays_panel_->Refresh();     // row texts (language) - keeps selection and scroll
+        aui_.GetPane("scenes").Caption(wxString::FromUTF8(lang_.Get("scenes_panel")));
+        if (scenes_panel_) scenes_panel_->Reload();          // tooltips (language)
         aui_.Update();
     }
 
@@ -1874,6 +1910,8 @@ void HomRecMainFrame::HandleRecordingCrashed() {
 
     recording_crashed_pending_notice_ = true;
     recording_restart_after_crash_ = rec_ && rec_->crash_was_ddagrab();
+    recording_codec_fallback_restart_ = rec_ && !recording_restart_after_crash_ &&
+                                        rec_->crash_needs_codec_fallback();
     rec_->StopAsync([this]() {
         CallAfter([this]() { OnRecordingFinalized(); });
     });
@@ -1896,6 +1934,24 @@ void HomRecMainFrame::OnRecordingFinalized() {
     // they'd clicked Stop themselves.
     if (recording_crashed_pending_notice_) {
         recording_crashed_pending_notice_ = false;
+        if (recording_codec_fallback_restart_) {
+            // The hardware encoder died in the first seconds - retry this recording once with
+            // libx264 instead of leaving the user with a crash (RecordingController's
+            // crash_needs_codec_fallback()).
+            recording_codec_fallback_restart_ = false;
+            HrLog::Warn("Recording: the hardware encoder stopped in the first seconds - the part captured so "
+                        "far was saved; continuing in a NEW file with software libx264.");
+            rec_->ForceSoftwareEncoder();
+            CallAfter([this]() {
+                if (state_.recording) return;
+                DoStart();
+                if (state_.recording)
+                    SetStatusState(wxString::FromUTF8("\u26A0 Hardware encoder failed \u2014 recording continues "
+                                                      "with software libx264"),
+                                   theme_.warning);
+            });
+            return;   // no summary popup in between
+        }
         if (recording_restart_after_crash_) {
             // Full-GPU (ddagrab) capture died - typically because a game switched the display mode (or
             // went fullscreen) while recording.
@@ -2286,29 +2342,6 @@ void HomRecMainFrame::RunSourceAction(int action) {
     if (overlays_panel_) overlays_panel_->RefreshSourceRow();
 }
 
-void HomRecMainFrame::FillScenesMenu() {
-    if (!scenes_menu_) return;
-    while (scenes_menu_->GetMenuItemCount() > 0)
-        scenes_menu_->Destroy(scenes_menu_->FindItemByPosition(0));
-
-    const size_t max_scenes = (size_t)(ID_SCENE_LAST - ID_SCENE_FIRST) + 1;
-    auto label = [](const std::string &name) { return wxControl::EscapeMnemonics(wxString::FromUTF8(name.c_str())); };
-    for (size_t i = 0; i < state_.scenes.size() && i < max_scenes; ++i) {
-        wxMenuItem *it = scenes_menu_->AppendRadioItem(ID_SCENE_FIRST + (int)i, label(state_.scenes[i].name));
-        if (state_.scenes[i].id == state_.active_scene_id) it->Check(true);
-    }
-    scenes_menu_->AppendSeparator();
-    scenes_menu_->Append(ID_SCENE_NEW, "New scene...");
-    scenes_menu_->Append(ID_SCENE_DUPLICATE, "Duplicate current scene...");
-    scenes_menu_->Append(ID_SCENE_RENAME, "Rename current scene...");
-    auto *del = new wxMenu();
-    for (size_t i = 0; i < state_.scenes.size() && i < max_scenes; ++i)
-        if (state_.scenes[i].id != state_.active_scene_id) del->Append(ID_SCENE_DELETE_FIRST + (int)i, label(state_.scenes[i].name));
-    const bool any_deletable = del->GetMenuItemCount() > 0;
-    wxMenuItem *del_item = scenes_menu_->AppendSubMenu(del, "Delete scene");
-    del_item->Enable(any_deletable);
-}
-
 void HomRecMainFrame::SwitchToScene(const std::string &id) {
     if (id == state_.active_scene_id) return;
     if (state_.recording && rec_ && rec_->PlainDdagrabActive()) {
@@ -2321,13 +2354,13 @@ void HomRecMainFrame::SwitchToScene(const std::string &id) {
     if (preview_panel_) preview_panel_->FlushOverlaySave();
     if (!HrcConfig::SwitchScene(state_, id)) {
         wxMessageBox("Couldn't switch the scene: its file is missing or can't be read.", "HomRec", wxOK | wxICON_WARNING, this);
-        FillScenesMenu();
+        if (scenes_panel_) scenes_panel_->Reload();
         return;
     }
     if (preview_panel_) preview_panel_->ClearOverlaySelection();
     if (overlays_panel_) overlays_panel_->Refresh();
     if (rec_) rec_->SyncOverlays();   // hands the new list to the running pipeline; nothing is restarted
-    FillScenesMenu();
+    if (scenes_panel_) scenes_panel_->Reload();
     const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     std::string name = id;
     for (const auto &sc : state_.scenes) if (sc.id == id) name = sc.name;
@@ -2335,54 +2368,72 @@ void HomRecMainFrame::SwitchToScene(const std::string &id) {
                 " ms (file load + list swap on the UI thread; pictures are decoded afterwards on the capture thread if they are not cached)");
 }
 
-void HomRecMainFrame::OnSceneMenu(wxCommandEvent &evt) {
-    const int id = evt.GetId();
-    const size_t max_scenes = (size_t)(ID_SCENE_LAST - ID_SCENE_FIRST) + 1;
-    if (id >= ID_SCENE_FIRST && id <= ID_SCENE_LAST) {
-        const size_t i = (size_t)(id - ID_SCENE_FIRST);
-        if (i < state_.scenes.size()) SwitchToScene(state_.scenes[i].id);
+void HomRecMainFrame::SceneNew() {
+    wxTextEntryDialog dlg(this, "Scene name:", "New scene", "Scene " + wxString::Format("%d", (int)state_.scenes.size() + 1));
+    if (dlg.ShowModal() != wxID_OK) return;
+    if (preview_panel_) preview_panel_->FlushOverlaySave();
+    const std::string nid = HrcConfig::AddScene(state_, dlg.GetValue().ToUTF8().data(), false);
+    if (nid.empty()) {
+        wxMessageBox("Couldn't create the scene.", "HomRec", wxOK | wxICON_WARNING, this);
         return;
     }
-    if (id >= ID_SCENE_DELETE_FIRST && id <= ID_SCENE_DELETE_LAST) {
-        const size_t i = (size_t)(id - ID_SCENE_DELETE_FIRST);
-        if (i >= state_.scenes.size() || i >= max_scenes) return;
-        const SceneInfo sc = state_.scenes[i];
-        if (wxMessageBox("Delete the scene \"" + wxString::FromUTF8(sc.name.c_str()) + "\"? Its overlays are lost.",
-                         "HomRec", wxYES_NO | wxICON_QUESTION, this) != wxYES) return;
-        HrcConfig::DeleteScene(state_, sc.id);
-        FillScenesMenu();
+    if (scenes_panel_) scenes_panel_->Reload();
+    if (!state_.recording) SwitchToScene(nid);   // while recording, the new scene is only added: picking it changes the video
+}
+
+void HomRecMainFrame::SceneDuplicate(const std::string &id) {
+    wxString cur;
+    for (const auto &sc : state_.scenes) if (sc.id == id) cur = wxString::FromUTF8(sc.name.c_str()) + " 2";
+    wxTextEntryDialog dlg(this, "Scene name:", "Duplicate scene", cur);
+    if (dlg.ShowModal() != wxID_OK) return;
+    if (preview_panel_) preview_panel_->FlushOverlaySave();
+    const std::string nid = HrcConfig::CopyScene(state_, id, dlg.GetValue().ToUTF8().data());
+    if (nid.empty()) {
+        wxMessageBox("Couldn't create the scene.", "HomRec", wxOK | wxICON_WARNING, this);
         return;
     }
-    if (id == ID_SCENE_NEW || id == ID_SCENE_DUPLICATE) {
-        wxTextEntryDialog dlg(this, "Scene name:", id == ID_SCENE_NEW ? "New scene" : "Duplicate scene",
-                              "Scene " + wxString::Format("%d", (int)state_.scenes.size() + 1));
-        if (dlg.ShowModal() != wxID_OK) return;
-        if (preview_panel_) preview_panel_->FlushOverlaySave();
-        const std::string nid = HrcConfig::AddScene(state_, dlg.GetValue().ToUTF8().data(), id == ID_SCENE_DUPLICATE);
-        if (nid.empty()) {
-            wxMessageBox("Couldn't create the scene.", "HomRec", wxOK | wxICON_WARNING, this);
-            return;
-        }
-        FillScenesMenu();
-        if (!state_.recording) SwitchToScene(nid);   // while recording, the new scene is only added: picking it changes the video
+    if (scenes_panel_) scenes_panel_->Reload();
+    if (!state_.recording) SwitchToScene(nid);
+}
+
+void HomRecMainFrame::SceneRename(const std::string &id) {
+    wxString cur;
+    for (const auto &sc : state_.scenes) if (sc.id == id) cur = wxString::FromUTF8(sc.name.c_str());
+    wxTextEntryDialog dlg(this, "Scene name:", "Rename scene", cur);
+    if (dlg.ShowModal() != wxID_OK) return;
+    HrcConfig::RenameScene(state_, id, dlg.GetValue().ToUTF8().data());
+    if (scenes_panel_) scenes_panel_->Reload();
+}
+
+void HomRecMainFrame::SceneDelete(const std::string &id) {
+    if (id == state_.active_scene_id) {
+        wxMessageBox("This scene is in use. Switch to another scene first.", "HomRec", wxOK | wxICON_INFORMATION, this);
         return;
     }
-    if (id == ID_SCENE_RENAME) {
-        wxString cur;
-        for (const auto &sc : state_.scenes) if (sc.id == state_.active_scene_id) cur = wxString::FromUTF8(sc.name.c_str());
-        wxTextEntryDialog dlg(this, "Scene name:", "Rename scene", cur);
-        if (dlg.ShowModal() != wxID_OK) return;
-        HrcConfig::RenameScene(state_, state_.active_scene_id, dlg.GetValue().ToUTF8().data());
-        FillScenesMenu();
+    if (state_.scenes.size() <= 1) return;
+    std::string name = id;
+    for (const auto &sc : state_.scenes) if (sc.id == id) name = sc.name;
+    if (wxMessageBox("Delete the scene \"" + wxString::FromUTF8(name.c_str()) + "\"? Its overlays are lost.",
+                     "HomRec", wxYES_NO | wxICON_QUESTION, this) != wxYES) return;
+    HrcConfig::DeleteScene(state_, id);
+    if (scenes_panel_) scenes_panel_->Reload();
+}
+
+void HomRecMainFrame::SceneMove(const std::string &id, int delta) {
+    if (!HrcConfig::MoveScene(state_, id, delta)) return;
+    if (scenes_panel_) {
+        // The selection follows the moved row.
+        for (size_t i = 0; i < state_.scenes.size(); ++i) if (state_.scenes[i].id == id) scenes_panel_->Select((int)i);
+        scenes_panel_->Reload();
     }
 }
 
 void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
     const int menu_id = evt.GetId();
     if (menu_id >= ID_VIEW_DOCK_FIRST && menu_id <= ID_VIEW_DOCK_LAST) {
-        static const char *const kPaneNames[3] = { "controls", "audio", "overlays" };
+        static const char *const kPaneNames[4] = { "controls", "audio", "overlays", "scenes" };
         const int p = (menu_id - ID_VIEW_DOCK_FIRST) / 8, sl = (menu_id - ID_VIEW_DOCK_FIRST) % 8;
-        if (p >= 0 && p < 3 && sl >= 0 && sl <= kDockFloat) DockPaneTo(kPaneNames[p], (DockSlot)sl);
+        if (p >= 0 && p < 4 && sl >= 0 && sl <= kDockFloat) DockPaneTo(kPaneNames[p], (DockSlot)sl);
         return;
     }
     switch (menu_id) {
@@ -2463,6 +2514,9 @@ void HomRecMainFrame::OnMenu(wxCommandEvent &evt) {
             break;
         case ID_VIEW_AUDIO_PANEL:
             SetPaneShown("audio", !state_.show_audio_panel, true);
+            break;
+        case ID_VIEW_SCENES_PANEL:
+            SetPaneShown("scenes", !state_.show_scenes_panel, true);
             break;
         case ID_VIEW_PC_ANALYTICS: ShowPcAnalyticsDialog(GetHWND(), wxGetInstance(), state_.output_folder); break;
         case ID_VIEW_LOG: ShowLogViewerDialog(GetHWND(), wxGetInstance()); break;

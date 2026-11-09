@@ -15,6 +15,7 @@
 #include "audio_panel.h"
 #include "console_window.h"
 #include "overlays_dock_panel.h"
+#include "scenes_panel.h"
 #include "../plugins/lua_engine.h"
 
 // Menu/control IDs - kept identical to the old main_window.h enum so every
@@ -49,6 +50,7 @@ enum MenuCommandId {
     ID_FILE_OPEN_PROGRAM_FILES = 1027,
     ID_FILE_IMPORT_HRP      = 1028,
     ID_FILE_SELECT_REGION   = 1029,
+    ID_VIEW_SCENES_PANEL    = 1033,
     // 2.4 - panel docking (View menu). ID_VIEW_DOCK_FIRST + pane * 8 + slot.
     ID_VIEW_LOCK_UI         = 1034,
     ID_FILE_FULL_DESKTOP    = 1035,
@@ -56,14 +58,6 @@ enum MenuCommandId {
     ID_PREVIEW_TOGGLE_BTN   = 1037,
     ID_VIEW_DOCK_FIRST      = 1040,
     ID_VIEW_DOCK_LAST       = 1069,
-    // Scenes menu: ID_SCENE_FIRST + i switches to scene i, ID_SCENE_DELETE_FIRST + i deletes it (64 scenes at most).
-    ID_SCENE_NEW            = 1070,
-    ID_SCENE_DUPLICATE      = 1071,
-    ID_SCENE_RENAME         = 1072,
-    ID_SCENE_FIRST          = 1100,
-    ID_SCENE_LAST           = 1163,
-    ID_SCENE_DELETE_FIRST   = 1200,
-    ID_SCENE_DELETE_LAST    = 1263,
 };
 
 // ColorButton and StatusDot moved to themed_widgets.h/.cpp so audio_panel
@@ -168,10 +162,14 @@ public:
 
 private:
     void BuildMenuBar();
-    void FillScenesMenu();                         // (re)builds the Scenes menu from state_.scenes
+    void BuildScenesPanel(wxWindow *parent);       // the Scenes dock panel (scenes_panel.h)
     void SwitchToScene(const std::string &id);
-    void OnSceneMenu(wxCommandEvent &evt);
-    wxMenu *scenes_menu_ = nullptr;
+    void SceneNew();
+    void SceneDuplicate(const std::string &id);
+    void SceneRename(const std::string &id);
+    void SceneDelete(const std::string &id);
+    void SceneMove(const std::string &id, int delta);
+    ScenesPanel *scenes_panel_ = nullptr;          // owned by its wx parent (the dock host)
     void BuildLeftPanel(wxWindow *parent, wxSizer *parentSizer);
     void BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer);
     void BuildBottomBar(wxWindow *parent, wxSizer *parentSizer);
@@ -250,6 +248,10 @@ private:
     // The crash was the full-GPU (ddagrab) ffmpeg dying (e.g. a game changed the display mode): once the
     // interrupted recording is finalized, a new one is started right away with the normal pipeline.
     bool recording_restart_after_crash_ = false;
+    // The crash was an early failure of the hardware encoder: once the interrupted recording is
+    // finalized, a new one is started right away with software libx264 (see RecordingController's
+    // crash_needs_codec_fallback()).
+    bool recording_codec_fallback_restart_ = false;
     void SetStatusState(const wxString &text, COLORREF dotColor);
     void ToggleFullscreenNative();
     // Un-minimizes + un-hides the window from the tray, in that order -
