@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Anything that is not Windows (i.e. Linux) is built by cmake/LinuxPort.cmake and stops here:
-# the rest of this file is the Windows build (hr.exe / hom.exe / homrec.exe) and needs windres, wxMSW, the
+# the rest of this file is the Windows build (hr.exe / homrec.exe) and needs windres, wxMSW, the
 # Windows SDK import libraries ... none of which exist elsewhere. See docs/LINUX_PORT_PLAN.md.
 if(NOT WIN32)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/LinuxPort.cmake)
@@ -15,9 +15,9 @@ endif()
 
 # The Windows build (CMake is the only build system now - the old Makefile is gone).
 #
-#   cmake -S . -B build -G "MinGW Makefiles"            (MSYS2 MINGW64 shell)
-#   cmake --build build -j                              -> hr.exe, hom.exe, homrec.exe in the repo root
-#   cmake --build build --target hr                     just hr.exe (also: hom, homrec)
+#   cmake -S . -B build -G "MinGW Makefiles"            (MSYS2 UCRT64 shell)
+#   cmake --build build -j                              -> hr.exe and homrec.exe in the repo root
+#   cmake --build build --target hr                     just hr.exe (also: homrec)
 #   cmake -S . -B build -DHOMREC_BUILD_TESTS=ON         + unit tests (ctest --test-dir build) and the bench target
 #
 # When you add or remove a source file, update the lists below (HR_SOURCES / homrec).
@@ -27,14 +27,36 @@ endif()
 #   cmake -S . -B build -DLUA_INCLUDE_DIR=D:/lua/include -DLUA_LIB_DIR=D:/lua/lib
 set(LUA_INCLUDE_DIR "C:/lua54/include" CACHE PATH "Lua headers")
 set(LUA_LIB_DIR     "C:/lua54/lib"     CACHE PATH "Lua import lib dir")
-set(WX_INCLUDE_DIR  "C:/msys64/mingw64/lib/wx/include/msw-unicode-3.2" CACHE PATH "wx build-specific headers")
-set(WX_INCLUDE_DIR2 "C:/msys64/mingw64/include/wx-3.2" CACHE PATH "wx headers")
-set(WX_LIB_DIR      "C:/msys64/mingw64/lib" CACHE PATH "wx/mingw64 lib dir")
+# wxWidgets and the C++ runtime must come from the SAME MSYS2 environment as the compiler.
+# Mixing .../mingw64 (MSVCRT) with .../ucrt64 (UCRT) headers and import libraries produces
+# link errors like undefined `__imp__snprintf_s`, `vswprintf_s` or `std::istream::seekg(fpos)`.
+# Derive the prefix from the compiler CMake picked, so C:/msys64/ucrt64/bin/c++.exe uses
+# C:/msys64/ucrt64 (the environment the shipped DLLs and C:/lua54 are built for).
+set(HOMREC_MSYS_PREFIX "C:/msys64/ucrt64")
+if(CMAKE_CXX_COMPILER MATCHES "^(.*)/bin/c\\+\\+\\.exe$")
+    set(HOMREC_MSYS_PREFIX "${CMAKE_MATCH_1}")
+endif()
+set(WX_INCLUDE_DIR  "${HOMREC_MSYS_PREFIX}/lib/wx/include/msw-unicode-3.2" CACHE PATH "wx build-specific headers")
+set(WX_INCLUDE_DIR2 "${HOMREC_MSYS_PREFIX}/include/wx-3.2" CACHE PATH "wx headers")
+set(WX_LIB_DIR      "${HOMREC_MSYS_PREFIX}/lib" CACHE PATH "wx + MinGW runtime lib dir")
+if(WX_INCLUDE_DIR AND NOT WX_INCLUDE_DIR MATCHES "^${HOMREC_MSYS_PREFIX}/")
+    message(WARNING
+        "WX_INCLUDE_DIR=${WX_INCLUDE_DIR} is outside the compiler's MSYS2 prefix "
+        "(${HOMREC_MSYS_PREFIX}). Mixing mingw64 and ucrt64 normally fails to link - "
+        "reconfigure with --fresh (and without old -DWX_* values) to let the defaults follow the compiler.")
+endif()
+if(NOT EXISTS "${WX_INCLUDE_DIR2}/wx/wx.h")
+    message(WARNING
+        "wxWidgets headers not found at ${WX_INCLUDE_DIR2}. The shipped DLLs and C:/lua54 are UCRT64: "
+        "build from the MSYS2 UCRT64 shell with mingw-w64-ucrt-x86_64-wxwidgets3.2-msw installed, "
+        "or point -DWX_INCLUDE_DIR/-DWX_INCLUDE_DIR2/-DWX_LIB_DIR at a wxWidgets built the same way as the compiler.")
+endif()
 
 enable_language(RC)
 
-# hr.exe / hom.exe / homrec.exe land in the repo root, like they always did: installer/HomRec.iss and
-# tools/homrec_build.py pick them up from there. -DHR_EXE_IN_ROOT=OFF keeps them in the build folder.
+# hr.exe / homrec.exe land in the repo root, like they always did: installer/HomRec.iss and
+# tools/homrec_build.py pick them up from there (hom.exe is not built here any more: it comes from
+# github.com/homaaio/hom/releases - drop it in the repo root to bundle it). -DHR_EXE_IN_ROOT=OFF keeps them in the build folder.
 option(HR_EXE_IN_ROOT "Put the .exe files in the source folder instead of the build folder" ON)
 if(HR_EXE_IN_ROOT)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
@@ -73,6 +95,7 @@ set(HR_SOURCES
     src/ui/capture_source_dialog.cpp
     src/ui/hide_window_dialog.cpp
     src/ui/overlays_dock_panel.cpp
+    src/ui/scenes_panel.cpp
     src/ui/overlay_editor_dialog.cpp
     src/utils/log.cpp
     src/utils/log_paths.cpp
@@ -150,6 +173,12 @@ target_link_options(hr PRIVATE
     -Wl,-Map=${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/hr.map
 )
 
+# hr.exe may still be running (the app lives in the tray) and Windows refuses to overwrite a running exe:
+# ld then exits with "returned 5" (ERROR_ACCESS_DENIED). A running exe can be renamed, so move it aside first.
+add_custom_command(TARGET hr PRE_LINK
+    COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:hr> -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/free_exe.cmake
+    VERBATIM)
+
 target_link_libraries(hr PRIVATE
     comctl32 comdlg32 gdi32 shell32 user32 psapi wininet winhttp
     d3d11 dxgi pdh winmm ole32 uuid lua dwmapi uxtheme
@@ -158,21 +187,6 @@ target_link_libraries(hr PRIVATE
     wx_mswu_aui-3.2 wx_mswu_xrc-3.2 wx_mswu_html-3.2 wx_mswu_qa-3.2
     wx_mswu_core-3.2 wx_baseu_xml-3.2 wx_baseu_net-3.2 wx_baseu-3.2
 )
-
-# hom.exe - standalone plugin-manager CLI tool. Deliberately NOT municode
-# (plain `main`, not `wWinMain`) and does NOT link wx/Lua - see the comment
-# below explaining why it has its own flag set (plain narrow main, no wx / Lua).
-add_executable(hom tools/hom/hom.cpp)
-
-target_compile_features(hom PRIVATE cxx_std_17)
-
-target_compile_options(hom PRIVATE -O2 -Wall -Wextra -static-libgcc -static-libstdc++)
-
-target_compile_definitions(hom PRIVATE UNICODE _UNICODE)
-
-target_link_options(hom PRIVATE -static-libgcc -static-libstdc++)
-
-target_link_libraries(hom PRIVATE winhttp shlwapi dbghelp)
 
 # homrec.exe - standalone command-line interface (tools/homrec). No wx/Lua, and a wide wmain(), so
 # it IS built with -municode. 'homrec start' records with the same RecordingController as hr.exe,
@@ -195,6 +209,7 @@ add_executable(homrec
     src/core/settings_registry.cpp
     src/core/tools.cpp
     src/core/webcam_capture.cpp
+    src/core/webcam_enum.cpp
     src/core/wgc_capture.cpp
     src/ui/hrc_config.cpp
     src/ui/recording_controller.cpp
