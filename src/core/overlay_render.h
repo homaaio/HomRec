@@ -82,6 +82,11 @@ public:
     void CollectGpuLayers(const std::vector<HrOverlayDesc> &overlays, double current_fps,
                           std::vector<HrGpuLayer> &out);
 
+    // Closes every running camera and window capture. The capture thread calls this when the active
+    // overlay list stops drawing anything (e.g. an empty scene): the layer loop is not run then, so
+    // nothing else would close them.
+    void ReleaseLiveSources();
+
 private:
     struct CachedLayer;   // defined below; ForEachLayer() hands them to a callback
     // Shared by Apply()/ApplyNv12(): prunes stale caches, skips overlays that
@@ -151,8 +156,12 @@ private:
         int native_w = 0, native_h = 0;
         bool valid = false;
         bool attempted = false; // see InputOverlayCache::attempted above
+        unsigned long long loaded_seq = 0;   // source_seq_ when it was decoded (eviction order)
     };
-    std::unordered_map<size_t, ImageSourceCache> image_source_cache_;
+    // Keyed by file path, not by overlay position: a scene switch changes which overlay sits at
+    // which position, and the decoded picture of a file used by both scenes must survive it.
+    // Bounded by kSourceCacheBudgetBytes, see TrimSourceCaches().
+    std::unordered_map<std::string, ImageSourceCache> image_source_cache_;
 
     struct GifFrameCache {
         std::vector<uint8_t> bgra; // canvas_w * canvas_h * 4
@@ -165,12 +174,14 @@ private:
         long long total_duration_ms = 0;
         bool valid = false;
         bool attempted = false;
+        unsigned long long loaded_seq = 0;   // see ImageSourceCache::loaded_seq
+        size_t bytes = 0;                    // size of all decoded frames
         // Wall-clock anchor for "what frame is due right now" - set once when the GIF is
         // (re)loaded, not per Apply() call, so the loop plays at its authored speed no matter how
         // often frames get composited.
         std::chrono::steady_clock::time_point start_time;
     };
-    std::unordered_map<size_t, GifSourceCache> gif_cache_;
+    std::unordered_map<std::string, GifSourceCache> gif_cache_;   // keyed by file path, like image_source_cache_
 
     // One live capture session for a "webcam" overlay -- see webcam_capture.h.
     struct WebcamSourceCache {
@@ -213,9 +224,15 @@ private:
     const CachedLayer *GetOrRenderWindow(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *CropFromSource(size_t idx, const HrOverlayDesc &ov);
 
-    // Drops every entry in the six idx-keyed caches above whose idx is no
+    // Drops every entry in the idx-keyed caches above whose idx is no
     // longer in range for `overlay_count` -- called at the top of Apply()
     void PruneStaleCaches(size_t overlay_count);
+
+    // Frees decoded pictures / GIFs that no overlay in `overlays` uses, oldest first, once the
+    // path-keyed caches together exceed kSourceCacheBudgetBytes. Entries the current list uses are
+    // never dropped, so a scene always keeps its own pictures.
+    void TrimSourceCaches(const std::vector<HrOverlayDesc> &overlays);
+    unsigned long long source_seq_ = 0;
 
     const CachedLayer *GetOrRenderText(size_t idx, const HrOverlayDesc &ov);
     const CachedLayer *GetOrRenderImage(size_t idx, const HrOverlayDesc &ov);

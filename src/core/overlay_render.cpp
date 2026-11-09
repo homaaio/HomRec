@@ -15,6 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <unordered_set>
 #include <vector>
 #include "wgc_capture.h"   // 8th pass: window layers that capture the window itself (after NOMINMAX above)
 
@@ -557,12 +558,13 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderImage(size_t
                       std::strncmp(snap.image_path, ov.image_path, sizeof(snap.image_path)) == 0;
     auto it0 = cache_.find(idx);
     if (unchanged && it0 != cache_.end()) return &it0->second;
-    ImageSourceCache &src = image_source_cache_[idx];
+    ImageSourceCache &src = image_source_cache_[ov.image_path];
     bool path_changed = src.path != ov.image_path;
     if (path_changed || (!src.valid && !src.attempted)) {
         src.path = ov.image_path;
         src.valid = false;
         src.attempted = true;
+        src.loaded_seq = ++source_seq_;
 
         int wlen = MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, nullptr, 0);
         if (wlen > 1) {
@@ -607,14 +609,16 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderImage(size_t
 
 const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderGif(size_t idx, const HrOverlayDesc &ov) {
 #ifdef _WIN32
-    GifSourceCache &src = gif_cache_[idx];
+    GifSourceCache &src = gif_cache_[ov.image_path];
     bool path_changed = src.path != ov.image_path;
     if (path_changed || (!src.valid && !src.attempted)) {
         src.path = ov.image_path;
         src.valid = false;
         src.attempted = true;
+        src.loaded_seq = ++source_seq_;
         src.frames.clear();
         src.total_duration_ms = 0;
+        src.bytes = 0;
 
         int wlen = MultiByteToWideChar(CP_UTF8, 0, ov.image_path, -1, nullptr, 0);
         if (wlen > 1) {
@@ -631,6 +635,7 @@ const OverlayCompositor::CachedLayer *OverlayCompositor::GetOrRenderGif(size_t i
                     gc.bgra = std::move(f.bgra);
                     gc.delay_ms = f.delay_ms;
                     src.total_duration_ms += gc.delay_ms;
+                    src.bytes += gc.bgra.size();
                     src.frames.push_back(std::move(gc));
                 }
                 src.valid = !src.frames.empty() && src.total_duration_ms > 0;
@@ -991,10 +996,47 @@ void OverlayCompositor::PruneStaleCaches(size_t overlay_count) {    auto prune =
     prune(snapshots_);
     prune(cache_);
     prune(input_cache_);
-    prune(image_source_cache_);
-    prune(gif_cache_);
     prune(webcam_cache_);
     prune(window_cache_);
+}
+
+void OverlayCompositor::ReleaseLiveSources() {
+    webcam_cache_.clear();
+    window_cache_.clear();
+}
+
+// Decoded pictures and GIFs of all scenes together may use this much; the pictures of the overlays
+// that are in the list right now do not count against it (they are never dropped).
+static constexpr size_t kSourceCacheBudgetBytes = 128u * 1024u * 1024u;
+
+void OverlayCompositor::TrimSourceCaches(const std::vector<HrOverlayDesc> &overlays) {
+    size_t total = 0;
+    for (const auto &e : image_source_cache_) total += e.second.native_bgra.size();
+    for (const auto &e : gif_cache_) total += e.second.bytes;
+    if (total <= kSourceCacheBudgetBytes) return;
+
+    std::unordered_set<std::string> in_use;
+    for (const auto &ov : overlays) {
+        if (std::strcmp(ov.type, "image") == 0 || std::strcmp(ov.type, "gif") == 0) in_use.insert(ov.image_path);
+    }
+    while (total > kSourceCacheBudgetBytes) {
+        // oldest decoded entry that the current overlay list does not use
+        bool is_gif = false;
+        std::string victim;
+        unsigned long long best = ~0ull;
+        for (const auto &e : image_source_cache_)
+            if (e.second.loaded_seq < best && !in_use.count(e.first)) { best = e.second.loaded_seq; victim = e.first; is_gif = false; }
+        for (const auto &e : gif_cache_)
+            if (e.second.loaded_seq < best && !in_use.count(e.first)) { best = e.second.loaded_seq; victim = e.first; is_gif = true; }
+        if (best == ~0ull) return;   // everything left is in use
+        if (is_gif) {
+            total -= gif_cache_[victim].bytes;
+            gif_cache_.erase(victim);
+        } else {
+            total -= image_source_cache_[victim].native_bgra.size();
+            image_source_cache_.erase(victim);
+        }
+    }
 }
 
 void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays, double current_fps,
@@ -1057,6 +1099,28 @@ void OverlayCompositor::ForEachLayer(const std::vector<HrOverlayDesc> &overlays,
             }
         }
     }
+
+    // A scene switch can put another kind of overlay at a position that used to hold a webcam or a
+    // window layer. Its camera / window capture must stop then, not keep running behind it.
+    for (auto it = webcam_cache_.begin(); it != webcam_cache_.end();) {
+        const size_t i = it->first;
+        const bool used = i < overlays.size() && HrOverlayDrawsAnything(overlays[i]) &&
+                          std::strcmp(overlays[i].type, "webcam") == 0;
+        it = used ? std::next(it) : webcam_cache_.erase(it);
+    }
+    for (auto it = window_cache_.begin(); it != window_cache_.end();) {
+        const size_t i = it->first;
+        const bool used = i < overlays.size() && HrOverlayDrawsAnything(overlays[i]) &&
+                          std::strcmp(overlays[i].type, "window") == 0;
+        it = used ? std::next(it) : window_cache_.erase(it);
+    }
+    // Same for the keyboard / mouse layout and spritesheet.
+    for (auto it = input_cache_.begin(); it != input_cache_.end();) {
+        const size_t i = it->first;
+        const bool used = i < overlays.size() && std::strcmp(overlays[i].type, "input_overlay") == 0;
+        it = used ? std::next(it) : input_cache_.erase(it);
+    }
+    TrimSourceCaches(overlays);
 }
 
 void OverlayCompositor::Apply(uint8_t *base_bgra, int base_w, int base_h, int base_stride,
