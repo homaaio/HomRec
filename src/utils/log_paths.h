@@ -5,6 +5,10 @@
 #include <vector>
 
 namespace HrLogPaths {
+    // Puts every log of this process into <exe>\logs\<sub> instead of <exe>\logs (homrec.exe uses "cli").
+    // Call it once at startup, before any thread logs. An empty string restores the default folder.
+    void SetLogsSubdir(const std::wstring &sub);
+
     std::wstring LogsDir();
 
     // LogsDir() + "\" + filename. Does NOT sanitize filename - callers

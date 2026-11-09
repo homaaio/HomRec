@@ -17,10 +17,18 @@ std::wstring ExeDir() {
 
 namespace HrLogPaths {
 
+static std::wstring g_logs_subdir;   // set once at startup by SetLogsSubdir(), read-only afterwards
+
+void SetLogsSubdir(const std::wstring &sub) { g_logs_subdir = sub; }
+
 std::wstring LogsDir() {
     std::wstring dir = ExeDir() + L"\\logs";
     // Best-effort: if this fails (e.g.
     CreateDirectoryW(dir.c_str(), nullptr);
+    if (!g_logs_subdir.empty()) {
+        dir += L"\\" + g_logs_subdir;
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
     return dir;
 }
 
