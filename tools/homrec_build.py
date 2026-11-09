@@ -164,29 +164,7 @@ ALWAYS_SKIP_DIRS = {".git", "__pycache__", "dist", "build", "Build", ".github", 
 ALWAYS_SKIP_SUFFIXES = (".o", ".obj", ".pdb", ".log")
 ALWAYS_SKIP_FILES = {
     "homrec.hrc", "homrec_settings.json", "homrec_overlays.hrc",
-    "hr.map", "desktop.ini", "Thumbs.db", ".DS_Store",
 }
-
-# Runtime/output folders that must never end up in a source release.
-SOURCE_SKIP_DIRS = {
-    "recordings",   # captured videos
-    "crashes",      # crash dumps
-    ".vscode",      # editor state
-    ".claude",
-    ".idea",
-}
-
-# Binaries and media don't belong in the source archive. Filtering by suffix
-# (instead of only at the repo root) keeps e.g. ffmpeg/ffmpeg_runner.cpp while
-# dropping ffmpeg/ffmpeg.exe.
-SOURCE_SKIP_SUFFIXES = ALWAYS_SKIP_SUFFIXES + (
-    ".exe", ".dll", ".com", ".msi", ".lib", ".a", ".so", ".dylib", ".dmp",
-    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".mp3", ".wav", ".flac",
-)
-
-def _is_build_dir(name):
-    """True for build trees such as build, build-linux, build_release."""
-    return name in ("build", "Build") or name.lower().startswith(("build-", "build_"))
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -351,8 +329,8 @@ def step_build():
     hr_exe = os.path.join(REPO_ROOT, "hr.exe")
     hom_exe = os.path.join(REPO_ROOT, "hom.exe")
 
-    if ask_yes_no("Rebuild hr.exe and hom.exe now "
-                  "(clean cmake build of hr, hom and homrec, in MSYS2 MINGW64)?"):
+    if ask_yes_no("Rebuild hr.exe and homrec.exe now "
+                  "(clean cmake build of hr and homrec, in MSYS2 MINGW64)?"):
         # Same Lua paths CMakeLists.txt defaults to - overridable via env vars
         # for anyone whose lua54 is not installed at C:/lua54.
         lua_inc = os.environ.get("LUA_INCLUDE_DIR", "C:/lua54/include")
@@ -366,7 +344,7 @@ def step_build():
         ok = run_in_mingw64(make_cmd, REPO_ROOT)
         if not ok:
             error("build finished with an error")
-            if not ask_yes_no("Continue with the old hr.exe/hom.exe (if any)?",
+            if not ask_yes_no("Continue with the old hr.exe (if any)?",
                               default_yes=False):
                 sys.exit(1)
 
@@ -374,7 +352,8 @@ def step_build():
         warn("hr.exe not found in the repo root - the 'full' and "
              "'portable' presets will be built without it if you continue.")
     if not os.path.isfile(hom_exe):
-        warn("hom.exe not found - it will be skipped in the archives if you continue.")
+        warn("hom.exe not found in the repo root - get it from github.com/homaaio/hom/releases "
+             "(it is not built here any more); it will be skipped in the archives if you continue.")
 
     return (hr_exe if os.path.isfile(hr_exe) else None,
             hom_exe if os.path.isfile(hom_exe) else None)
@@ -428,23 +407,13 @@ def discover_root_dlls():
         if f.lower().endswith(".dll") and os.path.isfile(os.path.join(REPO_ROOT, f))
     )
 
-def iter_tree(root_dir, arc_prefix="", skip_dirs=None, skip_suffixes=None,
-              skip_files=None):
+def iter_tree(root_dir, arc_prefix=""):
     """Yield (abs_path, arcname) for every file under root_dir, skipping
-    build artifacts and VCS metadata.
-
-    The skip_* arguments default to the ALWAYS_SKIP_* sets; source archives
-    pass their own, narrower file-type filters so nested binaries and media
-    are dropped too.
-    """
-    skip_dirs = ALWAYS_SKIP_DIRS if skip_dirs is None else skip_dirs
-    skip_suffixes = ALWAYS_SKIP_SUFFIXES if skip_suffixes is None else skip_suffixes
-    skip_files = ALWAYS_SKIP_FILES if skip_files is None else skip_files
+    build artifacts and VCS metadata."""
     for dirpath, dirnames, filenames in os.walk(root_dir):
-        dirnames[:] = [d for d in dirnames
-                       if d not in skip_dirs and not _is_build_dir(d)]
+        dirnames[:] = [d for d in dirnames if d not in ALWAYS_SKIP_DIRS]
         for fname in filenames:
-            if fname.endswith(tuple(skip_suffixes)) or fname in skip_files:
+            if fname.endswith(ALWAYS_SKIP_SUFFIXES) or fname in ALWAYS_SKIP_FILES:
                 continue
             abs_path = os.path.join(dirpath, fname)
             rel = os.path.relpath(abs_path, root_dir)
@@ -481,20 +450,13 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
                 files.extend(iter_tree(p, arc_prefix=d))
 
     elif preset == "source":
-        skip_dirs = ALWAYS_SKIP_DIRS | SOURCE_SKIP_DIRS
         for entry in sorted(os.listdir(REPO_ROOT)):
-            if (entry in skip_dirs or entry in ALWAYS_SKIP_FILES
-                    or _is_build_dir(entry)):
+            if entry in ALWAYS_SKIP_DIRS or entry == "dist" or entry in ALWAYS_SKIP_FILES:
                 continue
             abs_path = os.path.join(REPO_ROOT, entry)
             if os.path.isdir(abs_path):
-                files.extend(iter_tree(
-                    abs_path,
-                    arc_prefix=entry,
-                    skip_dirs=skip_dirs,
-                    skip_suffixes=SOURCE_SKIP_SUFFIXES,
-                ))
-            elif not abs_path.lower().endswith(SOURCE_SKIP_SUFFIXES):
+                files.extend(iter_tree(abs_path, arc_prefix=entry))
+            elif not abs_path.endswith((".exe", ".dll") + ALWAYS_SKIP_SUFFIXES):
                 files.append((abs_path, entry))
 
     return files
