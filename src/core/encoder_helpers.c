@@ -138,7 +138,7 @@ typedef struct {
     int crr, crg, crb;  /* Cr coefficients                               */
 } HrCsc;
 
-static const HrCsc k_csc_full = {
+__attribute__((unused)) static const HrCsc k_csc_full = {   /* full range; no converter uses it since I420 went to studio range */
     19595, 38470, 7471, 0,
     -11059, -21709, 32768,
      32768, -27439, -5329
@@ -448,13 +448,12 @@ static void hr_csc_band(
  * the pitch of the big frame. This is what lets the capture loop crop without first copying the
  * rectangle into a packed buffer. The output is always tightly packed (width x height). */
 
-/* Planar I420, full/PC range - software encoders (libx264/libx265). */
 HR_EXPORT void hr_bgra_to_yuv420p_band_s(
     const uint8_t * HR_RESTRICT bgra, size_t stride,
     uint8_t       * HR_RESTRICT yuv_out,
     int width, int height, int y0, int y1)
 {
-    hr_csc_band(bgra, stride, yuv_out, width, height, y0, y1, 0, &k_csc_full);
+    hr_csc_band(bgra, stride, yuv_out, width, height, y0, y1, 0, &k_csc_tv);
 }
 
 HR_EXPORT void hr_bgra_to_yuv420p_band(
@@ -462,7 +461,7 @@ HR_EXPORT void hr_bgra_to_yuv420p_band(
     uint8_t       * HR_RESTRICT yuv_out,
     int width, int height, int y0, int y1)
 {
-    hr_csc_band(bgra, 0, yuv_out, width, height, y0, y1, 0, &k_csc_full);
+    hr_csc_band(bgra, 0, yuv_out, width, height, y0, y1, 0, &k_csc_tv);
 }
 
 HR_EXPORT void hr_bgra_to_yuv420p(
