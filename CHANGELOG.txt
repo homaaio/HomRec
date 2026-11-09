@@ -1,5 +1,42 @@
 welcome to changelog :D
 
+[Unreleased] - 2026-11-11
+Clearer recording errors, and documentation for the common ones.
+
+### Added
+- docs/hr/troubleshooting-recording.md: what each ffmpeg exit code means (-13, -2, -22, -28, -32, -40 and the
+  Windows 0xC000xxxx codes), which encoder to pick for which GPU, how to test an encoder by hand, and what to send
+  with a bug report. Includes the NVENC requirement: driver 570.0 or newer for the current ffmpeg build.
+
+### Added (homrec CLI)
+- First-run setup in the terminal (also `homrec setup`): which config to use, the folder for recordings, video format and
+  fps. It is offered once (`setup_done` in cfg/homrec_cli.cfg), only in a real console, in Russian or English.
+- `homrec overlay list | add | set | show | hide | remove | edit`: overlays of the active scene from the terminal,
+  including an interactive editor. Same scene files as the HomRec window.
+- `homrec` with no arguments in a console opens a small menu (start / overlays / setup).
+- All logs of the CLI go to logs/cli (cli.log plus the engine's own logs).
+- scripts/tests/test_homrec_cli.cpp: tests for the text helpers, the overlay editing rules and the cfg file.
+
+### Changed (homrec CLI)
+- `homrec start` now loads the overlays of the active scene, like the HomRec window does (by the code it did not
+  before). New look: a small start panel, one status line that is redrawn only when its text changes, polled twice a
+  second; the saving bar moves 10 times a second instead of 20. Not measured: how much CPU this saves.
+- cfg/homrec_cli.cfg keeps its other keys when `config change` rewrites it.
+
+### Not checked (homrec CLI)
+- The Windows part of homrec.cpp (menus, raw keys, wizard, recording screen) was only type-checked against stub
+  headers on Linux, not built with MinGW and not run on Windows. The portable parts and the scene save/load were run.
+
+### Changed (hom moved to its own repository)
+- hom (the package manager) moved to its own repository, github.com/homaaio/hom, and is now 0.6.1. Its source,
+  the official package list and the plugins that used to live in Hom/plugins/ went with it; hom.exe now comes from
+  that repo's releases. CMake no longer has a `hom` target; installer/HomRec.iss and tools/homrec_build.py still
+  bundle a hom.exe if one sits in the repo root.
+- Console `hom restore` downloads hom.exe from github.com/homaaio/hom/releases/latest. `hom repo` settings no
+  longer affect it. The console now also asks for `inwid` on `hom set`, `hom install --run` and `hom install --to`.
+- src/ui/console_window.cpp has its own small byte/progress formatters instead of tools/hom/hom_common.h.
+- Hom/ keeps only a notice and version.txt (bridge for hom 0.6.0, whose `hom update` still reads it).
+
 [Version 3.0.3] - 2026-11-07
 
 ### Added
