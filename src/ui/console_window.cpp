@@ -8,7 +8,6 @@
 #include "../utils/log_paths.h"
 #include "../core/settings_registry.h"
 #include "../utils/update.h"
-#include "../../tools/hom/hom_common.h"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -17,6 +16,7 @@
 #include <vector>
 #include <cmath>
 #include <cwchar>
+#include <cstdio>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -122,15 +122,17 @@ bool CommandNeedsInwid(const std::wstring &cmd, const std::wstring &raw) {
         std::wstring sub2;
         iss >> sub2;
         std::transform(sub2.begin(), sub2.end(), sub2.begin(), ::towlower);
-        // "hom repo add/set/remove" decides where plugins AND hom.exe itself
-        // are downloaded from, so it's gated; "hom repo" / "hom repo list" only reads.
+        // "hom repo add/set/remove" decides where packages are downloaded from, so it's
+        // gated; "hom repo" / "hom repo list" only reads.
         if (sub == L"repo") {
             return sub2 == L"add" || sub2 == L"set" || sub2 == L"use" ||
                    sub2 == L"remove" || sub2 == L"rm" || sub2 == L"delete";
         }
         // "update" re-downloads and swaps hom.exe itself, "restore" overwrites it;
-        // "remove"/"purge"/"autoremove" delete plugins.
-        return sub == L"update" || sub == L"remove" || sub == L"uninstall" ||
+        // "remove"/"purge"/"autoremove" delete packages; "set" changes where hom installs to;
+        // --run starts a downloaded installer and --to writes into any folder.
+        if (raw.find(L"--run") != std::wstring::npos || raw.find(L"--to") != std::wstring::npos) return true;
+        return sub == L"set" || sub == L"update" || sub == L"remove" || sub == L"uninstall" ||
                sub == L"purge" || sub == L"autoremove" || sub == L"restore" || sub == L"repair";
     }
     return false;
@@ -280,20 +282,54 @@ bool RunCapturedProcess(const std::wstring &cmdline, const std::wstring &cwd,
     return true;
 }
 
-// Downloads hom.exe again from the active hom repo (cfg\hom_repos.cfg - the same file `hom
-// repo set` writes; "official" when there is none) to <hom_path>.new and moves it into
-// place.
+// hom lives in its own repo now (github.com/homaaio/hom); `hom restore` downloads hom.exe from its
+// latest release. (Same address `hom update` uses, so the two always agree.)
+static const char kHomExeUrl[] = "https://github.com/homaaio/hom/releases/latest/download/hom.exe";
+
+static std::string HomFormatBytes(long long b) {
+    char buf[32];
+    if (b < 0) b = 0;
+    if (b < 1024)                std::snprintf(buf, sizeof(buf), "%lld B", b);
+    else if (b < 1024LL * 1024)  std::snprintf(buf, sizeof(buf), "%.1f KB", b / 1024.0);
+    else                         std::snprintf(buf, sizeof(buf), "%.1f MB", b / (1024.0 * 1024.0));
+    return buf;
+}
+
+// "[#####---------------]  25%  1.0 / 4.0 MB  ~4s" (same look as the bar hom prints itself)
+static std::string HomFormatProgress(int pct, long long received, long long total, int eta_sec) {
+    std::string s;
+    if (pct >= 0 && total > 0) {
+        if (pct > 100) pct = 100;
+        const int width = 20;
+        int filled = pct * width / 100;
+        s += "[";
+        s.append((size_t)filled, '#');
+        s.append((size_t)(width - filled), '-');
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "] %3d%%  ", pct);
+        s += buf;
+        s += HomFormatBytes(received) + " / " + HomFormatBytes(total);
+    } else {
+        s += "downloading...  " + HomFormatBytes(received);
+    }
+    if (eta_sec >= 0) {
+        char buf[32];
+        if (eta_sec >= 60) std::snprintf(buf, sizeof(buf), "  ~%dm %02ds", eta_sec / 60, eta_sec % 60);
+        else               std::snprintf(buf, sizeof(buf), "  ~%ds", eta_sec);
+        s += buf;
+    }
+    return s;
+}
+
+// Downloads hom.exe again from the latest hom release to <hom_path>.new and moves it into place.
 bool RestoreHomExe(const std::wstring &hom_path, const std::wstring &base_dir,
                    const std::atomic<bool> &cancel,
                    const std::function<void(int, std::wstring)> &push) {
-    homcommon::RepoConfig cfg =
-        homcommon::LoadRepoConfig(homcommon::RepoCfgFile(std::filesystem::path(base_dir)));
-    homcommon::Repo repo = homcommon::ActiveRepo(cfg);
-    const std::wstring url = WideFromNarrow(repo.url + "hom.exe");
+    (void)base_dir;
+    const std::wstring url = WideFromNarrow(kHomExeUrl);
     const std::wstring tmp = hom_path + L".new";
 
-    push(1, L"hom: downloading hom.exe from repo '" + WideFromNarrow(repo.name) + L"' (" +
-            WideFromNarrow(repo.url) + L")");
+    push(1, L"hom: downloading hom.exe from " + url);
 
     HrUpdate::DownloadState st;
     std::atomic<bool> done{false};
@@ -325,8 +361,8 @@ bool RestoreHomExe(const std::wstring &hom_path, const std::wstring &base_dir,
         DeleteFileW(tmp.c_str());
         if (!cancel.load()) {
             push(4, L"hom: couldn't download " + url);
-            push(1, L"  check your connection and `hom repo list`, or copy hom.exe next to hr.exe by hand "
-                    L"(it is in the portable archive and in the repo's Hom\\ folder).");
+            push(1, L"  check your connection, or copy hom.exe next to hr.exe by hand "
+                    L"(it is in the portable archive and on github.com/homaaio/hom/releases).");
         }
         return false;
     }
@@ -338,7 +374,7 @@ bool RestoreHomExe(const std::wstring &hom_path, const std::wstring &base_dir,
                 L") - is hom.exe running or is the folder read-only?");
         return false;
     }
-    push(2, L"hom.exe restored (" + WideFromNarrow(homcommon::FormatBytes((long long)st.received.load())) + L")");
+    push(2, L"hom.exe restored (" + WideFromNarrow(HomFormatBytes((long long)st.received.load())) + L")");
     return true;
 }
 
@@ -846,7 +882,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
             bool settingAssignment = !ExtractSettingValue(rest).empty() &&
                                       HrSettingsRegistry::Find(NarrowFromWide(rcmd)) != nullptr;
 
-            // bter's own "inwid" command (Hom/plugins/bter-src/entry.lua's
+            // bter's own "inwid" command (bter plugin, pkgs/src/bter/entry.lua in github.com/homaaio/hom's
             // cmd_inwid) only ever recognizes two subcommands of its own:
             bool bterReserved = (rcmd == L"status" || rcmd == L"settings");
             if (CommandNeedsInwid(rcmd, rest) || settingAssignment || !bterReserved) {
@@ -1584,7 +1620,7 @@ void ConsoleWindow::DrainHomLines() {
                 int pct = -1, eta = -1;
                 long long got = 0, total = 0;
                 is >> pct >> got >> total >> eta;
-                SetProgressLine(L"  " + WideFromNarrow(homcommon::FormatProgress(pct, got, total, eta)));
+                SetProgressLine(L"  " + WideFromNarrow(HomFormatProgress(pct, got, total, eta)));
                 if (total > 0 && got >= total) EndProgressLine();   // finished - whatever comes next is a new line
                 break;
             }
