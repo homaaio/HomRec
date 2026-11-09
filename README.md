@@ -60,7 +60,7 @@ HomRec is currently **Windows-only**: the capture engine uses DXGI/D3D11/Win32. 
 - **Hotkeys** - start/stop, pause/resume, fullscreen toggle, save-replay, all user-rebindable
 - **Presets** - keep several named `.hrc` settings profiles and switch between them (File > Set Preset...), plus Export/Import Settings
 - **Custom languages** - `.hrl` translation files, applied without restarting
-- **Plugin system** - Lua-scripted, filesystem/network access, lifecycle and overlay hooks, plus the `hom` plugin package manager
+- **Plugin system** - Lua-scripted, filesystem/network access, lifecycle and overlay hooks, plus [`hom`](https://github.com/homaaio/hom), a separate package manager for plugins
 - **Console** - built-in command console with optional autorun scripts
 - **GPU-assisted capture** - unchanged desktop frames are skipped, only the changed screen region is read back and re-converted, and with a hardware encoder the D3D11 video processor scales + converts to NV12 on the GPU (Settings > Video > GPU colour conversion). Optional full-GPU capture + encode through ffmpeg 6+ `ddagrab` (experimental; no overlays/plugins/pause) - falls back to the normal pipeline automatically
 - **Performance controls** - live preview can be disabled at the pipeline level (not just hidden in the UI), with independently adjustable preview resolution/FPS when left on
@@ -124,8 +124,8 @@ Point the build at a different location with `-DLUA_INCLUDE_DIR=... -DLUA_LIB_DI
 Build:
 ```bash
 cmake -S . -B build -G "MinGW Makefiles"
-cmake --build build -j                   # hr.exe, hom.exe and homrec.exe, written to the repo root
-cmake --build build --target hr          # only hr.exe (other targets: hom, homrec)
+cmake --build build -j                   # hr.exe and homrec.exe, written to the repo root
+cmake --build build --target hr          # only hr.exe (other target: homrec)
 ```
 
 CMake is the only build system. The paths are cache variables (defaults: MSYS2 at `C:\msys64`, Lua at `C:/lua54`), e.g. `-DLUA_INCLUDE_DIR=D:/lua/include -DLUA_LIB_DIR=D:/lua/lib -DWX_LIB_DIR=...`. `-DHR_LTO=OFF` switches link-time optimisation off if the link is slow or fails, `-DHR_EXE_IN_ROOT=OFF` keeps the .exe files in `build/`. The source files are listed by hand in `CMakeLists.txt` - when you add or remove a `.cpp`, update that list.
@@ -233,7 +233,7 @@ A packaged plugin (`.hrp`, a renamed `.zip`) can be installed by:
 - **File > Import Plugin (.hrp)...** in the app, which loads it without a restart, or
 - `hom install <plugin-name>`, using the `hom` package manager
 
-**`hom`** is a small command-line package manager for `.hrp` plugins (`hom.exe`, kept next to `hr.exe`; prebuilt in [`Hom/`](Hom), or `cmake --build build --target hom`). Besides `install`, it supports `search`, `show`, `list`, `upgrade`, `remove` and `purge`, and can update itself with `hom update`. It also runs inside HomRec's console. See [`Hom/README.md`](Hom/README.md) for the full command list.
+**`hom`** is a separate project: a small package manager for plugins (`.hrp`, `.jar`) and, on its own, also for files, archives and programs. It lives in [github.com/homaaio/hom](https://github.com/homaaio/hom) (source, the official package list, `hom.exe` in the [releases](https://github.com/homaaio/hom/releases)). The installer and the portable archive include `hom.exe` next to `hr.exe`; HomRec's console forwards `hom ...` to it, and `hom restore` downloads it again if it is missing. It supports `install`, `search`, `show`, `list`, `upgrade`, `remove`, `purge` and `update`; plain `hom` in a terminal opens a full-screen package browser. See its README for the commands, package types and where files go.
 
 For the plugin API, see the plugins section of the [documentation page](docs/documentation.html).
 
@@ -251,7 +251,7 @@ For the plugin API, see the plugins section of the [documentation page](docs/doc
 
 | Dependency | Needed for |
 |---|---|
-| MinGW-w64 toolchain (g++, gcc, windres, mingw32-make) | building `hr.exe`, `hom.exe` and `homrec.exe` |
+| MinGW-w64 toolchain (g++, gcc, windres, mingw32-make) | building `hr.exe` and `homrec.exe` |
 | wxWidgets 3.2 (MSW, Unicode, DLL build) | UI - links `aui`, `xrc`, `html`, `qa`, `core`, `base`, `xml`, `net` |
 | Lua 5.4 (headers + library) | plugin host |
 | FFmpeg | runtime encoding (6+ for `ddagrab`) |
@@ -271,8 +271,8 @@ src/
   platform/    OS-neutral interfaces + the Linux groundwork (X11 / Wayland backends to come)
   ui/linux/    the Linux (wxGTK) main window and its small windows (the other src/ui files are shared)
 ffmpeg/        ffmpeg process runner
-Hom/           prebuilt hom.exe and its version file
-tools/         hom source, homrec_build.py, homrec_check.py, hrl_tool.py
+Hom/           only a notice that hom moved (old hom.exe self-update bridge, see Hom/README.md)
+tools/         homrec_build.py, homrec_check.py, hrl_tool.py
 installer/     Inno Setup script and notes
 cfg/           example console startup scripts
 docs/          project website and command reference

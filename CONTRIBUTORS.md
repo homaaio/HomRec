@@ -42,8 +42,8 @@ rather not do the Markdown yourself, just say so in the PR description
 and the maintainer will add you when it's merged.
 
 **What counts:** anything that took real effort and made it into the
-project - a code change, a translation (`.hrl` file), a plugin bundled
-in `Hom/plugins/`, a documentation fix, or a bug report detailed enough
+project - a code change, a translation (`.hrl` file), a plugin added
+to the hom package list (github.com/homaaio/hom), a documentation fix, or a bug report detailed enough
 that it directly led to a fix. Typo fixes and one-line nits are welcome
 too, just less likely to need a whole changelog line of their own -
 they'll still get you listed if you'd like.
