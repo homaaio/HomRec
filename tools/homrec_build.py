@@ -333,7 +333,7 @@ def step_build():
                   "(clean cmake build of hr and homrec, in MSYS2 MINGW64)?"):
         # Same Lua paths CMakeLists.txt defaults to - overridable via env vars
         # for anyone whose lua54 is not installed at C:/lua54.
-        lua_inc = os.environ.get("LUA_INCLUDE_DIR", "C:/lua54/include")
+        lua_inc = os.environ.get("LUA_INCLUDE_DIR", os.path.join(REPO_ROOT, "lua54", "include").replace("\\", "/"))
         lua_lib = os.environ.get("LUA_LIB_DIR", "C:/lua54/lib")
         make_cmd = (
             f"rm -rf build && "
