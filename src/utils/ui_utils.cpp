@@ -990,7 +990,7 @@ void WithCursorInFrame(int width, int height, int origin_x, int origin_y,
 } // namespace
 
 // Pointer into a finished 4:2:0 frame. nv12 != 0: Y + interleaved UV (hardware-encoder path, studio
-// range); nv12 == 0: planar I420 (software-encoder path, full range) - the same layouts and
+// range); nv12 == 0: planar I420 (software-encoder path, studio range too) - the same layouts and
 // matrices hr_bgra_to_nv12_band / hr_bgra_to_yuv420p write, so the result is the same picture the
 // converter would have made from a BGRA frame with the pointer already in it (+-1 level).
 // hr_composite_cursor_yuv_rows - same, and reports the luma rows [*row0,*row1) it may have drawn on (0,0 = nothing),
@@ -1004,7 +1004,7 @@ HR_EXPORT void hr_composite_cursor_yuv_rows(uint8_t *yuv, int width, int height,
     if (!yuv) return;
     WithCursorInFrame(width, height, origin_x, origin_y, scale_x, scale_y,
         [&](const hrcursor::Bitmap &bm, int lx, int ly, int dw, int dh) {
-            hrcursor::blend_yuv420(yuv, width, height, nv12 != 0, /*full_range=*/nv12 == 0,
+            hrcursor::blend_yuv420(yuv, width, height, nv12 != 0, /*full_range=*/false,
                                    bm, lx, ly, dw, dh);
             if (ly + dh > 0 && ly < height) {
                 if (row0) *row0 = std::max(0, ly - 2);
