@@ -641,15 +641,25 @@ void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
     evt.Skip();
 }
 
-// Right-click while editing on a screenshot: Refresh (re-take it) / Done.
+// Right-click on the preview: Preview off / on (the old "Preview: ON/OFF" header button), plus, while
+// editing on a screenshot, Refresh (re-take it) / Done.
 void PreviewPanel::OnRightUp(wxMouseEvent &evt) {
-    if (!snapshot_mode_) { evt.Skip(); return; }
     wxMenu menu;
-    menu.Append(wxID_REFRESH, "Refresh screenshot");
-    menu.Append(wxID_CLOSE, "Done editing\tEsc");
+    if (snapshot_mode_) {
+        menu.Append(wxID_REFRESH, "Refresh screenshot");
+        menu.Append(wxID_CLOSE, "Done editing\tEsc");
+        menu.AppendSeparator();
+    }
+    menu.Append(ID_PREVIEW_TOGGLE_BTN, state_.disable_preview ? "Preview on" : "Preview off");
     int id = GetPopupMenuSelectionFromUser(menu);
     if (id == wxID_REFRESH) RefreshSnapshot();
     else if (id == wxID_CLOSE) EndSnapshotEditingSession();
+    else if (id == ID_PREVIEW_TOGGLE_BTN) {
+        // The frame handles this id (wxEVT_BUTTON -> ToggleLivePreview()); a command event goes up to it.
+        wxCommandEvent toggle(wxEVT_BUTTON, ID_PREVIEW_TOGGLE_BTN);
+        toggle.SetEventObject(this);
+        wxPostEvent(this, toggle);
+    }
 }
 
 void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
@@ -1195,12 +1205,8 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     preview_title_lbl_->SetFont(wxFont(wxFontInfo(9).FaceName("Segoe UI").Bold()));
     headerSizer->Add(preview_title_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxLEFT, 10);
     headerSizer->AddStretchSpacer(1);
-    // On/off switch of the live preview (it used to be a checkbox in Settings > Security). The choice is
-    // still stored in the config as disable_preview.
-    preview_toggle_btn_ = new ColorButton(preview_header_, ID_PREVIEW_TOGGLE_BTN, "Preview: ON");
-    preview_toggle_btn_->SetFont(wxFont(wxFontInfo(8).FaceName("Segoe UI").Bold()));
-    preview_toggle_btn_->SetMinSize(wxSize(104, 22));
-    headerSizer->Add(preview_toggle_btn_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
+    // On/off switch of the live preview: right-click on the preview (PreviewPanel::OnRightUp posts
+    // ID_PREVIEW_TOGGLE_BTN). The choice is still stored in the config as disable_preview.
     Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { ToggleLivePreview(); }, ID_PREVIEW_TOGGLE_BTN);
     // FPS readout.
     preview_fps_lbl_ = new wxStaticText(preview_header_, wxID_ANY,
