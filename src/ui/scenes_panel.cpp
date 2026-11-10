@@ -4,7 +4,7 @@
 #include <algorithm>
 
 namespace {
-enum { kBtnNew = 6101, kBtnDel, kBtnUp, kBtnDown };
+enum { kBtnNew = 6101, kBtnUp, kBtnDown };
 enum { kMenuRename = 6201, kMenuDup, kMenuUp, kMenuDown, kMenuDel };
 constexpr size_t kMaxScenes = 64;   // same limit as hrc_config.cpp
 }
@@ -24,32 +24,28 @@ ScenesPanel::ScenesPanel(wxWindow *parent, AppState &state)
     list_->Bind(wxEVT_LEAVE_WINDOW, &ScenesPanel::OnMouse, this);
     list_->Bind(wxEVT_KEY_DOWN, &ScenesPanel::OnKey, this);
 
-    add_btn_  = new ColorButton(this, kBtnNew,  wxString());
-    del_btn_  = new ColorButton(this, kBtnDel,  wxString());
-    up_btn_   = new ColorButton(this, kBtnUp,   wxString());
-    down_btn_ = new ColorButton(this, kBtnDown, wxString());
-    add_btn_->SetGlyph(ColorButton::Glyph::Plus);
-    del_btn_->SetGlyph(ColorButton::Glyph::Minus);
-    up_btn_->SetGlyph(ColorButton::Glyph::Up);
-    down_btn_->SetGlyph(ColorButton::Glyph::Down);
-    for (ColorButton *b : { add_btn_, del_btn_, up_btn_, down_btn_ }) {
-        b->SetMinSize(wxSize(FromDIP(40), FromDIP(32)));
-        b->SetCornerRadius(2.0);   // nearly square corners
+    // Same layout as the Layers panel (overlays_dock_panel.cpp): one row on top - "+" on the left,
+    // up / down on the right, 28x24 each - and the list below. Delete is in the row menu and on Del.
+    add_btn_  = new ColorButton(this, kBtnNew,  wxString::FromUTF8("+"));
+    up_btn_   = new ColorButton(this, kBtnUp,   wxString::FromUTF8("\xE2\x86\x91"));
+    down_btn_ = new ColorButton(this, kBtnDown, wxString::FromUTF8("\xE2\x86\x93"));
+    for (ColorButton *b : { add_btn_, up_btn_, down_btn_ }) {
+        b->SetMinSize(wxSize(FromDIP(28), FromDIP(24)));
+        b->SetFont(wxFont(wxFontInfo(12).FaceName("Segoe UI").Bold()));
     }
 
     auto *bar = new wxBoxSizer(wxHORIZONTAL);
-    bar->Add(add_btn_, 0, wxALL, 3);
-    bar->Add(del_btn_, 0, wxTOP | wxBOTTOM | wxRIGHT, 3);
+    bar->Add(add_btn_, 0, wxALL, 6);
     bar->AddStretchSpacer(1);
-    bar->Add(up_btn_, 0, wxTOP | wxBOTTOM, 3);
-    bar->Add(down_btn_, 0, wxALL, 3);
+    bar->Add(up_btn_, 0, wxTOP | wxBOTTOM, 6);
+    bar->AddSpacer(4);
+    bar->Add(down_btn_, 0, wxTOP | wxBOTTOM | wxRIGHT, 6);
     auto *root = new wxBoxSizer(wxVERTICAL);
-    root->Add(list_, 1, wxEXPAND);
     root->Add(bar, 0, wxEXPAND);
+    root->Add(list_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
     SetSizer(root);
 
     Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { if (on_new) on_new(); }, kBtnNew);
-    Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { if (on_delete && sel_ >= 0) on_delete(IdAt(sel_)); }, kBtnDel);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { if (on_move && sel_ >= 0) on_move(IdAt(sel_), -1); }, kBtnUp);
     Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { if (on_move && sel_ >= 0) on_move(IdAt(sel_), +1); }, kBtnDown);
 
@@ -81,9 +77,8 @@ void ScenesPanel::ApplyTheme(const ThemeColors &theme, bool dark) {
     theme_ = theme;
     dark_ = dark;
     SetBackgroundColour(FromColorref(theme.bg));
-    for (ColorButton *b : { add_btn_, del_btn_, up_btn_, down_btn_ })
+    for (ColorButton *b : { add_btn_, up_btn_, down_btn_ })
         b->SetColours(FromColorref(theme.surface_light), FromColorref(theme.text));
-    add_btn_->SetColours(FromColorref(theme.accent), FromColorref(theme.bg));
     Refresh();
     list_->Refresh();
 }
@@ -102,7 +97,6 @@ void ScenesPanel::Reload() {
     list_->SetScrollbars(0, RowH(), 0, n, 0, std::max(0, std::min(vy, n - 1)));
 
     add_btn_->SetToolTip(wxString::FromUTF8(T("scene_new", "New scene").c_str()));
-    del_btn_->SetToolTip(wxString::FromUTF8(T("scene_delete", "Delete scene").c_str()));
     up_btn_->SetToolTip(wxString::FromUTF8(T("scene_up", "Move up").c_str()));
     down_btn_->SetToolTip(wxString::FromUTF8(T("scene_down", "Move down").c_str()));
     UpdateButtons();
@@ -113,7 +107,6 @@ void ScenesPanel::UpdateButtons() {
     const int n = (int)state_.scenes.size();
     const bool has = sel_ >= 0 && sel_ < n;
     add_btn_->Enable2((size_t)n < kMaxScenes);
-    del_btn_->Enable2(has && n > 1 && state_.scenes[(size_t)sel_].id != state_.active_scene_id);
     up_btn_->Enable2(has && sel_ > 0);
     down_btn_->Enable2(has && sel_ + 1 < n);
 }

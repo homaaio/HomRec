@@ -46,7 +46,7 @@ private:
 
     AppState &state_;
     wxScrolledWindow *list_ = nullptr;
-    ColorButton *add_btn_ = nullptr, *del_btn_ = nullptr, *up_btn_ = nullptr, *down_btn_ = nullptr;
+    ColorButton *add_btn_ = nullptr, *up_btn_ = nullptr, *down_btn_ = nullptr;
     int sel_ = -1;     // selected row (right-click / keyboard), may differ from the active scene
     int hot_ = -1;     // row under the mouse
     bool dark_ = true;
