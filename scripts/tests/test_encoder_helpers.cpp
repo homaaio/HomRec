@@ -36,22 +36,22 @@ std::vector<uint8_t> SolidBgra(int w, int h, uint8_t b, uint8_t g, uint8_t r) {
 }
 } // namespace
 
-TEST_CASE("hr_bgra_to_yuv420p: solid black -> Y=0, chroma neutral (full range, software path)") {
+TEST_CASE("hr_bgra_to_yuv420p: solid black -> Y=16, chroma neutral (limited range, software path)") {
     const int w = 4, h = 4;
     auto bgra = SolidBgra(w, h, 0, 0, 0);
     std::vector<uint8_t> yuv((size_t)w * h * 3 / 2);
     hr_bgra_to_yuv420p(bgra.data(), yuv.data(), w, h);
 
-    for (int i = 0; i < w * h; ++i) CHECK(yuv[i] == 0);
+    for (int i = 0; i < w * h; ++i) CHECK(yuv[i] == 16);
     for (size_t i = (size_t)w * h; i < yuv.size(); ++i) CHECK(yuv[i] == 128);
 }
 
-TEST_CASE("hr_bgra_to_yuv420p: solid white -> Y=255 (full range, software x264/x265 path)") {
+TEST_CASE("hr_bgra_to_yuv420p: solid white -> Y=235 (limited range, software x264/x265 path)") {
     const int w = 4, h = 4;
     auto bgra = SolidBgra(w, h, 255, 255, 255);
     std::vector<uint8_t> yuv((size_t)w * h * 3 / 2);
     hr_bgra_to_yuv420p(bgra.data(), yuv.data(), w, h);
-    for (int i = 0; i < w * h; ++i) CHECK(yuv[i] == 255);
+    for (int i = 0; i < w * h; ++i) CHECK(yuv[i] == 235);
 }
 
 TEST_CASE("hr_bgra_to_nv12: solid black -> Y should be 16 in limited/tv range (NVENC/QSV/AMF)") {
