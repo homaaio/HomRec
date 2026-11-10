@@ -382,11 +382,10 @@ void RecordingController::Initialize() {
                 const std::string why_utf8 = NarrowFromWide(why);
                 HrLog::Warn("Startup: " + state_.video_codec + " does not work on this system (" +
                             (why_utf8.empty() ? std::string("probe failed") : why_utf8) +
-                            ") -- using libx264 instead. Update the GPU driver or pick another "
-                            "encoder in Settings > Video.");
+                            ") -- the codec stays as chosen (no automatic switch to libx264). "
+                            "Update the GPU driver or pick another encoder in Settings > Video.");
                 codec_fallback_note_ = L"The hardware encoder " + want +
-                                       L" does not work on this system \u2014 recordings use libx264.";
-                state_.video_codec = "libx264";
+                                       L" does not work on this system \u2014 pick another encoder in Settings > Video.";
             } else {
                 HrLog::Info("Startup: hardware encoder available (" + state_.video_codec + ").");
             }
@@ -2243,15 +2242,6 @@ void RecordingController::PollStats() {
             ddagrab_blocked_ = true;
             HrLog::Warn("Recording: full-GPU (ddagrab) capture is switched off for the rest of this "
                         "session - the next recording uses the normal capture pipeline.");
-        } else if (current_codec_is_hw_ && !codec_retried_ && elapsed_seconds() < 5.0) {
-            // A hardware encoder that dies right at the start is usually simply unsupported here
-            // (old driver, encoder session limit, GPU in a bad state). Give this recording one
-            // automatic retry with libx264 - the UI finalizes what was captured and starts a new
-            // file with the software encoder (see main_frame.cpp / OnRecordingFinalized()).
-            codec_retried_ = true;
-            crash_needs_codec_fallback_ = true;
-            HrLog::Warn("Recording: the hardware encoder died in the first seconds - this recording will "
-                        "continue in a new file with software libx264.");
         }
         crashed_ = true;
         return;
