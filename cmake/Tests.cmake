@@ -14,7 +14,7 @@ add_library(hr_encoder_helpers STATIC ${CMAKE_SOURCE_DIR}/src/core/encoder_helpe
 target_include_directories(hr_encoder_helpers PUBLIC ${CMAKE_SOURCE_DIR}/src/core)
 target_compile_options(hr_encoder_helpers PRIVATE -O3 -Wall)
 
-foreach(t wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry)
+foreach(t wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry homrec_cli)
     add_executable(test_${t} ${CMAKE_SOURCE_DIR}/scripts/tests/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE
         ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/utils ${CMAKE_SOURCE_DIR}/scripts/tests)
@@ -23,6 +23,8 @@ foreach(t wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpe
 endforeach()
 target_link_libraries(test_encoder_helpers PRIVATE hr_encoder_helpers)
 target_sources(test_settings_registry PRIVATE ${CMAKE_SOURCE_DIR}/src/core/settings_registry.cpp)
+# homrec CLI: header-only logic (tools/homrec/homrec_tui.h, homrec_overlay.h, homrec_binding.h)
+target_include_directories(test_homrec_cli PRIVATE ${CMAKE_SOURCE_DIR}/tools/homrec)
 
 # CPU hot-spot timings ("[bench] name ms" + "[pair] label old new"). Not part of `all`: build it when you want it.
 add_executable(bench EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/scripts/tests/bench.cpp)

@@ -1,7 +1,7 @@
 # cmake/LinuxPort.cmake - the non-Windows (Linux) half of the build.
 #
 # The root CMakeLists.txt includes this file and stops when it is not building for Windows, so the
-# Windows target list (hr / hom / homrec) is never touched by anything in here.
+# Windows target list (hr / homrec) is never touched by anything in here.
 #
 # What it builds today:
 #   hr_platform     static library: src/platform/linux/* (session detection, XDG paths, backend stubs)
