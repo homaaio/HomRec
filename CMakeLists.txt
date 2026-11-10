@@ -25,7 +25,7 @@ endif()
 # Where the build looks for libraries. Cache variables, so you can override them
 # on the command line instead of editing the file, e.g.:
 #   cmake -S . -B build -DLUA_INCLUDE_DIR=D:/lua/include -DLUA_LIB_DIR=D:/lua/lib
-set(LUA_INCLUDE_DIR "C:/lua54/include" CACHE PATH "Lua headers")
+set(LUA_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/lua54/include" CACHE PATH "Lua headers")
 set(LUA_LIB_DIR     "C:/lua54/lib"     CACHE PATH "Lua import lib dir")
 # wxWidgets and the C++ runtime must come from the SAME MSYS2 environment as the compiler.
 # Mixing .../mingw64 (MSVCRT) with .../ucrt64 (UCRT) headers and import libraries produces
