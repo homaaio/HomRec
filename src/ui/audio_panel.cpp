@@ -16,6 +16,9 @@
 #include <windows.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <chrono>
+#include <memory>
 #include <functional>
 #include <thread>
 
@@ -28,7 +31,9 @@ extern "C" {
     void hr_audio_extra_set_volume(int id, float vol, int mute);
     int  hr_audio_extra_level(int id);
     int  hr_decode_audio_to_wav(const wchar_t *ffpath, const wchar_t *in_path, const wchar_t *wav_path);
-    int  hr_audio_test_record(const wchar_t *mic_device_id, int ms, void *out, int cap_bytes, int *out_bytes);
+    int  hr_audio_test_record(const wchar_t *mic_device_id, int ms, void *out, int cap_bytes, int *out_bytes,
+                              volatile int *live_level);
+    int  hr_audio_rms(const void *buf, int n_bytes);
 }
 
 namespace {
@@ -651,6 +656,12 @@ public:
             row->Add(test_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
             root->Add(row, 0, wxEXPAND | wxALL, FromDIP(12));
 
+            // Level meter: follows the input while the test records, then the recorded sound while it plays back.
+            meter_ = new LevelMeterPanel(this, false);
+            meter_->SetBgColour(FromColorref(th.surface_light));
+            meter_->SetMinSize(wxSize(-1, FromDIP(14)));
+            root->Add(meter_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+
             status_ = new wxStaticText(this, wxID_ANY,
                 recording ? "The device can't be changed or tested while a recording is running."
                           : "Test records 3 seconds from the selected device and plays it back (headphones recommended).");
@@ -679,10 +690,13 @@ public:
         Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(kReset); }, kReset);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(kRemove); }, kRemove);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { StartTest(); }, kTest);
+        meter_timer_.SetOwner(this);
+        Bind(wxEVT_TIMER, [this](wxTimerEvent &) { UpdateMeter(); }, meter_timer_.GetId());
     }
 
     ~SourceSettingsDialog() override {
         *alive_ = false;
+        meter_timer_.Stop();
         if (playing_) PlayWavFromMemory(nullptr);   // stop playback before its buffer goes away
     }
 
@@ -700,12 +714,17 @@ private:
         status_->SetLabel("Recording 3 seconds - say something...");
         const std::wstring dev = WideOf(SelectedDeviceId());
         std::shared_ptr<bool> alive = alive_;
+        std::shared_ptr<int> level = live_level_;   // the worker may outlive the dialog
+        *level = 0;
+        if (playing_) PlayWavFromMemory(nullptr);   // a new test replaces the buffer: stop the old playback first
+        playing_ = false;
+        meter_timer_.Start(30);
         SourceSettingsDialog *self = this;
-        std::thread([dev, alive, self]() {
+        std::thread([dev, alive, self, level]() {
             std::vector<char> buf(1 << 20);          // 3 s of 48 kHz stereo 16-bit is ~0.55 MB
             int bytes = 0;
             bool ok = false;
-            try { ok = hr_audio_test_record(dev.c_str(), 3000, buf.data(), (int)buf.size(), &bytes) != 0; } catch (...) {}
+            try { ok = hr_audio_test_record(dev.c_str(), 3000, buf.data(), (int)buf.size(), &bytes, level.get()) != 0; } catch (...) {}
             buf.resize(ok ? (size_t)bytes : 0);
             if (wxTheApp) {
                 wxTheApp->CallAfter([alive, self, ok, b = std::move(buf)]() mutable {
@@ -719,18 +738,48 @@ private:
         testing_ = false;
         test_->Enable(true);
         if (!ok || wav.empty()) {
+            meter_timer_.Stop();
+            meter_->SetLevel(0);
             status_->SetLabel("Couldn't record from this device.");
             return;
         }
         play_buf_ = std::move(wav);
         playing_ = true;
         status_->SetLabel("Playing back what was recorded...");
-        PlayWavFromMemory(play_buf_.data());
+        play_start_ = std::chrono::steady_clock::now();
+        PlayWavFromMemory(play_buf_.data());   // the meter timer keeps running and now reads play_buf_
+    }
+
+    // Timer tick: while recording the level comes from the worker thread; during playback it is measured
+    // on the 40 ms of the recorded sound that is playing right now.
+    void UpdateMeter() {
+        if (!meter_) return;
+        if (testing_) { meter_->SetLevel(*live_level_); return; }
+        if (!playing_ || play_buf_.size() < 44) { meter_timer_.Stop(); meter_->SetLevel(0); return; }
+        uint32_t rate = 0;
+        std::memcpy(&rate, play_buf_.data() + 24, sizeof(rate));   // WAV header: sample rate
+        const size_t data_bytes = play_buf_.size() - 44;
+        const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - play_start_).count();
+        const size_t frame = (size_t)(sec * rate);                 // 4 bytes per stereo frame
+        const size_t win = (size_t)(rate / 25);                    // 40 ms
+        if (rate == 0 || frame * 4 >= data_bytes) {
+            playing_ = false;
+            meter_timer_.Stop();
+            meter_->SetLevel(0);
+            status_->SetLabel("Done. Press Test to try again.");
+            return;
+        }
+        const size_t from = frame > win ? frame - win : 0;
+        meter_->SetLevel(hr_audio_rms(play_buf_.data() + 44 + from * 4, (int)((frame - from + 1) * 4)));
     }
 
     wxChoice *choice_ = nullptr;
     wxButton *test_ = nullptr;
     wxStaticText *status_ = nullptr;
+    LevelMeterPanel *meter_ = nullptr;
+    wxTimer meter_timer_;
+    std::shared_ptr<int> live_level_ = std::make_shared<int>(0);   // written by the recording thread
+    std::chrono::steady_clock::time_point play_start_;
     std::vector<std::string> ids_;
     std::vector<char> play_buf_;
     bool testing_ = false, playing_ = false;

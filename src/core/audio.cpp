@@ -755,9 +755,12 @@ HR_EXPORT void hr_audio_get_levels(int* out_mic, int* out_sys)
 // stream - g_state, the recording buffers and the running meters are not touched. The result is a
 // complete in-memory WAV file (44-byte header + 16-bit stereo PCM, cut to cap_bytes), so the caller can
 // play it with PlaySound(SND_MEMORY) and no temp file / non-ASCII path is involved.
+// `live_level` (may be null) gets the current input level 0..100 (same scale as the mixer's meters) after
+// every read, and 0 when the recording ends.
 // Blocks for `ms`: call it from a worker thread. Returns 1 when audio was captured.
 HR_EXPORT int hr_audio_test_record(const wchar_t* mic_device_id, int ms,
-                                   void* out, int cap_bytes, int* out_bytes)
+                                   void* out, int cap_bytes, int* out_bytes,
+                                   volatile int* live_level)
 {
     if (out_bytes) *out_bytes = 0;
     if (!out || ms <= 0 || cap_bytes <= (int)sizeof(WavHeader)) return 0;
@@ -778,8 +781,10 @@ HR_EXPORT int hr_audio_test_record(const wchar_t* mic_device_id, int ms,
                     else Sleep(20);
                     tmp.clear();
                     st.read(tmp);
+                    if (live_level) *live_level = tmp.empty() ? 0 : calc_rms(tmp.data(), tmp.size());
                     pcm.insert(pcm.end(), tmp.begin(), tmp.end());
                 }
+                if (live_level) *live_level = 0;
                 const uint32_t rate = st.rate;
                 st.close();
                 const size_t room = (size_t)cap_bytes - sizeof(WavHeader);
