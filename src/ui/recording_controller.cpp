@@ -1215,7 +1215,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     bool any_overlay = false;
     for (const auto &o : state_.overlays)
         if (o.visible && o.w > 0 && o.h > 0) { any_overlay = true; break; }
-    if (!state_.desktop_visible) any_overlay = true;   // a hidden Desktop layer needs the CPU pipeline (ddagrab can't blank it)
+    if (!state_.DesktopIsPlain()) any_overlay = true;  // a hidden / deleted / moved Desktop layer needs the CPU pipeline (ddagrab can't blank or move it)
 
     // Overlays through ffmpeg are an opt-in and have their own preconditions; anything else keeps using the
     // normal pipeline.
@@ -1223,7 +1223,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     bool overlay_mode = false;
     if (any_overlay) {
         if (!state_.ddagrab_overlays)        overlay_why = "overlays/plugins are active and need the CPU pipeline (ddagrab_overlays=1 would draw them through ffmpeg)";
-        else if (!state_.desktop_visible)    overlay_why = "a hidden Desktop layer needs the CPU pipeline";
+        else if (!state_.DesktopIsPlain())   overlay_why = "a hidden, deleted or moved Desktop layer needs the CPU pipeline";
         else if (!pipeline_)                 overlay_why = "the overlay feed needs the preview pipeline (the live preview is off)";
         else if (codec_args.find(L"qsv") != std::wstring::npos)
                                              overlay_why = "ddagrab overlays work with NVENC / AMF only";
@@ -2360,7 +2360,8 @@ void RecordingController::SyncOverlays() {
     // "Cursor" setting - cheap atomic store, fine to re-apply every tick rather than needing
     // its own change-tracking like the overlay list below (which is expensive enough per-tick
     // to be worth skipping when unchanged).
-    hr_pl_set_include_cursor(pipeline_, (state_.cursor_enabled && state_.desktop_visible) ? 1 : 0);
+    // (The pointer is blended at its screen position, so it is left out while the Desktop layer is moved / resized.)
+    hr_pl_set_include_cursor(pipeline_, (state_.cursor_enabled && state_.DesktopIsPlain()) ? 1 : 0);
     // GPU colour conversion (Settings > Video): only ever takes effect for NV12
     // output, i.e. hardware encoders - the capture loop checks that itself.
     hr_pl_set_gpu_convert(pipeline_, state_.gpu_convert ? 1 : 0);
@@ -2421,14 +2422,30 @@ void RecordingController::SyncOverlays() {
         d.opacity = (unsigned char)((pct * 255 + 50) / 100);
         descs.push_back(d);
     }
-    // The Desktop layer's closed eye. Appended at the END on purpose: the compositor keeps its per-layer
-    // caches (webcams, GIFs...) by list position, and this entry must not shift everyone else's.
-    if (!state_.desktop_visible) {
+    // The Desktop (main) layer when it is not the plain full-canvas picture. Appended at the END on purpose: the
+    // compositor keeps its per-layer caches (webcams, GIFs...) by list position, and these entries must not shift
+    // everyone else's. They are the backmost layers (the list is drawn from its end).
+    //   closed eye / deleted : the picture is blanked ("desktop_hidden").
+    //   moved / resized      : blanked, then the whole monitor picture is drawn again as a "region" layer into the
+    //                          Desktop layer's rectangle (the compositor cuts it from the untouched capture).
+    if (!state_.DesktopIsPlain()) {
+        const int cw = capture_w_ > 0 ? capture_w_ : 1;
+        const int ch = capture_h_ > 0 ? capture_h_ : 1;
+        if (state_.DesktopShown() && state_.DesktopMoved()) {
+            HrOverlayDesc d{};
+            std::strncpy(d.type, "region", sizeof(d.type) - 1);
+            d.src_x = 0; d.src_y = 0; d.src_w = cw; d.src_h = ch;
+            d.x = state_.desktop_x; d.y = state_.desktop_y;
+            d.w = state_.desktop_w; d.h = state_.desktop_h;
+            d.visible = 1;
+            d.opacity = 255;
+            descs.push_back(d);
+        }
         HrOverlayDesc d{};
         std::strncpy(d.type, "desktop_hidden", sizeof(d.type) - 1);
         d.visible = 1;
-        d.w = capture_w_ > 0 ? capture_w_ : 1;
-        d.h = capture_h_ > 0 ? capture_h_ : 1;
+        d.w = cw;
+        d.h = ch;
         d.opacity = 255;
         descs.push_back(d);
     }
