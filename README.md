@@ -7,7 +7,7 @@
 [![Telegram](https://img.shields.io/badge/Telegram-1D77A3?style=flat-square&logo=telegram)](https://t.me/homaexe)
 [![Boosty](https://img.shields.io/badge/support-boosty-orange?style=flat-square)](https://boosty.to/homa4ella/single-payment/donation/837068/target?share=target_link)
 
-![homrec_screenshot](Assets/for_repo/homrec_screenshot.png)
+![homrec_screenshot](docs/images/site/homrec_screenshot.png)
 
 A native C/C++ screen recorder for low-spec Windows machines. FFmpeg for encoding, no GPU requirement, no background services. Free and open source (GPLv3) - no activation, no license keys, no paid features.
 
@@ -29,6 +29,7 @@ A native C/C++ screen recorder for low-spec Windows machines. FFmpeg for encodin
   - [Console](#console)
   - [Console startup scripts](#console-startup-scripts)
 - [Plugins](#plugins)
+- [Documentation](#documentation)
 - [Diagnostics and troubleshooting](#diagnostics-and-troubleshooting)
 - [Development](#development)
   - [Build dependencies](#build-dependencies)
@@ -95,7 +96,7 @@ The installer registers a standard uninstaller (Windows Settings > Apps); it ask
 
 1. Download the latest `.zip` or `.7z` from [Releases](https://github.com/homaaio/HomRec/releases).
 2. Extract to any location.
-3. Run `hr.exe`. FFmpeg and the required `.dll` files are included in the archive.
+3. Run `hr.exe`. The required `.dll` files are included. **FFmpeg is only included in the "full" archive** (`...-portable-full`); with the plain `portable` archive, put `ffmpeg.exe` into an `ffmpeg\` folder next to `hr.exe` or HomRec reports "FFmpeg not found." See [Getting started](docs/hr/getting-started.md).
 
 Settings (`homrec.hrc`), logs and plugins live next to `hr.exe`, so keep them if you replace the files with a newer version.
 
@@ -156,7 +157,7 @@ Add an extra audio source with **+ Add source** in the Audio Mixer; pick horizon
 
 ### Window capture
 
-Choose **File > Select Window...** to record a single window. By default HomRec uses Windows Graphics Capture so the whole window is recorded regardless of what covers it; if the window is resized while recording, the picture is fitted into the recording's fixed size (aspect kept, black bars). Under Settings > General > Window capture you can switch the method between `auto` and `crop` (the older screen-region crop) and choose whether to capture the whole window or only its client area.
+The first row of the **Layers** panel is the capture source: double-click it to open the **Capture source** window and choose the whole desktop (and a monitor), one window, or a screen region. For a window you can pick **The window itself** (Windows Graphics Capture, so the whole window is recorded regardless of what covers it), **A part of the screen** (screen crop) or **Smart mode**, and choose how HomRec finds the window again (program, window class, title). If the window is resized while recording, the picture is fitted into the recording's fixed size (aspect kept, black bars). Full guide: [Capture sources](docs/hr/capture-sources.md).
 
 ### Keyboard shortcuts
 
@@ -192,7 +193,7 @@ Community translations are commonly shared via Discord.
 
 HomRec has a built-in developer console for scripting and diagnostics. Commands include `status`, `info`, `log`, `echo`, `alias`, `batch` and `hom` (the plugin manager, see [Plugins](#plugins)), and anything not built in is passed to loaded plugins. `ls` lists files - `ls .` shows the HomRec folder, `ls plugins` any folder, and `ls plugins/name.hrp` the contents of a plugin package without extracting it (a bare `ls` still lists console aliases).
 
-Most settings are also exposed as console variables by key (for example `ui_locked = 1`), and by the same keys in `.hrc` files, cfg scripts and plugins. See [`docs/commands/Commands.md`](docs/commands/Commands.md) for the command reference and the [documentation page](docs/documentation.html) for the console, config scripts, plugins and `hom`.
+Most settings are also exposed as console variables by key (for example `ui_locked = 1`), and by the same keys in `.hrc` files, cfg scripts and plugins. Reading a setting is free (`target_fps`); changing it needs the `inwid` prefix (`inwid target_fps = 60`), except in `cfg/` scripts. See [`docs/commands/Commands.md`](docs/commands/Commands.md) for the command reference.
 
 ### Console startup scripts
 
@@ -235,10 +236,22 @@ A packaged plugin (`.hrp`, a renamed `.zip`) can be installed by:
 
 **`hom`** is a separate project: a small package manager for plugins (`.hrp`, `.jar`) and, on its own, also for files, archives and programs. It lives in [github.com/homaaio/hom](https://github.com/homaaio/hom) (source, the official package list, `hom.exe` in the [releases](https://github.com/homaaio/hom/releases)). The installer and the portable archive include `hom.exe` next to `hr.exe`; HomRec's console forwards `hom ...` to it, and `hom restore` downloads it again if it is missing. It supports `install`, `search`, `show`, `list`, `upgrade`, `remove`, `purge` and `update`; plain `hom` in a terminal opens a full-screen package browser. See its README for the commands, package types and where files go.
 
-For the plugin API, see the plugins section of the [documentation page](docs/documentation.html).
+For the plugin API, see [`docs/hr/plugins.md`](docs/hr/plugins.md).
+
+## Documentation
+
+| Guide | What it covers |
+|---|---|
+| [Documentation index](docs/hr/README.md) | Start here: which page answers which question |
+| [Getting started](docs/hr/getting-started.md) | Install, first run, first recording |
+| [How it works](docs/hr/how-it-works.md) | What happens from Start to the finished file, and what can fail at each step |
+| [Troubleshooting](docs/hr/troubleshooting.md) | Fixes by symptom |
+| [Logs and diagnostics](docs/hr/logs-and-diagnostics.md) | Log files, crash dumps, bug reports |
+| [hom documentation](docs/hom/README.md) | Install and use the plugin package manager |
 
 ## Diagnostics and troubleshooting
 
+- Step-by-step fixes by symptom: [`docs/hr/troubleshooting.md`](docs/hr/troubleshooting.md).
 - **Logs** are written under `logs/` next to `hr.exe`; system logging and plugin logging can be toggled in Settings > Security.
 - **Crashes** produce a `.dmp` file and a log entry - please attach both to a bug report.
 - **Environment check:** `python tools/homrec_check.py` inspects RAM, Windows version, GPU, disk space, FFmpeg, your settings, cfg scripts, plugins and recent logs, and runs a short smoke test.
