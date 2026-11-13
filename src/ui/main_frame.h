@@ -4,6 +4,7 @@
 #include <wx/wx.h>
 #include <wx/taskbar.h>
 #include <wx/aui/aui.h>      // 2.4: dockable / floating panels
+#include <functional>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -78,7 +79,20 @@ public:
     // Writes any debounced overlay edit (arrow-key nudges) to disk right now.
     void FlushOverlaySave();
     // Forgets the clicked / dragged overlay (a scene switch puts other overlays at the same list positions).
-    void ClearOverlaySelection() { drag_overlay_index_ = -1; selected_overlay_index_ = -1; drag_corner_ = Corner::kNone; }
+    void ClearOverlaySelection() {
+        drag_overlay_index_ = kNoLayer; selected_overlay_index_ = kNoLayer; press_layer_ = kNoLayer;
+        drag_corner_ = Corner::kNone;
+    }
+
+    // 3.1: a "layer" here is an overlay index (>= 0), kDesktopLayer for the main (Desktop) layer, or kNoLayer.
+    static constexpr int kNoLayer = -1;
+    static constexpr int kDesktopLayer = -2;
+    // A click (no drag) on a layer asks for the same menu the Layers panel gives on a right-click; `screen_pt` is
+    // where the mouse is. Wired up by the main frame.
+    std::function<void(int layer, const wxPoint &screen_pt)> on_layer_menu;
+    // The main layer was moved / resized in the Preview: the frame saves the settings (it lives in the .hrc, not
+    // in the scene file the overlays are saved to).
+    std::function<void()> on_desktop_changed;
 
     void EnterSnapshotMode(const std::vector<uint8_t> &buf, int w, int h,
                            int native_w = 0, int native_h = 0);
@@ -103,6 +117,13 @@ private:
     // Size overlay x/y/w/h are measured in for what's currently shown.
     bool GetNativeSize(int &w, int &h) const;
     void EndDrag();               // shared by OnLeftUp / stuck-drag recovery
+    // 3.1: the layer behind an index as an OverlayDef the drag code can read and write. The Desktop layer lives in
+    // AppState's desktop_* fields, so it is handed out as a proxy that StoreLayer() copies back.
+    OverlayDef *LayerAt(int idx) const;
+    void StoreLayer(int idx);
+    // Is this layer's frame (with its two handles) drawn - and so also grabbable - right now?
+    bool FrameShown(int idx) const;
+    void OpenLayerMenu(int layer, const wxPoint &client_pt);
     void ScheduleOverlaySave();   // debounced (400ms) autosave of state_.overlays
 
     bool GetPreviewRect(wxRect &out) const;
@@ -118,7 +139,12 @@ private:
     int snapshot_w_ = 0, snapshot_h_ = 0;
     int snapshot_native_w_ = 0, snapshot_native_h_ = 0;
 
-    int drag_overlay_index_ = -1;
+    int drag_overlay_index_ = kNoLayer;
+    // The layer the mouse button went down on; a release without a drag on it is a click (opens its menu).
+    int press_layer_ = kNoLayer;
+    bool drag_threshold_passed_ = false;   // the mouse moved far enough since the press for it to be a drag
+    bool desktop_save_pending_ = false;    // the main layer changed: on_desktop_changed() is due with the next flush
+    mutable OverlayDef desktop_proxy_;
     // Which corner (if any) is being dragged to resize. kNone means a
     // plain move-drag (grabbed the body, not a handle).
     enum class Corner { kNone, kTopLeft, kBottomRight };
@@ -127,7 +153,7 @@ private:
     // handle was hit.
     int HitTestOverlay(int mx, int my, Corner &corner) const;
     // Overlay the user last clicked - stays highlighted after mouse-up.
-    int selected_overlay_index_ = -1;
+    int selected_overlay_index_ = kNoLayer;
     int drag_start_mouse_x_ = 0, drag_start_mouse_y_ = 0;
     int drag_start_ov_x_ = 0, drag_start_ov_y_ = 0, drag_start_ov_w_ = 0, drag_start_ov_h_ = 0;
 

@@ -233,6 +233,76 @@ void PreviewPanel::FlushOverlaySave() {
     if (!overlay_save_pending_) return;
     overlay_save_pending_ = false;
     HrcConfig::SaveActiveOverlays(state_);
+    if (desktop_save_pending_) {
+        desktop_save_pending_ = false;
+        if (on_desktop_changed) on_desktop_changed();
+    }
+}
+
+// The layer behind `idx`. The Desktop layer is not an OverlayDef (see AppState::desktop_*), so it is rebuilt into a
+// proxy on every call: its rectangle is the whole picture until it has been moved or resized.
+OverlayDef *PreviewPanel::LayerAt(int idx) const {
+    if (idx >= 0) return idx < (int)state_.overlays.size() ? &state_.overlays[(size_t)idx] : nullptr;
+    if (idx != kDesktopLayer || !state_.desktop_present) return nullptr;
+    int cw = 0, ch = 0;
+    if (!GetNativeSize(cw, ch)) return nullptr;
+    OverlayDef &d = desktop_proxy_;
+    d.type = "desktop";
+    d.name = state_.desktop_name.empty() ? "Desktop" : state_.desktop_name;
+    d.visible = state_.desktop_visible;
+    d.locked = state_.desktop_locked;
+    d.lock_aspect = state_.desktop_lock_aspect;
+    if (state_.DesktopMoved()) {
+        d.x = state_.desktop_x; d.y = state_.desktop_y; d.w = state_.desktop_w; d.h = state_.desktop_h;
+    } else {
+        d.x = 0; d.y = 0; d.w = cw; d.h = ch;
+    }
+    return &d;
+}
+
+// Copies the proxy of the Desktop layer back after a drag / nudge. A rectangle that is exactly the picture again goes
+// back to "plain" (all zero), which keeps the cheap capture paths (no blanking + redraw of the monitor picture).
+void PreviewPanel::StoreLayer(int idx) {
+    if (idx != kDesktopLayer) return;
+    const OverlayDef &d = desktop_proxy_;
+    int cw = 0, ch = 0;
+    if (GetNativeSize(cw, ch) && d.x == 0 && d.y == 0 && d.w == cw && d.h == ch) {
+        state_.desktop_x = state_.desktop_y = state_.desktop_w = state_.desktop_h = 0;
+    } else {
+        state_.desktop_x = d.x; state_.desktop_y = d.y; state_.desktop_w = d.w; state_.desktop_h = d.h;
+    }
+    desktop_save_pending_ = true;
+}
+
+// Frames are only drawn around the clicked layer (they used to be drawn around every overlay all the time, blue
+// when not clicked). On a screenshot (Preview off) the overlays themselves are not in the picture, so there every
+// overlay keeps its frame - it is the only sign of where they are.
+bool PreviewPanel::FrameShown(int idx) const {
+    if (idx == kNoLayer) return false;
+    if (idx >= 0 && snapshot_mode_) return true;
+    return idx == selected_overlay_index_ || idx == drag_overlay_index_;
+}
+
+// A click on a layer: select it and show its menu (the one of the Layers panel's right-click).
+void PreviewPanel::OpenLayerMenu(int layer, const wxPoint &client_pt) {
+    if (!on_layer_menu) return;
+    std::string keep_id;
+    if (layer >= 0 && layer < (int)state_.overlays.size()) keep_id = state_.overlays[(size_t)layer].id;
+    selected_overlay_index_ = layer;       // the frame is there while the menu is open
+    Refresh();
+    Update();
+    on_layer_menu(layer, ClientToScreen(client_pt));
+    // The menu may have deleted, moved or renamed the layer: keep the selection on the same one.
+    if (layer == kDesktopLayer) {
+        selected_overlay_index_ = state_.desktop_present ? kDesktopLayer : kNoLayer;
+    } else if (keep_id.empty()) {
+        selected_overlay_index_ = layer < (int)state_.overlays.size() ? layer : kNoLayer;
+    } else {
+        selected_overlay_index_ = kNoLayer;
+        for (size_t i = 0; i < state_.overlays.size(); ++i)
+            if (state_.overlays[i].id == keep_id) { selected_overlay_index_ = (int)i; break; }
+    }
+    Refresh();
 }
 
 void PreviewPanel::PollRefresh() {
@@ -394,19 +464,16 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
     if (GetPreviewRect(prevRect) && GetNativeSize(nw, nh)) {
         double sx = (double)prevRect.GetWidth() / nw;
         double sy = (double)prevRect.GetHeight() / nh;
-        if (selected_overlay_index_ >= (int)state_.overlays.size()) selected_overlay_index_ = -1;
+        if (selected_overlay_index_ >= (int)state_.overlays.size() ||
+            (selected_overlay_index_ == kDesktopLayer && !state_.desktop_present))
+            selected_overlay_index_ = kNoLayer;
 
         // Nothing of the frames / labels may be painted outside the picture (see OverlayScreenRect()).
         dc.SetClippingRegion(prevRect);
 
-        for (size_t i = 0; i < state_.overlays.size(); ++i) {
-            const auto &ov = state_.overlays[i];
-            // In snapshot mode every overlay is shown/draggable, even a hidden one - that's the only
-            // way left to reach it when the live preview (where it'd otherwise be temporarily unhidden
-            // via Show/Hide) is off.
-            if (!ov.visible && !snapshot_mode_) continue;
+        // One frame (+ handles + label). `active` = the clicked layer (yellow); the blue ones only exist on a screenshot.
+        auto draw_frame = [&](const OverlayDef &ov, bool active) {
             wxRect r = OverlayScreenRect(ov, prevRect, sx, sy);
-            bool active = ((int)i == drag_overlay_index_) || ((int)i == selected_overlay_index_);
             wxColour accent = active ? wxColour(255, 210, 90) : wxColour(120, 170, 250);
 
             // Dark outer line first so the frame stays readable on top of
@@ -436,10 +503,25 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
                 dc.SetTextForeground(accent);
                 dc.DrawText(label, r.GetX() + 3, ty + 1);
             }
+        };
+
+        // The main layer is the backmost one: its frame goes first, the overlays' frames over it.
+        if (FrameShown(kDesktopLayer)) {
+            if (const OverlayDef *d = LayerAt(kDesktopLayer))
+                if (d->visible || snapshot_mode_) draw_frame(*d, true);
+        }
+        for (int i = (int)state_.overlays.size() - 1; i >= 0; --i) {
+            if (!FrameShown(i)) continue;
+            const auto &ov = state_.overlays[(size_t)i];
+            // In snapshot mode every overlay is shown/draggable, even a hidden one - that's the only
+            // way left to reach it when the live preview (where it'd otherwise be temporarily unhidden
+            // via Show/Hide) is off.
+            if (!ov.visible && !snapshot_mode_) continue;
+            draw_frame(ov, i == drag_overlay_index_ || i == selected_overlay_index_);
         }
 
         // Centre guides while a dragged overlay is snapped to the middle of the picture.
-        if (drag_overlay_index_ >= 0 && (snap_center_x_ || snap_center_y_)) {
+        if (drag_overlay_index_ != kNoLayer && (snap_center_x_ || snap_center_y_)) {
             dc.SetPen(wxPen(wxColour(255, 210, 90), 1, wxPENSTYLE_SHORT_DASH));
             if (snap_center_x_) {
                 const int gx = prevRect.GetX() + prevRect.GetWidth() / 2;
@@ -473,29 +555,40 @@ bool PreviewPanel::GetPreviewRect(wxRect &out) const {
     return true;
 }
 
-// Topmost overlay under (mx,my), or -1. Earlier entries paint on top of
-// later ones, so walk forwards to grab the one the user actually sees.
-// `corner` reports whether a resize handle (vs. the plain body) was hit.
+// Topmost layer under (mx,my), or kNoLayer. Earlier entries paint on top of
+// later ones, so walk forwards to grab the one the user actually sees; the main (Desktop) layer is the backmost, so
+// it is tried last - and only while it is unlocked: a locked main layer is just the background, a click passes
+// through it (that is what makes a click on "empty space" deselect).
+// `corner` reports whether a resize handle (vs. the plain body) was hit. Handles are only there while the layer's
+// frame is drawn (see FrameShown()).
 int PreviewPanel::HitTestOverlay(int mx, int my, Corner &corner) const {
     corner = Corner::kNone;
     wxRect prevRect;
     int nw = 0, nh = 0;
-    if (!GetPreviewRect(prevRect) || !GetNativeSize(nw, nh)) return -1;
+    if (!GetPreviewRect(prevRect) || !GetNativeSize(nw, nh)) return kNoLayer;
     double sx = (double)prevRect.GetWidth() / nw;
     double sy = (double)prevRect.GetHeight() / nh;
 
-    for (int i = 0; i < (int)state_.overlays.size(); ++i) {
-        const auto &ov = state_.overlays[(size_t)i];
-        if (!ov.visible && !snapshot_mode_) continue;
-        wxRect r = OverlayScreenRect(ov, prevRect, sx, sy);
-        wxRect brHandle(r.GetRight() - kOverlayHandle + 1, r.GetBottom() - kOverlayHandle + 1,
-                        kOverlayHandle, kOverlayHandle);
-        wxRect tlHandle(r.GetX(), r.GetY(), kOverlayHandle, kOverlayHandle);
-        if (brHandle.Contains(mx, my))      { corner = Corner::kBottomRight; return i; }
-        if (tlHandle.Contains(mx, my))      { corner = Corner::kTopLeft;     return i; }
-        if (r.Contains(mx, my))             { corner = Corner::kNone;        return i; }
-    }
-    return -1;
+    auto test = [&](int idx) -> bool {
+        const OverlayDef *ov = LayerAt(idx);
+        if (!ov) return false;
+        if (!ov->visible && !snapshot_mode_) return false;
+        wxRect r = OverlayScreenRect(*ov, prevRect, sx, sy);
+        if (FrameShown(idx)) {
+            wxRect brHandle(r.GetRight() - kOverlayHandle + 1, r.GetBottom() - kOverlayHandle + 1,
+                            kOverlayHandle, kOverlayHandle);
+            wxRect tlHandle(r.GetX(), r.GetY(), kOverlayHandle, kOverlayHandle);
+            if (brHandle.Contains(mx, my))  { corner = Corner::kBottomRight; return true; }
+            if (tlHandle.Contains(mx, my))  { corner = Corner::kTopLeft;     return true; }
+        }
+        if (r.Contains(mx, my))             { corner = Corner::kNone;        return true; }
+        return false;
+    };
+
+    for (int i = 0; i < (int)state_.overlays.size(); ++i)
+        if (test(i)) return i;
+    if (state_.desktop_present && !state_.desktop_locked && test(kDesktopLayer)) return kDesktopLayer;
+    return kNoLayer;
 }
 
 void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
@@ -512,12 +605,16 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
 
     Corner corner = Corner::kNone;
     int hit = HitTestOverlay(evt.GetX(), evt.GetY(), corner);
-    if (hit >= 0) {
-        auto &ov = state_.overlays[(size_t)hit];
+    const OverlayDef *hit_ov = hit != kNoLayer ? LayerAt(hit) : nullptr;
+    if (hit_ov) {
+        const OverlayDef &ov = *hit_ov;
+        // A release on this layer without a drag in between is a click: it opens the layer's menu (OnLeftUp()).
+        press_layer_ = hit;
+        drag_threshold_passed_ = false;
         if (ov.locked) {
             // "Lock position and size" (Layers panel): can be selected, can't be moved or resized.
             selected_overlay_index_ = hit;
-            drag_overlay_index_ = -1;
+            drag_overlay_index_ = kNoLayer;
             drag_corner_ = Corner::kNone;
             Refresh();
             return;
@@ -537,10 +634,12 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
         return;
     }
 
-    if (drag_overlay_index_ >= 0 || selected_overlay_index_ >= 0) {
+    // Empty space: nothing is selected any more, so no frame is drawn.
+    press_layer_ = kNoLayer;
+    if (drag_overlay_index_ != kNoLayer || selected_overlay_index_ != kNoLayer) {
         if (HasCapture()) ReleaseMouse();
-        drag_overlay_index_ = -1;
-        selected_overlay_index_ = -1;
+        drag_overlay_index_ = kNoLayer;
+        selected_overlay_index_ = kNoLayer;
         drag_corner_ = Corner::kNone;
         Refresh();
     }
@@ -551,16 +650,17 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
     // Button released without us ever seeing the LEFT_UP (released over a
     // modal/other window): finish the drag properly instead of leaving it
     // stuck and the position unsaved.
-    if (drag_overlay_index_ >= 0 && !evt.LeftIsDown()) EndDrag();
-    if (drag_overlay_index_ < 0 || !evt.LeftIsDown()) {
+    if (drag_overlay_index_ != kNoLayer && !evt.LeftIsDown()) { press_layer_ = kNoLayer; EndDrag(); }
+    if (drag_overlay_index_ == kNoLayer || !evt.LeftIsDown()) {
         // Not dragging - just tell the user what's grabbable here.
         Corner corner = Corner::kNone;
         int hit = (state_.disable_preview && !snapshot_mode_)
-                      ? -1 : HitTestOverlay(evt.GetX(), evt.GetY(), corner);
+                      ? kNoLayer : HitTestOverlay(evt.GetX(), evt.GetY(), corner);
+        const OverlayDef *hit_ov = hit != kNoLayer ? LayerAt(hit) : nullptr;
         wxStockCursor cur = wxCURSOR_ARROW;
         if (state_.disable_preview && !snapshot_mode_ && !state_.overlays.empty()) cur = wxCURSOR_HAND;
-        else if (hit >= 0 && state_.overlays[(size_t)hit].locked) cur = wxCURSOR_ARROW;   // locked: nothing to grab
-        else if (hit >= 0) {
+        else if (hit_ov && hit_ov->locked) cur = wxCURSOR_ARROW;   // locked: nothing to grab
+        else if (hit_ov) {
             cur = corner == Corner::kBottomRight ? wxCURSOR_SIZENWSE
                 : corner == Corner::kTopLeft     ? wxCURSOR_SIZENWSE
                                                  : wxCURSOR_SIZING;
@@ -569,10 +669,22 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
         evt.Skip();
         return;
     }
-    if (drag_overlay_index_ >= (int)state_.overlays.size()) { // list changed under us
-        drag_overlay_index_ = -1;
+    OverlayDef *ovp = LayerAt(drag_overlay_index_);
+    if (!ovp) { // list changed under us
+        drag_overlay_index_ = kNoLayer;
         evt.Skip();
         return;
+    }
+    // A plain click wobbles a pixel or two: nothing moves until the mouse has gone a few pixels from where it went
+    // down (then the layer follows the whole distance). A release before that is a click and opens the menu.
+    if (!drag_threshold_passed_) {
+        constexpr int kClickSlop = 4;
+        if (std::abs(evt.GetX() - drag_start_mouse_x_) <= kClickSlop &&
+            std::abs(evt.GetY() - drag_start_mouse_y_) <= kClickSlop) {
+            evt.Skip();
+            return;
+        }
+        drag_threshold_passed_ = true;
     }
     wxRect prevRect;
     int cw = 0, ch = 0;
@@ -590,7 +702,7 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
     int dx = (int)std::lround((evt.GetX() - drag_start_mouse_x_) / sx);
     int dy = (int)std::lround((evt.GetY() - drag_start_mouse_y_) / sy);
 
-    auto &ov = state_.overlays[(size_t)drag_overlay_index_];
+    OverlayDef &ov = *ovp;
     using namespace HrOverlayGeom;
     const Rect start{drag_start_ov_x_, drag_start_ov_y_, drag_start_ov_w_, drag_start_ov_h_};
     // Shift = keep the overlay's proportions (a 500x500 picture can't become 1000x200); an overlay with
@@ -618,14 +730,15 @@ void PreviewPanel::OnMouseMove(wxMouseEvent &evt) {
         }
         ov.x = r.x; ov.y = r.y;
     }
+    StoreLayer(drag_overlay_index_);     // the main layer lives in AppState::desktop_*, not in the overlay list
     if (dx != 0 || dy != 0) drag_moved_ = true;
     Refresh();
 }
 
 void PreviewPanel::EndDrag() {
-    if (drag_overlay_index_ < 0) return;
+    if (drag_overlay_index_ == kNoLayer) return;
     if (HasCapture()) ReleaseMouse();
-    drag_overlay_index_ = -1; // selected_overlay_index_ stays - the frame stays highlighted
+    drag_overlay_index_ = kNoLayer; // selected_overlay_index_ stays - the frame stays highlighted
     drag_corner_ = Corner::kNone;
     snap_center_x_ = snap_center_y_ = false;
     if (drag_moved_) {
@@ -637,8 +750,13 @@ void PreviewPanel::EndDrag() {
 }
 
 void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
+    // The button went down on a layer and the mouse did not travel: a click - show that layer's menu.
+    const int pressed = press_layer_;
+    press_layer_ = kNoLayer;
+    const bool was_click = pressed != kNoLayer && !drag_threshold_passed_ && !drag_moved_;
     EndDrag();
     evt.Skip();
+    if (was_click && LayerAt(pressed)) OpenLayerMenu(pressed, evt.GetPosition());
 }
 
 // Right-click on the preview: Preview off / on (the old "Preview: ON/OFF" header button), plus, while
@@ -672,12 +790,13 @@ void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
     // Shift) - precise placement that's fiddly to do with the mouse on a
     // scaled-down preview.
     bool arrow = key == WXK_LEFT || key == WXK_RIGHT || key == WXK_UP || key == WXK_DOWN;
-    if (arrow && selected_overlay_index_ >= 0 &&
-        selected_overlay_index_ < (int)state_.overlays.size() && drag_overlay_index_ < 0) {
+    OverlayDef *sel_ov = (arrow && selected_overlay_index_ != kNoLayer && drag_overlay_index_ == kNoLayer)
+                             ? LayerAt(selected_overlay_index_) : nullptr;
+    if (sel_ov) {
         int cw = 0, ch = 0;
         if (GetNativeSize(cw, ch)) {
             int step = evt.ShiftDown() ? 10 : 1;
-            auto &ov = state_.overlays[(size_t)selected_overlay_index_];
+            OverlayDef &ov = *sel_ov;
             if (ov.locked) return;      // "Lock position and size"
             if (key == WXK_LEFT)  ov.x -= step;
             if (key == WXK_RIGHT) ov.x += step;
@@ -685,6 +804,7 @@ void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
             if (key == WXK_DOWN)  ov.y += step;
             ov.x = std::clamp(ov.x, 0, std::max(0, cw - ov.w));
             ov.y = std::clamp(ov.y, 0, std::max(0, ch - ov.h));
+            StoreLayer(selected_overlay_index_);
             ScheduleOverlaySave(); // debounced - a held arrow key repeats ~30x/sec
             Refresh();
             return;
@@ -694,7 +814,8 @@ void PreviewPanel::OnKeyDown(wxKeyEvent &evt) {
 }
 
 void PreviewPanel::OnCaptureLost(wxMouseCaptureLostEvent &) {
-    drag_overlay_index_ = -1;
+    drag_overlay_index_ = kNoLayer;
+    press_layer_ = kNoLayer;
     drag_corner_ = Corner::kNone;
     snap_center_x_ = snap_center_y_ = false;
     Refresh();
@@ -762,8 +883,9 @@ void PreviewPanel::ExitSnapshotMode() {
     cache_dirty_ = true;
     pv_seq_ = 0;
     FlushOverlaySave();
-    drag_overlay_index_ = -1;
-    selected_overlay_index_ = -1;
+    drag_overlay_index_ = kNoLayer;
+    selected_overlay_index_ = kNoLayer;
+    press_layer_ = kNoLayer;
     drag_corner_ = Corner::kNone;
     SetCursor(wxCursor(wxCURSOR_ARROW));
     Refresh();
@@ -1223,6 +1345,12 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     pcSizer->Add(preview_header_, 0, wxEXPAND);
 
     preview_panel_ = new PreviewPanel(preview_container_, rec_raw_, state_);
+    // 3.1: a click on a layer in the Preview opens the menu of the Layers panel's right-click; moving the main layer
+    // there changes the settings, not the scene file.
+    preview_panel_->on_layer_menu = [this](int layer, const wxPoint &pt) {
+        if (overlays_panel_) overlays_panel_->ShowLayerMenuAt(layer, POINT{ (LONG)pt.x, (LONG)pt.y });
+    };
+    preview_panel_->on_desktop_changed = [this]() { PersistSettings(); };
     pcSizer->Add(preview_panel_, 1, wxEXPAND | wxALL, 8);
     preview_container_->SetSizer(pcSizer);
 
@@ -1296,8 +1424,17 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
             overlays_panel_->Refresh();
         }
     };
-    overlays_panel_->on_overlay_added = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_added"); };
-    overlays_panel_->on_overlay_removed = [this]() { if (plugins_) plugins_->EmitHook("on_overlay_removed"); };
+    // The Preview remembers its clicked layer by list position, which an add / delete / reorder shifts - and its frame
+    // is only drawn around that layer now - so it forgets it.
+    overlays_panel_->on_overlay_added = [this]() {
+        if (preview_panel_) preview_panel_->ClearOverlaySelection();
+        if (plugins_) plugins_->EmitHook("on_overlay_added");
+    };
+    overlays_panel_->on_overlay_removed = [this]() {
+        if (preview_panel_) preview_panel_->ClearOverlaySelection();
+        if (plugins_) plugins_->EmitHook("on_overlay_removed");
+    };
+    overlays_panel_->on_overlay_order_changed = [this]() { if (preview_panel_) preview_panel_->ClearOverlaySelection(); };
     // 7th pass: the panel is "Layers" - first row = capture source (see overlays_dock_panel.h).
     overlays_panel_->tr = [this](const char *key) { return lang_.Get(key); };
     overlays_panel_->get_canvas_size = [this](int &w, int &h) {
