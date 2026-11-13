@@ -301,6 +301,14 @@ struct AppState {
     // The Desktop layer's eye: false = the monitor picture is not drawn (the other layers still can use it
     // as their source, e.g. a region layer).
     bool         desktop_visible = true;
+    bool         desktop_present     = true;
+    int          desktop_x = 0, desktop_y = 0, desktop_w = 0, desktop_h = 0;
+    bool         desktop_locked      = true;
+    bool         desktop_lock_aspect = false;
+    std::string  desktop_name;
+    bool DesktopShown() const { return desktop_present && desktop_visible; }
+    bool DesktopMoved() const { return desktop_w > 0 && desktop_h > 0; }          // not the plain full-canvas picture
+    bool DesktopIsPlain() const { return DesktopShown() && !DesktopMoved(); }     // the picture exactly as captured
     std::string  capture_window_title;
     // The exact HWND the person picked in File > Select Window...
     HWND         capture_window_hwnd = nullptr;

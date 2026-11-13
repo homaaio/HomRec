@@ -129,6 +129,15 @@ const std::vector<SettingDef> &All() {
             v.push_back(d);
         }
         v.push_back(BoolField("desktop_visible", "capture", &AppState::desktop_visible));
+        // 3.1: the Desktop (main) layer - deleted / position / size / locks / name (see app_state.h)
+        v.push_back(BoolField("desktop_present", "capture", &AppState::desktop_present));
+        v.push_back(IntField("desktop_x", "capture", &AppState::desktop_x));
+        v.push_back(IntField("desktop_y", "capture", &AppState::desktop_y));
+        v.push_back(IntField("desktop_w", "capture", &AppState::desktop_w));
+        v.push_back(IntField("desktop_h", "capture", &AppState::desktop_h));
+        v.push_back(BoolField("desktop_locked", "capture", &AppState::desktop_locked));
+        v.push_back(BoolField("desktop_lock_aspect", "capture", &AppState::desktop_lock_aspect));
+        v.push_back(StrField("desktop_name", "capture", &AppState::desktop_name));
         v.push_back(StrField("capture_window_title", "capture", &AppState::capture_window_title));
         // 2.4: how a selected window is captured / which part of it (see app_state.h)
         v.push_back(StrField("window_capture_method", "capture", &AppState::window_capture_method));
