@@ -135,14 +135,15 @@ void PersistState(AppState &state) {
 // this file, never go through WM_COMMAND, so no risk of colliding with the
 // ID_OVDOCK_* control ids.
 enum { kMenuAddText = 1, kMenuAddImage, kMenuAddGif, kMenuAddWebcam, kMenuAddExternal, kMenuAddInputOverlay,
-       kMenuAddWindow, kMenuAddRegion };
+       kMenuAddWindow, kMenuAddRegion, kMenuAddDesktop };
 
 // TrackPopupMenu(TPM_RETURNCMD) result codes for the per-row right-click
 // menu -- same reasoning as kMenuAdd* above, a separate numbering space
 // local to this file.
 enum { kCtxToggle = 1, kCtxRename, kCtxEdit, kCtxDelete, kCtxDuplicate, kCtxUp, kCtxDown, kCtxCenter, kCtxLock, kCtxKeepProp };
 // ... and for the capture-source row's menu.
-enum { kSrcCtxSettings = 1, kSrcCtxToggle };
+enum { kSrcCtxSettings = 1, kSrcCtxToggle, kSrcCtxRename, kSrcCtxCenter, kSrcCtxFill, kSrcCtxLock, kSrcCtxKeepProp,
+       kSrcCtxDelete };
 // Width of the clickable eye column on the right edge of an overlay row.
 constexpr int kEyeColW = 30;
 
@@ -275,7 +276,8 @@ LRESULT CALLBACK OverlaysDockPanel::ListSubclassProc(HWND hwnd, UINT msg, WPARAM
 }
 
 // ---- list helpers --------------------------------------------------------------------------------
-// Row 0 = capture source; row r >= 1 = overlay r-1 (or, with no overlays, one non-interactive hint row).
+// Row 0 = capture source (the Desktop layer; no such row once it is deleted); then one row per overlay (or, with no
+// overlays, one non-interactive hint row).
 int OverlaysDockPanel::RowAtPoint(POINT client_pt, RECT *rc_out) const {
     if (!list_) return -1;
     const LRESULT hit = SendMessageW(list_, LB_ITEMFROMPOINT, 0, MAKELPARAM(client_pt.x, client_pt.y));
@@ -292,7 +294,8 @@ int OverlaysDockPanel::RowAtPoint(POINT client_pt, RECT *rc_out) const {
 }
 
 int OverlaysDockPanel::OverlayOfRow(int row) const {
-    if (row >= 1 && row - 1 < (int)state_.overlays.size()) return row - 1;
+    const int idx = row - SrcRows();
+    if (row >= 0 && idx >= 0 && idx < (int)state_.overlays.size()) return idx;
     return -1;
 }
 
@@ -327,7 +330,7 @@ const std::vector<HrMonitorInfo> &OverlaysDockPanel::Monitors() const {
 // What the source row says. `tag` (optional) receives the short dim text on its right edge.
 std::wstring OverlaysDockPanel::SourceText(std::wstring *tag) const {
     // 8th pass: the first row is the DESKTOP layer only (window / region recording are layers of their own).
-    std::wstring text = WideFromNarrow(T("src_row_desktop", "Desktop"));
+    std::wstring text = WideFromNarrow(state_.desktop_name.empty() ? T("src_row_desktop", "Desktop") : state_.desktop_name);
     std::wstring t;
     const std::string dash = " \xE2\x80\x94 ";   // " — "
     const auto &mons = Monitors();
@@ -347,15 +350,28 @@ std::wstring OverlaysDockPanel::SourceText(std::wstring *tag) const {
 void OverlaysDockPanel::RefreshSourceRow() {
     if (!list_) return;
     std::wstring tag;
-    std::wstring sig = SourceText(&tag) + L"\x1F" + tag;
+    std::wstring sig = SourceSig(tag);
     if (sig == last_source_sig_) return;
     last_source_sig_ = sig;
     RebuildList();
 }
 
+// What the source row looks like, as one string: the row is only rebuilt when this changes.
+std::wstring OverlaysDockPanel::SourceSig(std::wstring &tag) const {
+    if (!state_.desktop_present) { tag.clear(); return L"-"; }
+    std::wstring sig = SourceText(&tag) + L"\x1F" + tag;
+    sig += state_.desktop_locked ? L"\x1FL" : L"\x1Fu";
+    return sig;
+}
+
 void OverlaysDockPanel::SelectOverlay(size_t idx) {
     if (!list_) return;
-    SendMessageW(list_, LB_SETCURSEL, (WPARAM)(idx + 1), 0);
+    SendMessageW(list_, LB_SETCURSEL, (WPARAM)(idx + (size_t)SrcRows()), 0);
+}
+
+void OverlaysDockPanel::SelectDesktop() {
+    if (!list_ || !state_.desktop_present) return;
+    SendMessageW(list_, LB_SETCURSEL, 0, 0);
 }
 
 void OverlaysDockPanel::OnListMouse(UINT msg, LPARAM lparam, bool &handled) {
@@ -365,7 +381,7 @@ void OverlaysDockPanel::OnListMouse(UINT msg, LPARAM lparam, bool &handled) {
     if (row < 0) return;
     const int idx = OverlayOfRow(row);
     // 8th pass: the Desktop row has an eye too (hides / shows the monitor picture)
-    if (row == 0 && pt.x >= rc.right - kEyeColW) {
+    if (IsSourceRow(row) && pt.x >= rc.right - kEyeColW) {
         SendMessageW(list_, LB_SETCURSEL, (WPARAM)row, 0);
         if (on_source_action) on_source_action(kSrcToggleDesktop);
         handled = true;
@@ -381,7 +397,7 @@ void OverlaysDockPanel::OnListMouse(UINT msg, LPARAM lparam, bool &handled) {
     }
     if (msg == WM_LBUTTONDBLCLK) {
         SendMessageW(list_, LB_SETCURSEL, (WPARAM)row, 0);
-        if (row == 0) { if (on_edit_source) on_edit_source(); }
+        if (IsSourceRow(row)) { if (on_edit_source) on_edit_source(); }
         else if (idx >= 0) { if (on_edit_overlay) on_edit_overlay((size_t)idx); }
         handled = true;
     }
@@ -393,14 +409,15 @@ void OverlaysDockPanel::OnListKey(WPARAM vk, bool &handled) {
     const int idx = OverlayOfRow(row);
     switch (vk) {
     case VK_RETURN:
-        if (row == 0) { if (on_edit_source) on_edit_source(); handled = true; }
+        if (IsSourceRow(row)) { if (on_edit_source) on_edit_source(); handled = true; }
         else if (idx >= 0) { if (on_edit_overlay) on_edit_overlay((size_t)idx); handled = true; }
         break;
     case VK_F2:
-        if (idx >= 0) { RenameAt((size_t)idx); handled = true; }
+        if (IsSourceRow(row)) { RenameDesktop(); handled = true; }
+        else if (idx >= 0) { RenameAt((size_t)idx); handled = true; }
         break;
     case VK_SPACE:
-        if (row == 0) { if (on_source_action) on_source_action(kSrcToggleDesktop); handled = true; }
+        if (IsSourceRow(row)) { if (on_source_action) on_source_action(kSrcToggleDesktop); handled = true; }
         else if (idx >= 0) { ToggleVisibility((size_t)idx); handled = true; }
         break;
     default: break;
@@ -433,19 +450,48 @@ void OverlaysDockPanel::OnListContextMenu(LPARAM lparam) {
         SendMessageW(list_, LB_SETCURSEL, sel, 0);
     }
 
-    if (sel == 0) { ShowSourceContextMenu(GetParent(hwnd_), screen_pt); return; }
+    if (IsSourceRow(sel)) { ShowSourceContextMenu(GetParent(hwnd_), screen_pt); return; }
     const int idx = OverlayOfRow(sel);
     if (idx < 0) return;
     ShowRowContextMenu(GetParent(hwnd_), screen_pt, (size_t)idx);
 }
 
+void OverlaysDockPanel::ShowLayerMenuAt(int layer, POINT screen_pt) {
+    if (!hwnd_) return;
+    if (layer == kDesktopLayer) {
+        if (!state_.desktop_present) return;
+        SelectDesktop();
+        ShowSourceContextMenu(GetParent(hwnd_), screen_pt);
+    } else if (layer >= 0 && layer < (int)state_.overlays.size()) {
+        SelectOverlay((size_t)layer);
+        ShowRowContextMenu(GetParent(hwnd_), screen_pt, (size_t)layer);
+    }
+}
+
 void OverlaysDockPanel::ShowSourceContextMenu(HWND owner, POINT screen_pt) {
     const std::wstring s_settings = WideFromNarrow(T("ctx_src_settings", "Capture source\u2026"));
     const std::wstring s_toggle   = WideFromNarrow(state_.desktop_visible ? T("ctx_hide", "Hide") : T("ctx_show", "Show"));
+    const std::wstring s_rename   = WideFromNarrow(T("ctx_rename", "Rename\u2026"));
+    const std::wstring s_center   = WideFromNarrow(T("ctx_center", "Center on the picture"));
+    const std::wstring s_fill     = WideFromNarrow(T("ctx_desktop_fill", "Fill the whole picture"));
+    const std::wstring s_lock     = WideFromNarrow(T("ctx_lock", "Lock position and size"));
+    const std::wstring s_prop     = WideFromNarrow(T("ctx_keep_prop", "Keep proportions when resizing"));
+    const std::wstring s_del      = WideFromNarrow(T("ctx_delete", "Delete"));
 
+    // 3.1: the main layer has the menu of every other layer (it is always the backmost one, so no Move up / down and
+    // no Duplicate). It starts locked at full size - "Fill the whole picture" puts it back there after a resize.
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, kSrcCtxSettings, s_settings.c_str());
     AppendMenuW(menu, MF_STRING, kSrcCtxToggle, s_toggle.c_str());
+    AppendMenuW(menu, MF_STRING, kSrcCtxRename, s_rename.c_str());
+    AppendMenuW(menu, MF_STRING, kSrcCtxSettings, s_settings.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | ((state_.desktop_locked || !state_.DesktopMoved()) ? MF_GRAYED : 0), kSrcCtxCenter, s_center.c_str());
+    AppendMenuW(menu, MF_STRING | ((state_.desktop_locked || !state_.DesktopMoved()) ? MF_GRAYED : 0), kSrcCtxFill, s_fill.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (state_.desktop_locked ? MF_CHECKED : 0), kSrcCtxLock, s_lock.c_str());
+    AppendMenuW(menu, MF_STRING | (state_.desktop_lock_aspect ? MF_CHECKED : 0), kSrcCtxKeepProp, s_prop.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kSrcCtxDelete, s_del.c_str());
 
     SetForegroundWindow(owner);
     const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
@@ -454,6 +500,26 @@ void OverlaysDockPanel::ShowSourceContextMenu(HWND owner, POINT screen_pt) {
     switch (cmd) {
     case kSrcCtxSettings: if (on_edit_source) on_edit_source(); break;
     case kSrcCtxToggle:   if (on_source_action) on_source_action(kSrcToggleDesktop); break;
+    case kSrcCtxRename:   RenameDesktop(); break;
+    case kSrcCtxCenter:   CenterDesktop(); break;
+    case kSrcCtxFill:
+        state_.desktop_x = state_.desktop_y = state_.desktop_w = state_.desktop_h = 0;
+        PersistState(state_);
+        RefreshSourceRow();
+        SelectDesktop();
+        break;
+    case kSrcCtxLock:
+        state_.desktop_locked = !state_.desktop_locked;
+        PersistState(state_);
+        RefreshSourceRow();
+        SelectDesktop();
+        break;
+    case kSrcCtxKeepProp:
+        state_.desktop_lock_aspect = !state_.desktop_lock_aspect;
+        PersistState(state_);
+        SelectDesktop();
+        break;
+    case kSrcCtxDelete:   DeleteDesktop(); break;
     default: break;
     }
 }
@@ -535,9 +601,11 @@ void OverlaysDockPanel::RebuildList() {
     SendMessageW(list_, LB_RESETCONTENT, 0, 0);
 
     std::wstring tag;
-    const std::wstring src = SourceText(&tag);
-    last_source_sig_ = src + L"\x1F" + tag;
-    SendMessageW(list_, LB_ADDSTRING, 0, (LPARAM)src.c_str());
+    last_source_sig_ = SourceSig(tag);
+    if (state_.desktop_present) {
+        const std::wstring src = SourceText(&tag);
+        SendMessageW(list_, LB_ADDSTRING, 0, (LPARAM)src.c_str());
+    }
 
     if (state_.overlays.empty()) {
         // Non-interactive hint row (HandleDrawItem paints it dim).
@@ -550,7 +618,7 @@ void OverlaysDockPanel::RebuildList() {
     }
     const int count = (int)SendMessageW(list_, LB_GETCOUNT, 0, 0);
     if (top > 0 && top < count) SendMessageW(list_, LB_SETTOPINDEX, (WPARAM)top, 0);
-    if (sel >= 0 && sel < count && !(sel == 1 && state_.overlays.empty()))
+    if (sel >= 0 && sel < count && !(sel == SrcRows() && state_.overlays.empty()))
         SendMessageW(list_, LB_SETCURSEL, (WPARAM)sel, 0);
     SendMessageW(list_, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(list_, nullptr, TRUE);
@@ -558,6 +626,12 @@ void OverlaysDockPanel::RebuildList() {
 
 void OverlaysDockPanel::ShowAddMenu(HWND parent, HINSTANCE hInst) {
     HMENU menu = CreatePopupMenu();
+    // 3.1: a deleted main layer comes back from here.
+    if (!state_.desktop_present) {
+        const std::wstring s_desk = WideFromNarrow(T("add_desktop_layer", "Desktop capture"));
+        AppendMenuW(menu, MF_STRING, kMenuAddDesktop, s_desk.c_str());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
     // 8th pass: window / region recording are layers now - added here like any other layer.
     const std::wstring s_win = WideFromNarrow(T("add_window_layer", "Window capture\u2026"));
     const std::wstring s_reg = WideFromNarrow(T("add_region_layer", "Region capture\u2026"));
@@ -583,6 +657,7 @@ void OverlaysDockPanel::ShowAddMenu(HWND parent, HINSTANCE hInst) {
     DestroyMenu(menu);
 
     switch (cmd) {
+        case kMenuAddDesktop:      AddDesktopLayer(); break;
         case kMenuAddWindow:       AddWindowLayer(parent, hInst); break;
         case kMenuAddRegion:       AddRegionLayer(parent, hInst); break;
         case kMenuAddText:         AddTextOverlay(parent, hInst); break;
@@ -774,6 +849,53 @@ void OverlaysDockPanel::AddFromInputOverlayRegistry(HWND parent, HINSTANCE hInst
     Refresh();
 }
 
+// ---- the main (Desktop) layer -------------------------------------------------------------------------------------
+void OverlaysDockPanel::AddDesktopLayer() {
+    if (state_.desktop_present) return;
+    // A fresh main layer: shown, filling the picture, locked - what every new install starts with.
+    state_.desktop_present = true;
+    state_.desktop_visible = true;
+    state_.desktop_x = state_.desktop_y = state_.desktop_w = state_.desktop_h = 0;
+    state_.desktop_locked = true;
+    state_.desktop_lock_aspect = false;
+    state_.desktop_name.clear();
+    PersistState(state_);
+    RebuildList();
+    SelectDesktop();
+}
+
+void OverlaysDockPanel::DeleteDesktop() {
+    if (!state_.desktop_present) return;
+    state_.desktop_present = false;
+    PersistState(state_);
+    RebuildList();
+}
+
+void OverlaysDockPanel::RenameDesktop() {
+    if (!state_.desktop_present || !list_) return;
+    HWND parent = GetParent(hwnd_);
+    HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE);
+    std::wstring value = WideFromNarrow(state_.desktop_name);
+    if (!HrPromptForText(parent, hInst, L"Rename Layer",
+                          L"Display name (leave blank to use the default label):", value)) {
+        return;
+    }
+    state_.desktop_name = NarrowFromWide(value);
+    PersistState(state_);
+    RefreshSourceRow();
+    SelectDesktop();
+}
+
+void OverlaysDockPanel::CenterDesktop() {
+    if (!state_.DesktopMoved()) return;
+    int cw = 0, ch = 0;
+    if (!get_canvas_size || !get_canvas_size(cw, ch) || cw <= 0 || ch <= 0) return;
+    state_.desktop_x = (cw - state_.desktop_w) / 2;
+    state_.desktop_y = (ch - state_.desktop_h) / 2;
+    PersistState(state_);
+    SelectDesktop();
+}
+
 void OverlaysDockPanel::ToggleVisibility(size_t idx) {
     if (idx >= state_.overlays.size()) return;
     state_.overlays[idx].visible = !state_.overlays[idx].visible;
@@ -820,6 +942,7 @@ void OverlaysDockPanel::MoveBy(size_t idx, int delta) {
     const long target = (long)idx + delta;
     if (idx >= state_.overlays.size() || target < 0 || target >= (long)state_.overlays.size()) return;
     std::swap(state_.overlays[idx], state_.overlays[(size_t)target]);
+    if (on_overlay_order_changed) on_overlay_order_changed();
     Refresh();
     SelectOverlay((size_t)target);
 }
@@ -975,7 +1098,7 @@ void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
 
     HDC dc = dis->hDC;
     RECT rc = dis->rcItem;
-    const bool is_source = dis->itemID == 0;
+    const bool is_source = state_.desktop_present && dis->itemID == 0;
     HBRUSH br = CreateSolidBrush(is_source ? (selected ? bgSrcSel : bgSrc) : (selected ? bgSel : bg));
     FillRect(dc, &rc, br);
     DeleteObject(br);
@@ -999,6 +1122,10 @@ void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
         std::wstring tag;
         SourceText(&tag);
         int right = rc.right - kEyeColW - 2;
+        if (state_.desktop_locked) {                       // 3.1: the main layer can be locked like the others
+            DrawLock(dc, right - 12, rc.top + (rowH - 12) / 2, fgDim);
+            right -= 18;
+        }
         if (!tag.empty()) {
             SetTextColor(dc, fgDim);
             RECT tr_ = { x, rc.top, right, rc.bottom };
@@ -1019,7 +1146,8 @@ void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
     }
 
     // ---- the "no overlays yet" hint row --------------------------------------------------------
-    if (state_.overlays.empty() || dis->itemID - 1 >= state_.overlays.size()) {
+    const size_t first_ov = (size_t)SrcRows();
+    if (state_.overlays.empty() || dis->itemID < first_ov || dis->itemID - first_ov >= state_.overlays.size()) {
         SetTextColor(dc, fgDim);
         RECT tr_ = rc; tr_.left += 8; tr_.right -= 8;
         DrawTextW(dc, buf, -1, &tr_, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1027,7 +1155,7 @@ void OverlaysDockPanel::HandleDrawItem(DRAWITEMSTRUCT *dis, bool dark) {
     }
 
     // ---- an overlay row: [icon] label ........ [lock] [eye] -----------------------------------
-    const OverlayDef &ov = state_.overlays[dis->itemID - 1];
+    const OverlayDef &ov = state_.overlays[dis->itemID - first_ov];
     const int iconPx = 20;
     int x = rc.left + 8;
     const COLORREF tc = ov.visible ? fg : fgDim;

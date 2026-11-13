@@ -44,6 +44,7 @@ public:
     std::function<void(size_t idx)> on_edit_overlay;
     std::function<void()> on_overlay_added;
     std::function<void()> on_overlay_removed;
+    std::function<void()> on_overlay_order_changed;   // Move up / down: list positions changed, nothing added or removed
 
     // 7th pass - wiring done by main_frame.cpp (the panel itself knows neither the language table nor the
     // recorder):
@@ -57,6 +58,11 @@ public:
 
     // Re-reads what the source row shows (called from the UI timer; repaints only when it changed).
     void RefreshSourceRow();
+
+    // 3.1: the same menu a right-click on the layer's row gives, at a screen position - used by the Live Preview, where
+    // a click on a layer opens it. `layer` is an overlay index, or kDesktopLayer for the main (Desktop) layer.
+    static constexpr int kDesktopLayer = -2;
+    void ShowLayerMenuAt(int layer, POINT screen_pt);
 
 private:
     // Popup menu anchored under the "+" button; dispatches to one of the
@@ -81,6 +87,15 @@ private:
     // homrec.register_input_overlay() (input_overlay_registry.h) and adds the chosen one.
     void AddFromInputOverlayRegistry(HWND parent, HINSTANCE hInst);
 
+    // 3.1: the main (Desktop) layer: delete / bring back / rename / lock / center / fill the picture.
+    void AddDesktopLayer();
+    void DeleteDesktop();
+    void RenameDesktop();
+    void CenterDesktop();
+    void SelectDesktop();
+    bool IsSourceRow(int row) const { return state_.desktop_present && row == 0; }
+    int  SrcRows() const { return state_.desktop_present ? 1 : 0; }    // list rows in front of the overlays
+
     void ToggleVisibility(size_t idx);
     void RemoveAt(size_t idx);
     void RenameAt(size_t idx);
@@ -89,8 +104,8 @@ private:
     void CenterAt(size_t idx);
     void ClosePanel();
 
-    // 7th pass list helpers. Row 0 is the capture source, row r >= 1 is overlay r-1 (or the "no overlays yet"
-    // hint when there are none).
+    // 7th pass list helpers. Row 0 is the capture source (the Desktop layer - not there once it is deleted), the
+    // next rows are the overlays (or the "no overlays yet" hint when there are none).
     void RebuildList();                      // refills the rows, keeps selection and scroll position
     void SelectOverlay(size_t idx);
     int  RowAtPoint(POINT client_pt, RECT *rc_out) const;
@@ -100,6 +115,7 @@ private:
     void ShowSourceContextMenu(HWND owner, POINT screen_pt);
     std::string T(const char *key, const char *fallback) const;
     std::wstring SourceText(std::wstring *tag) const;
+    std::wstring SourceSig(std::wstring &tag) const;    // what the source row looks like, as one comparable string
     std::string NewOverlayId() const;
 
     // Right-click / keyboard context-menu support for a single row -- list_ is subclassed (see
