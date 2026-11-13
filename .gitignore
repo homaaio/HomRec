@@ -323,3 +323,6 @@ crashes/*.dmp
 hr.map
 cfg/console_history.*
 scenes/*
+commits.txt
+logs/*
+cfg/*.cfg
