@@ -42,7 +42,7 @@ On Windows, HomRec and ffmpeg report exit codes of two kinds.
 
 ## Hardware encoders (nvenc / qsv / amf)
 
-The encoder is chosen in **Settings → Video → Encoder** and stored in `homrec.hrc`
+The encoder is chosen in **Settings > Video & Codec > Video codec** and stored in `homrec.hrc`
 (`video_codec`, `hw_accel`, `qsv_low_power`).
 
 Matching GPU and encoder:
@@ -78,7 +78,7 @@ If the driver cannot be updated, use `libx264` (software encoder, works everywhe
 
 ### Choosing the encoder
 
-1. Open **Settings → Video** and pick the encoder for your GPU.
+1. Open **Settings > Video & Codec** and pick the encoder for your GPU.
 2. If it fails, pick `libx264`. It runs on the CPU and always works.
 3. Turn off `qsv_low_power` if you use QSV.
 
