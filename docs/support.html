@@ -33,15 +33,25 @@
         <li>Anything else about HomRec</li>
     </ul>
 
+    <h2>Try the guides first</h2>
+    <p>
+        Most problems have a step-by-step answer:
+        <a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md">Troubleshooting by symptom</a> ·
+        <a href="documentation.html#quick">Quick answers</a> ·
+        <a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/logs-and-diagnostics.md">Logs and diagnostics</a>.
+    </p>
+
     <h2>Writing a good bug report</h2>
     <p>To get your issue resolved quickly, please include:</p>
     <ol>
-        <li>HomRec version (see <code>version</code> in the built-in console, or Help menu)</li>
-        <li>Windows version (10/11, 64-bit)</li>
+        <li>HomRec version (Help &gt; About, or <code>version</code> in the built-in console) and whether it is the installer or a portable copy</li>
+        <li>Windows version (10/11, 64-bit), and your graphics card with its driver version</li>
         <li>A brief description of the problem</li>
         <li>Steps to reproduce it</li>
-        <li>A screenshot or a copy of <code>homrec.log</code> if possible</li>
+        <li>The file <code>logs\homrec.log</code> (or its last 200 lines); for a crash, also the newest <code>.dmp</code> from <code>crashes\</code></li>
+        <li>For a recording problem: the codec, container and capture source you used</li>
     </ol>
+    <p class="muted-note">Logs can contain file paths and window titles. Look through them before you post them.</p>
 
     <div class="note">
         <b>Response time:</b> usually within 2–4 days. HomRec is an open-source project

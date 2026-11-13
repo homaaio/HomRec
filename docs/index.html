@@ -15,11 +15,12 @@
         <a href="#download">Download</a>
         <a href="documentation.html">Documentation</a>
         <a href="#requirements">Requirements</a>
+        <a href="#docs">Guides</a>
         <a href="#install">Install</a>
         <a href="support.html">Support</a>
         <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
         <div class="spacer"></div>
-        <div class="version-badge" data-latest-version>v3.0</div>
+        <div class="version-badge" data-latest-version>latest release</div>
     </aside>
 
     <div class="content">
@@ -27,6 +28,7 @@
         <h1>HomRec</h1>
         <p><b>Hardware Optimized Mechanism Recorder</b></p>
         <p>Screen recorder built for weak PCs. No lags. No bloat. No GPU required.</p>
+        <!-- IMG: site-hero-main-window -->
 
         <div id="download" class="download-block">
             <div class="download-title">Download latest release</div>
@@ -71,7 +73,7 @@
             </tr>
             <tr>
                 <td>Screen recording</td>
-                <td>Full desktop or specific window</td>
+                <td>Full desktop, one monitor, one window or a screen region</td>
             </tr>
             <tr>
                 <td>Audio capture</td>
@@ -83,15 +85,19 @@
             </tr>
             <tr>
                 <td>Hotkeys</td>
-                <td>F9 start/stop · F10 pause · F11 fullscreen</td>
+                <td>F9 start/stop · F10 pause · F11 fullscreen · F8 save Instant Replay</td>
             </tr>
             <tr>
                 <td>Custom languages</td>
-                <td>Drop a .hrl file in Advanced Settings to add any language instantly</td>
+                <td>Settings &gt; General &gt; Add Language: load a .hrl file and it applies at once</td>
             </tr>
             <tr>
                 <td>Overlays</td>
-                <td>Add and position text/image/webcam overlays on your recording</td>
+                <td>Text, image, GIF, webcam and key-press overlays, placed in a visual editor</td>
+            </tr>
+            <tr>
+                <td>Instant Replay</td>
+                <td>A rolling buffer that you save with a hotkey, independent of normal recording</td>
             </tr>
             <tr>
                 <td>Custom output folder</td>
@@ -152,34 +158,55 @@
         </div>
 
         <h2 id="install">Installation</h2>
-        <h3>Option A — .exe (recommended)</h3>
+        <h3>Option A — Installer (recommended)</h3>
         <p>
-            1. Go to <a href="https://github.com/homaaio/HomRec">Releases</a> and download the latest .zip<br>
-            2. Unzip anywhere you want — no installer needed<br>
+            1. Download <code>homrec-setup-win64-&lt;version&gt;.exe</code> from <a href="https://github.com/homaaio/HomRec/releases">Releases</a><br>
+            2. Run it. It installs for your user only, no administrator rights needed<br>
+            3. Start HomRec from the Start menu
+        </p>
+        <h3>Option B — Portable archive</h3>
+        <p>
+            1. Download the latest <code>.zip</code> or <code>.7z</code> from <a href="https://github.com/homaaio/HomRec/releases">Releases</a><br>
+            2. Unpack it into a folder you can write to (not <code>C:\Program Files</code>)<br>
             3. Launch <code>hr.exe</code>
         </p>
+        <div class="warn">
+            <b>FFmpeg:</b> only the <b>full</b> archive (<code>...-portable-full</code>) contains it. With the plain
+            <code>portable</code> archive, put <code>ffmpeg.exe</code> into an <code>ffmpeg</code> folder next to
+            <code>hr.exe</code>, or HomRec reports "FFmpeg not found."
+        </div>
         <p>
-            FFmpeg is already included in the archive — no extra downloads needed.
-        </p>
-        <p>
-            <b>Antivirus warning?</b> Some antiviruses may flag HomRec because it is a new
+            <b>Antivirus warning?</b> Some antiviruses flag HomRec because it is a new, unsigned
             program. It is not a virus — the full source code is on GitHub.
         </p>
+        <p>
+            Step by step, with checks: <a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/getting-started.md">Getting started guide</a>.
+        </p>
 
-        <h3>Option B — Build from source</h3>
+        <h3>Option C — Build from source</h3>
         <pre>git clone https://github.com/homaaio/HomRec.git
 cd HomRec
 cmake -S . -B build -G "MinGW Makefiles"
-cmake --build build -j
-hr.exe</pre>
+cmake --build build -j</pre>
         <p>
-            Requires: MinGW-w64 toolchain, Lua 5.4, FFmpeg.
+            Requires the MSYS2 UCRT64 toolchain, wxWidgets 3.2, Lua 5.4 and CMake; FFmpeg is needed at run time.
+            See the <a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/building.md">build guide</a>.
         </p>
+
+        <h2 id="docs">Guides</h2>
+        <div class="card-grid">
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/getting-started.md"><strong>Getting started</strong><span>Install, first run, first recording.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/how-it-works.md"><strong>How it works</strong><span>From Start to the finished file, and what can fail on the way.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md"><strong>Troubleshooting</strong><span>Fixes sorted by symptom.</span></a>
+            <a class="card" href="documentation.html"><strong>Quick answers</strong><span>Searchable problems and the console reference.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hom/README.md"><strong>hom</strong><span>Install and use the plugin package manager.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/README.md"><strong>All guides</strong><span>The full documentation index.</span></a>
+        </div>
 
         <h2 id="shortcuts">Keyboard Shortcuts</h2>
         <table>
             <tr>
-                <th>Key</th>
+                <th>Key (default)</th>
                 <th>Action</th>
             </tr>
             <tr>
@@ -192,29 +219,18 @@ hr.exe</pre>
             </tr>
             <tr>
                 <td><code>F11</code></td>
-                <td>Toggle fullscreen</td>
+                <td>Toggle HomRec's own window fullscreen</td>
+            </tr>
+            <tr>
+                <td><code>F8</code></td>
+                <td>Save Instant Replay</td>
             </tr>
             <tr>
                 <td><code>Ctrl+Shift+T</code></td>
-                <td>Open built-in terminal</td>
-            </tr>
-            <tr>
-                <td><code>Ctrl+O</code></td>
-                <td>Open recordings folder</td>
-            </tr>
-            <tr>
-                <td><code>Ctrl+,</code></td>
-                <td>Open settings</td>
-            </tr>
-            <tr>
-                <td><code>Ctrl+Q</code></td>
-                <td>Quit the program</td>
-            </tr>
-            <tr>
-                <td><code>Esc</code></td>
-                <td>Minimize to tray</td>
+                <td>Open the built-in console</td>
             </tr>
         </table>
+        <p class="muted-note">The four function keys can be changed in Settings &gt; Hotkeys.</p>
 
         <h2 id="troubleshoot">Troubleshooting</h2>
         <table>
@@ -228,27 +244,31 @@ hr.exe</pre>
             </tr>
             <tr>
                 <td>Antivirus flags the file</td>
-                <td>False positive. Add HomRec folder to exceptions</td>
+                <td>False positive. Add the HomRec folder to the exclusions</td>
             </tr>
             <tr>
-                <td>"MSVCP140.dll not found"</td>
-                <td>Install Visual C++ Redistributable</td>
+                <td>"FFmpeg not found."</td>
+                <td>You use the plain portable archive. Add <code>ffmpeg\ffmpeg.exe</code> next to <code>hr.exe</code></td>
+            </tr>
+            <tr>
+                <td>"...dll was not found" at launch</td>
+                <td>Unpack the whole archive again; do not copy <code>hr.exe</code> alone</td>
             </tr>
             <tr>
                 <td>Black screen instead of video</td>
-                <td>Run HomRec as administrator</td>
+                <td>Check the capture source first; if a program runs as administrator, run HomRec as administrator too. See <a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md#the-recording-is-black-frozen-or-shows-the-wrong-thing">the guide</a></td>
             </tr>
             <tr>
                 <td>Video lags or stutters</td>
-                <td>Lower FPS to 30, quality to Medium</td>
+                <td>Use a hardware encoder, lower the frame rate or the resolution</td>
             </tr>
             <tr>
                 <td>No sound in recording</td>
-                <td>Check audio source in settings</td>
+                <td>Check the Audio Mixer bars and the microphone in Settings &gt; Audio</td>
             </tr>
             <tr>
-                <td>Audio out of sync</td>
-                <td>Lower quality or FPS, restart HomRec</td>
+                <td>Anything else</td>
+                <td>Read the end of <code>logs\homrec.log</code>; see <a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/logs-and-diagnostics.md">Logs and diagnostics</a></td>
             </tr>
         </table>
 

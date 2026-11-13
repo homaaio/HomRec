@@ -19,333 +19,160 @@
         <a href="support.html">Support</a>
         <a href="https://discord.gg/Gv4t6Xhy7E">Forum</a>
         <div class="spacer"></div>
-        <div class="version-badge" data-latest-version>v3.0</div>
+        <div class="version-badge" data-latest-version>latest release</div>
     </aside>
 
     <div class="content">
 
         <h1>Documentation</h1>
-        <p>Everything beyond "click record": the developer console, config scripts, plugins, and the <code>hom</code> plugin manager.</p>
+        <p>Guides for <b>HomRec 3.1.0</b>: how it works step by step, what can fail, and how to fix it. The guides are Markdown files in the repository; the quick answers below are searchable.</p>
 
         <div class="toc">
-            <a href="#console">1. The developer console</a>
-            <a href="#builtins">2. Built-in commands</a>
-            <a href="#cfg">3. Config scripts (autoexec.cfg)</a>
-            <a href="#security">4. Console security (sec / secui / secp)</a>
-            <a href="#plugins">5. Plugins (Lua)</a>
-            <a href="#hom">6. hom — the plugin package manager</a>
-            <a href="#faq">7. FAQ</a>
+            <a href="#guides">Guides</a>
+            <a href="#quick">Quick answers</a>
+            <a href="#console">Console and cfg scripts</a>
+            <a href="#plugins">Plugins</a>
+            <a href="#hom">hom, the package manager</a>
         </div>
 
-        <div class="note">
-            This page documents HomRec <b>v2.0</b> as it actually behaves today. HomRec's console
-            went through a Python → C++ rewrite, and some older material floating around (including
-            parts of the repo's own <code>commands.md</code>) still describes a fancier command
-            language — Windows/Rules/AE Objects, hotkeys, timers — from before that rewrite, which
-            <b>isn't implemented in the current build</b>. Everything below reflects what's actually
-            in <code>console_window.cpp</code> today, not the aspirational older spec.
+        <div id="doc-search" class="search">
+            <input id="doc-search-input" type="search" placeholder="Search the quick answers (press / to focus)" autocomplete="off" aria-label="Search the documentation">
+            <div id="doc-search-info" class="search-info" aria-live="polite"></div>
         </div>
 
-        <h2 id="console">1. The developer console</h2>
-        <p>
-            HomRec has a built-in console for scripting and diagnostics — it's the same idea as a
-            game's dev console (think Source/Quake), not a general shell. Open it from the app
-            (Help/Debug menu), type a command, press Enter.
-        </p>
-        <p>Commands share one line format:</p>
-        <pre><code>command [arguments]</code></pre>
-        <p>A few conventions apply everywhere:</p>
-        <ul>
-            <li>Flags look like <code>--name</code> or <code>--name=value</code>.</li>
-            <li>Commands chain with <code>&amp;&amp;</code> via <a href="#batch"><code>batch</code></a>.</li>
-            <li>Anything not matching a built-in is handed to loaded plugins in case one of them
-                registered that command name (see <a href="#plugins">Plugins</a>) — otherwise you
-                get <code>Unknown command: ...</code>.</li>
-        </ul>
+        <h2 id="guides">Guides</h2>
+        <p>Open the index first if you are not sure where to start.</p>
+        <div class="card-grid">
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/README.md"><strong>Documentation index</strong><span>Which page answers which question.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/getting-started.md"><strong>Getting started</strong><span>Install, first run, first recording.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/how-it-works.md"><strong>How it works</strong><span>Start to finished file, and what can fail.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/capture-sources.md"><strong>Capture sources</strong><span>Monitor, window, region.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/audio.md"><strong>Audio</strong><span>Microphone, desktop sound, per-app audio.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/overlays-and-scenes.md"><strong>Overlays and scenes</strong><span>Text, image, GIF, webcam, key presses.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/instant-replay.md"><strong>Instant Replay</strong><span>Save the last seconds with a hotkey.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/settings-reference.md"><strong>Settings reference</strong><span>Every tab, every option.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/codecs.md"><strong>Codecs</strong><span>NVENC, AMF, QSV, libx264.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md"><strong>Troubleshooting</strong><span>Fixes sorted by symptom.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/logs-and-diagnostics.md"><strong>Logs and diagnostics</strong><span>Log files, crashes, bug reports.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/plugins.md"><strong>Plugins</strong><span>Write and install Lua plugins.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/cli.md"><strong>Command line</strong><span>Record from a terminal.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/building.md"><strong>Building</strong><span>Compile HomRec from source.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/commands/Commands.md"><strong>Console reference</strong><span>Commands and cfg scripts.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hom/README.md"><strong>hom</strong><span>Install and use the package manager.</span></a>
+        </div>
 
-        <h2 id="builtins">2. Built-in commands</h2>
+        <h2 id="quick">Quick answers</h2>
+        <p>Click a problem to read the short answer. Each links to the full guide.</p>
+        <details class="issue">
+            <summary>HomRec does not start or closes immediately</summary>
+            <p>Only one copy runs at a time, so look in the system tray first. If Windows says a <code>.dll</code> was not found, unpack the <b>whole</b> archive again. For a crash, attach the newest file from <code>crashes\</code> and the end of <code>logs\homrec.log</code> to a bug report.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md#homrec-does-not-start-or-closes-immediately">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>"FFmpeg not found."</summary>
+            <p>HomRec encodes with <code>ffmpeg.exe</code>. Only the <b>full</b> portable archive contains it. Put <code>ffmpeg.exe</code> into an <code>ffmpeg</code> folder next to <code>hr.exe</code>.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/getting-started.md#2-pick-a-download">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>Start shows "Output folder doesn't exist" or "Not enough free disk space"</summary>
+            <p>Pick a writable folder in Settings &gt; General &gt; Output folder. Recording needs at least 200 MB free on the output drive.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md#start-does-nothing-or-shows-an-error">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>The recording is black, frozen or shows the wrong thing</summary>
+            <p>Check whether the preview is also black (capture problem). Remote Desktop and virtual displays cannot be captured. Re-select the monitor by double-clicking the first row of the Layers panel. For a window, use the <b>Test: find it now</b> button.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/capture-sources.md">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>There is no sound, or the wrong sound</summary>
+            <p>Watch the Audio Mixer bars: if they move, the source works. Check the mute button and Settings &gt; Audio &gt; Microphone, and use <b>Test</b>. Program-sound capture needs Windows 10 version 2004 or newer.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/audio.md">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>The recording stutters or the game loses FPS</summary>
+            <p>Use a hardware encoder, lower the frame rate or the resolution, and enable <b>Game-friendly priority</b>. Change one thing at a time and compare the frame counts in the log. <code>Recording overloaded</code> in the log means HomRec dropped frames.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md#the-recording-stutters-or-the-game-loses-fps">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>NVENC, AMF or Quick Sync does not work</summary>
+            <p>HomRec never swaps your chosen codec silently: it shows a notice and logs the reason. With <b>HW accel = auto</b> it tests NVENC, AMF and QSV and falls back to libx264 for recordings only.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/codecs.md">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>The .mp4 will not open after a crash</summary>
+            <p>MP4 is only complete when it is finished. Record as <b>MKV</b> (it survives crashes) or choose <i>Both</i>.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md#the-file-is-missing-damaged-huge-or-tiny">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>Hotkeys do not work</summary>
+            <p>Defaults are F9 start/stop, F10 pause, F11 fullscreen of HomRec's window and F8 save replay. Another program may use the same key; change it in Settings &gt; Hotkeys.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md#hotkeys-do-not-work">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>Instant Replay says "Instant Replay isn't running."</summary>
+            <p>Tick <b>Enable Instant Replay</b> in Settings &gt; Advanced and set a buffer length. Replay is paused while a normal recording runs and resumes afterwards.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/instant-replay.md">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>The window is recorded as a screen crop</summary>
+            <p>After a crash inside native window capture, HomRec switches it off. Open the Capture source window and click <b>Try the native Windows capture again...</b>.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/capture-sources.md#recording-one-window">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>The console says: blocked - needs the "inwid" confirmation prefix</summary>
+            <p>Changing a setting, switching a preset, <code>rm</code> and risky <code>hom</code> commands need the prefix: <code>inwid target_fps = 60</code>.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/commands/Commands.md#the-inwid-confirmation-prefix">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>A plugin does nothing</summary>
+            <p>Turn on <b>Plugin logging</b> in Settings &gt; Security and read <code>logs\plugins.log</code>. A hook must be a global function with the exact name.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/plugins.md#what-can-fail">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary><code>hom</code> is not found or cannot download</summary>
+            <p>Run <code>hom restore</code> in the console to download <code>hom.exe</code> again, or copy it next to <code>hr.exe</code> by hand.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hom/troubleshooting.md">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>Update says "No installer was found in that release"</summary>
+            <p>The release has no Setup <code>.exe</code> attached. Download from the release page. A portable copy cannot update itself: replace the files and keep <code>homrec.hrc</code>, <code>presets\</code>, <code>scenes\</code>, <code>plugins\</code> and <code>cfg\</code>.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/getting-started.md#7-updating">Full guide &rarr;</a></p>
+        </details>
 
-        <h3>Diagnostics</h3>
-        <table>
-            <tr><th>Command</th><th>What it does</th></tr>
-            <tr><td><code>version</code></td><td>Prints <code>HomRec v2.0 (developer console)</code>.</td></tr>
-            <tr><td><code>ver</code></td><td>Prints the bare version number (<code>2.0</code>) — handy in scripts that need just the number.</td></tr>
-            <tr><td><code>ping</code></td><td>Replies <code>pong</code> — quick check that the console is alive.</td></tr>
-            <tr><td><code>info</code></td><td>Prints CPU core count, RAM total/used, whether FFmpeg was found, and which encoder got picked (hardware GPU encoder vs. software libx264 fallback). The encoder line is the fastest way to answer "why is recording eating my CPU."</td></tr>
-            <tr><td><code>status</code></td><td>Shows <code>idle</code>, or <code>RECORDING</code>/<code>PAUSED</code> with elapsed time and current frame count.</td></tr>
-            <tr><td><code>log</code></td><td>See <a href="#log-cmd">below</a>.</td></tr>
-        </table>
-
-        <h3 id="log-cmd">The <code>log</code> command</h3>
-        <table>
-            <tr><th>Form</th><th>Effect</th></tr>
-            <tr><td><code>log &lt;message&gt;</code></td><td>Appends <code>[console] &lt;message&gt;</code> to <code>homrec.log</code>. A message that starts with <code>-</code> needs the <code>--</code> form: <code>log -- -text</code> (otherwise it is reported as an unknown option).</td></tr>
-            <tr><td><code>log open</code></td><td>Opens <code>homrec.log</code> in your default text editor.</td></tr>
-            <tr><td><code>log clear [flags]</code></td><td>Truncates (empties) <code>homrec.log</code> — the file itself stays, only its contents are wiped. Flags: <code>--pc</code>, <code>--plugins</code>, <code>--wgc</code>, <code>--ffmpeg</code>, <code>--homrec</code> (combine them), or <code>--all</code> / <code>-a</code> for every <code>*.log</code> in the logs folder.</td></tr>
-        </table>
-
-        <h3>Console utilities</h3>
-        <table>
-            <tr><th>Command</th><th>What it does</th></tr>
-            <tr><td><code>echo [--ok|--warn|--err] &lt;text&gt;</code></td><td>Prints text, optionally styled as success/warning/error.</td></tr>
-            <tr><td><code>clear</code></td><td>Clears the console output pane (not the same as <code>log clear</code>). Commands that take no arguments (<code>clear</code>, <code>ping</code>, <code>version</code>, <code>ver</code>, <code>info</code>, <code>status</code>, <code>hide</code>, <code>pwd</code>, <code>whoami</code>) refuse to run if anything follows them.</td></tr>
-            <tr><td><code>history</code></td><td>Lists every command run this session, numbered.</td></tr>
-            <tr><td><code>env</code></td><td>No args: lists session env vars. <code>env NAME</code>: prints its value. <code>env NAME=value</code>: sets it. Vars live only for the current session.</td></tr>
-            <tr><td><code>alias</code></td><td>No args: lists aliases. <code>alias name=target</code>: defines one (names are lower-cased).</td></tr>
-            <tr><td><code>ls [--aliases] [--env]</code></td><td>Lists aliases and/or env vars — the native equivalent of "list the registry" from the old command language, which doesn't otherwise exist in this port.</td></tr>
-            <tr><td><code>clip --copy "text"</code> / <code>--paste</code> / <code>--clear</code></td><td>Reads/writes the Windows clipboard.</td></tr>
-            <tr><td><code>hide</code></td><td>Hides the main window; restore it from the tray icon.</td></tr>
-            <tr><td><code>hrc save [path]</code> / <code>hrc load [path]</code></td><td>Saves or loads HomRec's settings to/from a <code>.hrc</code> file (default: <code>homrec_config.hrc</code> next to the exe). Some fields need a restart to take effect after loading.</td></tr>
-        </table>
-
-        <h3 id="batch">Scripting: <code>repeat</code> and <code>batch</code></h3>
-        <table>
-            <tr><th>Command</th><th>What it does</th></tr>
-            <tr><td><code>repeat --count=N &lt;command&gt;</code></td><td>Runs a command N times in a row (capped at 1000).</td></tr>
-            <tr><td><code>batch cmd1 &amp;&amp; cmd2 &amp;&amp; ... [-x | --stop-on-error]</code></td><td>Runs several commands in sequence. <code>-x</code> is accepted but only loosely enforced right now — most commands print their own error without yet reporting pass/fail back to <code>batch</code>.</td></tr>
-        </table>
-
-        <h3>Removal commands</h3>
+        <h2 id="console">Console and cfg scripts</h2>
+        <p>Open the console with <code>Ctrl+Shift+T</code> (Help &gt; Console). Reading a setting is free (<code>target_fps</code>). Changing one, switching a preset, <code>rm</code> and risky <code>hom</code> commands need the <code>inwid</code> prefix:</p>
+        <pre>target_fps
+inwid target_fps = 60
+inwid preset gaming</pre>
+        <p>Two optional scripts in <code>cfg\</code> next to <code>hr.exe</code>: <code>autoexec.cfg</code> runs at every launch, <code>startrec.cfg</code> at the start of every recording. One command per line; <code>//</code> and <code>#</code> start comments. Lines in these scripts run as confirmed, so they do not need <code>inwid</code>.</p>
         <div class="warn">
-            <b>These are destructive and irreversible.</b> Both require the master security fuse to
-            be off first (<code>sec 0</code> — see <a href="#security">Console security</a>).
+            <b>Dangerous:</b> <code>inwid rm --system@homrec.files --type=...</code> deletes whole folders next to <code>hr.exe</code>, and <code>inwid rm @homrec -r -y</code> removes HomRec itself. It also needs <code>sec 0</code>. <code>--type=recordings</code> removes the folder named <code>recordings</code> next to <code>hr.exe</code>, not your configured output folder.
         </div>
+        <p>Full reference: <a href="https://github.com/homaaio/HomRec/blob/main/docs/commands/Commands.md">Console reference</a>.</p>
+
+        <h2 id="plugins">Plugins</h2>
+        <p>Plugins are Lua scripts in <code>plugins\</code> with a <code>plugin.json</code> and an entry script. They have full file and network access, so install only plugins you trust. Install by importing a <code>.hrp</code> (File &gt; Import Plugin), by copying it into <code>plugins\</code>, or with <code>hom install</code>.</p>
         <table>
-            <tr><th>Command</th><th>What it does</th></tr>
-            <tr><td><code>rm --system@homrec.files --permission=core --type={recordings,plugins,logs,cache}</code></td><td>Deletes the listed data folders (any combination). E.g. <code>--type={logs,cache}</code> clears just those two.</td></tr>
-            <tr><td><code>rm @homrec [-q]</code></td><td>Uninstalls HomRec entirely once the app closes (confirmation prompt unless <code>-q</code>/<code>-y</code> is passed).</td></tr>
+            <tr><th>Hook</th><th>Called when</th></tr>
+            <tr><td><code>on_load</code> / <code>on_unload</code></td><td>The plugin is loaded / unloaded</td></tr>
+            <tr><td><code>on_recording_start</code> / <code>on_recording_stop</code></td><td>A recording starts / stops</td></tr>
+            <tr><td><code>on_replay_saved</code></td><td>An Instant Replay clip is saved</td></tr>
+            <tr><td><code>on_overlay_added</code> / <code>on_overlay_removed</code></td><td>An overlay is added / removed</td></tr>
+            <tr><td><code>on_custom_event</code></td><td>Another plugin raised an event</td></tr>
         </table>
+        <p>The <code>homrec.*</code> API, the manifest and the failure table: <a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/plugins.md">Plugins guide</a>.</p>
 
-        <h2 id="cfg">3. Config scripts</h2>
-        <p>
-            Drop a <code>.cfg</code> file into the <code>cfg/</code> folder next to the exe (created
-            automatically) and HomRec will run it line-by-line through the console, one command per
-            line. Blank lines are skipped, and both <code>//</code> and <code>#</code> work as comment
-            markers so you can use whichever convention you're used to.
-        </p>
-        <pre><code>// cfg/autoexec.cfg — runs automatically on startup
-echo --ok HomRec ready
-alias qr=hrc load quickrec.hrc
-env THEME=dark</code></pre>
-        <p>
-            <code>.cfg</code> files are read leniently (UTF-8 first, falling back to the system
-            ANSI codepage), since they're meant to be hand-edited in whatever text editor you've
-            got on Windows.
-        </p>
-
-        <h2 id="security">4. Console security</h2>
-        <p>
-            Three independent toggles gate different parts of the console. Each reports its state
-            with no argument, or is set with <code>0</code>/<code>off</code>/<code>false</code> to
-            disable, anything else to enable:
-        </p>
-        <table>
-            <tr><th>Command</th><th>Guards</th></tr>
-            <tr><td><code>sec [0|1]</code></td><td>The <b>master</b> fuse. Must be <code>0</code> before either <code>rm</code> command will run.</td></tr>
-            <tr><td><code>secui [0|1]</code></td><td>UI protection.</td></tr>
-            <tr><td><code>secp [0|1]</code></td><td>Plugin version-check / RAM watchdog.</td></tr>
-        </table>
-        <p>Example: <code>sec 0</code> then <code>rm --system@homrec.files --permission=core --type={cache}</code>.</p>
-
-        <h2 id="plugins">5. Plugins (Lua)</h2>
-        <p>
-            Plugins are Lua scripts loaded from <code>plugins/</code>, either as a loose folder or a
-            packaged <code>.hrp</code> archive. Each plugin needs a small manifest:
-        </p>
-        <pre><code>{
-    "id": "my_plugin",
-    "name": "My Plugin",
-    "version": "1.0.0",
-    "entry": "entry.lua"
-}</code></pre>
-        <p>and an entry script with an <code>on_load()</code> function HomRec calls when it loads the plugin:</p>
-        <pre><code>function on_load()
-    homrec.register_command("hello", "Says hi", function(args)
-        homrec.print("Hello from my_plugin!")
-    end)
-end</code></pre>
-
-        <h3>The <code>homrec.*</code> API</h3>
-        <table>
-            <tr><th>Function</th><th>Purpose</th></tr>
-            <tr><td><code>homrec.register_command(name, description, fn)</code></td><td>Adds a console command that runs your Lua function.</td></tr>
-            <tr><td><code>homrec.register_input_overlay(category, label, json_path, png_path)</code></td><td>Registers an input-overlay preset (keyboard/mouse/gamepad).</td></tr>
-            <tr><td><code>homrec.print(text)</code> / <code>homrec.log(message, level?)</code> / <code>homrec.log_to(filename, message)</code></td><td>Console output and logging, including to a custom file under your plugin's own log.</td></tr>
-            <tr><td><code>homrec.show_toast(message, color?, duration_ms?)</code></td><td>Shows a small non-blocking popup.</td></tr>
-            <tr><td><code>homrec.store_get/store_set</code></td><td>Persistent per-plugin key/value storage.</td></tr>
-            <tr><td><code>homrec.settings_get/settings_set</code></td><td>Reads/writes HomRec's own settings flags.</td></tr>
-            <tr><td><code>homrec.get_colors()</code></td><td>Returns the active UI theme's colors.</td></tr>
-            <tr><td><code>homrec.get_ffmpeg()</code></td><td>Returns the path to the FFmpeg binary HomRec is using.</td></tr>
-            <tr><td><code>homrec.plugin_info()</code></td><td>Returns your own plugin's <code>{id, name, version, author}</code>.</td></tr>
-            <tr><td><code>homrec.http_get(url)</code> / <code>homrec.http_post(url, body, content_type?)</code></td><td>Basic HTTPS requests.</td></tr>
-            <tr><td><code>homrec.emit(...)</code></td><td>Emits an event other plugins can react to.</td></tr>
-        </table>
-        <p>
-            Console commands a plugin registers are dispatched exactly like built-ins — if you type
-            a name the console doesn't recognize natively, it's handed to plugins before giving up.
-        </p>
-
-        <h2 id="hom">6. hom — the plugin package manager</h2>
-        <p>
-            <code>hom.exe</code> is a separate, tiny executable (no wxWidgets/Lua dependency) you
-            keep next to <code>hr.exe</code> for installing plugins the same way <code>apt</code> or
-            <code>pacman</code> installs packages — just aimed at <code>.hrp</code> plugin files
-            instead of system packages. Plugins are served straight out of the HomRec GitHub repo's
-            <code>Hom/</code> folder over plain HTTPS (<code>raw.githubusercontent.com</code>) — no
-            server, no API, no database, no login.
-        </p>
-
-        <h3>Commands</h3>
-        <table>
-            <tr><th>Command</th><th>What it does</th></tr>
-            <tr><td><code>hom --version</code></td><td>Prints the installed <code>hom</code> version.</td></tr>
-            <tr><td><code>hom update [-f|--force]</code></td><td>Checks the repo for a newer <code>hom.exe</code> and, if found, downloads it and swaps it in for the one you're running. <code>-f</code>/<code>--force</code> re-downloads and reinstalls even if you're already up to date. This updates <b>hom itself</b>, not a plugin index — <code>hom</code> has no local package index to go stale, since <code>search</code>/<code>show</code>/<code>install</code> always ask the repo live. Still fine to run out of habit; it's cheap.</td></tr>
-            <tr><td><code>hom ping</code></td><td>Checks connectivity to the plugin repo and reports round-trip time.</td></tr>
-            <tr><td><code>hom install &lt;name&gt; [-y] [-f|--force]</code></td><td>Downloads <code>Hom/plugins/&lt;name&gt;.hrp</code> into <code>./plugins/&lt;name&gt;.hrp</code>. HomRec's own plugin loader extracts and loads it the next time it starts — <code>hom</code>'s job stops at "the file is on disk." If the download would grow disk usage by more than ~1&nbsp;MB, asks for confirmation first unless <code>-y</code>/<code>-f</code> is given.</td></tr>
-            <tr><td><code>hom upgrade [-y] [-f|--force]</code></td><td>Re-downloads every plugin you already have installed to whatever's currently in the repo, without removing anything.</td></tr>
-            <tr><td><code>hom full-upgrade [-y] [-f|--force]</code></td><td>Currently identical to <code>hom upgrade</code> — see the note below.</td></tr>
-            <tr><td><code>hom remove &lt;name&gt; -r</code></td><td>Removes a plugin's code, but keeps its saved settings (see "remove vs. purge" below). <code>-r</code> is required to confirm.</td></tr>
-            <tr><td><code>hom purge &lt;name&gt; -r</code></td><td>Removes a plugin's code <b>and</b> its saved settings — nothing is left behind. <code>-r</code> is required to confirm.</td></tr>
-            <tr><td><code>hom autoremove</code></td><td>Currently always a no-op — see the note below.</td></tr>
-            <tr><td><code>hom search &lt;query&gt;</code></td><td>Matches <code>query</code> against every plugin's name and description in the repo's index. Tried as a case-insensitive regex first, falling back to a plain substring match if <code>query</code> isn't valid regex syntax.</td></tr>
-            <tr><td><code>hom show &lt;name&gt;</code></td><td>Prints what the repo knows about a plugin — version, author, description, package size — plus whether it's installed here and at what local version.</td></tr>
-            <tr><td><code>hom list --installed</code></td><td>Lists every plugin found under <code>./plugins</code> here, with its locally-known version.</td></tr>
-            <tr><td><code>hom list --upgradable</code></td><td>Same scan, but only prints plugins where the repo has a newer version than what's installed locally.</td></tr>
-        </table>
-
-        <pre><code>&gt; hom search overlay
-input-overlay (1.0.0) - Keyboard / mouse / gamepad input overlay presets (WASD, QWERTY, mouse, gamepad).
-
-&gt; hom show input-overlay
-Name:        input-overlay
-Version:     1.0.0
-Author:      HomRec
-Description: Keyboard / mouse / gamepad input overlay presets (WASD, QWERTY, mouse, gamepad).
-Package:     Hom/plugins/input-overlay.hrp
-Size:        540.0 KB
-Installed:   no
-
-&gt; hom install input-overlay
-Fetching plugin 'input-overlay'...
-Installed 'input-overlay' -&gt; plugins\input-overlay.hrp (552854 bytes)
-Restart HomRec (or reload plugins) to pick it up.
-
-&gt; hom list --installed
-input-overlay (version unknown)</code></pre>
-
-        <p>
-            "Version unknown" above is expected right after a fresh install — a plugin's known
-            version comes from the <code>plugin.json</code> HomRec's own loader extracts, so until
-            HomRec has actually started up once (or you run <code>hom upgrade</code>, which
-            re-fetches and re-checks it), <code>hom</code> has nothing local to compare against.
-        </p>
-
-        <h3 id="hom-remove-purge">remove vs. purge</h3>
-        <p>
-            Plugins can save their own persistent settings (a small <code>.store</code> file
-            alongside the plugin's code — see <code>homrec.store_get</code>/<code>store_set</code>
-            in the <a href="#plugins">plugins API</a>). <code>hom remove</code> deletes a plugin's
-            code but leaves that file behind, the same way <code>apt remove</code> leaves
-            <code>/etc</code> config in place — reinstalling the plugin later picks its old settings
-            back up. <code>hom purge</code> deletes everything, including that saved data.
-        </p>
-        <pre><code>&gt; hom remove input-overlay -r
-Removed plugins\input-overlay.hrp
-hom: plugin removed. Its saved settings (if any) were kept -- use 'hom purge input-overlay -r' to delete those too.
-
-&gt; hom purge input-overlay -r
-Removed plugins\.installed\input-overlay</code></pre>
-
-        <div class="note">
-            <b><code>full-upgrade</code> and <code>autoremove</code> are honest stubs, not fake
-            functionality.</b> apt's <code>full-upgrade</code> is allowed to remove packages to
-            resolve a dependency conflict, and <code>autoremove</code> cleans up dependencies that
-            were only pulled in for something you've since deleted — but every <code>hom</code>
-            plugin is one independent <code>.hrp</code> with no dependency graph between plugins.
-            <code>full-upgrade</code> currently just runs the same thing <code>upgrade</code> does
-            (and says so), and <code>autoremove</code> currently just reports that there's nothing
-            for it to find. Both are real commands you can always run — they just don't have
-            anything extra to do yet.
-        </div>
-
-        <p>
-            Every plugin name passed to <code>install</code>/<code>remove</code>/<code>purge</code>/<code>show</code>
-            is rejected outright if it contains <code>..</code>, a path separator, or a drive letter
-            — none of them can ever resolve to anything outside <code>.\plugins\</code>, no matter
-            what's typed.
-        </p>
-
-        <h3>From the console</h3>
-        <p>
-            You don't need to leave HomRec to use <code>hom</code> — the built-in
-            <code>hom</code> command (see <a href="#builtins">Built-in commands</a>) forwards
-            straight to <code>hom.exe</code> as a child process, working directory forced to
-            HomRec's own folder, so it behaves identically to running it from PowerShell/cmd.
-            The destructive subcommands — <code>update</code>, <code>remove</code>/<code>uninstall</code>,
-            <code>purge</code>, and <code>autoremove</code> — additionally need the
-            <a href="#security"><code>inwid</code></a> confirmation prefix from inside the console:
-        </p>
-        <pre><code>&gt; hom remove input-overlay -r
-Blocked: this needs the 'inwid' prefix, e.g. 'inwid hom remove input-overlay -r'
-
-&gt; inwid hom remove input-overlay -r
-Removed plugins\input-overlay.hrp
-hom: plugin removed. Its saved settings (if any) were kept -- use 'hom purge input-overlay -r' to delete those too.</code></pre>
-        <p>
-            <code>install</code>, <code>upgrade</code>, <code>full-upgrade</code>, <code>search</code>,
-            <code>show</code>, and <code>list</code> don't need <code>inwid</code> — none of them
-            delete anything you didn't just ask to add or refresh.
-        </p>
-
-        <h3>Where plugins come from</h3>
-        <p>
-            Everything <code>hom</code> reads comes from this repo's own <code>Hom/</code> folder:
-        </p>
-        <pre><code>Hom/
-  version.txt          current hom version, e.g. "0.4" -- checked by `hom update`
-  hom.exe              latest prebuilt hom.exe -- downloaded by `hom update`
-  plugins/
-    index.json         listing of available plugins -- read by `hom search`/`hom show`/
-                        `hom list --upgradable`
-    &lt;name&gt;.hrp          a plugin package -- `hom install &lt;name&gt;` downloads this</code></pre>
-        <p>
-            <code>index.json</code> is the one file worth knowing about if you're publishing a
-            plugin: <code>hom install &lt;name&gt;</code> itself doesn't need it (it just requests
-            <code>plugins/&lt;name&gt;.hrp</code> directly), but <code>search</code>,
-            <code>show</code>, and <code>list --upgradable</code> only know about what's listed
-            there, including each plugin's <code>version</code> field — so publishing a plugin
-            update without bumping its <code>version</code> in <code>index.json</code> means
-            <code>hom list --upgradable</code> won't notice there's anything new.
-        </p>
-
-        <h2 id="faq">7. FAQ</h2>
-        <h3>Does <code>rm</code> ask for confirmation?</h3>
-        <p>
-            <code>rm --system@homrec.files</code> does not (beyond needing <code>sec 0</code> first).
-            <code>rm @homrec</code> pops a Yes/No dialog unless you pass <code>-q</code>/<code>-y</code>.
-        </p>
-        <h3>Does <code>hom remove</code>/<code>hom purge</code> ask for confirmation?</h3>
-        <p>
-            Not with a pop-up — both refuse to run at all unless you pass <code>-r</code>
-            (e.g. <code>hom remove input-overlay -r</code>), which serves as the "yes, actually
-            delete it" confirmation. From the console, they additionally need the
-            <a href="#hom"><code>inwid</code></a> prefix.
-        </p>
-        <h3>Where do plugin commands show up if I don't remember the plugin's name?</h3>
-        <p>There's no <code>help</code>/list-all-commands built-in yet — check the plugin's own README, or its <code>entry.lua</code>, for what it registers via <code>register_command</code>.</p>
-        <h3>Can I use HomRec on Linux?</h3>
-        <p>Not yet — see the <a href="down-deb.html">Linux status page</a> for what's planned.</p>
-        <h3>Something in the older docs doesn't match what I'm seeing</h3>
-        <p>That's expected for anything about Windows/Rules/AE Objects, hotkeys, or timers — that syntax predates the C++ rewrite and isn't implemented. This page reflects the current console; if something here is wrong, please <a href="support.html">let us know</a>.</p>
+        <h2 id="hom">hom, the package manager</h2>
+        <p><code>hom</code> is a separate program, developed in <a href="https://github.com/homaaio/hom">its own repository</a>. HomRec's console forwards <code>hom ...</code> to <code>hom.exe</code> in the HomRec folder; plugins it installs land in <code>plugins\</code> and load at the next start. If <code>hom.exe</code> is missing, <code>hom restore</code> downloads it again.</p>
+        <p>Install, commands and error messages: <a href="https://github.com/homaaio/HomRec/blob/main/docs/hom/README.md">hom documentation</a>.</p>
 
         <div class="footer">
-            HomRec © 2026 · <a href="https://github.com/homaaio/HomRec">GitHub</a> ·
-            <a href="https://discord.gg/Gv4t6Xhy7E">Discord</a> ·
-            <a href="https://t.me/homaexe">Telegram</a>
+            HomRec © 2026 · Made by homaaio
         </div>
 
     </div>
 
 <script src="releases.js"></script>
+<script src="docs-search.js"></script>
 </body>
 </html>
