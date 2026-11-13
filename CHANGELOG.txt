@@ -1,41 +1,60 @@
 welcome to changelog :D
 
-[Unreleased] - 2026-11-11
-Clearer recording errors, and documentation for the common ones.
+[Version 3.1.0] - 2026-11-13
+Terminal control, a fully editable Desktop layer, and more predictable encoder fallback.
 
 ### Added
-- docs/hr/troubleshooting-recording.md: what each ffmpeg exit code means (-13, -2, -22, -28, -32, -40 and the
-  Windows 0xC000xxxx codes), which encoder to pick for which GPU, how to test an encoder by hand, and what to send
-  with a bug report. Includes the NVENC requirement: driver 570.0 or newer for the current ffmpeg build.
+- **Command-line tool:** first-run setup (also `homrec setup`) asks which config to use, where to save recordings, and
+  the video format and FPS. It is offered once, in a real console, in English or Russian.
+- **Command-line tool:** `homrec overlay list | add | set | show | hide | remove | edit` manages the active scene's
+  overlays from the terminal, including an interactive editor. It uses the same scene files as the HomRec window.
+- **Command-line tool:** `homrec` with no arguments in a console opens a small menu (start / overlays / setup).
+- **Command-line tool:** CLI logs are written to `logs/cli`.
+- **Layers:** the main Desktop layer can be deleted from its right-click menu. The canvas then stays blank until it is
+  restored with "+" > "Desktop capture".
+- **Layers:** the main layer now behaves like any other layer: move, resize, nudge, hide/show, rename, change its
+  capture source, center it, lock it, keep its proportions, fill the whole picture, or delete it. It remains the
+  backmost layer and cannot be moved up/down or duplicated. It starts locked, so existing layouts behave as before.
+- **Layers:** main-layer position, size, name and lock state are saved and available to `config` / cfg scripts.
+- **Layers:** clicking a layer in the Live Preview opens its context menu when the click does not turn into a drag.
+  This also works for locked overlays.
+- **Audio:** the Microphone settings window has a level meter under the device list. During Test it shows the live
+  input; during playback it shows the level of the recorded sound.
 
-### Added (homrec CLI)
-- First-run setup in the terminal (also `homrec setup`): which config to use, the folder for recordings, video format and
-  fps. It is offered once (`setup_done` in cfg/homrec_cli.cfg), only in a real console, in Russian or English.
-- `homrec overlay list | add | set | show | hide | remove | edit`: overlays of the active scene from the terminal,
-  including an interactive editor. Same scene files as the HomRec window.
-- `homrec` with no arguments in a console opens a small menu (start / overlays / setup).
-- All logs of the CLI go to logs/cli (cli.log plus the engine's own logs).
-- scripts/tests/test_homrec_cli.cpp: tests for the text helpers, the overlay editing rules and the cfg file.
+### Changed
+- **Command-line tool:** `homrec start` now loads the active scene's overlays, like the HomRec window. The start panel
+  and status line were refreshed; the status line is redrawn only when its text changes.
+- **Command-line tool:** `homrec config change` keeps the other keys in `cfg/homrec_cli.cfg`.
+- **Live Preview:** clicking an empty area clears the selection and its frame. The frame and resize handles are drawn
+  only around the selected layer, and only its handles can be grabbed. With Preview off (editing a screenshot),
+  overlays keep their frames as before.
+- **Live Preview:** moving or resizing starts after the pointer has moved 4 pixels, so a click does not nudge the
+  layer. Add, delete, Move up and Move down clear the Preview selection.
+- **Interface:** the Scenes panel buttons now follow the Layers layout - one row on top, "+" on the left, up/down on
+  the right. The delete button was removed; deletion stays in the right-click menu and on the Del key.
+- **Interface:** the "Preview: ON/OFF" button was removed from the preview header. Use the right-click menu instead.
+- **Encoders:** HomRec no longer switches to libx264 silently. A hardware encoder that fails the startup test stays
+  selected and is reported as not working. If it fails in the first seconds of a recording, the recording stops with
+  an error instead of restarting in a new libx264 file. `HW accel = auto` still chooses a working GPU encoder when
+  `Codec` is libx264, and falls back to libx264 when none works.
+- **hom:** moved to its own repository, `github.com/homaaio/hom`, now version 0.6.1. Its source, official package list
+  and plugins moved there; `hom.exe` now comes from that repository's releases.
+- **hom:** `hom restore` downloads `hom.exe` from the new repository, and `hom repo` settings no longer affect it. The
+  console now also requires the `inwid` prefix for `hom set`, `hom install --run` and `hom install --to`.
 
-### Changed (homrec CLI)
-- `homrec start` now loads the overlays of the active scene, like the HomRec window does (by the code it did not
-  before). New look: a small start panel, one status line that is redrawn only when its text changes, polled twice a
-  second; the saving bar moves 10 times a second instead of 20. Not measured: how much CPU this saves.
-- cfg/homrec_cli.cfg keeps its other keys when `config change` rewrites it.
+### Documentation
+- `docs/hr/codecs.md`: which encoder HomRec uses and when, how to keep full control, the relevant log lines, and why
+  NVENC may fail.
+- `docs/hr/troubleshooting-recording.md`: ffmpeg exit codes, encoder choice by GPU, manual encoder tests, what to
+  include in a bug report, and the NVENC driver requirement (570.0 or newer).
 
-### Not checked (homrec CLI)
-- The Windows part of homrec.cpp (menus, raw keys, wizard, recording screen) was only type-checked against stub
-  headers on Linux, not built with MinGW and not run on Windows. The portable parts and the scene save/load were run.
-
-### Changed (hom moved to its own repository)
-- hom (the package manager) moved to its own repository, github.com/homaaio/hom, and is now 0.6.1. Its source,
-  the official package list and the plugins that used to live in Hom/plugins/ went with it; hom.exe now comes from
-  that repo's releases. CMake no longer has a `hom` target; installer/HomRec.iss and tools/homrec_build.py still
-  bundle a hom.exe if one sits in the repo root.
-- Console `hom restore` downloads hom.exe from github.com/homaaio/hom/releases/latest. `hom repo` settings no
-  longer affect it. The console now also asks for `inwid` on `hom set`, `hom install --run` and `hom install --to`.
-- src/ui/console_window.cpp has its own small byte/progress formatters instead of tools/hom/hom_common.h.
-- Hom/ keeps only a notice and version.txt (bridge for hom 0.6.0, whose `hom update` still reads it).
+### For developers
+- `tools/build.py`: build menu (all / hr / homrec / tests / bench / clean / nolto / package). Full output goes to
+  `logs/build/`.
+- `tools/perf_test.py` and `tools/perf_sample.ps1`: record for N minutes while sampling CPU, GPU, disk and memory,
+  then compare with the previous run.
+- Lua 5.4 headers are bundled in `lua54`; CMake and `tools/homrec_build.py` use them by default. `LUA_INCLUDE_DIR`
+  can still override this.
 
 [Version 3.0.3] - 2026-11-07
 
