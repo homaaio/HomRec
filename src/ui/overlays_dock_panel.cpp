@@ -342,7 +342,6 @@ std::wstring OverlaysDockPanel::SourceText(std::wstring *tag) const {
     } else if (!mons.empty()) {
         t = std::to_wstring(mons[0].w) + L"\u00D7" + std::to_wstring(mons[0].h);
     }
-    if (!state_.desktop_visible) t = WideFromNarrow(T("src_tag_hidden", "hidden")) + (t.empty() ? L"" : L" \u00B7 " + t);
     if (tag) *tag = t;
     return text;
 }
