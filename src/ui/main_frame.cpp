@@ -283,7 +283,6 @@ bool PreviewPanel::FrameShown(int idx) const {
     return idx == selected_overlay_index_ || idx == drag_overlay_index_;
 }
 
-// A click on a layer: select it and show its menu (the one of the Layers panel's right-click).
 void PreviewPanel::OpenLayerMenu(int layer, const wxPoint &client_pt) {
     if (!on_layer_menu) return;
     std::string keep_id;
@@ -608,7 +607,7 @@ void PreviewPanel::OnLeftDown(wxMouseEvent &evt) {
     const OverlayDef *hit_ov = hit != kNoLayer ? LayerAt(hit) : nullptr;
     if (hit_ov) {
         const OverlayDef &ov = *hit_ov;
-        // A release on this layer without a drag in between is a click: it opens the layer's menu (OnLeftUp()).
+        // (a left click only selects / drags; the layer menu is on right-click, see OnRightUp())
         press_layer_ = hit;
         drag_threshold_passed_ = false;
         if (ov.locked) {
@@ -750,18 +749,19 @@ void PreviewPanel::EndDrag() {
 }
 
 void PreviewPanel::OnLeftUp(wxMouseEvent &evt) {
-    // The button went down on a layer and the mouse did not travel: a click - show that layer's menu.
-    const int pressed = press_layer_;
     press_layer_ = kNoLayer;
-    const bool was_click = pressed != kNoLayer && !drag_threshold_passed_ && !drag_moved_;
     EndDrag();
     evt.Skip();
-    if (was_click && LayerAt(pressed)) OpenLayerMenu(pressed, evt.GetPosition());
 }
 
 // Right-click on the preview: Preview off / on (the old "Preview: ON/OFF" header button), plus, while
 // editing on a screenshot, Refresh (re-take it) / Done.
 void PreviewPanel::OnRightUp(wxMouseEvent &evt) {
+    if (!(state_.disable_preview && !snapshot_mode_)) {
+        Corner corner = Corner::kNone;
+        const int hit = HitTestOverlay(evt.GetX(), evt.GetY(), corner);
+        if (hit >= 0 && LayerAt(hit)) { OpenLayerMenu(hit, evt.GetPosition()); return; }
+    }
     wxMenu menu;
     if (snapshot_mode_) {
         menu.Append(wxID_REFRESH, "Refresh screenshot");
@@ -1345,7 +1345,7 @@ void HomRecMainFrame::BuildPreviewPanel(wxWindow *parent, wxSizer *parentSizer) 
     pcSizer->Add(preview_header_, 0, wxEXPAND);
 
     preview_panel_ = new PreviewPanel(preview_container_, rec_raw_, state_);
-    // 3.1: a click on a layer in the Preview opens the menu of the Layers panel's right-click; moving the main layer
+    // a right-click on a layer in the Preview opens the menu of the Layers panel's right-click; moving the main layer
     // there changes the settings, not the scene file.
     preview_panel_->on_layer_menu = [this](int layer, const wxPoint &pt) {
         if (overlays_panel_) overlays_panel_->ShowLayerMenuAt(layer, POINT{ (LONG)pt.x, (LONG)pt.y });
