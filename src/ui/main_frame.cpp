@@ -2849,7 +2849,12 @@ void HomRecMainFrame::OnCheckForUpdates() {
 }
 
 void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
-    if (rec_) rec_->SyncOverlays();
+    // SyncOverlays() keeps its 20 Hz pace even when the timer runs faster for a high Preview FPS.
+    const unsigned long long now_ms = GetTickCount64();
+    if (preview_timer_.GetInterval() >= 50 || now_ms - overlay_sync_at_ >= 45) {
+        overlay_sync_at_ = now_ms;
+        if (rec_) rec_->SyncOverlays();
+    }
     if (preview_panel_) {
         static const wxString kUnavailableText =
             wxString::FromUTF8("Screen capture unavailable \u2014 check you're not on RDP/a "
@@ -2897,6 +2902,7 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
 
     UpdatePreviewToggleButton();
     UpdatePreviewFpsLabel();
+    if (preview_timer_.GetInterval() != PreviewTimerMs()) preview_timer_.Start(PreviewTimerMs());   // Preview FPS / preview on-off / window focus changed
 
     // logs\pc.log - throttles itself internally to ~once every 10s, so
     // piggybacking on this existing 500ms tick (rather than adding a
@@ -2947,12 +2953,18 @@ void HomRecMainFrame::RestartLevelMeterTimer() {
     level_meter_timer_.Start(1000 / fps);
 }
 
+int HomRecMainFrame::PreviewTimerMs() const {
+    if (!ui_visible_) return 100;
+    if (state_.disable_preview || !ui_active_) return 50;
+    return std::min(50, std::max(16, 1000 / std::max(1, state_.preview_fps)));
+}
+
 void HomRecMainFrame::ApplyVisibilityTimers(bool visible) {
     if (ui_visible_ == visible) return;
     ui_visible_ = visible;
     // The preview timer also keeps the overlay list / window-follow crop in sync with the recorder, so it
     // must keep running - just slower while nobody looks at the window.
-    preview_timer_.Start(visible ? 1000 / 20 : 100);
+    preview_timer_.Start(PreviewTimerMs());
     RestartLevelMeterTimer();
 }
 
@@ -2992,6 +3004,7 @@ void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
 }
 
 void HomRecMainFrame::OnActivate(wxActivateEvent &evt) {
+    ui_active_ = evt.GetActive();
     if (rec_) rec_->SetPreviewLow(!evt.GetActive());
     evt.Skip();
 }
