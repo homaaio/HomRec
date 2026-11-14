@@ -41,6 +41,11 @@ Terminal control, a fully editable Desktop layer, and more predictable encoder f
   and plugins moved there; `hom.exe` now comes from that repository's releases.
 - **hom:** `hom restore` downloads `hom.exe` from the new repository, and `hom repo` settings no longer affect it. The
   console now also requires the `inwid` prefix for `hom set`, `hom install --run` and `hom install --to`.
+- **Live Preview:** the preview now follows the Preview FPS setting above 20. The preview timer was fixed at 20 Hz,
+  and without a recording the capture ran at the slower of the recording fps and Preview FPS. Up to Preview FPS 20
+  nothing changes. During a recording the preview still cannot exceed the recording fps.
+- **Live Preview:** switching the preview off releases the preview panel's frame buffers and cached bitmap; they are
+  created again when it is switched back on.
 
 ### Documentation
 - `docs/hr/codecs.md`: which encoder HomRec uses and when, how to keep full control, the relevant log lines, and why
