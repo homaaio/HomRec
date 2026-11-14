@@ -308,6 +308,9 @@ private:
     // stops and the overlay-sync (preview) timer drops from 20 Hz to 10 Hz. Back to normal when shown.
     void ApplyVisibilityTimers(bool visible);
     bool ui_visible_ = true;
+    int PreviewTimerMs() const;
+    bool ui_active_ = true;
+    unsigned long long overlay_sync_at_ = 0;   // GetTickCount64() of the last SyncOverlays() from the preview timer
     // Hands the working set back to Windows (one-off, a few seconds after Start and after Stop finished).
     // On an 8 GB PC that already sits at ~90 % memory this keeps HomRec from being paged against the browser.
     void TrimWorkingSet();
