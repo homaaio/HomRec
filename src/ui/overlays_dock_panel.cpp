@@ -360,6 +360,7 @@ std::wstring OverlaysDockPanel::SourceSig(std::wstring &tag) const {
     if (!state_.desktop_present) { tag.clear(); return L"-"; }
     std::wstring sig = SourceText(&tag) + L"\x1F" + tag;
     sig += state_.desktop_locked ? L"\x1FL" : L"\x1Fu";
+    sig += state_.desktop_visible ? L"\x1Fv" : L"\x1Fh";
     return sig;
 }
 
