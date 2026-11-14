@@ -1088,14 +1088,11 @@ struct Pipeline {
             return (f > 0) ? (1'000'000'000LL / f) : (1'000'000'000LL / 30);
         };
         int64_t frame_ns_recording = compute_frame_ns_recording();
-        // Preview-only mode (not recording) never needs more than a
-        // handful of frames/sec - the thumbnail shown in the UI is
-        // already throttled by the preview-fps check further down.
         auto compute_frame_ns_idle = [&]() {
             int want_fps = preview_fps.load(std::memory_order_relaxed);
             if (preview_low.load(std::memory_order_relaxed) && want_fps > kPreviewLowFps) want_fps = kPreviewLowFps;
             if (want_fps < 1) want_fps = 1;
-            return std::max(frame_ns_recording, (int64_t)(1'000'000'000LL / want_fps));
+            return (int64_t)(1'000'000'000LL / want_fps);
         };
         int64_t frame_ns_idle = compute_frame_ns_idle();
         bool was_recording = recording.load(std::memory_order_acquire);
@@ -1105,8 +1102,6 @@ struct Pipeline {
         bool thread_is_high_prio = was_boosted;   // mirrors the SetThreadPriority() just below
         yuv_pool.SetBoost(was_boosted);
 #ifdef _WIN32
-        // This used to jump straight to THREAD_PRIORITY_TIME_CRITICAL the moment recording started
-        // (both here and in the is_recording_now transition below).
         SetThreadPriority(GetCurrentThread(), boost_priority.load(std::memory_order_relaxed)
                                                   ? THREAD_PRIORITY_HIGHEST
                                                   : THREAD_PRIORITY_ABOVE_NORMAL);
