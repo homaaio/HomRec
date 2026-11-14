@@ -334,6 +334,14 @@ void PreviewPanel::OnPaint(wxPaintEvent &) {
     wxAutoBufferedPaintDC dc(this);
 
     if (state_.disable_preview && !snapshot_mode_) {
+        // Nothing reads these while the preview is off; GetPreviewFrameIfNew() re-grows frame_buf_ when it is back.
+        if (!frame_buf_.empty() || !last_frame_buf_.empty() || cached_bmp_.IsOk()) {
+            std::vector<uint8_t>().swap(frame_buf_);
+            std::vector<uint8_t>().swap(last_frame_buf_);
+            cached_bmp_ = wxNullBitmap;
+            cache_dirty_ = true;
+            pv_seq_ = 0; // so the first frame of a re-created pipeline counts as new even if its sequence number equals the old one
+        }
         // Deliberately distinct from the "no frame yet" placeholder below -
         // this is an intentional choice (Settings > Disable live preview),
         // not something that looks broken/waiting.
