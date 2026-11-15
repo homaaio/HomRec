@@ -164,7 +164,25 @@ ALWAYS_SKIP_DIRS = {".git", "__pycache__", "dist", "build", "Build", ".github", 
 ALWAYS_SKIP_SUFFIXES = (".o", ".obj", ".pdb", ".log")
 ALWAYS_SKIP_FILES = {
     "homrec.hrc", "homrec_settings.json", "homrec_overlays.hrc",
+    # Per-machine files the app writes into cfg/ - the installer ships only
+    # README.md and the *.example templates, and so should the archives.
+    "homrec_cli.cfg", "console_history.txt", "hom_repos.cfg",
+    "autoexec.cfg", "startrec.cfg",
 }
+
+# Source archives are built from git-tracked files. These are used only when
+# git is unavailable (for example in an exported tree without .git).
+SOURCE_FALLBACK_DIRS = (
+    "src", "ffmpeg", "tools", "cmake", "scripts", "installer",
+    "docs", "icons", "lua54", "cfg", ".github",
+)
+SOURCE_FALLBACK_FILES = (
+    ".gitattributes", ".gitignore", "CMakeLists.txt", "resource.rc",
+    "README.md", "README.ru.md", "LICENSE", "FREE.txt", "SUPPORT.md",
+    "CONTRIBUTORS.md", "CHANGELOG.txt",
+)
+SOURCE_BINARY_SUFFIXES = (".exe", ".dll", ".lib", ".a", ".so", ".dylib", ".zip", ".7z")
+SOURCE_EXTRA_FILES = ("build.cmd",)
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -419,6 +437,43 @@ def iter_tree(root_dir, arc_prefix=""):
             rel = os.path.relpath(abs_path, root_dir)
             yield abs_path, os.path.join(arc_prefix, rel) if arc_prefix else rel
 
+def git_source_files():
+    """Tracked files only: this keeps runtime data (recordings/, crashes/,
+    plugins/, personal cfg/ files) and build outputs (*.exe, *.dll) out of the
+    source archive. Returns None when git or the repository is unavailable."""
+    try:
+        result = subprocess.run(["git", "ls-files", "-z"], cwd=REPO_ROOT,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+
+    files = []
+    for name in result.stdout.decode("utf-8", "replace").split("\0"):
+        if not name:
+            continue
+        abs_path = os.path.join(REPO_ROOT, name.replace("/", os.sep))
+        if os.path.isfile(abs_path):
+            files.append((abs_path, name))
+    return files
+
+def fallback_source_files():
+    """Approximation of the tracked source tree for a checkout without .git."""
+    files = []
+    for entry in SOURCE_FALLBACK_DIRS:
+        path = os.path.join(REPO_ROOT, entry)
+        if not os.path.isdir(path):
+            continue
+        for abs_path, arcname in iter_tree(path, arc_prefix=entry):
+            if not abs_path.lower().endswith(SOURCE_BINARY_SUFFIXES):
+                files.append((abs_path, arcname))
+    for entry in SOURCE_FALLBACK_FILES:
+        path = os.path.join(REPO_ROOT, entry)
+        if os.path.isfile(path):
+            files.append((path, entry))
+    return files
+
 def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
     """Returns list of (abs_path, arcname)."""
     files = []
@@ -436,6 +491,12 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
                      "another machine without them.")
             for dll in dlls:
                 files.append((os.path.join(REPO_ROOT, dll), dll))
+        homrec_exe = os.path.join(REPO_ROOT, "homrec.exe")
+        if os.path.isfile(homrec_exe):
+            files.append((homrec_exe, "homrec.exe"))
+        else:
+            warn("homrec.exe not found in the repo root - it will be skipped "
+                 "in the archives.")
         if hom_exe:
             files.append((hom_exe, "hom.exe"))
         if preset == "full" and ffmpeg_path:
@@ -450,16 +511,40 @@ def collect_files(preset, hr_exe, hom_exe, ffmpeg_path):
                 files.extend(iter_tree(p, arc_prefix=d))
 
     elif preset == "source":
-        for entry in sorted(os.listdir(REPO_ROOT)):
-            if entry in ALWAYS_SKIP_DIRS or entry == "dist" or entry in ALWAYS_SKIP_FILES:
-                continue
-            abs_path = os.path.join(REPO_ROOT, entry)
-            if os.path.isdir(abs_path):
-                files.extend(iter_tree(abs_path, arc_prefix=entry))
-            elif not abs_path.endswith((".exe", ".dll") + ALWAYS_SKIP_SUFFIXES):
-                files.append((abs_path, entry))
+        source = git_source_files()
+        if source is None:
+            warn("git is unavailable - using the fallback source file list")
+            source = fallback_source_files()
+        files.extend(source)
+        included = {arcname for _abs, arcname in files}
+        for entry in SOURCE_EXTRA_FILES:
+            path = os.path.join(REPO_ROOT, entry)
+            if os.path.isfile(path) and entry not in included:
+                files.append((path, entry))
 
     return files
+
+def find_7z():
+    """First 7z/7za that actually runs. A 7z.exe next to the repo can exist
+    without a matching 7z.dll, so being on PATH is not enough."""
+    candidates = [
+        os.environ.get("SEVEN_ZIP"),
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+        shutil.which("7z"),
+        shutil.which("7za"),
+    ]
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            result = subprocess.run([path, "i"], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return path
+    return None
 
 def make_archive(files, out_path, fmt):
     n = len(files)
@@ -478,10 +563,10 @@ def make_archive(files, out_path, fmt):
                     tf.add(abs_path, arcname)
                     state["label"] = f"{label}  {i}/{n}"
     elif fmt == "7z":
-        sevenzip = shutil.which("7z") or shutil.which("7za")
+        sevenzip = find_7z()
         if not sevenzip:
             raise RuntimeError(
-                "7z/7za not found in PATH - install 7-Zip (or the 7za "
+                "no working 7z/7za found - install 7-Zip (or the 7za "
                 "command-line build) and make sure it's on PATH, then try again."
             )
         # 7z can't take arbitrary (src, arcname) pairs directly, so stage
@@ -503,6 +588,8 @@ def make_archive(files, out_path, fmt):
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                 )
             if result.returncode != 0:
                 raise RuntimeError(f"7z failed: {result.stderr.strip() or result.returncode}")
@@ -556,6 +643,44 @@ def step_archives(version, hr_exe, hom_exe, ffmpeg_path):
 
     return produced
 
+def find_iscc():
+    candidates = [
+        shutil.which("iscc"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Inno Setup 6", "ISCC.exe"),
+        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    ]
+    return next((p for p in candidates if p and os.path.isfile(p)), None)
+
+def step_installer(version):
+    section("Windows installer")
+    iscc = find_iscc()
+    if not iscc:
+        warn("Inno Setup (ISCC.exe) not found - skipping the installer. "
+             "Install Inno Setup, or build installer\\HomRec.iss by hand.")
+        return None
+    if not ask_yes_no("Build the Windows installer now?"):
+        return None
+
+    out_path = os.path.join(DIST_DIR, f"homrec-setup-win64-{version}.exe")
+    if os.path.isfile(out_path):
+        os.remove(out_path)
+    installer_dir = os.path.join(REPO_ROOT, "installer")
+    cmd = [iscc, f"/DMyAppVersion={version}", os.path.join(installer_dir, "HomRec.iss")]
+    print(f"  {C.DIM}$ {subprocess.list2cmdline(cmd)}{C.RESET}")
+    with bouncing_bar("Building installer"):
+        # HomRec.iss sets SourceDir=.. and OutputDir=dist (relative to
+        # SourceDir), so it always writes to the repo-root dist\.
+        result = subprocess.run(cmd, cwd=installer_dir, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace")
+    if result.returncode != 0 or not os.path.isfile(out_path):
+        error("Inno Setup failed")
+        print(result.stdout[-4000:])
+        return None
+    success(f"{os.path.basename(out_path)}  {C.DIM}({_size_str(os.path.getsize(out_path))}){C.RESET}")
+    return out_path
+
 # ---------------------------------------------------------------------------
 # Step 5: other goodies
 # ---------------------------------------------------------------------------
@@ -567,7 +692,7 @@ def write_checksums(produced):
     sums_path = os.path.join(DIST_DIR, "SHA256SUMS.txt")
     lines = []
     total = len(produced)
-    with bouncing_bar(f"Hashing {total} archive(s)") as state:
+    with bouncing_bar(f"Hashing {total} file(s)") as state:
         for i, path in enumerate(produced, 1):
             name = os.path.basename(path)
             state["label"] = f"Hashing {name}  {i}/{total}"
@@ -620,10 +745,8 @@ def suggest_git_commands(version):
     print("  Then create the GitHub Release for that tag and attach the archives")
     print(f"  from {C.BOLD}{DIST_DIR}{C.RESET} as release assets.")
     print()
-    print("  The Windows installer (installer\\HomRec.iss) is no longer built by this")
-    print("  script - build it yourself in a separate Inno Setup window (ISCC.exe or")
-    print("  the Inno Setup Compiler GUI) and attach the resulting Setup .exe to the")
-    print("  release by hand.")
+    print("  The archives, the Windows installer and SHA256SUMS.txt are all in")
+    print(f"  {C.BOLD}{DIST_DIR}{C.RESET} - attach them to the release.")
     print()
     print(f"  {C.YELLOW}IMPORTANT for auto-update:{C.RESET} it has to be the installer .exe")
     print("  itself (not just the zip/tar.gz) - existing installs' Help > Check for")
@@ -648,6 +771,9 @@ def main():
     hr_exe, hom_exe = step_build()
     ffmpeg_path = find_ffmpeg()
     produced = step_archives(version, hr_exe, hom_exe, ffmpeg_path)
+    installer = step_installer(version)
+    if installer:
+        produced.append(installer)
 
     section("Other bits")
     write_checksums(produced)
