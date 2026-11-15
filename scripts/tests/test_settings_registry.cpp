@@ -61,3 +61,31 @@ TEST_CASE("registry: string field round-trips through text") {
     CHECK(st.current_theme == "light");
     CHECK(d->get(st) == "light");
 }
+
+TEST_CASE("registry: auto-pause on idle keys exist, default to off, and round-trip") {
+    AppState st;
+    CHECK_FALSE(st.auto_pause_on_idle);              // the feature must never be on by itself
+
+    const SettingDef *on = Find("auto_pause_on_idle");
+    REQUIRE(on);
+    CHECK(on->kind == Kind::Bool);
+    CHECK(on->set(st, "true"));
+    CHECK(st.auto_pause_on_idle);
+    AppState st2;                                    // what get() writes, set() reads back
+    CHECK(on->set(st2, on->get(st)));
+    CHECK(st2.auto_pause_on_idle);
+
+    // the aliases reach the same setting
+    CHECK(Find("action_detection") == on);
+    CHECK(Find("record_on_motion") == on);
+
+    const SettingDef *sec = Find("idle_duration_sec");
+    REQUIRE(sec);
+    CHECK(sec->set(st, "12"));
+    CHECK(st.idle_duration_sec == 12);
+
+    const SettingDef *thr = Find("idle_threshold_pct");
+    REQUIRE(thr);
+    CHECK(thr->set(st, "0.25"));
+    CHECK(st.idle_threshold_pct == doctest::Approx(0.25));
+}

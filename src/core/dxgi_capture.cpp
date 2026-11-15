@@ -23,6 +23,9 @@
 #include <algorithm>
 #include <vector>
 #include <memory>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include "gpu_overlay.h"   // overlays blended on the GPU (HrGpuLayer / HrGpuOverlay)
 
 #ifdef _WIN32
@@ -1392,8 +1395,244 @@ HR_EXPORT int hr_gpu_sched_set_process(void *hProcess, int level) {
 }
 
 /* -------------------------------------------------------------------------
- * hr_dx_adapter_count
+ * Screen activity probe  (Settings: auto_pause_on_idle - see idle_detect.h)
+ *
+ * Answers one question for RecordingController: "how much of the screen is changing?". It has nothing to do
+ * with the capture itself and does not share any state with it, so the capture path is untouched. It runs ONLY
+ * while a recording with auto_pause_on_idle is going; with the option off no thread, no D3D device and no
+ * duplication exist.
+ *
+ * What it does: its own small D3D11 device + its own desktop duplication of the same output, a thread that waits
+ * for DXGI's "the picture changed" signal and adds up the area of the dirty / move rectangles DXGI reports.
+ * It never copies, maps or reads a single pixel. Pointer-only updates are skipped (not activity). Because it
+ * is a separate duplication it keeps working while the recording is paused, which is exactly when the
+ * answer is needed to resume.
+ *
+ * Fail-safe: whenever it cannot tell (duplication lost / not available / not yet started) it says "not live",
+ * and the caller then treats the screen as active.
  * ---------------------------------------------------------------------- */
+#ifdef _WIN32
+namespace {
+
+struct DxActivityProbe {
+    int adapter_idx = 0;
+    int output_idx  = 0;
+    std::atomic<bool> stop{false};
+    std::atomic<unsigned long long> changed_px{0};   /* running total of changed pixels             */
+    std::atomic<unsigned long long> area_px{0};      /* size of the watched area                    */
+    std::atomic<int> live{0};                        /* 1 = a duplication is held and answering     */
+    std::atomic<int> rx{0}, ry{0}, rw{0}, rh{0};     /* watched rectangle, output-relative; w<=0: all */
+    std::thread th;
+};
+
+static unsigned long long activity_clip_area(long l, long t, long r, long b,
+                                             long cl, long ct, long cr, long cb) {
+    const long L = std::max(l, cl), T = std::max(t, ct), R = std::min(r, cr), B = std::min(b, cb);
+    if (R <= L || B <= T) return 0;
+    return (unsigned long long)(R - L) * (unsigned long long)(B - T);
+}
+
+/* Sleeps in short steps so that stop is noticed quickly. */
+static void activity_sleep(DxActivityProbe *p, int ms) {
+    for (int waited = 0; waited < ms && !p->stop.load(std::memory_order_relaxed); waited += 20)
+        Sleep(20);
+}
+
+static bool activity_open(DxActivityProbe *p, ComPtr<ID3D11Device> &dev,
+                          ComPtr<IDXGIOutputDuplication> &dup, int &w, int &h, bool &rotated) {
+    dup.Reset();
+    dev.Reset();
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(factory.GetAddressOf()))))
+        return false;
+    ComPtr<IDXGIAdapter1> adapter;
+    if (FAILED(factory->EnumAdapters1((UINT)p->adapter_idx, &adapter))) return false;
+    D3D_FEATURE_LEVEL fl = (D3D_FEATURE_LEVEL)0;
+    if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+                                 &dev, &fl, nullptr)))
+        return false;
+    ComPtr<IDXGIOutput> output;
+    if (FAILED(adapter->EnumOutputs((UINT)p->output_idx, &output))) return false;
+    ComPtr<IDXGIOutput1> output1;
+    if (FAILED(output.As(&output1))) return false;
+    if (FAILED(output1->DuplicateOutput(dev.Get(), &dup))) return false;
+    DXGI_OUTDUPL_DESC dd{};
+    dup->GetDesc(&dd);
+    w = (int)dd.ModeDesc.Width;
+    h = (int)dd.ModeDesc.Height;
+    rotated = (dd.Rotation != DXGI_MODE_ROTATION_IDENTITY && dd.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED);
+    return w > 0 && h > 0;
+}
+
+static void activity_thread(DxActivityProbe *p) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    try {
+        ComPtr<ID3D11Device> dev;
+        ComPtr<IDXGIOutputDuplication> dup;
+        std::vector<uint8_t> meta;
+        int w = 0, h = 0;
+        bool rotated = false;
+        bool first_after_open = true;
+
+        while (!p->stop.load(std::memory_order_relaxed)) {
+            if (!dup) {
+                p->live.store(0, std::memory_order_relaxed);
+                if (!activity_open(p, dev, dup, w, h, rotated)) {
+                    dup.Reset(); dev.Reset();
+                    activity_sleep(p, 1000);          /* UAC prompt, mode change, GPU reset...: try again */
+                    continue;
+                }
+                first_after_open = true;
+            }
+
+            /* The part of the output that is being watched (window / region capture crops it). Worked out
+             * BEFORE waiting, so the size is known even on a screen that never changes (only timeouts). */
+            long cl = 0, ct = 0, cr = w, cb = h;
+            {
+                const int rw = p->rw.load(std::memory_order_relaxed), rh = p->rh.load(std::memory_order_relaxed);
+                if (rw > 0 && rh > 0) {
+                    const int rx = p->rx.load(std::memory_order_relaxed), ry = p->ry.load(std::memory_order_relaxed);
+                    const long l = std::max(0, rx), t = std::max(0, ry);
+                    const long r = std::min((long)w, (long)rx + rw), b = std::min((long)h, (long)ry + rh);
+                    if (r > l && b > t) { cl = l; ct = t; cr = r; cb = b; }
+                }
+            }
+            const unsigned long long watch_area = (unsigned long long)(cr - cl) * (unsigned long long)(cb - ct);
+            p->area_px.store(watch_area, std::memory_order_relaxed);
+
+            DXGI_OUTDUPL_FRAME_INFO fi{};
+            ComPtr<IDXGIResource> res;
+            const HRESULT hr = dup->AcquireNextFrame(100, &fi, &res);
+            if (hr == DXGI_ERROR_WAIT_TIMEOUT) {      /* nothing changed in 100 ms: a valid "idle" answer */
+                p->live.store(1, std::memory_order_relaxed);
+                continue;
+            }
+            if (FAILED(hr)) {                         /* access lost / invalid call / anything else */
+                dup.Reset(); dev.Reset();
+                p->live.store(0, std::memory_order_relaxed);
+                activity_sleep(p, 500);
+                continue;
+            }
+            res.Reset();                               /* the picture itself is never touched */
+            p->live.store(1, std::memory_order_relaxed);
+
+            const bool pointer_only = (fi.LastPresentTime.QuadPart == 0 && fi.AccumulatedFrames == 0);
+            if (!pointer_only) {
+                unsigned long long frame_px = 0;
+                if (first_after_open) {
+                    /* The first image after (re)opening is the whole desktop, not a change. */
+                } else if (rotated || fi.TotalMetadataBufferSize == 0) {
+                    frame_px = watch_area;            /* an image was presented but we can't say where */
+                } else {
+                    const UINT total = fi.TotalMetadataBufferSize;
+                    if (meta.size() < total) meta.resize(total);
+                    UINT move_bytes = 0, dirty_bytes = 0;
+                    bool ok = SUCCEEDED(dup->GetFrameMoveRects(
+                        total, reinterpret_cast<DXGI_OUTDUPL_MOVE_RECT *>(meta.data()), &move_bytes)) &&
+                        move_bytes <= total;
+                    if (ok)
+                        ok = SUCCEEDED(dup->GetFrameDirtyRects(
+                            total - move_bytes, reinterpret_cast<RECT *>(meta.data() + move_bytes), &dirty_bytes)) &&
+                            move_bytes + dirty_bytes <= total;
+                    if (!ok) {
+                        frame_px = watch_area;
+                    } else {
+                        const auto *mv = reinterpret_cast<const DXGI_OUTDUPL_MOVE_RECT *>(meta.data());
+                        for (UINT i = 0; i < move_bytes / sizeof(DXGI_OUTDUPL_MOVE_RECT); ++i) {
+                            const RECT &d = mv[i].DestinationRect;      /* where the pixels ended up */
+                            frame_px += activity_clip_area(d.left, d.top, d.right, d.bottom, cl, ct, cr, cb);
+                        }
+                        const auto *dr = reinterpret_cast<const RECT *>(meta.data() + move_bytes);
+                        for (UINT i = 0; i < dirty_bytes / sizeof(RECT); ++i)
+                            frame_px += activity_clip_area(dr[i].left, dr[i].top, dr[i].right, dr[i].bottom,
+                                                           cl, ct, cr, cb);
+                        if (frame_px > watch_area) frame_px = watch_area;   /* rectangles may overlap */
+                    }
+                }
+                if (frame_px) p->changed_px.fetch_add(frame_px, std::memory_order_relaxed);
+                first_after_open = false;
+            }
+            dup->ReleaseFrame();
+        }
+    } catch (...) {
+        /* never let an exception leave a bare thread (that would end the whole process) */
+    }
+    p->live.store(0, std::memory_order_relaxed);
+}
+
+} // namespace
+#endif
+
+//  Starts the probe on DXGI output `output_idx` of adapter `adapter_idx` (the same numbers the capture uses).
+//  Returns null if it could not even start the thread; a probe that starts but cannot get a duplication
+//  simply keeps reporting "not live".
+HR_EXPORT void *hr_dx_activity_start(int adapter_idx, int output_idx) {
+#ifdef _WIN32
+    DxActivityProbe *p = nullptr;
+    try {
+        p = new DxActivityProbe();
+        p->adapter_idx = adapter_idx;
+        p->output_idx  = output_idx;
+        p->th = std::thread(activity_thread, p);
+    } catch (...) {
+        delete p;
+        return nullptr;
+    }
+    return p;
+#else
+    (void)adapter_idx; (void)output_idx;
+    return nullptr;
+#endif
+}
+
+// Which part of the output to watch, in the output's own pixel coordinates. w or h <= 0 = the whole output.
+HR_EXPORT void hr_dx_activity_set_rect(void *handle, int x, int y, int w, int h) {
+#ifdef _WIN32
+    if (!handle) return;
+    auto *p = static_cast<DxActivityProbe *>(handle);
+    p->rx.store(x, std::memory_order_relaxed);
+    p->ry.store(y, std::memory_order_relaxed);
+    p->rw.store(w, std::memory_order_relaxed);
+    p->rh.store(h, std::memory_order_relaxed);
+#else
+    (void)handle; (void)x; (void)y; (void)w; (void)h;
+#endif
+}
+
+// Reads the running total of changed pixels and the size of the watched area. Returns 1 while the probe
+// holds a working duplication, 0 when it cannot tell (the caller must then treat the screen as active).
+HR_EXPORT int hr_dx_activity_read(void *handle, unsigned long long *changed_px, unsigned long long *area_px) {
+#ifdef _WIN32
+    if (!handle) return 0;
+    auto *p = static_cast<DxActivityProbe *>(handle);
+    if (changed_px) *changed_px = p->changed_px.load(std::memory_order_relaxed);
+    if (area_px)    *area_px    = p->area_px.load(std::memory_order_relaxed);
+    return p->live.load(std::memory_order_relaxed) ? 1 : 0;
+#else
+    (void)handle;
+    if (changed_px) *changed_px = 0;
+    if (area_px)    *area_px = 0;
+    return 0;
+#endif
+}
+
+// Stops the thread (waits up to about 100 ms) and frees everything.
+HR_EXPORT void hr_dx_activity_stop(void *handle) {
+#ifdef _WIN32
+    if (!handle) return;
+    auto *p = static_cast<DxActivityProbe *>(handle);
+    p->stop.store(true, std::memory_order_relaxed);
+    if (p->th.joinable()) p->th.join();
+    delete p;
+#else
+    (void)handle;
+#endif
+}
+
+// -------------------------------------------------------------------------
+// hr_dx_adapter_count
+// ----------------------------------------------------------------------
 HR_EXPORT int hr_dx_adapter_count() {
 #ifdef _WIN32
     ComPtr<IDXGIFactory1> factory;
@@ -1410,9 +1649,9 @@ HR_EXPORT int hr_dx_adapter_count() {
 #endif
 }
 
-/* -------------------------------------------------------------------------
- * hr_dx_output_count
- * ---------------------------------------------------------------------- */
+// -------------------------------------------------------------------------
+// hr_dx_output_count
+// --------------------------------------------------------------------------
 HR_EXPORT int hr_dx_output_count(int adapter_idx) {
 #ifdef _WIN32
     ComPtr<IDXGIFactory1> factory;

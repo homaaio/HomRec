@@ -152,6 +152,12 @@ extern "C" {
     // dxgi_capture.cpp: GPU scheduling class of a process (nullptr = HomRec itself), 0 idle / 1 below normal / 2 normal
     int  hr_gpu_sched_set_process(void *hProcess, int level);
     long hr_gpu_sched_last_status();   // NTSTATUS of the last hr_gpu_sched_set_process() call
+    // dxgi_capture.cpp: screen activity probe for AppState::auto_pause_on_idle (own thread + own duplication;
+    // started only while that option is on). read() = 1 while the probe can tell, 0 = unknown (treat as active).
+    void *hr_dx_activity_start(int adapter_idx, int output_idx);
+    void  hr_dx_activity_set_rect(void *h, int x, int y, int w, int h2);
+    int   hr_dx_activity_read(void *h, unsigned long long *changed_px, unsigned long long *area_px);
+    void  hr_dx_activity_stop(void *h);
     void hr_ff_set_gpu_capture(void *h, int enable, int output_idx, int off_x, int off_y,
                                 int w, int h2, int draw_mouse);
     int hr_ff_start(void *handle);
@@ -323,6 +329,7 @@ RecordingController::RecordingController(AppState &state) : state_(state) {
 RecordingController::~RecordingController() {
     if (state_.recording) Stop();
     if (finalize_thread_.joinable()) finalize_thread_.join();
+    StopIdleProbe(false);
     if (instant_replay_active_) {
         StopInstantReplayEncoder();
         DeleteReplayDir(replay_dir_); // see DeleteReplayDir()'s comment
@@ -1244,6 +1251,7 @@ bool RecordingController::TryStartDdagrab(const std::wstring &codec_args, bool c
     else if (state_.capture_mode == CaptureMode::Window)  why = "window capture follows a moving window";
     else if (any_overlay && !overlay_mode)                why = overlay_why;
     else if (state_.auto_pause_on_silence)                why = "auto-pause on silence needs the pipeline's pause";
+    else if (state_.auto_pause_on_idle)                   why = "auto-pause on idle needs the pipeline's pause";
     else if (src_w <= 0 || src_h <= 0 ||
              output_w_ != src_w || output_h_ != src_h)    why = "the output resolution differs from the captured size";
     else if (state_.custom_ffmpeg_args.find("-vf") != std::string::npos ||
@@ -1751,6 +1759,8 @@ bool RecordingController::Start(std::wstring &error_out) {
     overloaded_ = false;
     last_loud_time_ = std::chrono::steady_clock::now();
     auto_paused_by_silence_ = false;
+    auto_paused_by_idle_ = false;
+    idle_start_tried_ = false;     // PollIdle() starts the screen probe on its first tick, if the option is on
     HrLog::Info("Recording started -> " + NarrowFromWide(current_output_path_) +
                 " (" + std::to_string(output_w_) + "x" + std::to_string(output_h_) +
                 " @ " + std::to_string(state_.target_fps) + "fps, captured at " +
@@ -1768,6 +1778,7 @@ void RecordingController::Stop() {
 void RecordingController::StopAsync(std::function<void()> on_done) {
     if (!state_.recording || finalizing_) return;
     finalizing_ = true;
+    StopIdleProbe(false);          // the screen probe lives only while a recording runs (waits <= ~100 ms)
     if (finalize_thread_.joinable()) finalize_thread_.join();
 
     // If we're keeping the pipeline alive afterward for continued live preview, don't call
@@ -2208,7 +2219,11 @@ void RecordingController::TogglePause() {
     hr_audio_pause(state_.paused ? 1 : 0);
     // Resuming counts as "just heard something" - otherwise the silence that
     // built up while paused made auto-pause fire again immediately.
-    if (!state_.paused) last_loud_time_ = std::chrono::steady_clock::now();
+    if (!state_.paused) {
+        last_loud_time_ = std::chrono::steady_clock::now();
+        // Same for the still-screen timer: it counts from the moment the recording goes on again.
+        idle_det_.Reset(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
     HrLog::Info(state_.paused ? "Recording paused" : "Recording resumed");
 }
 
@@ -2333,6 +2348,128 @@ void RecordingController::PollStats() {
                             std::to_string(state_.silence_duration_sec) + "s - auto-paused.");
             }
         }
+    }
+
+    // Auto-pause while the screen is still (off by default: with the option off this is one bool test).
+    if (!finalizing_) PollIdle();
+}
+
+// Seconds on a clock that never goes backwards - the idle detector's time base.
+static double HrIdleNowSec() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::string HrIdleFmt(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.3f", v);
+    return buf;
+}
+
+void RecordingController::StopIdleProbe(bool resume_if_paused) {
+    if (idle_probe_) {
+        hr_dx_activity_stop(idle_probe_);
+        idle_probe_ = nullptr;
+    }
+    // Switching the option off while we hold the recording paused must not leave it paused for good.
+    if (resume_if_paused && auto_paused_by_idle_ && state_.paused) {
+        TogglePause();
+        HrLog::Info("Recording: auto-pause on idle was switched off - recording continues.");
+    }
+    auto_paused_by_idle_ = false;
+}
+
+// "Record only when something happens": called from PollStats (every 500 ms) while a recording runs. Pauses the
+// recording after the screen has been still for idle_duration_sec and continues it as soon as the picture
+// changes. Whenever the screen signal is missing the recording simply goes on (see core/idle_detect.h).
+void RecordingController::PollIdle() {
+    if (!state_.auto_pause_on_idle) {
+        // The normal case. Nothing runs; only clean up if the option was switched off during a recording.
+        if (idle_probe_ || auto_paused_by_idle_) StopIdleProbe(/*resume_if_paused=*/true);
+        idle_start_tried_ = false;
+        return;
+    }
+
+    if (!idle_probe_) {
+        if (idle_start_tried_) return;                 // already attempted for this recording
+        idle_start_tried_ = true;
+        if (ddagrab_active_) {
+            HrLog::Info("Recording: auto-pause on idle needs the normal capture pipeline; this recording uses full-GPU "
+                        "(ddagrab) capture, so it applies from the next recording.");
+            return;
+        }
+        if (use_wgc_) {
+            HrLog::Info("Recording: auto-pause on idle is not available for window capture through Windows.Graphics."
+                        "Capture - the recording is not paused automatically.");
+            return;
+        }
+        idle_probe_ = hr_dx_activity_start(0, capture_output_idx_);
+        if (!idle_probe_) {
+            HrLog::Warn("Recording: auto-pause on idle could not start its screen probe - the recording is not "
+                        "paused automatically.");
+            return;
+        }
+        HrIdle::Config c0;
+        c0.threshold_pct = state_.idle_threshold_pct;
+        c0.idle_sec = (double)state_.idle_duration_sec;
+        idle_det_.SetConfig(c0);
+        idle_det_.Reset(HrIdleNowSec());
+        HrLog::Info("Recording: auto-pause on idle is on - pauses after " + std::to_string((int)idle_det_.config().idle_sec) +
+                    " s without screen changes (counts as activity: more than " +
+                    HrIdleFmt(idle_det_.config().threshold_pct) + " % of the recorded area changing per second).");
+        return;     // the probe needs a moment to deliver its first reading
+    }
+
+    // Settings can change during a recording (console, Settings dialog): follow them.
+    HrIdle::Config c;
+    c.threshold_pct = state_.idle_threshold_pct;
+    c.idle_sec = (double)state_.idle_duration_sec;
+    idle_det_.SetConfig(c);
+
+    // Window / region capture: only the recorded part of the monitor counts. crop_w_ == 0 = the whole monitor.
+    hr_dx_activity_set_rect(idle_probe_, crop_x_, crop_y_, crop_w_, crop_h_);
+
+    unsigned long long changed = 0, area = 0;
+    const bool live = hr_dx_activity_read(idle_probe_, &changed, &area) != 0;
+    const double now = HrIdleNowSec();
+
+    // The user resumed by hand while we had paused: that pause is over, start counting from now.
+    if (auto_paused_by_idle_ && !state_.paused) {
+        auto_paused_by_idle_ = false;
+        idle_det_.Reset(now);
+    }
+    // A pause the user made by hand stays as it is; the still-screen timer restarts when they resume (TogglePause).
+    if (state_.paused && !auto_paused_by_idle_) return;
+
+    const bool paused_by_us = auto_paused_by_idle_ && state_.paused;
+    const HrIdle::Action act = idle_det_.Update(now, changed, area, live, paused_by_us);
+    const double rate = idle_det_.rate_pct();      // read now: TogglePause() restarts the detector
+    switch (act) {
+        case HrIdle::Action::Pause:
+            if (!state_.paused) {
+                TogglePause();
+                if (state_.paused) {
+                    auto_paused_by_idle_ = true;
+                    HrLog::Info("Recording: the screen has been still for " + std::to_string((int)idle_det_.config().idle_sec) +
+                                " s (" + HrIdleFmt(rate) + " % of the area changing per second, limit " +
+                                HrIdleFmt(idle_det_.config().threshold_pct) + " %) - auto-paused.");
+                }
+            }
+            break;
+        case HrIdle::Action::Resume:
+            if (auto_paused_by_idle_ && state_.paused) {
+                TogglePause();
+                if (live)
+                    HrLog::Info("Recording: the screen is changing again (" + HrIdleFmt(rate) +
+                                " % of the area per second) - auto-resumed.");
+                else
+                    HrLog::Warn("Recording: auto-pause on idle lost its screen signal (display mode change, secure "
+                                "desktop, GPU reset) - recording continues; it pauses again once the signal is back "
+                                "and the screen is still.");
+            }
+            auto_paused_by_idle_ = false;
+            break;
+        case HrIdle::Action::None:
+            break;
     }
 }
 

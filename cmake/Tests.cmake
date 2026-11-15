@@ -14,7 +14,7 @@ add_library(hr_encoder_helpers STATIC ${CMAKE_SOURCE_DIR}/src/core/encoder_helpe
 target_include_directories(hr_encoder_helpers PUBLIC ${CMAKE_SOURCE_DIR}/src/core)
 target_compile_options(hr_encoder_helpers PRIVATE -O3 -Wall)
 
-foreach(t wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry homrec_cli)
+foreach(t wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry idle_detect homrec_cli)
     add_executable(test_${t} ${CMAKE_SOURCE_DIR}/scripts/tests/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE
         ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/core ${CMAKE_SOURCE_DIR}/src/utils ${CMAKE_SOURCE_DIR}/scripts/tests)

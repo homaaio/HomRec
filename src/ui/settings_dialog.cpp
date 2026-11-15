@@ -879,6 +879,27 @@ private:
         replayNote->SetBackgroundColour(bg);
         pageRoot->Add(replayNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
 
+        // Record only when something happens (action detection): the recording is paused while the screen
+        // is still and continues by itself when the picture changes. Off by default; while it is off nothing runs.
+        idle_pause_check_ = new wxCheckBox(page, wxID_ANY, "Record only when something happens");
+        idle_pause_check_->SetForegroundColour(text);
+        idle_pause_check_->SetBackgroundColour(bg);
+        idle_pause_check_->SetValue(state_.auto_pause_on_idle);
+        pageRoot->Add(idle_pause_check_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+        auto *idleGrid = new wxFlexGridSizer(2, 10, 10);
+        AddLabel(page, idleGrid, text, bg, "Pause after the screen is still for (sec):");
+        idle_sec_spin_ = new wxSpinCtrl(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                         wxSP_ARROW_KEYS, 1, 600, state_.idle_duration_sec);
+        idleGrid->Add(idle_sec_spin_, 0, wxALIGN_CENTRE_VERTICAL);
+        pageRoot->Add(idleGrid, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+        auto *idleNote = new wxStaticText(page, wxID_ANY,
+            "The still time is left out of the file. Not for window capture\n"
+            "through Windows.Graphics.Capture or full-GPU (ddagrab) capture.\n"
+            "Sensitivity: idle_threshold_pct in the console / settings file.");
+        idleNote->SetForegroundColour(textDim);
+        idleNote->SetBackgroundColour(bg);
+        pageRoot->Add(idleNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, 16);
+
         // -- Settings file path - the app's own auto-
         // managed settings file, an .hrc-format file (hrc_config.cpp) that replaced the old
         // homrec_settings.json.
@@ -1090,6 +1111,8 @@ private:
         autostop_spin_->SetValue(0);
         replay_buf_spin_->SetValue(0);
         instant_replay_check_->SetValue(false);
+        idle_pause_check_->SetValue(false);
+        idle_sec_spin_->SetValue(5);
         hk_save_replay_btn_->SetValue("F8");
 
         // Defaults = no custom hotkeys.
@@ -1200,6 +1223,8 @@ private:
         state_.auto_stop_min = autostop_spin_->GetValue();
         state_.replay_buffer_sec = replay_buf_spin_->GetValue();
         state_.instant_replay_enabled = instant_replay_check_->GetValue();
+        state_.auto_pause_on_idle = idle_pause_check_->GetValue();
+        state_.idle_duration_sec = idle_sec_spin_->GetValue();
         state_.hotkey_save_replay = hk_save_replay_btn_->GetValue().ToUTF8().data();
 
         // -- Security -------------------------------------------------------
@@ -1323,6 +1348,8 @@ private:
     wxTextCtrl *fname_template_edit_ = nullptr;
     wxSpinCtrl *autostop_spin_ = nullptr, *replay_buf_spin_ = nullptr;
     wxCheckBox *instant_replay_check_ = nullptr;
+    wxCheckBox *idle_pause_check_ = nullptr;
+    wxSpinCtrl *idle_sec_spin_ = nullptr;
 
     // Security
     wxCheckBox *sys_log_chk_ = nullptr, *plugin_log_chk_ = nullptr, *wgc_log_chk_ = nullptr;

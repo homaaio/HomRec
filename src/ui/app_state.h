@@ -193,6 +193,17 @@ struct AppState {
     double      silence_threshold_db   = -40.0;
     int         silence_duration_sec   = 3;
 
+    // "Record only when something happens" (action detection). Off by default; while it is off nothing runs
+    // at all (no thread, no extra screen duplication). When on, a recording is paused after the screen has
+    // stayed still for idle_duration_sec and continues by itself when the picture changes again. The same
+    // Pause as the hotkey, so the time in between is simply left out of the file.
+    //   idle_threshold_pct : how much of the recorded area must change per second to count as activity
+    //                        (percent). 0.02 = typing counts, a blinking caret / minute clock does not.
+    //                        Terminal / cfg only.
+    bool        auto_pause_on_idle     = false;
+    int         idle_duration_sec      = 5;
+    double      idle_threshold_pct     = 0.02;
+
     enum class PostRecordHookType { None, Script, Move, OpenFolder };
     bool               post_record_hook_enabled = false;
     PostRecordHookType post_record_hook_type    = PostRecordHookType::None;

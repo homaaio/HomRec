@@ -13,6 +13,7 @@
 #include "app_state.h"
 #include "../core/overlay_render.h"
 #include "../core/replay_ram.h"     // Instant Replay buffer in RAM
+#include "../core/idle_detect.h"    // auto-pause when the screen is still (AppState::auto_pause_on_idle)
 
 class RecordingController {
 public:
@@ -445,6 +446,17 @@ private:
 
     std::chrono::steady_clock::time_point last_loud_time_ = std::chrono::steady_clock::now();
     bool auto_paused_by_silence_ = false;
+
+    // "Record only when something happens" (AppState::auto_pause_on_idle; the decision logic is in
+    // core/idle_detect.h, the screen-change counter is hr_dx_activity_* in dxgi_capture.cpp). The probe exists
+    // only while the option is on AND a recording is running: idle_probe_ is null in every other case, and then
+    // PollIdle() costs a single bool test per PollStats tick.
+    void PollIdle();
+    void StopIdleProbe(bool resume_if_paused);
+    void *idle_probe_ = nullptr;
+    HrIdle::Detector idle_det_;
+    bool auto_paused_by_idle_ = false;   // the current pause was made by PollIdle() (a manual pause is never undone by it)
+    bool idle_start_tried_ = false;      // the probe was already attempted for this recording (no retry storm)
     int capture_w_ = 0, capture_h_ = 0; // native monitor resolution - MUST match what DXGI actually captures
     // DXGI output index (0-based) for the monitor ResolveCaptureSize() just
     // resolved state_.monitor_id to - passed into hr_pl_create() so the

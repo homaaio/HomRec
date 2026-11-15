@@ -227,6 +227,10 @@ const std::vector<SettingDef> &All() {
         v.push_back(BoolField("auto_pause_on_silence", "recording_extra", &AppState::auto_pause_on_silence));
         v.push_back(DblField("silence_threshold_db", "recording_extra", &AppState::silence_threshold_db));
         v.push_back(IntField("silence_duration_sec", "recording_extra", &AppState::silence_duration_sec));
+        v.push_back(BoolField("auto_pause_on_idle", "recording_extra", &AppState::auto_pause_on_idle,
+                              {"action_detection", "record_on_motion"}));
+        v.push_back(IntField("idle_duration_sec", "recording_extra", &AppState::idle_duration_sec));
+        v.push_back(DblField("idle_threshold_pct", "recording_extra", &AppState::idle_threshold_pct));
         v.push_back(BoolField("post_record_hook_enabled", "recording_extra", &AppState::post_record_hook_enabled));
         {
             Def d;
