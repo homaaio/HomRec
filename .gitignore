@@ -326,3 +326,4 @@ scenes/*
 commits.txt
 logs/*
 cfg/*.cfg
+tmp/
