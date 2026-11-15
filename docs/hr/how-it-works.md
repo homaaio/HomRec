@@ -105,7 +105,8 @@ If ddagrab or Media Foundation cannot start, HomRec logs why and continues with 
 
 **Pause** (`F10`): the video timeline and the audio are both paused, and Resume continues. With ddagrab, ffmpeg owns
 the capture and cannot be paused, so Pause closes the current ffmpeg piece, Resume starts a new one, and Stop joins
-the pieces by a stream copy (no re-encoding). If the `ddagrab_pause` setting is off, Pause is unavailable in ddagrab mode.
+the pieces by a stream copy (no re-encoding). If the `ddagrab_pause` setting is off, Pause is unavailable in ddagrab mode. HomRec can also pause and resume by itself while the screen is still: see
+[idle-pause.md](idle-pause.md).
 
 **Crash safety.** MKV keeps what was written before a crash or power loss. MP4 written by ffmpeg may be unusable if
 it was never finished. If you record long sessions, choose MKV ([codecs.md](codecs.md#settings-that-go-together-with-the-codec)).

@@ -58,6 +58,7 @@ HomRec is currently **Windows-only**: the capture engine uses DXGI/D3D11/Win32. 
 - **Multi-monitor support** - select which display to record
 - **Overlays** - text, image, GIF, webcam, and an input overlay (on-screen keypress/mouse-click display); each overlay is placed and configured in a visual editor (position, size, opacity, font, files)
 - **Instant Replay** - background rolling buffer, saved on demand via hotkey, independent of active recording
+- **Record only when something happens** - optional auto-pause while the screen is still, auto-resume when it changes (Settings > Advanced; off by default)
 - **Hotkeys** - start/stop, pause/resume, fullscreen toggle, save-replay, all user-rebindable
 - **Presets** - keep several named `.hrc` settings profiles and switch between them (File > Set Preset...), plus Export/Import Settings
 - **Custom languages** - `.hrl` translation files, applied without restarting

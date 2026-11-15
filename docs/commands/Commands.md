@@ -1,7 +1,7 @@
 # Developer console and `cfg/` scripts
 
 Open the console with **Help > Console** or `Ctrl+Shift+T`. It is a small command line inside HomRec for
-settings, presets, logs and the plugin package manager. This page matches **HomRec 3.1.0**.
+settings, presets, logs and the plugin package manager. This page matches **HomRec 3.1.1**.
 
 ![window](../images/console/window.png)
 
@@ -54,7 +54,7 @@ again with `sec 1` when you are done.
 
 | Command | What it does |
 |---|---|
-| `version` | `HomRec v3.1.0 (developer console)` |
+| `version` | `HomRec v3.1.1 (developer console)` |
 | `ver` | Just the version number (for scripts). |
 | `whoami` | Confirms which console and build answer. |
 | `ping` | Prints `pong`. |

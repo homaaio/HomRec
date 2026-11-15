@@ -1,5 +1,26 @@
 welcome to changelog :D
 
+[Version 3.1.1] - 2026-11-15
+
+### Added
+- **Recording:** "Record only when something happens" (Settings > Advanced; keys `auto_pause_on_idle`,
+  `idle_duration_sec`, `idle_threshold_pct`). The recording is paused after the screen has stayed still for the set
+  time and continues by itself when the picture changes. It is the same pause as the hotkey, so the still time is left
+  out of the file. Off by default.
+- **Recording:** the screen is judged from the areas Windows reports as redrawn, averaged over one second. Pointer
+  movement alone does not count. Every doubt is resolved towards recording: when the signal is missing, nothing is
+  paused, and a recording paused by this feature continues if the signal is lost. A pause made by hand is never undone.
+- **Recording:** window and region capture watch only the recorded part of the monitor. Each pause and resume is logged
+  with the measured change rate, which helps to tune `idle_threshold_pct`.
+- **Docs:** new page `docs/hr/idle-pause.md`.
+- **Tests:** `test_idle_detect` (the pause / resume decisions) and a settings-registry test for the new keys.
+
+### Notes
+- With the option off nothing runs: no thread, no extra screen capture. With it on, a second desktop duplication of the
+  recorded monitor and one thread exist while a recording is running; no pixels are copied or read.
+- Not available with Windows.Graphics.Capture window capture or full-GPU (ddagrab) capture (a log line says so), and
+  not in the `homrec` terminal tool.
+
 [Version 3.1.0] - 2026-11-13
 Terminal control, a fully editable Desktop layer, and more predictable encoder fallback.
 

@@ -1,6 +1,6 @@
 # HomRec documentation
 
-These pages describe **HomRec 3.1.0**. Every statement was checked
+These pages describe **HomRec 3.1.1**. Every statement was checked
 against the source code of that snapshot; where something could not be checked it says so.
 
 New to HomRec? Read [getting-started.md](getting-started.md), then [how-it-works.md](how-it-works.md).
@@ -16,6 +16,7 @@ Something is broken? Go straight to [troubleshooting.md](troubleshooting.md).
 | Set up the microphone, desktop sound, per-app audio | [audio.md](audio.md) |
 | Add a text, image, GIF, webcam or key-press overlay | [overlays-and-scenes.md](overlays-and-scenes.md) |
 | Save "the last 30 seconds" with a hotkey | [instant-replay.md](instant-replay.md) |
+| Record only while something happens on the screen | [idle-pause.md](idle-pause.md) |
 | Look up what a setting does | [settings-reference.md](settings-reference.md) |
 | Choose a video codec / fix NVENC, AMF, QSV | [codecs.md](codecs.md) |
 | Fix a recording that fails or has errors in the log | [recording-troubleshooting.md](recording-troubleshooting.md) |

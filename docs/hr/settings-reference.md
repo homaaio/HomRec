@@ -54,6 +54,7 @@ tie a key combo to any console command or `setting = value` line, for example `a
 | Filename template (`{date}` / `{time}` / `{app}`) | Names the recording file. Default `HomRec_{date}_{time}`. |
 | Auto-stop (min, 0 = off) | Stops the recording after N minutes. |
 | Replay buffer (sec, 0 = off) + Enable Instant Replay | [instant-replay.md](instant-replay.md). |
+| Record only when something happens + Pause after the screen is still for (sec) | Pauses while the screen is still, continues when it changes. Off by default. [idle-pause.md](idle-pause.md). |
 | Settings Storage | Path of the `.hrc` file. `cfg\config.cfg`, if present, can layer overrides on top at every launch (`sethrc`, see [Commands.md](../commands/Commands.md)). |
 
 ## Security
@@ -83,7 +84,7 @@ These have no checkbox. Change them from the console (`Ctrl+Shift+T`) or by edit
 
 | Section | Keys |
 |---|---|
-| `[recording_extra]` | `auto_pause_on_silence`, `silence_threshold_db`, `silence_duration_sec`, `scheduled_start_enabled`, `scheduled_start_time`, `post_record_hook_enabled`, `post_record_hook_type`, `post_record_hook_path`, `replay_in_ram`, `replay_ram_mb` |
+| `[recording_extra]` | `auto_pause_on_silence`, `silence_threshold_db`, `silence_duration_sec`, `idle_threshold_pct` (sensitivity of [idle-pause.md](idle-pause.md); the on/off switch and the seconds are in Settings > Advanced), `scheduled_start_enabled`, `scheduled_start_time`, `post_record_hook_enabled`, `post_record_hook_type`, `post_record_hook_path`, `replay_in_ram`, `replay_ram_mb` |
 | `[video]` | `ddagrab_pause`, `mf_encoder` (experimental in-process Media Foundation encoder) |
 
 ## Presets

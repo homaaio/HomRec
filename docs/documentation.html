@@ -25,7 +25,7 @@
     <div class="content">
 
         <h1>Documentation</h1>
-        <p>Guides for <b>HomRec 3.1.0</b>: how it works step by step, what can fail, and how to fix it. The guides are Markdown files in the repository; the quick answers below are searchable.</p>
+        <p>Guides for <b>HomRec 3.1.1</b>: how it works step by step, what can fail, and how to fix it. The guides are Markdown files in the repository; the quick answers below are searchable.</p>
 
         <div class="toc">
             <a href="#guides">Guides</a>
@@ -50,6 +50,7 @@
             <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/audio.md"><strong>Audio</strong><span>Microphone, desktop sound, per-app audio.</span></a>
             <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/overlays-and-scenes.md"><strong>Overlays and scenes</strong><span>Text, image, GIF, webcam, key presses.</span></a>
             <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/instant-replay.md"><strong>Instant Replay</strong><span>Save the last seconds with a hotkey.</span></a>
+            <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/idle-pause.md"><strong>Record only on activity</strong><span>Auto-pause while the screen is still.</span></a>
             <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/settings-reference.md"><strong>Settings reference</strong><span>Every tab, every option.</span></a>
             <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/codecs.md"><strong>Codecs</strong><span>NVENC, AMF, QSV, libx264.</span></a>
             <a class="card" href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md"><strong>Troubleshooting</strong><span>Fixes sorted by symptom.</span></a>
@@ -107,6 +108,11 @@
             <summary>Hotkeys do not work</summary>
             <p>Defaults are F9 start/stop, F10 pause, F11 fullscreen of HomRec's window and F8 save replay. Another program may use the same key; change it in Settings &gt; Hotkeys.</p>
             <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/troubleshooting.md#hotkeys-do-not-work">Full guide &rarr;</a></p>
+        </details>
+        <details class="issue">
+            <summary>The recording pauses by itself (or never pauses) when nothing happens</summary>
+            <p>That is <b>Record only when something happens</b> in Settings &gt; Advanced (off by default). <code>logs\homrec.log</code> shows the measured change; lower <code>idle_threshold_pct</code> if it pauses while you type, raise it if a ticking clock keeps it from pausing.</p>
+            <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/idle-pause.md">Full guide &rarr;</a></p>
         </details>
         <details class="issue">
             <summary>Instant Replay says "Instant Replay isn't running."</summary>

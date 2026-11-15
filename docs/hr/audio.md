@@ -67,6 +67,8 @@ Optional keys in `homrec.hrc` (section `[recording_extra]`, also changeable from
 | `silence_threshold_db` | Level below which it counts as silence | -40 |
 | `silence_duration_sec` | How long it must be silent | 3 |
 
+To pause on a still *screen* instead of a quiet microphone, see [idle-pause.md](idle-pause.md).
+
 ## What can fail
 
 | Symptom | Cause | Fix |
