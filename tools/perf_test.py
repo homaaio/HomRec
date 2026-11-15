@@ -157,7 +157,15 @@ def write_summary(path, run, cmp_rows, cmp_note):
              f"- recorded: {run['recording']['path'] or 'file not found'} "
              f"({run['recording']['size_mb']} MB, {run['recorded_seconds']:.0f} s)",
              f"- samples used: {run['samples_used']} of {run['samples_total']} "
-             f"(first {run['warmup_s']} s of the recording ignored)", "",
+             f"(first {run['warmup_s']} s of the recording ignored)",
+             f"- preview: {run.get('preview', 'unknown')}",
+             f"- process memory: start {run.get('proc_mem_start_mb', 0)} MB, "
+             f"end {run.get('proc_mem_end_mb', 0)} MB, peak {run.get('proc_mem_peak_mb', 0)} MB",
+             f"- file write rate: {run.get('recording_write_mb_s', 0)} MB/s "
+             f"(file size / recorded time; the WMI disk counter above is not reliable on this machine)",
+             f"- overload warnings: {run.get('overload_warnings', 0)}, "
+             f"capture hitches: {run.get('capture_hitches', 0)}",
+             f"- capture stats: {run.get('capture_stats') or 'not logged'}", "",
              "| metric | avg | p95 | max |", "|---|---:|---:|---:|"]
     for key, label, unit in METRICS:
         s = st[key]
@@ -265,6 +273,8 @@ def main():
     homrec_log = os.path.join(run_dir, "homrec.log")
     cli_log = os.path.join(exe_dir, "logs", "cli", "cli.log")
     cli_offset = os.path.getsize(cli_log) if os.path.isfile(cli_log) else 0
+    app_log = os.path.join(exe_dir, "logs", "cli", "homrec.log")
+    app_offset = os.path.getsize(app_log) if os.path.isfile(app_log) else 0
 
     section(f"Load test {name}")
     print(f"  output folder: {out_dir}")
@@ -325,12 +335,40 @@ def main():
 
     rows = load_samples(samples_csv) if os.path.isfile(samples_csv) else []
     stats, used = compute_stats(rows, rec_offset, args.warmup)
+    used_rows = [r for r in rows if r["elapsed_s"] - rec_offset >= args.warmup]
+    rec_rows = [r for r in used_rows if r["elapsed_s"] <= rec_offset + recorded]
+    proc_mem = [r.get("proc_mem_mb", 0.0) for r in rec_rows if r.get("proc_mem_mb", 0.0) > 0]
+
+    app_text = ""
+    if os.path.isfile(app_log):
+        with open(app_log, "rb") as f:
+            f.seek(app_offset)
+            app_text = f.read().decode("utf-8", "replace")
+        with open(os.path.join(run_dir, "app.log"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(app_text)
+    overload = app_text.lower().count("recording overloaded")
+    hitches = app_text.lower().count("capture hitch")
+    preview_on = "preview on" in app_text.lower()
+    capture_stats = ""
+    for line in app_text.splitlines():
+        if "Capture stats:" in line:
+            capture_stats = line.split("Capture stats:", 1)[1].strip()
+
     run = {"name": name, "time": datetime.datetime.now().isoformat(timespec="seconds"),
            "config": config, "config_sha256": sha256(config), "exe_sha256": sha256(exe),
            "git": git_info(), "machine": machine_info(), "warmup_s": args.warmup,
            "recorded_seconds": round(recorded, 1), "interrupted": interrupted,
            "recording": {"path": rec_path, "size_mb": round(os.path.getsize(rec_path) / 1048576, 1) if rec_path else 0},
-           "samples_total": len(rows), "samples_used": used, "stats": stats}
+           "samples_total": len(rows), "samples_used": used, "stats": stats,
+           "rec_offset_s": round(rec_offset, 3),
+           "proc_mem_start_mb": round(proc_mem[0], 2) if proc_mem else 0.0,
+           "proc_mem_end_mb": round(proc_mem[-1], 2) if proc_mem else 0.0,
+           "proc_mem_peak_mb": round(max(proc_mem), 2) if proc_mem else 0.0,
+           "recording_write_mb_s": round((os.path.getsize(rec_path) / 1048576) / recorded, 2)
+                                   if rec_path and recorded > 0 else 0.0,
+           "preview": "on" if preview_on else "off",
+           "overload_warnings": overload, "capture_hitches": hitches,
+           "capture_stats": capture_stats}
     with open(os.path.join(run_dir, "run.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(run, f, indent=2, ensure_ascii=False)
 
