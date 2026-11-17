@@ -1170,9 +1170,9 @@ void ConsoleWindow::CmdInfo(const std::wstring &) {
     if (rec_) {
         const std::wstring &hw = rec_->resolved_hw_encoder();
         PrintInfo(hw.empty()
-            ? L"Encoder: software (libx264) - no GPU encoder found. Heaviest on CPU; "
+            ? L"GPU encoder: none found. Software encoding is heavier on CPU; "
               L"see homrec.log's startup lines for why the GPU probe failed."
-            : L"Encoder: hardware (" + hw + L") - GPU-accelerated, light on CPU.");
+            : L"GPU encoder: " + hw + L" is available (used only if chosen in Settings > Video > Codec).");
     }
 }
 

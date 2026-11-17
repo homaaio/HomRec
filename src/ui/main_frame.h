@@ -279,6 +279,8 @@ private:
     // crash_needs_codec_fallback()).
     bool recording_codec_fallback_restart_ = false;
     void SetStatusState(const wxString &text, COLORREF dotColor);
+    // Startup status text that is followed by a "how to choose a codec" link in the bottom bar.
+    void ShowCodecHint(const wxString &text);
     void ToggleFullscreenNative();
     // Un-minimizes + un-hides the window from the tray, in that order -
     // see SetupTrayIcon()'s comment for why both steps are needed.
@@ -365,6 +367,8 @@ private:
     wxPanel *bottom_bar_ = nullptr;
     StatusDot *bottom_dot_ = nullptr;
     wxStaticText *file_lbl_ = nullptr;
+    wxStaticText *codec_help_lbl_ = nullptr;   // link; visible only while file_lbl_ shows codec_hint_text_
+    wxString codec_hint_text_;
     wxStaticText *made_by_lbl_ = nullptr;
     // Bottom-bar "N plugin update(s)" badge - hidden (empty label) until
     // CheckHomUpdatesAsync()'s background `hom list --upgradable` finds something.

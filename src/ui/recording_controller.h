@@ -28,9 +28,11 @@ public:
     bool ffmpeg_found() const { return ffmpeg_found_; }
     const std::wstring &resolved_ffmpeg_path() const { return ffmpeg_path_; }
     const std::wstring &resolved_hw_encoder() const { return hw_encoder_; }
-    // Non-empty when Initialize() found the explicitly chosen hardware encoder unusable and switched
-    // to libx264: the UI shows this once at startup (see main_frame.cpp).
+    // Non-empty when Initialize() found the explicitly chosen hardware encoder unusable (the codec is
+    // NOT changed): the UI shows this once at startup (see main_frame.cpp).
     const std::wstring &codec_fallback_note() const { return codec_fallback_note_; }
+    // True when the startup probe (hw_accel == "auto") found no working nvenc/qsv/amf encoder.
+    bool no_hw_encoder_found() const { return no_hw_encoder_found_; }
 
     // Start/stop/pause - return false with `error_out` populated on failure
     // (folder missing, ffmpeg missing, pipeline create failed, etc.).
@@ -371,7 +373,8 @@ private:
 
     bool ffmpeg_found_ = false;
     std::wstring ffmpeg_path_;
-    std::wstring hw_encoder_;    // empty if no GPU encoder available -> software fallback
+    std::wstring hw_encoder_;    // GPU encoder found by the startup probe; empty if none (not used to pick the codec)
+    bool no_hw_encoder_found_ = false;  // see no_hw_encoder_found() above
     std::wstring codec_fallback_note_;  // see codec_fallback_note() above
     std::wstring current_output_path_;
 

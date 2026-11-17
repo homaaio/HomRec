@@ -311,7 +311,9 @@ void PreviewPanel::PollRefresh() {
         return;
     }
     const uint64_t cur = rec_ ? rec_->PreviewSeq() : 0;
-    if (cur != pv_seq_ || (cur == 0 && have_frame_)) { Refresh(false); return; }
+    // Update() paints now: a bare Refresh() leaves the repaint to WM_PAINT, which Windows delivers only when the
+    // queue is otherwise empty, so frames were dropped between timer ticks.
+    if (cur != pv_seq_ || (cur == 0 && have_frame_)) { Refresh(false); Update(); return; }
     if ((++idle_ticks_ % 10) == 0) Refresh(false);
 }
 
@@ -1009,10 +1011,12 @@ HomRecMainFrame::HomRecMainFrame()
     SetupDocking();
     ApplyLanguageText();
     SetStatusState(wxString::FromUTF8(lang_.Get("ready")), theme_.text_secondary);
-    // Initialize() already switched to libx264 when the explicitly chosen hardware encoder does not
-    // work on this machine - say so once instead of letting the first recording crash mysteriously.
+    // The codec is never changed automatically. Say once at startup when the explicitly chosen hardware
+    // encoder does not work here, or when no hardware encoder was found at all, with a link to the docs.
     if (rec_ && !rec_->codec_fallback_note().empty())
-        SetStatusState(wxString(rec_->codec_fallback_note().c_str()), theme_.warning);
+        ShowCodecHint(wxString(rec_->codec_fallback_note().c_str()));
+    else if (rec_ && rec_->no_hw_encoder_found())
+        ShowCodecHint(wxString::FromUTF8("No hardware video encoder found \xE2\x80\x94 recording uses the CPU."));
     HrLog::Info("HomRec " HR_APP_VERSION " started");
 
     SetupTrayIcon();
@@ -1482,6 +1486,17 @@ void HomRecMainFrame::BuildBottomBar(wxWindow *parent, wxSizer *parentSizer) {
     file_lbl_->SetFont(BodyFont());
     sizer->Add(file_lbl_, 1, wxALIGN_CENTRE_VERTICAL | wxLEFT, 8);
 
+    codec_help_lbl_ = new wxStaticText(bottom_bar_, wxID_ANY, "How to choose a codec");
+    wxFont link_font = BodyFont();
+    link_font.SetUnderlined(true);
+    codec_help_lbl_->SetFont(link_font);
+    codec_help_lbl_->SetCursor(wxCursor(wxCURSOR_HAND));
+    codec_help_lbl_->Bind(wxEVT_LEFT_DOWN, [](wxMouseEvent &) {
+        wxLaunchDefaultBrowser("https://github.com/homaaio/HomRec/blob/main/docs/hr/codecs.md");
+    });
+    codec_help_lbl_->Hide();
+    sizer->Add(codec_help_lbl_, 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 10);
+
     // Empty (and therefore invisible - wxStaticText with no text takes no visible space) until
     // CheckHomUpdatesAsync() finds something to report.
     plugin_updates_lbl_ = new wxStaticText(bottom_bar_, wxID_ANY, wxEmptyString);
@@ -1526,6 +1541,7 @@ void HomRecMainFrame::ApplyThemeColours() {
     if (preview_title_lbl_) { preview_title_lbl_->SetForegroundColour(accent); preview_title_lbl_->SetBackgroundColour(surfaceLight); }
     if (preview_fps_lbl_) { preview_fps_lbl_->SetForegroundColour(textSecondary); preview_fps_lbl_->SetBackgroundColour(surfaceLight); }
     if (file_lbl_) { file_lbl_->SetForegroundColour(text); file_lbl_->SetBackgroundColour(surface); }
+    if (codec_help_lbl_) { codec_help_lbl_->SetForegroundColour(accent); codec_help_lbl_->SetBackgroundColour(surface); }
     if (made_by_lbl_) { made_by_lbl_->SetForegroundColour(textSecondary); made_by_lbl_->SetBackgroundColour(surface); }
     if (version_bar_lbl_) { version_bar_lbl_->SetForegroundColour(textSecondary); version_bar_lbl_->SetBackgroundColour(surface); }
 
@@ -1923,6 +1939,18 @@ void HomRecMainFrame::SetStatusState(const wxString &text, COLORREF dotColor) {
     // Called every stats tick while the overload warning is up - skip all work when nothing changed.
     if (file_lbl_ && file_lbl_->GetLabel() != text) file_lbl_->SetLabel(text);
     if (bottom_dot_) bottom_dot_->SetColor(FromColorref(dotColor));   // no-op for an unchanged colour
+    if (codec_help_lbl_) {
+        const bool show = !codec_hint_text_.empty() && text == codec_hint_text_;
+        if (codec_help_lbl_->IsShown() != show) {
+            codec_help_lbl_->Show(show);
+            if (bottom_bar_) bottom_bar_->Layout();
+        }
+    }
+}
+
+void HomRecMainFrame::ShowCodecHint(const wxString &text) {
+    codec_hint_text_ = text;
+    SetStatusState(text, theme_.warning);
 }
 
 void HomRecMainFrame::RequestStart() {
@@ -2908,10 +2936,8 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     // piggybacking on this existing 500ms tick (rather than adding a
     // dedicated timer just for this) doesn't mean 500ms-resolution writes.
     HrPcLog::MaybeLogSnapshot(state_.recording, rec_ ? rec_->current_fps() : 0.0,
-                               // resolved_hw_encoder() is only filled when hw_accel == "auto";
-                               // an explicitly chosen h264_qsv/nvenc/amf codec is hardware too.
-                               rec_ && (!rec_->resolved_hw_encoder().empty() ||
-                                        state_.video_codec.find("nvenc") != std::string::npos ||
+                               // the codec in use is the one chosen in Settings (h264_nvenc / qsv / amf = hardware)
+                               rec_ && (state_.video_codec.find("nvenc") != std::string::npos ||
                                         state_.video_codec.find("qsv")   != std::string::npos ||
                                         state_.video_codec.find("amf")   != std::string::npos),
                                state_.output_folder);

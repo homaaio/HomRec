@@ -370,13 +370,13 @@ void RecordingController::Initialize() {
             if (hr_probe_gpu(ffmpeg_path_.c_str(), enc_buf, 64)) {
                 hw_encoder_ = enc_buf;
                 HrLog::Info("Startup: GPU encoder available (" + NarrowFromWide(hw_encoder_) +
-                            ") -- recordings will use it instead of software libx264.");
+                            ") -- it is used only if it is selected in Settings > Video > Codec.");
             } else {
+                no_hw_encoder_found_ = true;
                 HrLog::Info("Startup: no working GPU encoder found (nvenc/qsv/amf all failed "
-                            "to probe) -- recordings will fall back to software libx264, which "
-                            "is noticeably heavier on CPU. If you have a GPU that should support "
-                            "one of those, check its drivers and that this ffmpeg build was "
-                            "compiled with that encoder.");
+                            "to probe) -- software encoding is heavier on CPU. If you have a GPU "
+                            "that should support one of those, check its drivers and that this "
+                            "ffmpeg build was compiled with that encoder.");
             }
         }
         // A hardware encoder picked explicitly in Settings > Video > Codec was never checked before
@@ -1497,11 +1497,8 @@ bool RecordingController::Start(std::wstring &error_out) {
     ResolveCaptureSize();
     start_timer.mark("resolve_size");
 
-    // Prefer the probed GPU encoder; fall back to libx264 if none/if the
-    // caller already forced a specific codec in settings.
-    std::wstring codec = state_.video_codec == "libx264" && !hw_encoder_.empty()
-                              ? hw_encoder_
-                              : WideFromNarrow(state_.video_codec);
+    // The codec chosen in Settings is used as is.
+    std::wstring codec = WideFromNarrow(state_.video_codec);
     std::wstring codec_args = BuildCodecArgs(codec);
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
     current_codec_is_hw_ = codec_is_hw;   // PollStats()'s early-crash fallback needs to know
@@ -2661,8 +2658,7 @@ bool RecordingController::StartInstantReplayEncoder(std::wstring &error_out) {
     if (wrap > 720) wrap = 720;
     if (wrap < 2) wrap = 2;
 
-    std::wstring codec = state_.video_codec == "libx264" && !hw_encoder_.empty()
-                              ? hw_encoder_ : WideFromNarrow(state_.video_codec);
+    std::wstring codec = WideFromNarrow(state_.video_codec);
     std::wstring codec_args = BuildCodecArgs(codec);
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
     const int fps = state_.target_fps > 0 ? state_.target_fps : 30;
@@ -3245,9 +3241,7 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
     qt_output_path_ = std::wstring(tmp_dir) + L"homrec_test_" +
                        std::to_wstring(GetTickCount()) + L".mp4";
 
-    std::wstring codec = codec_in == "libx264" && !hw_encoder_.empty()
-                              ? hw_encoder_
-                              : WideFromNarrow(codec_in);
+    std::wstring codec = WideFromNarrow(codec_in);
     qt_encoder_used_ = NarrowFromWide(codec);
     bool codec_is_hw = (codec != L"libx264" && codec != L"libx265");
 
