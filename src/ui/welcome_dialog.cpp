@@ -222,14 +222,15 @@ LRESULT CALLBACK WelcomeProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     SetPageVisibility(ctx, hwnd);
                     break;
                 case IDC_CHANGELOG:
-                    ShellExecuteW(hwnd, L"open", L"https://github.com/homaaio/HomREC/blob/main/CHANGELOG.txt",
+                    ShellExecuteW(hwnd, L"open", L"https://github.com/homaaio/HomRec/blob/main/CHANGELOG.txt",
                                   nullptr, nullptr, SW_SHOWNORMAL);
                     break;
                 case IDC_GITHUB:
-                    ShellExecuteW(hwnd, L"open", L"https://github.com/homaaio/HomREC", nullptr, nullptr, SW_SHOWNORMAL);
+                    ShellExecuteW(hwnd, L"open", L"https://github.com/homaaio/HomRec", nullptr, nullptr, SW_SHOWNORMAL);
                     break;
                 case IDC_WEBSITE:
-                    ShellExecuteW(hwnd, L"open", L"https://homaaio.github.io/HomREC/", nullptr, nullptr, SW_SHOWNORMAL);
+                    ShellExecuteW(hwnd, L"open", L"https://github.com/homaaio/HomRec/blob/main/docs/hr/README.md",
+                                  nullptr, nullptr, SW_SHOWNORMAL);
                     break;
             }
             return 0;

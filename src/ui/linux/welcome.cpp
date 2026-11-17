@@ -130,9 +130,9 @@ public:
             body->Wrap(500);
             s->Add(body, 0, wxBOTTOM, 14);
             auto *links = new wxBoxSizer(wxHORIZONTAL);
-            links->Add(new wxHyperlinkCtrl(page_[2], wxID_ANY, "Changelog", "https://github.com/homaaio/HomREC/blob/main/CHANGELOG.txt"), 0, wxRIGHT, 16);
-            links->Add(new wxHyperlinkCtrl(page_[2], wxID_ANY, "GitHub", "https://github.com/homaaio/HomREC"), 0, wxRIGHT, 16);
-            links->Add(new wxHyperlinkCtrl(page_[2], wxID_ANY, "Website", "https://homaaio.github.io/HomREC/"));
+            links->Add(new wxHyperlinkCtrl(page_[2], wxID_ANY, "Changelog", "https://github.com/homaaio/HomRec/blob/main/CHANGELOG.txt"), 0, wxRIGHT, 16);
+            links->Add(new wxHyperlinkCtrl(page_[2], wxID_ANY, "GitHub", "https://github.com/homaaio/HomRec"), 0, wxRIGHT, 16);
+            links->Add(new wxHyperlinkCtrl(page_[2], wxID_ANY, "Documentation", "https://github.com/homaaio/HomRec/blob/main/docs/hr/README.md"));
             s->Add(links, 0);
             page_[2]->SetSizer(s);
         }
