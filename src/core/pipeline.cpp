@@ -1286,18 +1286,26 @@ struct Pipeline {
 
         // Preview tick (Preview FPS setting). A lambda so the GPU zero-copy branch can run it BEFORE it
         // hands nv12_buf over to the writer - the thumbnail reads that buffer.
-        auto preview_if_due = [&]() {
+        auto preview_due = [&](int64_t &now_ns) -> bool {
 #ifdef _WIN32
-            if (preview_suppressed) return;
-            int64_t now_ns = (sw_ctx && g_libs.sw_elapsed_ns)
-                                  ? g_libs.sw_elapsed_ns(sw_ctx)
-                                  : next_frame_ns; // fallback: still monotonic
+            now_ns = (sw_ctx && g_libs.sw_elapsed_ns)
+                          ? g_libs.sw_elapsed_ns(sw_ctx)
+                          : next_frame_ns; // fallback: still monotonic
             int want_fps = preview_fps.load(std::memory_order_relaxed);
             if (preview_low.load(std::memory_order_relaxed) && want_fps > kPreviewLowFps) want_fps = kPreviewLowFps;
             if (want_fps < 1) want_fps = 1;
             int64_t preview_interval_ns = 1'000'000'000LL / want_fps;
-            if (preview_needed.load(std::memory_order_relaxed) &&
-                now_ns - last_preview_ns >= preview_interval_ns) {
+            return preview_needed.load(std::memory_order_relaxed) &&
+                   now_ns - last_preview_ns >= preview_interval_ns;
+#else
+            (void)now_ns;
+            return false;
+#endif
+        };
+        auto preview_if_due = [&]() {
+#ifdef _WIN32
+            int64_t now_ns = 0;
+            if (!preview_suppressed && preview_due(now_ns)) {
                 last_preview_ns = now_ns;
                 if (tex_pv_tick) {
                     // Texture path: nothing was read back for the encoder, so fetch the thumbnail source
@@ -1805,10 +1813,17 @@ struct Pipeline {
                         // The live preview reads nv12_buf (the clean GPU frame).
                         // With overlays on, hand it a copy that has them baked in
                         // (before the pointer, like the clean frame it replaces)
-                        if (preview_needed.load(std::memory_order_relaxed)) {
+                        int64_t pv_now_ns = 0;
+                        if (preview_due(pv_now_ns)) {
                             if (pv_nv12.size() != needed) pv_nv12.resize(needed);
                             std::memcpy(pv_nv12.data(), yuv_frame.data(), needed);
                             frame_nv12 = pv_nv12.data();
+                        } else {
+                            // No refresh this tick: no copy, and preview_if_due() must not fall back to the
+                            // clean nv12_buf (it has no overlays). It runs again on the next tick.
+                            preview_suppressed = true;
+                            if (!preview_needed.load(std::memory_order_relaxed) && !pv_nv12.empty())
+                                std::vector<uint8_t>().swap(pv_nv12);
                         }
                     }
                     if (cur_on) {
@@ -2770,6 +2785,12 @@ HR_EXPORT void hr_pl_set_preview_low(void* handle, int low) {
 HR_EXPORT void hr_pl_set_preview_needed(void* handle, int enabled) {
     if (!handle) return;
 #ifdef _WIN32
-    static_cast<Pipeline*>(handle)->preview_needed.store(enabled != 0, std::memory_order_relaxed);
+    auto* pl = static_cast<Pipeline*>(handle);
+    pl->preview_needed.store(enabled != 0, std::memory_order_relaxed);
+    if (!enabled) {
+        // update_preview() allocates it again on the next refresh.
+        std::lock_guard<std::mutex> lock(pl->pv_mtx);
+        std::vector<uint8_t>().swap(pl->pv_buf);
+    }
 #endif
 }
