@@ -52,9 +52,9 @@ Two things to remember:
 
 `HW accel` (Settings > Video & Codec) defaults to `auto`:
 
-- With `Codec` = `libx264` and `auto`: HomRec tests `h264_nvenc`, then `h264_amf`, then `h264_qsv` with a very short
-  clip (up to 10 s each). The first that works is used **for recordings only**; the `Codec` setting is not changed.
-  If none works, `libx264` (CPU) is used.
+- With `auto`: HomRec tests `h264_nvenc`, then `h264_amf`, then `h264_qsv` with a very short clip (up to 10 s each)
+  and writes the result to the log. Nothing is changed: recordings use exactly the `Codec` you chose. If none works,
+  the status bar shows a notice with a link to [codecs.md](codecs.md).
 - With `Codec` set to a hardware encoder: HomRec checks only that one (0.2 s). If it fails you get a notice and a
   log line, and **the setting stays as you chose it**. HomRec never silently swaps your codec.
 - `HW accel` = `none` turns the automatic probe off.

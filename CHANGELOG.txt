@@ -15,6 +15,20 @@ welcome to changelog :D
 - **Docs:** new page `docs/hr/idle-pause.md`.
 - **Tests:** `test_idle_detect` (the pause / resume decisions) and a settings-registry test for the new keys.
 
+### Changed
+- **Recording:** the codec chosen in Settings > Video & Codec is used exactly as set. `libx264` is no longer replaced
+  by a GPU encoder found by the startup probe (`HW accel` = `auto`); the probe now only reports what it found. This
+  applies to recordings, the replay buffer and Test Recording. If you relied on `libx264` + `auto` to get GPU
+  encoding, select your GPU encoder (for example `h264_nvenc`) in `Codec`.
+- **Status bar:** when the startup probe finds no hardware encoder, or the hardware encoder you selected does not work,
+  the status bar shows a notice with a "How to choose a codec" link to the codecs guide. The codec is never changed.
+- **Live preview:** a new frame is painted at once instead of waiting for the next idle repaint.
+- **Console:** the encoder info line reports the GPU probe result instead of the encoder in use.
+
+### Fixed
+- **Welcome screen:** the links on the last page use the repository's real name (`HomRec`), and the Documentation
+  button opens the documentation index instead of the website root (Windows and Linux).
+  
 ### Notes
 - With the option off nothing runs: no thread, no extra screen capture. With it on, a second desktop duplication of the
   recorded monitor and one thread exist while a recording is running; no pixels are copied or read.

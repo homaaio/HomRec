@@ -96,7 +96,7 @@
         </details>
         <details class="issue">
             <summary>NVENC, AMF or Quick Sync does not work</summary>
-            <p>HomRec never swaps your chosen codec silently: it shows a notice and logs the reason. With <b>HW accel = auto</b> it tests NVENC, AMF and QSV and falls back to libx264 for recordings only.</p>
+            <p>HomRec never swaps your chosen codec silently: it shows a notice and logs the reason. With <b>HW accel = auto</b> it tests NVENC, AMF and QSV at startup and only reports the result; recordings use exactly the codec you chose.</p>
             <p><a href="https://github.com/homaaio/HomRec/blob/main/docs/hr/codecs.md">Full guide &rarr;</a></p>
         </details>
         <details class="issue">

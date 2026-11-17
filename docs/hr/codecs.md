@@ -20,6 +20,14 @@ There are two kinds of encoder:
 
 How to read a name: the first part is the video standard (`h264` or `hevc`, that is H.265), the second part is who does the work (`nvenc` = NVIDIA, `qsv` = Intel, `amf` = AMD). `libx264` and `libx265` are the software implementations of H.264 and H.265.
 
+## What H.264 and H.265 are
+
+**H.264** (also called AVC, "Advanced Video Coding") is a video compression standard from 2003, and it is the one almost everything understands: phones, TVs, browsers, players, video editors and every upload site. Almost every GPU made in the last decade has a dedicated H.264 encoder, which is why it is the safe default.
+
+**H.265** (also called HEVC, "High Efficiency Video Coding") is its successor, from 2013. At similar picture quality its files are noticeably smaller (often about a third to a half), but compressing it needs more work, GPUs got an H.265 encoder only later, and some players, browsers and editors cannot open it without extra software.
+
+A standard is only a set of rules for how the video is stored. The **encoder** (the program or GPU block that follows those rules) is what you choose in `Codec`: `libx264` and `h264_nvenc` both produce H.264, one on the CPU and one on the GPU, and a file from either plays the same way. This is also why the notes below say that an H.265 encoder "needs a newer card than H.264 does": the H.264 hardware is in nearly every GPU, the H.265 hardware only in newer ones.
+
 ## Codecs available in HomRec
 
 | Codec | Standard | Runs on | Notes |
@@ -45,7 +53,7 @@ A hardware encoder must match your GPU vendor. An encoder for another vendor fai
 
    | Your situation | Choose |
    |----------------|--------|
-   | You just want it to work, or you are not sure. | `libx264` and leave `HW accel` on `auto`. HomRec then uses your GPU encoder if one works, and the CPU otherwise (see below). |
+   | You just want it to work, or you are not sure. | `libx264`. It works on every PC but uses the CPU. If your GPU has an encoder, the next row is the better choice. |
    | You record games, or the CPU is weak or busy. | The hardware H.264 encoder for your GPU: `h264_nvenc` (NVIDIA), `h264_amf` (AMD) or `h264_qsv` (Intel). |
    | You want smaller files and every device you use can play H.265. | `hevc_*` for your GPU, or `libx265` if you have a strong CPU and do not record games at the same time. |
    | You will upload or send the video to other people, or edit it in a program you have not checked. | H.264 (`libx264` or `h264_*`), pixel format `yuv420p`, MP4. This is the combination that opens almost everywhere. |
@@ -70,17 +78,17 @@ A hardware encoder must match your GPU vendor. An encoder for another vendor fai
 | Situation | Behaviour | Modifies your `Codec` setting? |
 |-----------|-----------|--------------------------------|
 | First run only | HomRec inspects the installed video cards and proposes a default codec (a hardware encoder for the detected GPU, or `libx264` if there is none). | Only on that first run, as a default. |
-| Every launch with `HW accel` = `auto` (the default) | HomRec attempts `h264_nvenc`, then `h264_amf`, then `h264_qsv` (up to 10 s each) using a very short test clip. If one succeeds **and `Codec` is set to `libx264`**, recordings are made with that GPU encoder. If none succeeds, recordings use `libx264`. | No. The swap happens only while recording. |
+| Every launch with `HW accel` = `auto` (the default) | HomRec attempts `h264_nvenc`, then `h264_amf`, then `h264_qsv` (up to 10 s each) using a very short test clip. The result is written to the log. If none succeeds, the status bar shows a notice with a link to this page. | **No.** The encoder is never changed for you. |
 | Every launch with `Codec` set to a hardware encoder | HomRec initialises that encoder once (a 0.2 s check). If it fails, the cause is written to the log and the status bar displays a notice. | **No.** The encoder remains the one you selected. |
 | While recording | If the hardware encoder stops working, the recording ends and the error is reported as usual (see `recording-troubleshooting.md`). There is no automatic restart with `libx264`. | No. |
 
-Before 3.1 build 1, a hardware encoder that failed the startup check was quietly swapped for `libx264` for the entire session, and a recording whose encoder failed within the first 5 seconds was resumed in a new file using `libx264`. Both automatic substitutions have been removed: if the encoder you selected does not work, you are informed and nothing is changed without your knowledge.
+Before 3.1 build 1, a hardware encoder that failed the startup check was quietly swapped for `libx264` for the entire session, and a recording whose encoder failed within the first 5 seconds was resumed in a new file using `libx264`. Both automatic substitutions have been removed: if the encoder you selected does not work, you are informed and nothing is changed without your knowledge. From 3.1.1 `libx264` is not replaced by a GPU encoder either: HomRec records with exactly the `Codec` you chose.
 
 ## Retaining full control
 
 - Choose the encoder you want in `Codec` (for instance `h264_nvenc`). It is used exactly as selected.
-- Set `HW accel` to `none` to disable the automatic GPU detection. Then `Codec` = `libx264` genuinely means software `libx264`.
-- Keep `HW accel` on `auto` and `Codec` on `libx264` if you want HomRec to use the GPU when possible and the CPU otherwise.
+- Set `HW accel` to `none` to skip the GPU check at startup (then there is no notice about a missing GPU encoder).
+- To use your GPU, select its encoder in `Codec`; HomRec's log (`Startup: GPU encoder available ...`) tells you which one works on your PC.
 
 ## Log entries
 
@@ -88,8 +96,8 @@ All entries are written to `logs\homrec.log`.
 
 | Entry | Meaning |
 |-------|---------|
-| `Startup: GPU encoder available (h264_nvenc) -- recordings will use it ...` | `auto` detected a working GPU encoder. |
-| `Startup: no working GPU encoder found ... will fall back to software libx264` | `auto` detected none: recordings use `libx264`. |
+| `Startup: GPU encoder available (h264_nvenc) -- it is used only if it is selected ...` | `auto` detected a working GPU encoder. It is used only if you select it in `Codec`. |
+| `Startup: no working GPU encoder found ...` | `auto` detected none. Choose a software codec such as `libx264`; the status bar links to this page. |
 | `Startup: hardware encoder available (h264_nvenc).` | The encoder you selected passed the check. |
 | `Startup: h264_nvenc does not work on this system (...) -- the codec stays as chosen` | The check failed. The cause is shown in the brackets. Recording with it will fail in the same way until the cause is resolved. |
 | `Recording: encoding with libx264 (software)` / `... with h264_nvenc (hardware)` | The encoder actually used for this recording. |
