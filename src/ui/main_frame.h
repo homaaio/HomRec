@@ -309,6 +309,9 @@ private:
     // Window hidden / minimised: nobody can see the VU meters or the thumbnail, so the level-meter timer
     // stops and the overlay-sync (preview) timer drops from 20 Hz to 10 Hz. Back to normal when shown.
     void ApplyVisibilityTimers(bool visible);
+    // EcoQoS (process power throttling) while the window is hidden and nothing is recording / buffering.
+    void UpdatePowerThrottle();
+    bool power_throttled_ = false;
     bool ui_visible_ = true;
     int PreviewTimerMs() const;
     bool ui_active_ = true;

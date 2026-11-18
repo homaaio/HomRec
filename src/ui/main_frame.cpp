@@ -1050,7 +1050,7 @@ HomRecMainFrame::HomRecMainFrame()
     Bind(wxEVT_TIMER, &HomRecMainFrame::OnScheduleTimer, this, schedule_timer_.GetId());
     preview_timer_.Start(1000 / 20);
     stats_timer_.Start(500);
-    schedule_timer_.Start(1000);
+    // schedule_timer_ is started by OnStatsTimer() only while a scheduled start is enabled.
     RestartLevelMeterTimer();
 
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_SELECT_REGION);
@@ -2049,6 +2049,7 @@ void HomRecMainFrame::DoStart() {
         wxMessageBox(wxString(err.c_str()), "HomRec", wxOK | wxICON_WARNING, this);
         return;
     }
+    UpdatePowerThrottle();
     ws_trim_at_ = GetTickCount64() + 6000;   // after the encoder has opened and start-up allocations settled
     start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("stop")));
     start_color_btn_->SetColours(FromColorref(theme_.error), FromColorref(theme_.bg));
@@ -2928,6 +2929,14 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
         return;
     }
 
+    {
+        const bool want_schedule = state_.scheduled_start_enabled && !state_.scheduled_start_time.empty();
+        if (want_schedule != schedule_timer_.IsRunning()) {
+            if (want_schedule) schedule_timer_.Start(1000); else schedule_timer_.Stop();
+        }
+    }
+    UpdatePowerThrottle();
+
     UpdatePreviewToggleButton();
     UpdatePreviewFpsLabel();
     if (preview_timer_.GetInterval() != PreviewTimerMs()) preview_timer_.Start(PreviewTimerMs());   // Preview FPS / preview on-off / window focus changed
@@ -2992,6 +3001,20 @@ void HomRecMainFrame::ApplyVisibilityTimers(bool visible) {
     // must keep running - just slower while nobody looks at the window.
     preview_timer_.Start(PreviewTimerMs());
     RestartLevelMeterTimer();
+    UpdatePowerThrottle();
+}
+
+void HomRecMainFrame::UpdatePowerThrottle() {
+    const bool want = !ui_visible_ && !state_.recording && !state_.instant_replay_enabled;
+    if (want == power_throttled_) return;
+    power_throttled_ = want;
+    // SetProcessInformation() is Windows 8+; the project targets 0x0601, so resolve it at run time.
+    typedef BOOL (WINAPI *SetProcessInformationFn)(HANDLE, int, LPVOID, DWORD);
+    static const SetProcessInformationFn set_info = (SetProcessInformationFn)GetProcAddress(
+        GetModuleHandleW(L"kernel32.dll"), "SetProcessInformation");
+    if (!set_info) return;
+    struct { ULONG Version; ULONG ControlMask; ULONG StateMask; } st = { 1, want ? 1u : 0u, want ? 1u : 0u };   // PROCESS_POWER_THROTTLING_EXECUTION_SPEED; masks 0 = back to system-managed
+    set_info(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &st, sizeof(st));
 }
 
 void HomRecMainFrame::TrimWorkingSet() {
