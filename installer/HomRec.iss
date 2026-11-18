@@ -26,7 +26,7 @@
 ; running hr.exe instead of failing to overwrite it mid-update.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.4.2"
+  #define MyAppVersion "3.1.2"
 #endif
 
 #define MyAppName "HomRec"
@@ -70,11 +70,9 @@ CloseApplications=yes
 RestartApplications=no
 
 SourceDir=..
-; OutputDir/OutputBaseFilename are NOT affected by SourceDir (unlike
-; LicenseFile/SetupIconFile above) - they stay relative to this .iss
-; file's own directory (installer\), hence the "..\" to land back in the
-; repo-root dist\ that tools/homrec_build.py and its docs both expect.
-OutputDir=..\dist
+; OutputDir is relative to SourceDir (the repo root), so "dist" lands in
+; the repo-root dist\ that tools/homrec_build.py and its docs both expect.
+OutputDir=dist
 OutputBaseFilename=homrec-setup-win64-{#MyAppVersion}
 ; Dedicated setup-only icon (separate from icons\main.ico, which is hr.exe's
 ; own icon) so the installer .exe doesn't look identical to the app itself
@@ -108,6 +106,7 @@ Name: "fileassoc"; Description: "Associate &.hrc and .hrp files with HomRec"; Gr
 
 [Files]
 Source: "hr.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "homrec.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; hom.exe is built from github.com/homaaio/hom; put its latest release next to hr.exe before compiling.
 Source: "hom.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; hr.exe links wxWidgets/etc dynamically (only libgcc/libstdc++/pthread are

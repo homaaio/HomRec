@@ -1,5 +1,41 @@
 welcome to changelog :D
 
+[Version 3.1.2] - 2026-11-18
+
+### Added
+- **Console:** `bookmark [label]` writes the elapsed recording time (pauses excluded) and the label to
+  `<recording file>.bookmarks.txt` while recording. Bind it to a key with Settings > Hotkeys > Add Hotkey.
+- **Recording:** `auto_capture_exe` (for example `cs2.exe`; empty = off) starts a recording when that program
+  launches and stops it when it exits. Only a recording started this way is stopped. A program that is already
+  running when HomRec starts (or the key is set) does not start a recording. Checked every ~2 s.
+- **Game mode:** `game_mode` (default on). While Windows reports a fullscreen app in front, the live preview is
+  suspended and rebuilt afterwards. Set `game_mode = 0` to keep the preview running.
+- **Settings:** the previous good `homrec.hrc` is kept as `homrec.hrc.bak`; if `homrec.hrc` cannot be read (empty or
+  damaged after a crash), the `.bak` is loaded instead.
+
+### Changed
+- **Idle / tray:** with the window hidden or minimised and nothing recording (Instant Replay off), HomRec asks Windows
+  to run it in power-saving (EcoQoS) mode. The mode is cleared when the window is shown and when a recording starts.
+- **Idle / tray:** the schedule timer runs only while a scheduled start is enabled; the statistics and preview timers
+  tick every 2 s / 0.5 s instead of 0.5 s / 0.1 s while the window is hidden and nothing is recording.
+- **Idle:** the preview is suspended while the display is off or the session is locked, and rebuilt on wake / unlock.
+- **Idle:** the 1 ms system timer is requested only while a recording is running; the preview-only pipeline no longer
+  holds it.
+- **Updater:** the installer is downloaded only from github.com, and when the release lists a SHA-256 for the file it
+  must match before the installer is started.
+- **Plugins:** importing a `.hrp` extracts it on a background thread instead of the window thread. The hidden helper
+  command used for the encoder probe is stopped after 30 s instead of waiting without a limit.
+
+### Fixed
+- **Settings:** `homrec.hrc` is written to a temporary file and then swapped in, and write errors are reported. A crash,
+  power loss or full disk during a save no longer leaves an empty settings file.
+- **Preview:** after returning from a fullscreen game, the window thread no longer waits for the old preview capture
+  to shut down before building the new one (a possible cause of the Alt-Tab freeze; not confirmed by a test).
+- **Preview:** a hidden window no longer rebuilds the preview capture in the background.
+
+### Not measured
+- The idle CPU / RAM effect of the changes above has not been measured yet; no figures are claimed.
+
 [Version 3.1.1] - 2026-11-15
 
 ### Added

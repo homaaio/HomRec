@@ -1,6 +1,6 @@
 # HomRec documentation
 
-These pages describe **HomRec 3.1.1**. Every statement was checked
+These pages describe **HomRec 3.1.2**. Every statement was checked
 against the source code of that snapshot; where something could not be checked it says so.
 
 New to HomRec? Read [getting-started.md](getting-started.md), then [how-it-works.md](how-it-works.md).

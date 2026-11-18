@@ -1,7 +1,7 @@
 # Developer console and `cfg/` scripts
 
 Open the console with **Help > Console** or `Ctrl+Shift+T`. It is a small command line inside HomRec for
-settings, presets, logs and the plugin package manager. This page matches **HomRec 3.1.1**.
+settings, presets, logs and the plugin package manager. This page matches **HomRec 3.1.2**.
 
 ![window](../images/console/window.png)
 
@@ -54,7 +54,7 @@ again with `sec 1` when you are done.
 
 | Command | What it does |
 |---|---|
-| `version` | `HomRec v3.1.1 (developer console)` |
+| `version` | `HomRec v3.1.2 (developer console)` |
 | `ver` | Just the version number (for scripts). |
 | `whoami` | Confirms which console and build answer. |
 | `ping` | Prints `pong`. |
@@ -73,6 +73,7 @@ again with `sec 1` when you are done.
 | `alias name=target` | Define an alias; `alias` alone lists them. |
 | `history`, `history clear` | Show or clear the history. `console_history_save 0` turns saving off. |
 | `clip --copy "text"` / `--paste` / `--clear` | Windows clipboard. |
+| `bookmark [label]` | While recording: appends the elapsed recording time (and the label) to `<recording file>.bookmarks.txt`. Bind it to a key in Settings > Hotkeys > Add Hotkey. |
 | `repeat --count=N <command>` | Run a command N times (maximum 1000). |
 | `batch cmd1 && cmd2 [-x]` | Run commands in order. `-x` / `--stop-on-error` exists, but in this build most commands do not report failure, so it does not reliably stop. |
 
