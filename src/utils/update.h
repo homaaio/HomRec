@@ -12,6 +12,7 @@ struct UpdateInfo {
     bool available = false;       // true = latest_version is newer than HR_APP_VERSION
     std::string latest_version;   // e.g. "2.0.3" ('v' prefix already stripped)
     std::string download_url;     // .exe asset URL, or empty if the release has none
+    std::string sha256;           // lowercase hex from the asset's "digest" ("sha256:..."), empty if GitHub gave none
     std::string html_url;         // release page, always set when checked_ok - fallback link
 };
 

@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <wincrypt.h>
 #include <winhttp.h>
 #include <shellapi.h>
 #pragma comment(lib, "winhttp.lib")
@@ -175,7 +176,7 @@ bool DownloadToFile(const std::wstring &url, const std::wstring &dest_path, Down
 
 // Finds the first "assets[].browser_download_url" whose "name" ends in .exe (case-
 // insensitive) - i.e.
-std::string FindInstallerAssetUrl(const std::string &json) {
+std::string FindInstallerAssetUrl(const std::string &json, std::string *sha256_out = nullptr) {
     size_t pos = 0;
     for (;;) {
         std::string name;
@@ -197,10 +198,61 @@ std::string FindInstallerAssetUrl(const std::string &json) {
             // accidentally grab the *next* asset's URL if this one has none.
             size_t nextName = json.find("\"name\"", pos);
             std::string window = json.substr(pos, nextName == std::string::npos ? std::string::npos : nextName - pos);
-            if (ExtractString(window, "browser_download_url", 0, nullptr, &url)) return url;
+            if (ExtractString(window, "browser_download_url", 0, nullptr, &url)) {
+                if (sha256_out) {
+                    // "digest": "sha256:<64 hex>" - may also be null, in which case ExtractString() would pick up
+                    // some later field, so the value is validated strictly.
+                    std::string d;
+                    if (ExtractString(window, "digest", 0, nullptr, &d) && d.size() == 7 + 64 &&
+                        d.compare(0, 7, "sha256:") == 0 &&
+                        std::all_of(d.begin() + 7, d.end(), [](unsigned char c) { return isxdigit(c) != 0; })) {
+                        *sha256_out = d.substr(7);
+                        std::transform(sha256_out->begin(), sha256_out->end(), sha256_out->begin(),
+                                       [](unsigned char c) { return (char)tolower(c); });
+                    }
+                }
+                return url;
+            }
         }
     }
     return {};
+}
+
+// The installer is executed, so it is only fetched from github.com (the release asset URL; GitHub then
+// redirects to its own CDN).
+bool IsGithubReleaseUrl(const std::wstring &url) {
+    URL_COMPONENTS uc = {};
+    uc.dwStructSize = sizeof(uc);
+    wchar_t host[256] = {};
+    uc.lpszHostName = host; uc.dwHostNameLength = _countof(host);
+    if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.size(), 0, &uc)) return false;
+    return uc.nScheme == INTERNET_SCHEME_HTTPS && _wcsicmp(host, L"github.com") == 0;
+}
+
+// SHA-256 of a file as lowercase hex (CryptoAPI, advapi32). Empty string on any failure.
+std::string Sha256FileHex(const std::wstring &path) {
+    std::string hex;
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH hash = 0;
+    std::ifstream in(std::filesystem::path(path), std::ios::binary);
+    if (!in) return hex;
+    if (!CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) return hex;
+    if (CryptCreateHash(prov, CALG_SHA_256, 0, 0, &hash)) {
+        std::vector<char> buf(64 * 1024);
+        bool ok = true;
+        while (in.read(buf.data(), (std::streamsize)buf.size()) || in.gcount() > 0) {
+            if (!CryptHashData(hash, reinterpret_cast<BYTE *>(buf.data()), (DWORD)in.gcount(), 0)) { ok = false; break; }
+        }
+        BYTE digest[32];
+        DWORD len = sizeof(digest);
+        if (ok && CryptGetHashParam(hash, HP_HASHVAL, digest, &len, 0) && len == 32) {
+            static const char *kHex = "0123456789abcdef";
+            for (BYTE b : digest) { hex += kHex[b >> 4]; hex += kHex[b & 15]; }
+        }
+        CryptDestroyHash(hash);
+    }
+    CryptReleaseContext(prov, 0);
+    return hex;
 }
 
 } // namespace
@@ -241,7 +293,7 @@ UpdateInfo CheckForUpdate() {
     info.latest_version = tag;
     info.html_url = htmlUrl;
     info.available = VersionGreaterThan(tag, HR_APP_VERSION);
-    if (info.available) info.download_url = FindInstallerAssetUrl(json);
+    if (info.available) info.download_url = FindInstallerAssetUrl(json, &info.sha256);
     return info;
 }
 
@@ -270,7 +322,13 @@ bool DownloadInstaller(const UpdateInfo &info, DownloadState &state, std::wstrin
     if (!GetTempPathW(MAX_PATH, tempDir)) return false;
     std::wstring destPath = std::wstring(tempDir) + L"HomRec-Update-" + SafeFileTag(info.latest_version) + L".exe";
 
+    if (!IsGithubReleaseUrl(url)) return false;
     if (!DownloadToFile(url, destPath, &state)) return false;
+    if (!info.sha256.empty() && Sha256FileHex(destPath) != info.sha256) {
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path(destPath), ec);
+        return false;
+    }
     if (out_path) *out_path = destPath;
     return true;
 }
