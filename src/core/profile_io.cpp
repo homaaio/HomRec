@@ -305,11 +305,23 @@ HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
         (const uint8_t *)json_body, strlen(json_body)));
     if (body.empty()) return 0;
 
-    FILE *f = fopen(path, "wb");
+    // Write to <path>.tmp and replace the target only after a clean write + flush + close, so a crash,
+    // power loss or full disk leaves the previous file intact instead of an empty/truncated one.
+    const std::string tmp = std::string(path) + ".tmp";
+    FILE *f = fopen(tmp.c_str(), "wb");
     if (!f) return 0;
-    fwrite(magic, 1, 4, f);
-    fwrite(body.data(), 1, body.size(), f);
-    fclose(f);
+    bool ok = fwrite(magic, 1, 4, f) == 4 &&
+              fwrite(body.data(), 1, body.size(), f) == body.size() &&
+              fflush(f) == 0;
+    if (fclose(f) != 0) ok = false;
+    if (ok) {
+#ifdef _WIN32
+        ok = MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+        ok = rename(tmp.c_str(), path) == 0;
+#endif
+    }
+    if (!ok) { remove(tmp.c_str()); return 0; }
     return 1;
 }
 
