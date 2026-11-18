@@ -295,6 +295,7 @@ private:
     // TeardownPreview() hands the actual hr_pl_destroy() off to a background thread (see its
     // own comment for why - avoids freezing the UI while a stuck DXGI capture times out).
     std::thread preview_teardown_thread_;
+    std::atomic<bool> preview_teardown_running_{false};   // true from TeardownPreview() until hr_pl_destroy() returned on that thread
     std::thread instant_replay_stop_thread_;
 
     // DXGI Desktop Duplication only allows one active duplication handle per output at a time

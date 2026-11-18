@@ -3124,7 +3124,13 @@ void RecordingController::EnsurePreview() {
     if (pipeline_ || state_.disable_preview) return; // already running, or user turned it off
     // See JoinPendingPreviewTeardown()'s comment (recording_controller.h) -
     // without this, creating a new pipeline right after TeardownPreview()
-    JoinPendingPreviewTeardown();
+    // The old pipeline is still being destroyed (a stuck DXGI capture can take seconds): don't wait for it
+    // on the UI thread, retry on the next SyncOverlays() tick instead. No failure is counted for this.
+    if (preview_teardown_running_.load(std::memory_order_acquire)) {
+        next_preview_retry_ = std::chrono::steady_clock::now();
+        return;
+    }
+    JoinPendingPreviewTeardown();   // the thread has finished here, so this returns at once
     ResolveCaptureSize();
     // pipe_fd=0 -> hr_pl_create() leaves this in preview-only mode (frames
     // captured + thumbnailed for the UI, nothing written anywhere) - see
@@ -3176,7 +3182,8 @@ void RecordingController::TeardownPreview() {
     pipeline_ = nullptr;
 
     if (preview_teardown_thread_.joinable()) preview_teardown_thread_.join();
-    preview_teardown_thread_ = std::thread([doomed]() {
+    preview_teardown_running_.store(true, std::memory_order_release);
+    preview_teardown_thread_ = std::thread([this, doomed]() {
         try {
             hr_pl_destroy(doomed);
         } catch (const std::exception &e) {
@@ -3184,6 +3191,7 @@ void RecordingController::TeardownPreview() {
         } catch (...) {
             HrLog::Error("Preview teardown thread: uncaught unknown exception");
         }
+        preview_teardown_running_.store(false, std::memory_order_release);
     });
 }
 
