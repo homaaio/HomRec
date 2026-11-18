@@ -94,6 +94,7 @@ extern "C" {
     void  hr_bgra_to_nv12_band_s(const uint8_t *bgra, size_t stride, uint8_t *yuv, int w, int h, int y0, int y1);
     void *hr_sw_create();
     void  hr_sw_destroy(void *handle);
+    void  hr_sw_set_fine_timer(void *handle, int on);
     void  hr_sw_start(void *handle);
     void  hr_sw_sleep_until_ns(void *handle, int64_t target_ns);
     int64_t hr_sw_elapsed_ns(void *handle);
@@ -128,6 +129,7 @@ struct LibHandles {
     void  (*bgra_to_yuv)(const uint8_t*, uint8_t*, int, int) = &hr_bgra_to_yuv420p;
     void *(*sw_create)()                                = &hr_sw_create;
     void  (*sw_destroy)(void*)                          = &hr_sw_destroy;
+    void  (*sw_fine_timer)(void*, int)                  = &hr_sw_set_fine_timer;
     void  (*sw_start)(void*)                            = &hr_sw_start;
     void  (*sw_sleep_until)(void*, int64_t)             = &hr_sw_sleep_until_ns;
     int64_t (*sw_elapsed_ns)(void*)                     = &hr_sw_elapsed_ns;
@@ -1096,6 +1098,7 @@ struct Pipeline {
         };
         int64_t frame_ns_idle = compute_frame_ns_idle();
         bool was_recording = recording.load(std::memory_order_acquire);
+        if (was_recording && sw_ctx && g_libs.sw_fine_timer) g_libs.sw_fine_timer(sw_ctx, 1);
         // Start at the pace matching the CURRENT mode.
         int64_t frame_ns = was_recording ? frame_ns_recording : frame_ns_idle;
         bool was_boosted = boost_priority.load(std::memory_order_relaxed);
@@ -1358,6 +1361,7 @@ struct Pipeline {
                 }
                 if (is_recording_now != was_recording) {
                     was_recording = is_recording_now;
+                    if (sw_ctx && g_libs.sw_fine_timer) g_libs.sw_fine_timer(sw_ctx, is_recording_now ? 1 : 0);   // 1 ms system timer only while recording
                     if (!is_recording_now && hitch_count > 0) {
                         HrLog::Info("Capture hitches this recording: " + std::to_string(hitch_count) +
                                     " (worst " + std::to_string((long long)hitch_worst_ms) + " ms between two capture ticks)");

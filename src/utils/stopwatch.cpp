@@ -55,26 +55,36 @@ struct Stopwatch {
 #endif
 
     Stopwatch() {
-#ifdef _WIN32
-        /* Enable 1 ms timer resolution */
-        TIMECAPS tc;
-        if (timeGetDevCaps(&tc, sizeof(tc)) == MMSYSERR_NOERROR) {
-            UINT period = (tc.wPeriodMin < 1) ? 1 : tc.wPeriodMin;
-            if (timeBeginPeriod(period) == TIMERR_NOERROR) {
-                timer_period_set = true;
-                timer_period_ms = period;
-            }
-        }
-#endif
         start_ns = _hw_now_ns();
     }
 
-    ~Stopwatch() {
+    // 1 ms timer resolution is requested only while `on` is true (see hr_sw_set_fine_timer()).
+    void set_fine_timer(bool on) {
 #ifdef _WIN32
-        if (timer_period_set) timeEndPeriod(timer_period_ms);
+        if (on && !timer_period_set) {
+            TIMECAPS tc;
+            if (timeGetDevCaps(&tc, sizeof(tc)) == MMSYSERR_NOERROR) {
+                UINT period = (tc.wPeriodMin < 1) ? 1 : tc.wPeriodMin;
+                if (timeBeginPeriod(period) == TIMERR_NOERROR) {
+                    timer_period_set = true;
+                    timer_period_ms = period;
+                }
+            }
+        } else if (!on && timer_period_set) {
+            timeEndPeriod(timer_period_ms);
+            timer_period_set = false;
+        }
+#else
+        (void)on;
 #endif
     }
+
+    ~Stopwatch() { set_fine_timer(false); }
 };
+
+HR_EXPORT void hr_sw_set_fine_timer(void *handle, int on) {
+    if (handle) static_cast<Stopwatch *>(handle)->set_fine_timer(on != 0);
+}
 
 HR_EXPORT void *hr_sw_create() {
     try { return new Stopwatch(); }
