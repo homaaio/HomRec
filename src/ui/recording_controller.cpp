@@ -2466,6 +2466,15 @@ void RecordingController::PollIdle() {
             auto_paused_by_idle_ = false;
             break;
         case HrIdle::Action::None:
+            // Why it is NOT pausing: one line a minute with the measured rate (the log was silent before).
+            if (!state_.paused && now - idle_last_log_sec_ >= 60.0) {
+                idle_last_log_sec_ = now;
+                if (live && idle_det_.rate_known() && rate >= idle_det_.config().threshold_pct)
+                    HrLog::Info("Recording: auto-pause on idle - the screen is active: " + HrIdleFmt(rate) +
+                                " % of the area changing per second (limit " + HrIdleFmt(idle_det_.config().threshold_pct) + " %).");
+                else if (!live)
+                    HrLog::Info("Recording: auto-pause on idle - no screen signal from the probe, so it does not pause.");
+            }
             break;
     }
 }

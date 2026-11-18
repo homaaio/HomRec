@@ -463,6 +463,7 @@ private:
     HrIdle::Detector idle_det_;
     bool auto_paused_by_idle_ = false;   // the current pause was made by PollIdle() (a manual pause is never undone by it)
     bool idle_start_tried_ = false;      // the probe was already attempted for this recording (no retry storm)
+    double idle_last_log_sec_ = 0.0;     // last "screen still counts as active" log line (at most one a minute)
     int capture_w_ = 0, capture_h_ = 0; // native monitor resolution - MUST match what DXGI actually captures
     // DXGI output index (0-based) for the monitor ResolveCaptureSize() just
     // resolved state_.monitor_id to - passed into hr_pl_create() so the

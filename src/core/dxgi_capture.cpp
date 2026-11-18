@@ -1422,8 +1422,30 @@ struct DxActivityProbe {
     std::atomic<unsigned long long> area_px{0};      /* size of the watched area                    */
     std::atomic<int> live{0};                        /* 1 = a duplication is held and answering     */
     std::atomic<int> rx{0}, ry{0}, rw{0}, rh{0};     /* watched rectangle, output-relative; w<=0: all */
+    int ox = 0, oy = 0;                              /* top-left of the output on the virtual desktop (probe thread only) */
     std::thread th;
 };
+
+/* Redraws inside HomRec's own windows (the recording timer, level meters) are not screen activity. */
+struct ActivityOwnWin { DWORD pid; long ox, oy; std::vector<RECT> *out; };
+
+static BOOL CALLBACK activity_enum_own(HWND h, LPARAM lp) {
+    auto *c = reinterpret_cast<ActivityOwnWin *>(lp);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    RECT r{};
+    if (pid == c->pid && IsWindowVisible(h) && !IsIconic(h) && GetWindowRect(h, &r)) {
+        OffsetRect(&r, (int)-c->ox, (int)-c->oy);      /* output-relative, like the DXGI rectangles */
+        c->out->push_back(r);
+    }
+    return TRUE;
+}
+
+static bool activity_inside_any(const std::vector<RECT> &own, const RECT &d) {
+    for (const RECT &r : own)
+        if (d.left >= r.left && d.top >= r.top && d.right <= r.right && d.bottom <= r.bottom) return true;
+    return false;
+}
 
 static unsigned long long activity_clip_area(long l, long t, long r, long b,
                                              long cl, long ct, long cr, long cb) {
@@ -1457,6 +1479,8 @@ static bool activity_open(DxActivityProbe *p, ComPtr<ID3D11Device> &dev,
     ComPtr<IDXGIOutput1> output1;
     if (FAILED(output.As(&output1))) return false;
     if (FAILED(output1->DuplicateOutput(dev.Get(), &dup))) return false;
+    DXGI_OUTPUT_DESC od{};
+    if (SUCCEEDED(output->GetDesc(&od))) { p->ox = od.DesktopCoordinates.left; p->oy = od.DesktopCoordinates.top; }
     DXGI_OUTDUPL_DESC dd{};
     dup->GetDesc(&dd);
     w = (int)dd.ModeDesc.Width;
@@ -1474,6 +1498,8 @@ static void activity_thread(DxActivityProbe *p) {
         int w = 0, h = 0;
         bool rotated = false;
         bool first_after_open = true;
+        std::vector<RECT> own;                    /* HomRec's own visible windows, refreshed twice a second */
+        ULONGLONG own_tick = 0;
 
         while (!p->stop.load(std::memory_order_relaxed)) {
             if (!dup) {
@@ -1500,6 +1526,13 @@ static void activity_thread(DxActivityProbe *p) {
             }
             const unsigned long long watch_area = (unsigned long long)(cr - cl) * (unsigned long long)(cb - ct);
             p->area_px.store(watch_area, std::memory_order_relaxed);
+
+            if (GetTickCount64() - own_tick >= 500) {
+                own.clear();
+                ActivityOwnWin ctx{GetCurrentProcessId(), (long)p->ox, (long)p->oy, &own};
+                EnumWindows(activity_enum_own, reinterpret_cast<LPARAM>(&ctx));
+                own_tick = GetTickCount64();
+            }
 
             DXGI_OUTDUPL_FRAME_INFO fi{};
             ComPtr<IDXGIResource> res;
@@ -1541,12 +1574,15 @@ static void activity_thread(DxActivityProbe *p) {
                         const auto *mv = reinterpret_cast<const DXGI_OUTDUPL_MOVE_RECT *>(meta.data());
                         for (UINT i = 0; i < move_bytes / sizeof(DXGI_OUTDUPL_MOVE_RECT); ++i) {
                             const RECT &d = mv[i].DestinationRect;      /* where the pixels ended up */
+                            if (activity_inside_any(own, d)) continue;
                             frame_px += activity_clip_area(d.left, d.top, d.right, d.bottom, cl, ct, cr, cb);
                         }
                         const auto *dr = reinterpret_cast<const RECT *>(meta.data() + move_bytes);
-                        for (UINT i = 0; i < dirty_bytes / sizeof(RECT); ++i)
+                        for (UINT i = 0; i < dirty_bytes / sizeof(RECT); ++i) {
+                            if (activity_inside_any(own, dr[i])) continue;
                             frame_px += activity_clip_area(dr[i].left, dr[i].top, dr[i].right, dr[i].bottom,
                                                            cl, ct, cr, cb);
+                        }
                         if (frame_px > watch_area) frame_px = watch_area;   /* rectangles may overlap */
                     }
                 }

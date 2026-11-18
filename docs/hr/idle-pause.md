@@ -31,7 +31,7 @@ the recording paused continues the recording.
 ## What counts as "something happens"
 
 HomRec asks Windows which parts of the screen were redrawn and adds up their area over the last second. The mouse
-pointer moving on its own does **not** count. At the default `0.02` (about 400 pixels per second on a 1920x1080
+pointer moving on its own does **not** count. Redraws inside HomRec's own windows (recording timer, level meters) do not count either. At the default `0.02` (about 400 pixels per second on a 1920x1080
 screen):
 
 | On screen | Counts as activity? |
@@ -55,6 +55,12 @@ recording after it has noticed the change.
 Recording: auto-pause on idle is on - pauses after 5 s without screen changes (counts as activity: more than 0.020 % ...
 Recording: the screen has been still for 5 s (0.003 % of the area changing per second, limit 0.020 %) - auto-paused.
 Recording: the screen is changing again (4.812 % of the area per second) - auto-resumed.
+```
+
+While it is not in pause, the log shows once a minute the measured rate:
+
+```
+Recording: auto-pause on idle - the screen is active: 0.310 % of the area changing per second (limit 0.020 %).
 ```
 
 If it pauses too often, lower `idle_threshold_pct`; if it never pauses, raise it above the value the log shows
