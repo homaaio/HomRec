@@ -58,8 +58,15 @@ static int _run_hidden(const std::string &cmd) {
                          CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         return -1;
     }
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    // A hung encoder probe used to wait forever.
     DWORD code = 0;
+    if (WaitForSingleObject(pi.hProcess, 30000) == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 2000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return -1;
+    }
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);

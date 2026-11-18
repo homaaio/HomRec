@@ -204,6 +204,12 @@ bool LuaPluginEngine::LoadPlugin(const std::string &plugin_dir_path) {
 }
 
 bool LuaPluginEngine::LoadPluginArchive(const std::string &hrp_path) {
+    std::string extracted_dir;
+    if (!ExtractPluginArchive(hrp_path, extracted_dir)) return false;
+    return LoadPlugin(extracted_dir);
+}
+
+bool LuaPluginEngine::ExtractPluginArchive(const std::string &hrp_path, std::string &extracted_dir_out) {
     std::string name = hrp_path;
     size_t slash = name.find_last_of("\\/");
     if (slash != std::string::npos) name = name.substr(slash + 1);
@@ -223,7 +229,8 @@ bool LuaPluginEngine::LoadPluginArchive(const std::string &hrp_path) {
             return false;
         }
     }
-    return LoadPlugin(extracted_dir);
+    extracted_dir_out = extracted_dir;
+    return true;
 }
 
 void LuaPluginEngine::UnloadPlugin(const std::string &id) {

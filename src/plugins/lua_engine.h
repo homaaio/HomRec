@@ -51,6 +51,10 @@ public:
     // calls LoadPlugin() on that directory.
     bool LoadPluginArchive(const std::string &hrp_path);
 
+    // The extraction half of LoadPluginArchive(): extracts when needed and returns the directory to pass to
+    // LoadPlugin(). Touches no plugin state, so it can run on a worker thread (extraction may take minutes).
+    bool ExtractPluginArchive(const std::string &hrp_path, std::string &extracted_dir_out);
+
     void UnloadPlugin(const std::string &id);
     void UnloadAll();
 
