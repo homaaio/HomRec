@@ -180,6 +180,8 @@ public:
     }
 
     const std::wstring &last_output_path() const { return last_output_path_; }
+    // The file being written right now (empty while idle) - used by the console "bookmark" command.
+    const std::wstring &current_output_path() const { return current_output_path_; }
     std::wstring last_duration_formatted() const;
     double last_output_size_mb() const { return last_output_size_mb_; }
     int capture_width() const { return capture_w_; }

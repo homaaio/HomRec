@@ -186,6 +186,7 @@ struct AppState {
     // until the user ever uses File > Set Preset...
     std::string active_preset_name = "default";
 
+    std::string auto_capture_exe = "";   // e.g. "cs2.exe": start recording when it launches, stop when it exits (only if started this way)
     bool        scheduled_start_enabled = false;
     std::string scheduled_start_time    = "";
 
@@ -268,6 +269,7 @@ struct AppState {
     bool show_overlays_panel = true;
     bool show_scenes_panel   = true;
     bool disable_preview     = false; // skip capturing/rendering the live preview, for lower-end machines
+    bool game_mode           = true;  // suspend the preview (and let the process throttle) while a fullscreen app is in front
     bool hint_no_overlay     = true;  // show the "don't see your overlay?" hint under the disabled-preview ':)' -
                                        // togglable from the bter plugin console ("edit settings hint-no-overlay false")
                                        // In-app console (console_window.cpp):

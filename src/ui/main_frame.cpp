@@ -28,6 +28,7 @@
 #include <wx/display.h>
 #include <wx/wrapsizer.h>
 #include <thread>
+#include <tlhelp32.h>
 #include <atomic>
 #include <sstream>
 #include <wx/msgdlg.h>
@@ -1052,6 +1053,18 @@ HomRecMainFrame::HomRecMainFrame()
     stats_timer_.Start(500);
     // schedule_timer_ is started by OnStatsTimer() only while a scheduled start is enabled.
     RestartLevelMeterTimer();
+    {
+        // Display off (GUID_CONSOLE_DISPLAY_STATE) and session lock/unlock; resolved at run time (Vista+/Win8+ APIs).
+        static const GUID kConsoleDisplayState = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
+        typedef PVOID (WINAPI *RegPowerFn)(HANDLE, const GUID *, DWORD);
+        if (RegPowerFn reg = (RegPowerFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "RegisterPowerSettingNotification"))
+            power_notify_ = reg(GetHWND(), &kConsoleDisplayState, 0 /* DEVICE_NOTIFY_WINDOW_HANDLE */);
+        if (HMODULE wts = LoadLibraryW(L"wtsapi32.dll")) {
+            typedef BOOL (WINAPI *WtsRegFn)(HWND, DWORD);
+            if (WtsRegFn reg = (WtsRegFn)GetProcAddress(wts, "WTSRegisterSessionNotification"))
+                wts_registered_ = reg(GetHWND(), 0 /* NOTIFY_FOR_THIS_SESSION */) != FALSE;
+        }
+    }
 
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_FILE_OPEN_RECORDINGS, ID_FILE_SELECT_REGION);
     Bind(wxEVT_MENU, &HomRecMainFrame::OnMenu, this, ID_VIEW_SCENES_PANEL, ID_VIEW_DOCK_LAST);
@@ -1074,6 +1087,18 @@ HomRecMainFrame::HomRecMainFrame()
 }
 
 HomRecMainFrame::~HomRecMainFrame() {
+    if (power_notify_) {
+        typedef BOOL (WINAPI *UnregPowerFn)(PVOID);
+        if (UnregPowerFn un = (UnregPowerFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "UnregisterPowerSettingNotification"))
+            un(power_notify_);
+        power_notify_ = nullptr;
+    }
+    if (wts_registered_) {
+        typedef BOOL (WINAPI *WtsUnregFn)(HWND);
+        if (HMODULE wts = GetModuleHandleW(L"wtsapi32.dll"))
+            if (WtsUnregFn un = (WtsUnregFn)GetProcAddress(wts, "WTSUnRegisterSessionNotification")) un(GetHWND());
+        wts_registered_ = false;
+    }
     dock_ready_ = false;   // nothing may touch the (about to be uninitialised) AUI manager after this
     aui_.UnInit();   // 2.4: must happen before dock_host_ and the panes are destroyed
     if (preview_panel_) preview_panel_->FlushOverlaySave(); // children + state_ still alive here
@@ -2050,6 +2075,8 @@ void HomRecMainFrame::DoStart() {
         return;
     }
     UpdatePowerThrottle();
+    stats_timer_.Start(500);                    // may have been slowed while hidden and idle (OnStatsTimer)
+    preview_timer_.Start(PreviewTimerMs());
     ws_trim_at_ = GetTickCount64() + 6000;   // after the encoder has opened and start-up allocations settled
     start_color_btn_->SetLabelText2(wxString::FromUTF8(lang_.Get("stop")));
     start_color_btn_->SetColours(FromColorref(theme_.error), FromColorref(theme_.bg));
@@ -2062,6 +2089,7 @@ void HomRecMainFrame::DoStart() {
 }
 
 void HomRecMainFrame::DoStop() {
+    auto_started_ = false;    // a manual stop ends the auto-started state too
     stop_pending_ = true;     // OnStatsTimer must not keep ticking the Time label while finalizing
     SetStatusState(wxString::FromUTF8("Saving\u2026"), theme_.warning);
     if (time_lbl_) time_lbl_->SetLabel("00:00:00");
@@ -2401,19 +2429,28 @@ void HomRecMainFrame::ImportHrpPlugin() {
         return;
     }
 
-    bool loaded = plugins_ && plugins_->LoadPluginArchive(destPath);
     HrLog::Info("Imported plugin from " + srcPath + " -> " + destPath);
-    if (loaded) {
-        wxMessageBox("Plugin installed and loaded.", "Import Plugin",
-                     wxOK | wxICON_INFORMATION, this);
-    } else {
-        // Copied fine, but LoadPluginArchive() itself failed (bad plugin.json, missing entry
-        // script, on_load() threw, etc.
-        wxMessageBox("Plugin copied into the plugins folder, but couldn't be "
-                      "loaded right now - check the Console/plugins.log for "
-                      "details. It will be tried again the next time HomRec starts.",
-                     "Import Plugin", wxOK | wxICON_WARNING, this);
-    }
+    // Extraction can take up to two minutes in the worst case (tar/PowerShell, see archive.cpp), so it runs on a
+    // worker thread; only LoadPlugin() (Lua state) runs back on the UI thread.
+    LuaPluginEngine *engine = plugins_.get();
+    std::thread([this, engine, destPath]() {
+        std::string extracted;
+        const bool extracted_ok = engine && engine->ExtractPluginArchive(destPath, extracted);
+        CallAfter([this, extracted_ok, extracted]() {
+            const bool loaded = extracted_ok && plugins_ && plugins_->LoadPlugin(extracted);
+            if (loaded) {
+                wxMessageBox("Plugin installed and loaded.", "Import Plugin",
+                             wxOK | wxICON_INFORMATION, this);
+            } else {
+                // Copied fine, but extracting/LoadPlugin() failed (bad plugin.json, missing entry
+                // script, on_load() threw, etc.
+                wxMessageBox("Plugin copied into the plugins folder, but couldn't be "
+                              "loaded right now - check the Console/plugins.log for "
+                              "details. It will be tried again the next time HomRec starts.",
+                             "Import Plugin", wxOK | wxICON_WARNING, this);
+            }
+        });
+    }).detach();
 }
 
 void HomRecMainFrame::OpenRecordingsFolder() {
@@ -2895,6 +2932,21 @@ void HomRecMainFrame::OnPreviewTimer(wxTimerEvent &) {
     }
 }
 
+static bool IsExeRunning(const std::string &exe_utf8) {
+    const std::wstring want = wxString::FromUTF8(exe_utf8.c_str()).ToStdWstring();
+    if (want.empty()) return false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = {};
+    pe.dwSize = sizeof(pe);
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        if (_wcsicmp(pe.szExeFile, want.c_str()) == 0) { found = true; break; }
+    }
+    CloseHandle(snap);
+    return found;
+}
+
 void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
     if (rec_) rec_->PollStats();
     if (dock_ready_) StripControlsFloatCloseBox(aui_);
@@ -2935,10 +2987,51 @@ void HomRecMainFrame::OnStatsTimer(wxTimerEvent &) {
             if (want_schedule) schedule_timer_.Start(1000); else schedule_timer_.Stop();
         }
     }
+    if (state_.auto_capture_exe.empty()) {
+        auto_exe_seeded_ = false; auto_exe_running_ = false;
+    } else if (GetTickCount64() >= auto_exe_poll_at_) {
+        auto_exe_poll_at_ = GetTickCount64() + 2000;
+        const bool running = IsExeRunning(state_.auto_capture_exe);
+        if (!auto_exe_seeded_) {
+            auto_exe_seeded_ = true;                 // already running when enabled/started: not a launch
+            auto_exe_running_ = running;
+        } else if (running && !auto_exe_running_) {
+            auto_exe_running_ = true;
+            if (!state_.recording && !stop_pending_) {
+                HrLog::Info("Auto-capture: " + state_.auto_capture_exe + " started - starting recording");
+                auto_started_ = true;
+                RequestStart();
+            }
+        } else if (!running && auto_exe_running_) {
+            auto_exe_running_ = false;
+            if (auto_started_ && state_.recording && !stop_pending_) {
+                HrLog::Info("Auto-capture: " + state_.auto_capture_exe + " exited - stopping recording");
+                DoStop();
+            }
+            auto_started_ = false;
+        }
+    }
+    {
+        // Game mode: a fullscreen app in front (QUNS_BUSY = 2, QUNS_RUNNING_D3D_FULL_SCREEN = 3).
+        bool fs = false;
+        if (state_.game_mode) {
+            typedef HRESULT (WINAPI *QueryUserStateFn)(int *);
+            static const QueryUserStateFn query = (QueryUserStateFn)GetProcAddress(
+                GetModuleHandleW(L"shell32.dll"), "SHQueryUserNotificationState");
+            int st = 0;
+            if (query && SUCCEEDED(query(&st))) fs = (st == 2 || st == 3);
+        }
+        if (fs != game_fullscreen_) { game_fullscreen_ = fs; ApplySuspendState(); }
+    }
     UpdatePowerThrottle();
 
     UpdatePreviewToggleButton();
     UpdatePreviewFpsLabel();
+    {
+        // Hidden and idle: nothing to show or sync, so the tick can be slow.
+        const int want_stats_ms = (!ui_visible_ && !state_.recording && !state_.instant_replay_enabled) ? 2000 : 500;
+        if (stats_timer_.GetInterval() != want_stats_ms) stats_timer_.Start(want_stats_ms);
+    }
     if (preview_timer_.GetInterval() != PreviewTimerMs()) preview_timer_.Start(PreviewTimerMs());   // Preview FPS / preview on-off / window focus changed
 
     // logs\pc.log - throttles itself internally to ~once every 10s, so
@@ -2989,7 +3082,7 @@ void HomRecMainFrame::RestartLevelMeterTimer() {
 }
 
 int HomRecMainFrame::PreviewTimerMs() const {
-    if (!ui_visible_) return 100;
+    if (!ui_visible_) return (state_.recording || state_.instant_replay_enabled) ? 100 : 500;   // idle and hidden: no pipeline to sync
     if (state_.disable_preview || !ui_active_) return 50;
     return std::min(50, std::max(16, 1000 / std::max(1, state_.preview_fps)));
 }
@@ -3015,6 +3108,34 @@ void HomRecMainFrame::UpdatePowerThrottle() {
     if (!set_info) return;
     struct { ULONG Version; ULONG ControlMask; ULONG StateMask; } st = { 1, want ? 1u : 0u, want ? 1u : 0u };   // PROCESS_POWER_THROTTLING_EXECUTION_SPEED; masks 0 = back to system-managed
     set_info(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &st, sizeof(st));
+}
+
+void HomRecMainFrame::ApplySuspendState() {
+    const bool s = display_off_ || session_locked_ || game_fullscreen_;
+    if (s == suspended_) return;
+    suspended_ = s;
+    const bool visible = !s && IsShown() && !IsIconized();
+    if (rec_) rec_->SetPreviewVisible(visible);   // releases the preview's duplication while suspended, rebuilds it on resume
+    ApplyVisibilityTimers(visible);
+    UpdatePowerThrottle();
+}
+
+WXLRESULT HomRecMainFrame::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) {
+    constexpr UINT kWmWtsSessionChange = 0x02B1;   // WM_WTSSESSION_CHANGE
+    if (nMsg == WM_POWERBROADCAST && wParam == 0x8013 /* PBT_POWERSETTINGCHANGE */ && lParam) {
+        struct PowerSetting { GUID guid; DWORD len; UCHAR data[1]; };   // POWERBROADCAST_SETTING
+        const PowerSetting *ps = reinterpret_cast<const PowerSetting *>(lParam);
+        if (ps->len == sizeof(DWORD)) {
+            DWORD v = 0;
+            memcpy(&v, ps->data, sizeof(v));
+            display_off_ = (v == 0);   // 0 = off, 1 = on, 2 = dimmed
+            ApplySuspendState();
+        }
+    } else if (nMsg == kWmWtsSessionChange) {
+        if (wParam == 0x7 /* WTS_SESSION_LOCK */)        { session_locked_ = true;  ApplySuspendState(); }
+        else if (wParam == 0x8 /* WTS_SESSION_UNLOCK */) { session_locked_ = false; ApplySuspendState(); }
+    }
+    return wxFrame::MSWWindowProc(nMsg, wParam, lParam);
 }
 
 void HomRecMainFrame::TrimWorkingSet() {
@@ -3047,8 +3168,8 @@ void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
     // Plain minimize (not minimize-to-tray) doesn't Hide() the window, so
     // it never reaches OnShowEvent below - the window is still
     // "shown" as far as wx is concerned, just iconized in the taskbar.
-    if (rec_) rec_->SetPreviewVisible(!evt.IsIconized());
-    ApplyVisibilityTimers(!evt.IsIconized() && IsShown());
+    if (rec_) rec_->SetPreviewVisible(!evt.IsIconized() && !suspended_);
+    ApplyVisibilityTimers(!evt.IsIconized() && IsShown() && !suspended_);
     evt.Skip();
 }
 
@@ -3059,8 +3180,8 @@ void HomRecMainFrame::OnActivate(wxActivateEvent &evt) {
 }
 
 void HomRecMainFrame::OnShowEvent(wxShowEvent &evt) {
-    if (rec_) rec_->SetPreviewVisible(evt.IsShown());
-    ApplyVisibilityTimers(evt.IsShown() && !IsIconized());
+    if (rec_) rec_->SetPreviewVisible(evt.IsShown() && !suspended_);
+    ApplyVisibilityTimers(evt.IsShown() && !IsIconized() && !suspended_);
     evt.Skip();
 }
 

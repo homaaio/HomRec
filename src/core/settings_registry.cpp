@@ -162,6 +162,7 @@ const std::vector<SettingDef> &All() {
         v.push_back(IntField("preview_quality_pct", "capture", &AppState::preview_quality_pct));
         v.push_back(IntField("preview_fps", "capture", &AppState::preview_fps));
         v.push_back(BoolField("disable_preview", "capture", &AppState::disable_preview));
+        v.push_back(BoolField("game_mode", "capture", &AppState::game_mode));
 
         // -- [video] ---------------------------------------------------------
         v.push_back(StrField("video_codec", "video", &AppState::video_codec));
@@ -222,6 +223,7 @@ const std::vector<SettingDef> &All() {
         v.push_back(IntField("replay_ram_mb", "recording_extra", &AppState::replay_ram_mb));
         v.push_back(BoolField("instant_replay_enabled", "recording_extra", &AppState::instant_replay_enabled));
         v.push_back(StrField("active_preset_name", "recording_extra", &AppState::active_preset_name));
+        v.push_back(StrField("auto_capture_exe", "recording_extra", &AppState::auto_capture_exe));
         v.push_back(BoolField("scheduled_start_enabled", "recording_extra", &AppState::scheduled_start_enabled));
         v.push_back(StrField("scheduled_start_time", "recording_extra", &AppState::scheduled_start_time));
         v.push_back(BoolField("auto_pause_on_silence", "recording_extra", &AppState::auto_pause_on_silence));

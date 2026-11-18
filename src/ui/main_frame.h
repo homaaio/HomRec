@@ -271,6 +271,11 @@ private:
     // Stop was pressed (or the encoder died) and the recording is being finalized in the background:
     // state_.recording stays true for those seconds, but the Time / state labels must stay frozen.
     bool stop_pending_ = false;
+    // auto_capture_exe: edge-triggered from OnStatsTimer(), polled every ~2 s.
+    bool auto_exe_seeded_ = false;      // first poll only records whether the exe is already running
+    bool auto_exe_running_ = false;
+    bool auto_started_ = false;         // the running recording was started by auto_capture_exe
+    unsigned long long auto_exe_poll_at_ = 0;
     // The crash was the full-GPU (ddagrab) ffmpeg dying (e.g. a game changed the display mode): once the
     // interrupted recording is finalized, a new one is started right away with the normal pipeline.
     bool recording_restart_after_crash_ = false;
@@ -312,6 +317,15 @@ private:
     // EcoQoS (process power throttling) while the window is hidden and nothing is recording / buffering.
     void UpdatePowerThrottle();
     bool power_throttled_ = false;
+    // Display off / session locked / fullscreen app in front (game mode): preview suspended, see ApplySuspendState().
+    WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) override;
+    void ApplySuspendState();
+    bool suspended_ = false;
+    bool display_off_ = false;
+    bool session_locked_ = false;
+    bool game_fullscreen_ = false;
+    void *power_notify_ = nullptr;
+    bool wts_registered_ = false;
     bool ui_visible_ = true;
     int PreviewTimerMs() const;
     bool ui_active_ = true;

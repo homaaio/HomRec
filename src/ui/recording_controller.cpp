@@ -2473,7 +2473,7 @@ void RecordingController::PollIdle() {
 void RecordingController::SyncOverlays() {
     if (!pipeline_) {
         // pipeline - this retry is only for the idle/preview-only case.
-        if (!state_.disable_preview && !state_.recording) {
+        if (!state_.disable_preview && !state_.recording && preview_window_visible_) {   // hidden/suspended: don't rebuild the preview
             auto now = std::chrono::steady_clock::now();
             if (now >= next_preview_retry_) {
                 int backoff_s = kPreviewRetryBaseSeconds;

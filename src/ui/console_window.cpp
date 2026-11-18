@@ -935,6 +935,7 @@ void ConsoleWindow::RunCommand(const std::wstring &raw, bool confirmed) {
     }
     else if (cmd == L"sethrc") CmdSetHrc(raw);
     else if (cmd == L"clip") CmdClip(raw);
+    else if (cmd == L"bookmark") CmdBookmark(raw);
     else if (cmd == L"repeat") CmdRepeat(raw);
     else if (cmd == L"batch") CmdBatch(raw);
     else if (cmd == L"ls") CmdLs(raw);
@@ -1184,6 +1185,24 @@ void ConsoleWindow::CmdStatus(const std::wstring &) {
     } else {
         PrintInfo(L"idle");
     }
+}
+
+// bookmark [label] - appends "<elapsed>[<TAB>label]" to <recording file>.bookmarks.txt. Elapsed is recording time
+// (pauses excluded), i.e. the position in the video. Bind it to a key via Settings > Hotkeys > Add Hotkey.
+void ConsoleWindow::CmdBookmark(const std::wstring &raw) {
+    if (!rec_ || !state_.recording) { PrintWarn(L"bookmark: not recording"); return; }
+    const std::wstring path = rec_->current_output_path();
+    if (path.empty()) { PrintWarn(L"bookmark: no recording file yet"); return; }
+    const std::wstring elapsed = rec_->elapsed_formatted();
+    const std::wstring label = Trim(RestAfterCommand(raw));
+    std::string line = NarrowFromWide(elapsed);
+    if (!label.empty()) line += "\t" + NarrowFromWide(label);
+    line += "\r\n";
+    FILE *f = _wfopen((path + L".bookmarks.txt").c_str(), L"ab");
+    if (!f) { PrintWarn(L"bookmark: couldn't write " + path + L".bookmarks.txt"); return; }
+    const bool ok = fwrite(line.data(), 1, line.size(), f) == line.size();
+    if (fclose(f) != 0 || !ok) { PrintWarn(L"bookmark: write failed"); return; }
+    PrintOk(L"bookmark @ " + elapsed + (label.empty() ? L"" : L"  " + label));
 }
 
 void ConsoleWindow::CmdLog(const std::wstring &raw) {

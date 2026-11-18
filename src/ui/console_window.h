@@ -84,6 +84,7 @@ private:
     void CmdHistory(const std::wstring &raw);
     void CmdInfo(const std::wstring &raw);
     void CmdStatus(const std::wstring &raw);
+    void CmdBookmark(const std::wstring &raw);
     void CmdLog(const std::wstring &raw);
     void CmdHide(const std::wstring &raw);
     void CmdSec(const std::wstring &raw);
