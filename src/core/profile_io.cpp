@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
 // -- zlib / gzip ------------------------------------------------------------
 // hr_profile_io uses gzip to wrap JSON in .hrc/.hrl files.
 #if defined(_WIN32)
@@ -292,6 +293,17 @@ static std::vector<uint8_t> _gz_decompress(const uint8_t *data, size_t sz) {
 /*  Low-level binary file I/O                                                   */
 /* --------------------------------------------------------------------------- */
 
+// true if `path` starts with the .hrc magic and has a body (used to decide whether the current file is worth
+// keeping as the backup - an empty/truncated file must never replace a good .bak).
+static bool _hrc_file_looks_valid(const std::string &path) {
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    uint8_t magic[4] = {};
+    const bool ok = fread(magic, 1, 4, f) == 4 && memcmp(magic, MAGIC_HRC, 4) == 0 && fgetc(f) != EOF;
+    fclose(f);
+    return ok;
+}
+
 // hr_hrc_write - Writes magic (4 bytes) + gzip(json_body) to path.
 // Returns 1 on success.
 HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
@@ -314,6 +326,12 @@ HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
               fwrite(body.data(), 1, body.size(), f) == body.size() &&
               fflush(f) == 0;
     if (fclose(f) != 0) ok = false;
+    if (ok && file_type == 0 && _hrc_file_looks_valid(path)) {
+        // Rolling backup: the previous good settings stay next to the file as <path>.bak (best effort).
+        std::error_code ec;
+        std::filesystem::copy_file(std::filesystem::path(path), std::filesystem::path(std::string(path) + ".bak"),
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+    }
     if (ok) {
 #ifdef _WIN32
         ok = MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
@@ -328,8 +346,8 @@ HR_EXPORT int hr_hrc_write(const char *path, const char *json_body,
 // hr_hrc_read - Reads a HomRec binary file and returns the JSON body in out_json.
 // Caller provides a buffer; if the buffer is too small, the function
 // returns the required size (negative) so the caller can retry.
-HR_EXPORT int hr_hrc_read(const char *path, int expected_type,
-                          char *out_json, int out_len) {
+static int _hrc_read_one(const char *path, int expected_type,
+                         char *out_json, int out_len) {
     if (!path) return 0;
     // expected_type: 0=hrc, 1=hrl. (2=hrt was removed along with theme
     // file support - callers should no longer pass it.)
@@ -362,6 +380,15 @@ HR_EXPORT int hr_hrc_read(const char *path, int expected_type,
     memcpy(out_json, decompressed.data(), decompressed.size());
     out_json[decompressed.size()] = '\0';
     return needed;
+}
+
+HR_EXPORT int hr_hrc_read(const char *path, int expected_type,
+                          char *out_json, int out_len) {
+    int r = _hrc_read_one(path, expected_type, out_json, out_len);
+    if (r == 0 && path && expected_type == 0) {
+        r = _hrc_read_one((std::string(path) + ".bak").c_str(), expected_type, out_json, out_len);
+    }
+    return r;
 }
 
 // hr_hrc_detect - Reads 4 bytes from path and returns the file type:
