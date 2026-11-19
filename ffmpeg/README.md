@@ -19,14 +19,16 @@ The package entry lives in the hom repo, `pkgs/index.json`, and uses the `into` 
   "file": "ffmpeg.exe",
   "dest": "ffmpeg",
   "into": "homrec",
-  "url": "https://github.com/homaaio/hom/releases/download/pkgs/ffmpeg-hr-8.0.1.exe",
-  "version": "8.0.1",
+  "url": "https://github.com/homaaio/hom/releases/download/pkgs/ffmpeg-hr-8.0.2.exe",
+  "version": "8.0.2",
   "sha256": "..."
 }
 ```
 
 `file` is the name it gets after installing (`ffmpeg.exe`); `url` points at the versioned asset, so the
 release can keep `ffmpeg-hr-8.0.1.exe`, `ffmpeg-hr-8.0.2.exe`, ... and the installed name stays the same.
+The package version counts builds: `8.0.2` is the second build of the FFmpeg **8.0.1** source (it fixes
+the missing audio input), so a new upload never has to reuse an old file name.
 
 `into: homrec` needs hom **0.8.1** or newer (or hom 2.x).
 
@@ -70,23 +72,32 @@ Built from FFmpeg **8.0.1** with `--disable-everything` plus only the parts belo
 - **Containers:** MP4/MOV (fragmented too), Matroska/WebM, NUT, MPEG-TS, `segment` (Instant Replay),
   WAV, MP3, Ogg/FLAC/ADTS, `concat`, `image2`, `null`.
 - **Inputs/devices:** `dshow` (webcam, `-list_devices`), `lavfi` (`-f lavfi -i nullsrc`, the GPU/codec
-  probes), `rawvideo`, NUT, `s16le`. The CLI's own `wrapped_avframe` decoder is included, which the
-  `lavfi` sources need.
+  probes), `rawvideo`, NUT, raw PCM for the audio pipe (`-f s16le` - the FFmpeg 8 configure name is
+  `pcm_s16le`). The CLI's own `wrapped_avframe` encoder/decoder is included, which the `lavfi` sources
+  and a bare `-f null -` need.
 - **Filters:** `ddagrab`, `hwdownload`, `hwmap`, `hwupload`, `scale`, `overlay`, `format`, `fps`,
   `setpts`, `crop`, `pad`, `split`, `concat`, `trim`, `select`, `fade`, `volume`, `adelay`, `amix`,
-  `aresample`, `atempo`, plus the buffer sources/sinks.
+  `aresample`, `atempo`. The buffer sources/sinks are built in and are not listed.
 - **Bitstream filters:** `setts` (the fast re-time path), `h264_metadata`, `hevc_metadata`,
   `av1_metadata`, `aac_adtstoasc`, `h264_mp4toannexb`, `hevc_mp4toannexb`, `extract_extradata`.
-- **Hardware:** `d3d11va`, `dxva2`, `d3d12va` decoding; `-ffnvcodec`/`-nvenc`, `-amf`, `-libvpl`.
+- **Hardware:** D3D11VA/DXVA2/D3D12VA decoding for H.264, HEVC, AV1, VP9, MPEG-2, VC-1 and WMV3 (FFmpeg 8
+  names them per codec, e.g. `h264_d3d11va`); `-ffnvcodec`/`-nvenc`, `-amf`, `-libvpl`.
 
 Left out on purpose: `ffplay`, `ffprobe`, documentation, networking protocols (HTTP/RTMP/SRT/...),
 DVD/Blu-ray, subtitles and font shaping, AVISynth, SDL, OpenCL/Vulkan/libplacebo/shaderc, Whisper,
 TTS, VMAF/vidstab/zimg, image formats HomRec never writes (JPEG XL, WebP output, OpenJPEG) and the
 software AV1 encoders (rav1e, SVT-AV1, vvenc, aom, xevd). Hardware AV1 encoding **is** included.
+`--enable-zlib` is in for the PNG/APNG encoders and the PNG decoder.
 
 The script checks the pieces HomRec calls today: run `ffmpeg-hr.exe -hide_banner -filters` for
 `ddagrab`, `-encoders` for `libx264`/`nvenc`/`amf`/`qsv`, `-muxers` for `mp4`/`nut`/`mpegts`/`segment`,
 and `-devices` for `dshow`.
+
+After `configure` the script also verifies every requested component against the generated
+`config_components.h` and stops with a list if one is missing. Configure silently ignores unknown or
+renamed names - this is how `-f s16le` was lost once: FFmpeg 8 renamed the component to `pcm_s16le`
+while the CLI name stayed `s16le`, so the build had no audio input and every recording with sound died
+immediately (ffmpeg exit code `-22`, `Error opening input files: Invalid argument`).
 
 ## Licence and source
 
@@ -111,9 +122,9 @@ repository.
 
    ```
    python tools/pub.py add /path/to/ffmpeg-hr.exe --name ffmpeg-hr --type file \
-     --file ffmpeg.exe --version 8.0.1 --into homrec --dest ffmpeg --author homaaio \
+     --file ffmpeg.exe --version 8.0.2 --into homrec --dest ffmpeg --author homaaio \
      --desc "Lean FFmpeg 8.0.1 for HomRec (x264/x265 + NVENC/AMF/QSV, ddagrab)" \
-     --url https://github.com/homaaio/hom/releases/download/pkgs/ffmpeg-hr-8.0.1.exe
+     --url https://github.com/homaaio/hom/releases/download/pkgs/ffmpeg-hr-8.0.2.exe
    python tools/pub.py check
    ```
 

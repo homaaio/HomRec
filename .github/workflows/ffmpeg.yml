@@ -51,16 +51,33 @@ jobs:
           ./$exe -hide_banner -version | head -n 3
           ./$exe -hide_banner -filters  | grep -q ddagrab
           ./$exe -hide_banner -filters  | grep -q hwdownload
+          ./$exe -hide_banner -filters  | grep -q overlay
           ./$exe -hide_banner -encoders | grep -q libx264
           ./$exe -hide_banner -encoders | grep -q h264_nvenc
           ./$exe -hide_banner -encoders | grep -q h264_amf
           ./$exe -hide_banner -encoders | grep -q h264_qsv
+          ./$exe -hide_banner -encoders | grep -q wrapped_avframe
           ./$exe -hide_banner -muxers   | grep -q ' mp4 '
           ./$exe -hide_banner -muxers   | grep -q ' segment '
+          ./$exe -hide_banner -demuxers | grep -q ' nut '
+          ./$exe -hide_banner -demuxers | grep -q ' s16le '   # the audio pipe: -f s16le
           ./$exe -hide_banner -bsfs     | grep -q setts
           ./$exe -hide_banner -devices  | grep -q dshow
           ./$exe -hide_banner -devices  | grep -q lavfi
+          # the GPU/codec probe
           ./$exe -hide_banner -y -f lavfi -i nullsrc=s=160x120:d=0.1 -c:v libx264 -f null -
+          # "-f null -" with no explicit codec (wrapped_avframe encoder)
+          ./$exe -hide_banner -y -f lavfi -i testsrc2=s=160x120:d=0.1 -f null -
+          # the recording pipeline: NUT over stdin + raw PCM audio pipe -> fragmented MP4
+          ./$exe -hide_banner -y -f lavfi -i testsrc2=s=160x120:r=30:d=0.2 -pix_fmt nv12 -f nut t.nut
+          head -c 192000 /dev/zero > silent.pcm
+          cat t.nut | ./$exe -hide_banner -y -probesize 32 -analyzeduration 1 -f nut -i pipe:0 \
+            -probesize 32 -analyzeduration 1 -f s16le -ar 48000 -ac 2 -thread_queue_size 1024 -i silent.pcm \
+            -c:v libx264 -preset ultrafast -c:a aac -b:a 160k \
+            -movflags +frag_keyframe+empty_moov+default_base_moof -frag_duration 500000 out.mp4
+          ./$exe -hide_banner -v error -i out.mp4 -f null -
+          # PNG (zlib)
+          ./$exe -hide_banner -y -f lavfi -i testsrc2=s=160x120:d=0.1 -frames:v 1 t.png
           sha256sum "$exe" | tee dist/ffmpeg-hr.exe.sha256
 
       - uses: actions/upload-artifact@v4

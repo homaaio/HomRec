@@ -141,6 +141,8 @@ CONFIGURE=(
   --enable-libmp3lame
   --enable-libopus
   --enable-libvorbis
+  # the PNG/APNG encoders and the PNG decoder are dropped without it (--disable-autodetect)
+  --enable-zlib
 
   # hardware: the same backends the full gyan build has
   --enable-d3d11va
@@ -170,17 +172,18 @@ CONFIGURE=(
   --enable-demuxer=h264
   --enable-demuxer=hevc
   --enable-demuxer=image2
-  --enable-demuxer=lavfi
   --enable-demuxer=matroska
   --enable-demuxer=mov
   --enable-demuxer=mp3
   --enable-demuxer=mpegts
   --enable-demuxer=nut
   --enable-demuxer=ogg
+  # FFmpeg 8 renamed the raw PCM components: the CLI name is still "-f s16le",
+  # but the configure name is pcm_s16le (that is the audio pipe's format).
+  --enable-demuxer=pcm_f32le
+  --enable-demuxer=pcm_s16le
+  --enable-demuxer=pcm_s24le
   --enable-demuxer=rawvideo
-  --enable-demuxer=s16le
-  --enable-demuxer=s24le
-  --enable-demuxer=f32le
   --enable-demuxer=wav
 
   # -- muxers
@@ -199,9 +202,9 @@ CONFIGURE=(
   --enable-muxer=null
   --enable-muxer=nut
   --enable-muxer=ogg
+  --enable-muxer=pcm_s16le
   --enable-muxer=rawvideo
   --enable-muxer=segment
-  --enable-muxer=s16le
   --enable-muxer=wav
   --enable-muxer=webm
 
@@ -224,6 +227,10 @@ CONFIGURE=(
   --enable-encoder=gif
   --enable-encoder=apng
   --enable-encoder=rawvideo
+  # `-f null -` with no explicit video codec picks wrapped_avframe (the CLI's own
+  # "throw the frame away" encoder); without it that command fails with
+  # "Automatic encoder selection failed".
+  --enable-encoder=wrapped_avframe
 
   # -- audio encoders
   --enable-encoder=aac
@@ -327,8 +334,8 @@ CONFIGURE=(
   --enable-bsf=vp9_superframe
 
   # -- filters (the recording pipeline + the audio mixer; a few for later)
-  --enable-filter=abuffersink
-  --enable-filter=abuffersrc
+  # buffersrc/buffersink are always built in (they are not selectable components),
+  # so they are not listed here.
   --enable-filter=adelay
   --enable-filter=afade
   --enable-filter=amix
@@ -341,8 +348,6 @@ CONFIGURE=(
   --enable-filter=atempo
   --enable-filter=atrim
   --enable-filter=boxblur
-  --enable-filter=buffersink
-  --enable-filter=buffersrc
   --enable-filter=color
   --enable-filter=concat
   --enable-filter=crop
@@ -372,15 +377,69 @@ CONFIGURE=(
   --enable-filter=vflip
   --enable-filter=volume
 
-  # hardware decoders (only the d3d11 paths; no CUDA/VAAPI/Vulkan)
-  --enable-hwaccel=d3d11va
-  --enable-hwaccel=dxva2
-  --enable-hwaccel=d3d12va
+  # hardware decoders (only the D3D11/DXVA paths; no CUDA/VAAPI/Vulkan).
+  # FFmpeg 8 lists these per codec, so the old generic "d3d11va" names are ignored.
+  --enable-hwaccel=h264_d3d11va
+  --enable-hwaccel=h264_d3d11va2
+  --enable-hwaccel=h264_d3d12va
+  --enable-hwaccel=h264_dxva2
+  --enable-hwaccel=hevc_d3d11va
+  --enable-hwaccel=hevc_d3d11va2
+  --enable-hwaccel=hevc_d3d12va
+  --enable-hwaccel=hevc_dxva2
+  --enable-hwaccel=av1_d3d11va
+  --enable-hwaccel=av1_d3d11va2
+  --enable-hwaccel=av1_d3d12va
+  --enable-hwaccel=av1_dxva2
+  --enable-hwaccel=vp9_d3d11va
+  --enable-hwaccel=vp9_d3d11va2
+  --enable-hwaccel=vp9_d3d12va
+  --enable-hwaccel=vp9_dxva2
+  --enable-hwaccel=mpeg2_d3d11va
+  --enable-hwaccel=mpeg2_d3d11va2
+  --enable-hwaccel=mpeg2_d3d12va
+  --enable-hwaccel=mpeg2_dxva2
+  --enable-hwaccel=vc1_d3d11va
+  --enable-hwaccel=vc1_d3d11va2
+  --enable-hwaccel=vc1_d3d12va
+  --enable-hwaccel=vc1_dxva2
+  --enable-hwaccel=wmv3_d3d11va
+  --enable-hwaccel=wmv3_d3d11va2
+  --enable-hwaccel=wmv3_d3d12va
+  --enable-hwaccel=wmv3_dxva2
 )
 
 say "== configure"
 cd "$SRC"
 ./configure "${CONFIGURE[@]}"
+
+# ---------------------------------------------------------------- verify
+# A misspelled or renamed component does not fail configure - it is silently
+# dropped, and the build succeeds with a missing demuxer/encoder (this is how
+# `-f s16le` once went missing after FFmpeg renamed it to pcm_s16le). Check
+# every requested component against the generated config_components.h.
+say "== verify requested components"
+missing=0
+for arg in "${CONFIGURE[@]}"; do
+  case "$arg" in
+    --enable-*=*) ;;
+    *) continue ;;
+  esac
+  kind=${arg#--enable-}; kind=${kind%%=*}
+  name=${arg#*=}
+  case "$kind" in
+    protocol|indev|outdev|demuxer|muxer|encoder|decoder|parser|bsf|filter|hwaccel) ;;
+    *) continue ;;
+  esac
+  U=$(printf '%s' "$name" | sed 's/[^A-Za-z0-9]/_/g' | tr '[:lower:]' '[:upper:]')
+  K=$(printf '%s' "$kind" | tr '[:lower:]' '[:upper:]')
+  if ! grep -q "^#define CONFIG_${U}_${K} 1$" config_components.h; then
+    printf '   NOT ENABLED: %s\n' "$arg"
+    missing=1
+  fi
+done
+[ "$missing" -eq 0 ] || die "components above are missing from the build (renamed in this FFmpeg version? see config_components.h)"
+say "   all requested components are enabled"
 
 # ---------------------------------------------------------------- build
 JOBS=$(nproc 2>/dev/null || echo 4)

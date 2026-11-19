@@ -6,6 +6,9 @@ welcome to changelog :D
 - **FFmpeg:** `ffmpeg-hr`, a lean static FFmpeg 8.0.1 build for HomRec (`ffmpeg/build-ffmpeg-hr.sh`).
   In the console, `inwid hom install ffmpeg-hr` downloads it to `ffmpeg\ffmpeg.exe` next to `hr.exe`,
   where HomRec already looks. The "FFmpeg not found." message now says so.
+  The build script now checks every requested component against the generated configuration, so a name
+  that a newer FFmpeg renamed cannot be dropped silently again (that is what removed `-f s16le`, the
+  audio pipe's raw PCM input, and made recordings fail at once with ffmpeg exit code `-22`).
 
 [Version 3.1.2] - 2026-11-18
 
