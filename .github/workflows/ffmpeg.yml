@@ -1,0 +1,71 @@
+# Builds ffmpeg-hr (dist/ffmpeg-hr.exe), the lean static FFmpeg that HomRec installs with
+# 'inwid hom install ffmpeg-hr'. Manual only: the release process is described in ffmpeg/README.md
+# (the exe is uploaded to the hom repo's 'pkgs' release, then pkgs/index.json gets its sha256).
+name: ffmpeg-hr
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["ffmpeg/**", ".github/workflows/ffmpeg.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-x264
+            mingw-w64-x86_64-x265
+            mingw-w64-x86_64-dav1d
+            mingw-w64-x86_64-lame
+            mingw-w64-x86_64-mpg123
+            mingw-w64-x86_64-opus
+            mingw-w64-x86_64-libvorbis
+            mingw-w64-x86_64-libvpl
+            mingw-w64-x86_64-ffnvcodec-headers
+            mingw-w64-x86_64-amf-headers
+
+      - name: Build
+        run: ./ffmpeg/build-ffmpeg-hr.sh
+
+      - name: Check the pieces HomRec uses
+        run: |
+          set -e
+          exe=dist/ffmpeg-hr.exe
+          ./$exe -hide_banner -version | head -n 3
+          ./$exe -hide_banner -filters  | grep -q ddagrab
+          ./$exe -hide_banner -filters  | grep -q hwdownload
+          ./$exe -hide_banner -encoders | grep -q libx264
+          ./$exe -hide_banner -encoders | grep -q h264_nvenc
+          ./$exe -hide_banner -encoders | grep -q h264_amf
+          ./$exe -hide_banner -encoders | grep -q h264_qsv
+          ./$exe -hide_banner -muxers   | grep -q ' mp4 '
+          ./$exe -hide_banner -muxers   | grep -q ' segment '
+          ./$exe -hide_banner -bsfs     | grep -q setts
+          ./$exe -hide_banner -devices  | grep -q dshow
+          ./$exe -hide_banner -devices  | grep -q lavfi
+          ./$exe -hide_banner -y -f lavfi -i nullsrc=s=160x120:d=0.1 -c:v libx264 -f null -
+          sha256sum "$exe" | tee dist/ffmpeg-hr.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-hr
+          path: |
+            dist/ffmpeg-hr.exe
+            dist/ffmpeg-hr.exe.sha256

@@ -97,7 +97,7 @@ The installer registers a standard uninstaller (Windows Settings > Apps); it ask
 
 1. Download the latest `.zip` or `.7z` from [Releases](https://github.com/homaaio/HomRec/releases).
 2. Extract to any location.
-3. Run `hr.exe`. The required `.dll` files are included. **FFmpeg is only included in the "full" archive** (`...-portable-full`); with the plain `portable` archive, put `ffmpeg.exe` into an `ffmpeg\` folder next to `hr.exe` or HomRec reports "FFmpeg not found." See [Getting started](docs/hr/getting-started.md).
+3. Run `hr.exe`. The required `.dll` files are included. **FFmpeg is only included in the "full" archive** (`...-portable-full`); with the plain `portable` archive, run `inwid hom install ffmpeg-hr` in the console (`Ctrl+Shift+T`) - it fetches the lean build made for HomRec into `ffmpeg\ffmpeg.exe` - or put your own `ffmpeg.exe` there, otherwise HomRec reports "FFmpeg not found." See [Getting started](docs/hr/getting-started.md).
 
 Settings (`homrec.hrc`), logs and plugins live next to `hr.exe`, so keep them if you replace the files with a newer version.
 

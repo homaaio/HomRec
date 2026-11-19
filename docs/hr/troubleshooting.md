@@ -42,7 +42,7 @@ Run `python tools\homrec_check.py --launch` for an automatic check ([logs-and-di
 
 | Message | Cause | Fix |
 |---|---|---|
-| "FFmpeg not found." | No `ffmpeg.exe` in a known place. The **portable** (non-"full") archive does not include it. | [getting-started.md](getting-started.md#2-pick-a-download) |
+| "FFmpeg not found." | No `ffmpeg.exe` in a known place. The **portable** (non-"full") archive does not include it. | Run `inwid hom install ffmpeg-hr` in the console (`Ctrl+Shift+T`); details in [getting-started.md](getting-started.md#2-pick-a-download). |
 | "Output folder doesn't exist and couldn't be created." | Bad path or no rights. | Pick a folder in your profile. |
 | "Not enough free disk space ... need at least 200 MB." | Disk almost full. | Free space or change drive. |
 | "Already recording." / "The previous recording is still being saved" | State not finished. | Wait until the status is idle. |

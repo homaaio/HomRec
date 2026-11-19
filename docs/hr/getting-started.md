@@ -29,9 +29,19 @@ Open the Releases page: <https://github.com/homaaio/HomRec/releases>.
 > "portable" does not). Always read the file list on the release page; the project maintainer chooses the names
 > for each release.
 
-HomRec cannot record without ffmpeg. If you picked an archive without it, download a Windows 64-bit ffmpeg
-build of **version 6 or newer** (the FFmpeg download page lists Windows builds), and place `ffmpeg.exe` as
-`ffmpeg\ffmpeg.exe` next to `hr.exe`.
+HomRec cannot record without ffmpeg. If you picked an archive without it, the easy way is HomRec's own
+package manager: open the console (`Ctrl+Shift+T`) and run
+
+```
+inwid hom install ffmpeg-hr
+```
+
+It downloads the lean build made for HomRec and puts it at `ffmpeg\ffmpeg.exe` next to `hr.exe`
+(`hom.exe`, which ships with HomRec, already knows where the program folder is). You can also download
+any Windows 64-bit ffmpeg build of **version 6 or newer** (the FFmpeg download page lists Windows builds)
+and place `ffmpeg.exe` as `ffmpeg\ffmpeg.exe` next to `hr.exe` yourself. The HomRec build has the
+hardware encoders (NVENC, AMF, QSV), the desktop capture filter (`ddagrab`) and the usual containers;
+a "shared" build is fine too, but then keep its `bin` folder and its DLLs together.
 
 <!-- LINK: ffmpeg-windows-builds --> HomRec looks for it, in this order: next to `hr.exe`, then `bin\ffmpeg.exe` and
 `ffmpeg\ffmpeg.exe` inside the program folder, then `C:\ffmpeg\bin`, `C:\Program Files\ffmpeg\bin`,
@@ -108,7 +118,7 @@ which encoder was used. The file name follows the template in Settings > Advance
 
 | What you see | Meaning | Fix |
 |---|---|---|
-| "FFmpeg not found." | No `ffmpeg.exe` was found. | Step 2 above. |
+| "FFmpeg not found." | No `ffmpeg.exe` was found. | Run `inwid hom install ffmpeg-hr` in the console (`Ctrl+Shift+T`), or see step 2 above. |
 | "Output folder doesn't exist and couldn't be created." | The folder path is wrong or not writable. | Settings > General > Output folder: pick a folder in your own profile. |
 | "Not enough free disk space on the output drive (... MB free, need at least 200 MB)." | Disk almost full. | Free space or choose another drive. |
 | "Failed to start the ffmpeg process." | ffmpeg exists but cannot run. | [recording-troubleshooting.md](recording-troubleshooting.md). |

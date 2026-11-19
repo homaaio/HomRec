@@ -267,6 +267,8 @@ hr.exe
 build/
 Build/
 build-*/
+# ffmpeg/build-ffmpeg-hr.sh: FFmpeg tarball + objects (~1 GB)
+.ffmpeg-build/
 
 # CMake generated files
 CMakeFiles/

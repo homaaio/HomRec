@@ -99,7 +99,7 @@ HomRec решает конкретную проблему: универсаль�
 
 1. Скачайте последний `.zip` или `.7z` со страницы [Releases](https://github.com/homaaio/HomRec/releases).
 2. Распакуйте в любое место.
-3. Запустите `hr.exe`. Нужные `.dll` входят в архив. **FFmpeg входит только в «полный» архив** (`...-portable-full`); при обычном архиве `portable` положите `ffmpeg.exe` в папку `ffmpeg\` рядом с `hr.exe`, иначе HomRec сообщит «FFmpeg not found.» См. [Начало работы](docs/hr/getting-started.md).
+3. Запустите `hr.exe`. Нужные `.dll` входят в архив. **FFmpeg входит только в «полный» архив** (`...-portable-full`); при обычном архиве `portable` выполните в консоли HomRec (`Ctrl+Shift+T`) команду `inwid hom install ffmpeg-hr` — она скачает лёгкую сборку для HomRec в `ffmpeg\ffmpeg.exe`, — либо положите туда свой `ffmpeg.exe`, иначе HomRec сообщит «FFmpeg not found.» См. [Начало работы](docs/hr/getting-started.md).
 
 Настройки (`homrec.hrc`), логи и плагины лежат рядом с `hr.exe`, поэтому сохраните их, если заменяете файлы более новой версией.
 

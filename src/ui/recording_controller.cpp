@@ -224,6 +224,13 @@ extern "C" {
 
 namespace {
 constexpr uint64_t kMinFreeDiskMb = 200;
+// Shown when no ffmpeg.exe turns up. Says how to get one without leaving the program:
+// 'hom' is bundled with HomRec and knows where the HomRec folder is.
+constexpr const wchar_t *kFfmpegMissingMsg =
+    L"FFmpeg not found.\n\n"
+    L"Install the build made for HomRec: open the console (Ctrl+Shift+T) and run\n"
+    L"    inwid hom install ffmpeg-hr\n\n"
+    L"Or put ffmpeg.exe in the ffmpeg folder next to hr.exe.";
 
 std::string NarrowFromWide(const std::wstring &w) {
     if (w.empty()) return {};
@@ -1473,7 +1480,7 @@ bool RecordingController::Start(std::wstring &error_out) {
         }
     }
     if (!ffmpeg_found_) {
-        error_out = L"FFmpeg not found.";
+        error_out = kFfmpegMissingMsg;
         HrLog::Error("Start failed: ffmpeg not found");
         return false;
     }
@@ -2821,7 +2828,7 @@ bool RecordingController::EnableInstantReplay(std::wstring &error_out) {
     if (state_.recording) return true;       // Stop() will start it once the manual recording ends
 
     if (!ffmpeg_found_) {
-        error_out = L"FFmpeg not found.";
+        error_out = kFfmpegMissingMsg;
         return false;
     }
     if (!CheckCaptureTarget(error_out)) return false;
@@ -3215,7 +3222,7 @@ bool RecordingController::StartQuickTest(const std::string &codec_in, const std:
         return false;
     }
     if (!ffmpeg_found_) {
-        error_out = L"FFmpeg not found.";
+        error_out = kFfmpegMissingMsg;
         return false;
     }
 

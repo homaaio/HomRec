@@ -1,5 +1,12 @@
 welcome to changelog :D
 
+[Unreleased]
+
+### Added
+- **FFmpeg:** `ffmpeg-hr`, a lean static FFmpeg 8.0.1 build for HomRec (`ffmpeg/build-ffmpeg-hr.sh`).
+  In the console, `inwid hom install ffmpeg-hr` downloads it to `ffmpeg\ffmpeg.exe` next to `hr.exe`,
+  where HomRec already looks. The "FFmpeg not found." message now says so.
+
 [Version 3.1.2] - 2026-11-18
 
 ### Added
@@ -35,9 +42,6 @@ welcome to changelog :D
 - **Recording:** "Record only when something happens" no longer counts redraws inside HomRec's own windows (the
   recording timer and level meters ticking every second kept the screen "active" and the recording never paused).
   Not tested on Windows yet. The log now says once a minute why it is not pausing (measured rate, or no screen signal).
-
-### Not measured
-- The idle CPU / RAM effect of the changes above has not been measured yet; no figures are claimed.
 
 [Version 3.1.1] - 2026-11-15
 
