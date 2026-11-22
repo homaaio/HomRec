@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
-# build-ffmpeg-hr.sh - builds ffmpeg-hr, the lean static FFmpeg that HomRec uses.
+# build-ffmpeg-hr.sh - builds ffmpeg-hr, the static FFmpeg that HomRec uses.
 #
 # Run it in an MSYS2 MINGW64 shell (or let .github/workflows/ffmpeg.yml run it):
 #
 #   ./ffmpeg/build-ffmpeg-hr.sh                 # -> dist/ffmpeg-hr.exe
 #   ./ffmpeg/build-ffmpeg-hr.sh /path/ffmpeg.exe
 #
-# Only one file comes out: a static ffmpeg.exe with no DLLs beside it. It contains what
-# hr.exe/homrec.exe call today (see "WHAT HOMREC NEEDS" below) plus the codecs/containers
-# that a recorder is likely to need later (AV1, VP9, GIF/PNG output, audio import/export).
+# Only one file comes out: a static ffmpeg.exe with no DLLs beside it.
 #
-# WHAT HOMREC NEEDS (checked against the sources, 3.0.x):
-#   * encoders: libx264, libx265, h264/hevc/av1 _nvenc/_amf/_qsv, mpeg4, aac, libmp3lame,
-#     pcm_s16le (the separate MP3/WAV audio files)
-#   * decoders/filters for the audio-file mixer and GIF/image overlays (paths are decoded by
-#     HomRec itself, this is for the "Audio file..." track and for future thumbnails)
-#   * input: dshow (webcam), lavfi (the GPU encoder/ddagrab probes), rawvideo, NUT, s16le
-#   * output: mp4 (fragmented), matroska, mpegts + segment (Instant Replay), nut, wav, mp3
-#   * filters: ddagrab, hwdownload, hwmap, scale, overlay, format, fps, setpts
-#   * bsfs: setts (the re-time fast path), h264/hevc/av1_metadata (ddagrab colour tags),
-#     aac_adtstoasc, h264/hevc_mp4toannexb (mpegts / concat)
+# This is a NORMAL FFmpeg build: every native component (demuxers, muxers,
+# decoders, encoders, filters, parsers, bitstream filters, protocols, devices)
+# is kept, exactly like a regular FFmpeg release. Earlier revisions used
+# --disable-everything plus a hand-written allow-list, and every missing entry
+# became a real bug in the field (the -f s16le / pcm_s16le rename, missing
+# filters for custom args, missing decoders for imported files, ...).
+# Do not go back to an allow-list: an incomplete build fails in ways that are
+# hard to see until a user hits the exact path.
 #
-# Deliberately NOT in the build ("definitely never needed"): ffplay/ffprobe, docs, networking
-# (http/rtmp/srt/rist/ssh/zmq), DVD/Blu-ray, subtitles/font shaping, AVISynth, SDL, filters
-# that need OpenCL/Vulkan/libplacebo/shaderc, Whisper/FLITE/TTS, VMAF/vidstab/zimg/Lensfun,
-# image formats we never write (JPEG XL/WebP/OpenJPEG), and the software AV1 encoders
-# (rav1e/SVT-AV1/vvenc/aom/xevd) - hardware AV1 is in.
+# What is still left out, because it is a separate program or not needed to run
+# ffmpeg at all: ffplay, ffprobe, documentation, debug symbols. --disable-autodetect
+# keeps configure from linking random system libraries; the external libraries
+# below are the only ones linked, and they are all static.
 #
 # Licence: --enable-gpl --enable-version3 (libx264/libx265), so the result is GPLv3. If you
 # publish the exe, publish the corresponding source too (this script + the FFmpeg tarball URL
@@ -99,7 +94,6 @@ if [ ! -f "$SRC/configure" ]; then
 fi
 
 # ---------------------------------------------------------------- configure
-# Keep these lists sorted; duplicates are harmless but make the diff noisy.
 CONFIGURE=(
   --prefix="$WORK/out"
   --target-os=mingw32
@@ -123,16 +117,23 @@ CONFIGURE=(
   --extra-libs=-lmpg123
   --extra-version=hr
 
-  # nothing we do not ask for: no ffplay/ffprobe/doc, no autodetected system libraries
-  --disable-everything
+  # No autodetected system libraries: everything external is named below.
   --disable-autodetect
+  # Separate programs / docs, not part of ffmpeg itself.
   --disable-doc
   --disable-debug
-  --disable-network
   --disable-ffplay
   --disable-ffprobe
 
-  # external libraries that matter (GPL: x264/x265; the rest are permissive)
+  # A few things that have nothing to do with recording: HomRec only ever reads
+  # and writes local files and pipes, so every network protocol (http, rtmp,
+  # udp, srt, rist, ...) is dead weight, and nothing here builds an ASCII-art
+  # video (caca). Nothing else is removed - every codec, filter, muxer and
+  # demuxer stays, so custom ffmpeg args and imports keep working.
+  --disable-network
+  --disable-muxer=caca
+
+  # External libraries (GPL: x264/x265; the rest are permissive).
   --enable-gpl
   --enable-version3
   --enable-libx264
@@ -141,10 +142,9 @@ CONFIGURE=(
   --enable-libmp3lame
   --enable-libopus
   --enable-libvorbis
-  # the PNG/APNG encoders and the PNG decoder are dropped without it (--disable-autodetect)
   --enable-zlib
 
-  # hardware: the same backends the full gyan build has
+  # Hardware encoding backends used by HomRec.
   --enable-d3d11va
   --enable-dxva2
   --enable-d3d12va
@@ -153,260 +153,9 @@ CONFIGURE=(
   --enable-amf
   --enable-libvpl
 
-  # devices and file/pipe I/O only: dshow is the webcam; lavfi is "-f lavfi -i nullsrc"
-  # (the GPU/codec probes) - both are input *devices*, not demuxers
-  --enable-indev=dshow
-  --enable-indev=lavfi
-  --enable-protocol=file
-  --enable-protocol=pipe
-
-  # -- demuxers
-  --enable-demuxer=aac
-  --enable-demuxer=ac3
-  --enable-demuxer=asf
-  --enable-demuxer=avi
-  --enable-demuxer=concat
-  --enable-demuxer=eac3
-  --enable-demuxer=flac
-  --enable-demuxer=gif
-  --enable-demuxer=h264
-  --enable-demuxer=hevc
-  --enable-demuxer=image2
-  --enable-demuxer=matroska
-  --enable-demuxer=mov
-  --enable-demuxer=mp3
-  --enable-demuxer=mpegts
-  --enable-demuxer=nut
-  --enable-demuxer=ogg
-  # FFmpeg 8 renamed the raw PCM components: the CLI name is still "-f s16le",
-  # but the configure name is pcm_s16le (that is the audio pipe's format).
-  --enable-demuxer=pcm_f32le
-  --enable-demuxer=pcm_s16le
-  --enable-demuxer=pcm_s24le
-  --enable-demuxer=rawvideo
-  --enable-demuxer=wav
-
-  # -- muxers
-  --enable-muxer=adts
-  --enable-muxer=apng
-  --enable-muxer=avi
-  --enable-muxer=flac
-  --enable-muxer=gif
-  --enable-muxer=image2
-  --enable-muxer=ipod
-  --enable-muxer=matroska
-  --enable-muxer=mov
-  --enable-muxer=mp3
-  --enable-muxer=mp4
-  --enable-muxer=mpegts
-  --enable-muxer=null
-  --enable-muxer=nut
-  --enable-muxer=ogg
-  --enable-muxer=pcm_s16le
-  --enable-muxer=rawvideo
-  --enable-muxer=segment
-  --enable-muxer=wav
-  --enable-muxer=webm
-
-  # -- video encoders
-  --enable-encoder=libx264
-  --enable-encoder=libx265
-  --enable-encoder=h264_nvenc
-  --enable-encoder=hevc_nvenc
-  --enable-encoder=av1_nvenc
-  --enable-encoder=h264_amf
-  --enable-encoder=hevc_amf
-  --enable-encoder=av1_amf
-  --enable-encoder=h264_qsv
-  --enable-encoder=hevc_qsv
-  --enable-encoder=av1_qsv
-  --enable-encoder=mpeg4
-  --enable-encoder=mjpeg
-  --enable-encoder=png
-  --enable-encoder=bmp
-  --enable-encoder=gif
-  --enable-encoder=apng
-  --enable-encoder=rawvideo
-  # `-f null -` with no explicit video codec picks wrapped_avframe (the CLI's own
-  # "throw the frame away" encoder); without it that command fails with
-  # "Automatic encoder selection failed".
-  --enable-encoder=wrapped_avframe
-
-  # -- audio encoders
-  --enable-encoder=aac
-  --enable-encoder=libmp3lame
-  --enable-encoder=libopus
-  --enable-encoder=libvorbis
-  --enable-encoder=pcm_s16le
-  --enable-encoder=pcm_s24le
-  --enable-encoder=pcm_f32le
-  --enable-encoder=flac
-  --enable-encoder=ac3
-  --enable-encoder=eac3
-  --enable-encoder=mp2
-
-  # -- decoders used by the ffmpeg CLI itself
-  --enable-decoder=wrapped_avframe
-
-  # -- video decoders (audio-file mixer, future trimming, thumbnails)
-  --enable-decoder=h264
-  --enable-decoder=hevc
-  --enable-decoder=av1
-  --enable-decoder=libdav1d
-  --enable-decoder=vp8
-  --enable-decoder=vp9
-  --enable-decoder=mpeg1video
-  --enable-decoder=mpeg2video
-  --enable-decoder=mpeg4
-  --enable-decoder=mjpeg
-  --enable-decoder=png
-  --enable-decoder=bmp
-  --enable-decoder=gif
-  --enable-decoder=webp
-  --enable-decoder=tiff
-  --enable-decoder=wmv1
-  --enable-decoder=wmv2
-  --enable-decoder=wmv3
-  --enable-decoder=vc1
-  --enable-decoder=h263
-  --enable-decoder=rawvideo
-  --enable-decoder=prores
-  --enable-decoder=dnxhd
-  --enable-decoder=theora
-
-  # -- audio decoders
-  --enable-decoder=aac
-  --enable-decoder=aac_latm
-  --enable-decoder=mp3
-  --enable-decoder=mp2
-  --enable-decoder=mp1
-  --enable-decoder=ac3
-  --enable-decoder=eac3
-  --enable-decoder=dca
-  --enable-decoder=truehd
-  --enable-decoder=flac
-  --enable-decoder=vorbis
-  --enable-decoder=opus
-  --enable-decoder=wmav1
-  --enable-decoder=wmav2
-  --enable-decoder=wmapro
-  --enable-decoder=wmalossless
-  --enable-decoder=pcm_s16le
-  --enable-decoder=pcm_s24le
-  --enable-decoder=pcm_s32le
-  --enable-decoder=pcm_f32le
-  --enable-decoder=pcm_u8
-  --enable-decoder=pcm_alaw
-  --enable-decoder=pcm_mulaw
-  --enable-decoder=alac
-
-  # -- parsers
-  --enable-parser=aac
-  --enable-parser=aac_latm
-  --enable-parser=ac3
-  --enable-parser=av1
-  --enable-parser=dca
-  --enable-parser=flac
-  --enable-parser=gif
-  --enable-parser=h264
-  --enable-parser=hevc
-  --enable-parser=mjpeg
-  --enable-parser=mpeg4video
-  --enable-parser=mpegvideo
-  --enable-parser=mpegaudio
-  --enable-parser=opus
-  --enable-parser=png
-  --enable-parser=vc1
-  --enable-parser=vorbis
-  --enable-parser=vp8
-  --enable-parser=vp9
-
-  # -- bitstream filters
-  --enable-bsf=aac_adtstoasc
-  --enable-bsf=av1_metadata
-  --enable-bsf=extract_extradata
-  --enable-bsf=h264_metadata
-  --enable-bsf=h264_mp4toannexb
-  --enable-bsf=hevc_metadata
-  --enable-bsf=hevc_mp4toannexb
-  --enable-bsf=setts
-  --enable-bsf=vp9_metadata
-  --enable-bsf=vp9_superframe
-
-  # -- filters (the recording pipeline + the audio mixer; a few for later)
-  # buffersrc/buffersink are always built in (they are not selectable components),
-  # so they are not listed here.
-  --enable-filter=adelay
-  --enable-filter=afade
-  --enable-filter=amix
-  --enable-filter=amerge
-  --enable-filter=anull
-  --enable-filter=anullsrc
-  --enable-filter=apad
-  --enable-filter=aresample
-  --enable-filter=asetpts
-  --enable-filter=atempo
-  --enable-filter=atrim
-  --enable-filter=boxblur
-  --enable-filter=color
-  --enable-filter=concat
-  --enable-filter=crop
-  --enable-filter=ddagrab
-  --enable-filter=delogo
-  --enable-filter=fade
-  --enable-filter=format
-  --enable-filter=fps
-  --enable-filter=hflip
-  --enable-filter=hwdownload
-  --enable-filter=hwmap
-  --enable-filter=hwupload
-  --enable-filter=null
-  --enable-filter=nullsrc
-  --enable-filter=overlay
-  --enable-filter=pad
-  --enable-filter=scale
-  --enable-filter=select
-  --enable-filter=setpts
-  --enable-filter=setsar
-  --enable-filter=sine
-  --enable-filter=split
-  --enable-filter=testsrc
-  --enable-filter=testsrc2
-  --enable-filter=transpose
-  --enable-filter=trim
-  --enable-filter=vflip
-  --enable-filter=volume
-
-  # hardware decoders (only the D3D11/DXVA paths; no CUDA/VAAPI/Vulkan).
-  # FFmpeg 8 lists these per codec, so the old generic "d3d11va" names are ignored.
-  --enable-hwaccel=h264_d3d11va
-  --enable-hwaccel=h264_d3d11va2
-  --enable-hwaccel=h264_d3d12va
-  --enable-hwaccel=h264_dxva2
-  --enable-hwaccel=hevc_d3d11va
-  --enable-hwaccel=hevc_d3d11va2
-  --enable-hwaccel=hevc_d3d12va
-  --enable-hwaccel=hevc_dxva2
-  --enable-hwaccel=av1_d3d11va
-  --enable-hwaccel=av1_d3d11va2
-  --enable-hwaccel=av1_d3d12va
-  --enable-hwaccel=av1_dxva2
-  --enable-hwaccel=vp9_d3d11va
-  --enable-hwaccel=vp9_d3d11va2
-  --enable-hwaccel=vp9_d3d12va
-  --enable-hwaccel=vp9_dxva2
-  --enable-hwaccel=mpeg2_d3d11va
-  --enable-hwaccel=mpeg2_d3d11va2
-  --enable-hwaccel=mpeg2_d3d12va
-  --enable-hwaccel=mpeg2_dxva2
-  --enable-hwaccel=vc1_d3d11va
-  --enable-hwaccel=vc1_d3d11va2
-  --enable-hwaccel=vc1_d3d12va
-  --enable-hwaccel=vc1_dxva2
-  --enable-hwaccel=wmv3_d3d11va
-  --enable-hwaccel=wmv3_d3d11va2
-  --enable-hwaccel=wmv3_d3d12va
-  --enable-hwaccel=wmv3_dxva2
+  # A normal build: all native components stay enabled. Do not add
+  # --disable-everything here unless every single component HomRec (and the
+  # user's custom ffmpeg args) can ever need is listed and tested.
 )
 
 say "== configure"
@@ -414,32 +163,71 @@ cd "$SRC"
 ./configure "${CONFIGURE[@]}"
 
 # ---------------------------------------------------------------- verify
-# A misspelled or renamed component does not fail configure - it is silently
-# dropped, and the build succeeds with a missing demuxer/encoder (this is how
-# `-f s16le` once went missing after FFmpeg renamed it to pcm_s16le). Check
-# every requested component against the generated config_components.h.
-say "== verify requested components"
+# A typo or a renamed component does not fail configure - it is silently dropped
+# and the build succeeds with a missing piece (this is how `-f s16le` once went
+# missing after FFmpeg renamed it to pcm_s16le). Check the components HomRec
+# actually calls against the generated config_components.h.
+say "== verify the components HomRec uses"
 missing=0
-for arg in "${CONFIGURE[@]}"; do
-  case "$arg" in
-    --enable-*=*) ;;
-    *) continue ;;
-  esac
-  kind=${arg#--enable-}; kind=${kind%%=*}
-  name=${arg#*=}
-  case "$kind" in
-    protocol|indev|outdev|demuxer|muxer|encoder|decoder|parser|bsf|filter|hwaccel) ;;
-    *) continue ;;
-  esac
+check() { # kind name
+  local kind=$1 name=$2
+  local U K
   U=$(printf '%s' "$name" | sed 's/[^A-Za-z0-9]/_/g' | tr '[:lower:]' '[:upper:]')
   K=$(printf '%s' "$kind" | tr '[:lower:]' '[:upper:]')
   if ! grep -q "^#define CONFIG_${U}_${K} 1$" config_components.h; then
-    printf '   NOT ENABLED: %s\n' "$arg"
+    printf '   NOT ENABLED: %s %s\n' "$kind" "$name"
     missing=1
   fi
-done
+}
+check indev   dshow
+check indev   lavfi
+check demuxer nut
+check demuxer rawvideo
+check demuxer pcm_s16le
+check demuxer matroska
+check demuxer mov
+check demuxer mpegts
+check demuxer concat
+check demuxer mp3
+check demuxer wav
+check muxer   mp4
+check muxer   matroska
+check muxer   mpegts
+check muxer   segment
+check muxer   nut
+check muxer   mp3
+check muxer   wav
+check muxer   null
+check encoder libx264
+check encoder libx265
+check encoder h264_nvenc
+check encoder hevc_nvenc
+check encoder h264_amf
+check encoder hevc_amf
+check encoder h264_qsv
+check encoder hevc_qsv
+check encoder aac
+check encoder libmp3lame
+check encoder pcm_s16le
+check encoder wrapped_avframe
+check decoder rawvideo
+check decoder wrapped_avframe
+check filter  ddagrab
+check filter  hwdownload
+check filter  hwmap
+check filter  overlay
+check filter  scale
+check filter  fps
+check filter  setpts
+check filter  format
+check filter  aresample
+check filter  apad
+check bsf     setts
+check bsf     h264_metadata
+check bsf     hevc_metadata
+check bsf     av1_metadata
 [ "$missing" -eq 0 ] || die "components above are missing from the build (renamed in this FFmpeg version? see config_components.h)"
-say "   all requested components are enabled"
+say "   all checked components are enabled"
 
 # ---------------------------------------------------------------- build
 JOBS=$(nproc 2>/dev/null || echo 4)
