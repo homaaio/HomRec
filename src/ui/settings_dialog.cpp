@@ -23,6 +23,7 @@
 #include <wx/scrolwin.h>
 #include <wx/statline.h>
 #include <wx/timer.h>
+#include <wx/display.h>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -231,7 +232,7 @@ public:
     SettingsDialog(wxWindow *parent, AppState &state, const ThemeColors &theme,
                     const LanguageTable &lang, RecordingController *rec)
         : wxDialog(parent, wxID_ANY, wxString::FromUTF8(lang.Get("settings_title")),
-                   wxDefaultPosition, wxSize(600, 640),
+                   wxDefaultPosition, wxWindow::FromDIP(wxSize(600, 640), parent),
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
           state_(state), theme_(theme), lang_(lang), rec_(rec), test_timer_(this) {
         wxColour bg = FromColorref(theme_.bg);
@@ -240,6 +241,10 @@ public:
         wxColour textDim = FromColorref(theme_.text_secondary);
         wxColour accent = FromColorref(theme_.accent);
         SetBackgroundColour(bg);
+        {
+            const wxRect wa = wxDisplay(0u).GetClientArea();
+            SetSize(std::min(GetSize().x, wa.width), std::min(GetSize().y, wa.height));
+        }
 
         auto *root = new wxBoxSizer(wxVERTICAL);
 
@@ -1086,7 +1091,7 @@ private:
 
         codec_combo_->SetValue(hr_settings_get_codec(def));
         hwaccel_combo_->SetValue("auto");
-        preset_combo_->SetValue("ultrafast");
+        preset_combo_->SetValue("veryfast");
         crf_spin_->SetValue(18);
         pixfmt_combo_->SetValue("yuv420p");
         custom_args_edit_->SetValue("");

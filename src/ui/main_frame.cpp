@@ -906,7 +906,7 @@ void PreviewPanel::ExitSnapshotMode() {
 // HomRecMainFrame
 // ---------------------------------------------------------------------------
 HomRecMainFrame::HomRecMainFrame()
-    : wxFrame(nullptr, wxID_ANY, "HomRec", wxDefaultPosition, wxSize(1300, 750)),
+    : wxFrame(nullptr, wxID_ANY, "HomRec", wxDefaultPosition, wxWindow::FromDIP(wxSize(1300, 750), nullptr)),
       countdown_timer_(this), schedule_timer_(this),
       preview_timer_(this), stats_timer_(this), level_meter_timer_(this), restore_topmost_timer_(this) {
     g_frame = this;
@@ -982,7 +982,14 @@ HomRecMainFrame::HomRecMainFrame()
     lang_ = LanguageTable::Load(state_.current_language, "Assets\\L");
     theme_ = GetBuiltinTheme(state_.current_theme);
 
-    SetMinSize(wxSize(state_.window_min_w, state_.window_min_h));
+    // Sizes are in DIPs so the window follows the Windows display scaling; clamped to the primary work area.
+    {
+        const wxRect wa = wxDisplay(0u).GetClientArea();
+        wxSize mn = FromDIP(wxSize(state_.window_min_w, state_.window_min_h));
+        mn.x = std::min(mn.x, wa.width); mn.y = std::min(mn.y, wa.height);
+        SetMinSize(mn);
+        SetSize(std::min(GetSize().x, wa.width), std::min(GetSize().y, wa.height));
+    }
 
     BuildMenuBar();
 

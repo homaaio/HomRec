@@ -1,14 +1,41 @@
 welcome to changelog :D
 
-[Unreleased]
+[Version 3.1.3]- 2026-11-23
 
 ### Added
-- **FFmpeg:** `ffmpeg-hr`, a lean static FFmpeg 8.0.1 build for HomRec (`ffmpeg/build-ffmpeg-hr.sh`).
+- **FFmpeg:** `ffmpeg-hr`, a static FFmpeg 8.0.4 build for HomRec (`ffmpeg/build-ffmpeg-hr.sh`).
   In the console, `inwid hom install ffmpeg-hr` downloads it to `ffmpeg\ffmpeg.exe` next to `hr.exe`,
   where HomRec already looks. The "FFmpeg not found." message now says so.
   The build script now checks every requested component against the generated configuration, so a name
   that a newer FFmpeg renamed cannot be dropped silently again (that is what removed `-f s16le`, the
   audio pipe's raw PCM input, and made recordings fail at once with ffmpeg exit code `-22`).
+
+### Changed
+- **Recording quality:** NVENC no longer runs in `-preset p1 -tune ull -rc constqp -qp N`, which is
+  NVIDIA's fastest and ugliest mode (spatial AQ and lookahead off, coarse motion search): at
+  `quality 100` it still produced soft text and blocky motion. It now uses
+  `-preset p5 -tune hq -rc vbr -cq N -b:v 0 -spatial_aq 1 -aq-strength 8`, and the quality slider maps
+  to `-cq 32..17` instead of `-qp 34..23`. On real window-drag/text content at the default slider value
+  (70) that measured as 6.5 -> 12.7 Mb/s and +2.4 dB PSNR against the same source. The default libx264
+  preset is now `veryfast` instead of `ultrafast` (same reason, CPU path).
+
+### Fixed
+- **Window size on scaled displays:** the main window and Settings used fixed pixel sizes, so on a 4K screen with Windows
+  scaling above 100% they opened small with cut-off content. Their sizes are now scaled to the display and limited to
+  the screen work area. Not yet tested on a high-DPI screen; other dialogs still use fixed pixel sizes.
+- **Recording:** dragging or moving a window no longer leaves its previous position behind as a stale or
+  black band, and the pointer no longer leaves a ghost copy of itself along the drag path. The desktop
+  duplication reports a window move as the destination rectangle only; the area the pixels were copied
+  from is now refreshed as well, so the persistent desktop copy cannot keep the vacated window content
+  (or the pointer pixels Windows draws into a title bar while a window is being moved) until the next
+  full refresh.
+- **FFmpeg:** `ffmpeg-hr` is now a normal FFmpeg build instead of a hand-written allow-list. The
+  `--disable-everything` list had dropped components that real use needs (custom `custom_ffmpeg_args`,
+  importing audio/video files, decoding, uncommon containers), which made the exe behave badly in
+  ways that were hard to trace. All native components are back; only `ffplay`/`ffprobe`, the docs and
+  debug symbols stay out. The script still verifies the components HomRec invokes and fails loudly if
+  one is missing. Build `8.0.4` removes exactly two more things that recording can never use - the
+  network protocols (`--disable-network`) and the `caca` ASCII-art muxer - and nothing else.
 
 [Version 3.1.2] - 2026-11-18
 
