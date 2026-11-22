@@ -329,3 +329,7 @@ commits.txt
 logs/*
 cfg/*.cfg
 tmp/
+# in build.cmd writen local paths, so it is not useful to keep it in the repo
+build.cmd
+*.old
+*.new
