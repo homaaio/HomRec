@@ -15,6 +15,7 @@ Find your symptom, follow the steps **in order**, and stop when it works. Not so
 - [HomRec does not start or closes immediately](#homrec-does-not-start-or-closes-immediately)
 - [Start does nothing or shows an error](#start-does-nothing-or-shows-an-error)
 - [The recording is black, frozen or shows the wrong thing](#the-recording-is-black-frozen-or-shows-the-wrong-thing)
+- [Screen capture unavailable, or `HRESULT 0x887A0004` in the log](#screen-capture-unavailable-or-hresult-0x887a0004-in-the-log)
 - [There is no sound, or the wrong sound](#there-is-no-sound-or-the-wrong-sound)
 - [The recording stutters or the game loses FPS](#the-recording-stutters-or-the-game-loses-fps)
 - [The file is missing, damaged, huge or tiny](#the-file-is-missing-damaged-huge-or-tiny)
@@ -48,7 +49,9 @@ Run `python tools\homrec_check.py --launch` for an automatic check ([logs-and-di
 | "Already recording." / "The previous recording is still being saved" | State not finished. | Wait until the status is idle. |
 | "The window you selected ... is not on any screen" | The window is closed or minimised. | [capture-sources.md](capture-sources.md) |
 | "Failed to start the ffmpeg process." | ffmpeg cannot run (blocked by antivirus, damaged file). | [recording-troubleshooting.md](recording-troubleshooting.md) |
-| "Failed to start the capture pipeline." | The capture engine could not start (remote session, graphics driver). | See the next section. |
+| "Failed to start the capture pipeline." | The capture engine could not start (remote session, graphics driver). | [Screen capture unavailable](#screen-capture-unavailable-or-hresult-0x887a0004-in-the-log). |
+| "Couldn't capture a screenshot to edit overlays against" | Edit Overlay needs one desktop screenshot, and screen capture is not working. | Same as the line above: [Screen capture unavailable](#screen-capture-unavailable-or-hresult-0x887a0004-in-the-log). |
+| "HomRec - Recording Interrupted" | The ffmpeg process ended by itself while recording. | [recording-troubleshooting.md > Recording stopped unexpectedly](recording-troubleshooting.md#recording-stopped-unexpectedly-popup). |
 | The hotkey does nothing | See [Hotkeys](#hotkeys-do-not-work). | |
 
 ## The recording is black, frozen or shows the wrong thing
@@ -65,6 +68,31 @@ Run `python tools\homrec_check.py --launch` for an automatic check ([logs-and-di
 9. Still wrong: turn on **Window capture logging** and read `logs\wgc.log`.
 
 Nothing here is specific to a driver version that was tested for this guide. Mention your GPU and driver in a report.
+
+## Screen capture unavailable, or `HRESULT 0x887A0004` in the log
+
+What you see: the preview says "Screen capture unavailable", **Start** shows "Failed to start the capture pipeline.",
+and `logs\homrec.log` repeats `Pipeline create failed: dx_create() returned null, HRESULT 0x...`.
+
+`0x887A0004` is `DXGI_ERROR_UNSUPPORTED`: Windows refused Desktop Duplication for the selected monitor. The log line does
+not say why, so go through these in order:
+
+1. Remote Desktop or a virtual display: capture does not work there. Use the physical session.
+2. Two graphics adapters (a laptop with integrated + NVIDIA/AMD, or a PC with the monitor plugged into a different card
+   than the one Windows lists first). HomRec asks for the **first adapter** only (adapter 0). If the selected monitor is
+   driven by another adapter, Desktop Duplication can fail. Try: plug the monitor into the GPU that drives the main
+   display, or change which GPU HomRec uses in Windows Settings > System > Display > Graphics, and restart HomRec.
+3. HDR or "Use HDR" turned on for that monitor (Windows Settings > System > Display). Turn it off and test. This is a
+   setting to rule out; it has not been confirmed as the cause for HomRec.
+4. [Update the graphics driver](#update-the-graphics-driver) and restart HomRec.
+
+Good to know (HomRec 3.1.2): the desktop capture is started first even when the source is a single window or when the
+Desktop layer is hidden. In a 3.1.2 log with this error, window sources and "Start" failed too, so choosing a window does
+not work around it. The same failed capture also stops **Edit Overlay** with preview off ("Couldn't capture a screenshot
+to edit overlays against").
+
+If it still fails, send `logs\homrec.log`, the `dxdiag` "Display" section (it lists every GPU and which one drives which
+monitor) and a note on whether the PC is a laptop.
 
 ## There is no sound, or the wrong sound
 

@@ -99,6 +99,18 @@ If the driver cannot be updated, use `libx264` (software encoder, works everywhe
 | `Startup: no working GPU encoder found` | The hardware encoder probe failed. Recording will use `libx264`. |
 | `full-GPU (ddagrab) capture is switched off` | ddagrab mode was turned off for the rest of the session after a failure. |
 
+## "Recording stopped unexpectedly" popup
+
+The popup titled **HomRec - Recording Interrupted** says the encoder process ended on its own. HomRec shows it when ffmpeg
+stops while the recording is still running: ffmpeg crashed, something closed it (Task Manager, antivirus), or it hit a fatal
+error. The popup says that what was captured up to that moment has been finalized and saved, so check the output folder
+first.
+
+The popup does not give the reason. Open `logs\homrec.log` and find the `ffmpeg exit code` line near the end of that
+recording, then look the code up in [ffmpeg exit codes](#ffmpeg-exit-codes). If the hardware encoder is selected (`h264_nvenc`,
+`h264_qsv`, `h264_amf`), also read [Hardware encoders](#hardware-encoders-nvenc--qsv--amf) and try `libx264` once to see
+whether the encoder is the cause.
+
 ## If nothing helps
 
 Attach to your report:
