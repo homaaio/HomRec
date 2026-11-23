@@ -1,6 +1,6 @@
 welcome to changelog :D
 
-[Version 3.1.3]- 2026-11-23
+[Version 3.1.3] - 2026-11-23
 
 ### Added
 - **FFmpeg:** `ffmpeg-hr`, a static FFmpeg 8.0.4 build for HomRec (`ffmpeg/build-ffmpeg-hr.sh`).
@@ -20,6 +20,9 @@ welcome to changelog :D
   preset is now `veryfast` instead of `ultrafast` (same reason, CPU path).
 
 ### Fixed
+- **Capture on PCs with two GPUs:** if Windows answered "unsupported" (0x887A0004) for the first graphics adapter, HomRec
+  gave up with "Failed to start the capture pipeline". It now retries on any other adapter that lists the same monitor
+  (e.g. the Intel iGPU that actually drives it). Not tested on a hybrid-GPU PC.
 - **Window size on scaled displays:** the main window and Settings used fixed pixel sizes, so on a 4K screen with Windows
   scaling above 100% they opened small with cut-off content. Their sizes are now scaled to the display and limited to
   the screen work area. Not yet tested on a high-DPI screen; other dialogs still use fixed pixel sizes.
