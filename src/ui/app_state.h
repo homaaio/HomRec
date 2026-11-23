@@ -146,7 +146,7 @@ struct AppState {
     bool        skip_static_frames = true;
     // ffmpeg "ddagrab" fast path (ffmpeg 6.0+, hardware encoders only): ffmpeg captures AND
     // encodes entirely on the GPU.
-    bool        gpu_capture_ddagrab = false;
+    bool        gpu_capture_ddagrab = true;
     // Ddagrab, the two things it used to lack. Terminal / cfg only.
     //   ddagrab_pause    : Pause works during a ddagrab recording. ffmpeg owns the capture and cannot be paused, so Pause
     //                      ends the current ffmpeg piece and Resume starts the next one (same container as the output); Stop joins the pieces with a

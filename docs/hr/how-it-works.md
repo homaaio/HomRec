@@ -84,7 +84,7 @@ After the checks, HomRec runs the 3-second countdown (if enabled) and `cfg\start
 | Path | When | Log line |
 |---|---|---|
 | **Normal pipeline + ffmpeg** | The default. | `Recording: encoding with libx264 (software)` or `... with h264_nvenc (hardware)` |
-| **Full-GPU ddagrab** | You ticked *Full-GPU capture via ffmpeg ddagrab* (experimental), ffmpeg is 6+, a hardware encoder is in use, and you use no overlays, plugins, reduced resolution or window tracking. | `Recording: full-GPU capture + encode via ffmpeg ddagrab` |
+| **Full-GPU ddagrab** | *Full-GPU capture via ffmpeg ddagrab* is ticked (the default), ffmpeg is 6+, a hardware encoder is in use, and you use no overlays, plugins, reduced resolution or window tracking. | `Recording: full-GPU capture + encode via ffmpeg ddagrab` |
 | **In-process Media Foundation** | Experimental, off by default; only through the console / cfg (`mf_encoder=1`), H.264 hardware encoder, MP4 output, no custom ffmpeg arguments. | `Recording: in-process Media Foundation encoder` |
 
 If ddagrab or Media Foundation cannot start, HomRec logs why and continues with the normal pipeline.

@@ -18,6 +18,10 @@ welcome to changelog :D
   to `-cq 32..17` instead of `-qp 34..23`. On real window-drag/text content at the default slider value
   (70) that measured as 6.5 -> 12.7 Mb/s and +2.4 dB PSNR against the same source. The default libx264
   preset is now `veryfast` instead of `ultrafast` (same reason, CPU path).
+- **Full-GPU capture (ddagrab)** is now ON by default (`gpu_capture_ddagrab=1`). Plain recordings with a hardware
+  encoder are captured and encoded inside ffmpeg instead of HomRec's own pipeline. Anything it cannot do
+  (overlays, plugins, pause on silence, window capture, reduced resolution, a software encoder, an ffmpeg
+  without ddagrab) still uses the normal pipeline automatically. An existing saved setting is kept.
 
 ### Fixed
 - **Capture on PCs with two GPUs:** if Windows answered "unsupported" (0x887A0004) for the first graphics adapter, HomRec

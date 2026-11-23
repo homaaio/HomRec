@@ -110,7 +110,7 @@ managers, chat windows and notifications.
 
 ## Full-GPU capture (ddagrab)
 
-An experimental setting (**Settings > Video & Codec > GPU acceleration**) lets ffmpeg capture and encode entirely on
+On by default (**Settings > Video & Codec > GPU acceleration**), ffmpeg captures and encodes entirely on
 the GPU. It cannot be used together with HomRec overlays or plugins, pause or silence auto-pause, window tracking, or a reduced
 output resolution; HomRec then quietly uses the normal pipeline. See [codecs.md](codecs.md) and
 [how-it-works.md](how-it-works.md#which-path-does-the-video-take).
