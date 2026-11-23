@@ -3177,6 +3177,7 @@ void HomRecMainFrame::OnIconize(wxIconizeEvent &evt) {
     // "shown" as far as wx is concerned, just iconized in the taskbar.
     if (rec_) rec_->SetPreviewVisible(!evt.IsIconized() && !suspended_);
     ApplyVisibilityTimers(!evt.IsIconized() && IsShown() && !suspended_);
+    if (evt.IsIconized()) ws_trim_at_ = GetTickCount64() + 3000;   // hidden/minimised: give back the UI's pages
     evt.Skip();
 }
 
@@ -3189,6 +3190,7 @@ void HomRecMainFrame::OnActivate(wxActivateEvent &evt) {
 void HomRecMainFrame::OnShowEvent(wxShowEvent &evt) {
     if (rec_) rec_->SetPreviewVisible(evt.IsShown() && !suspended_);
     ApplyVisibilityTimers(evt.IsShown() && !IsIconized() && !suspended_);
+    if (!evt.IsShown()) ws_trim_at_ = GetTickCount64() + 3000;      // hidden to tray: same
     evt.Skip();
 }
 
