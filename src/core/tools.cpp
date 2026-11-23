@@ -276,7 +276,8 @@ HR_EXPORT int hr_build_codec_args_ex(const wchar_t* codec,
     ss << L"-c:v " << codec;
 
     if (is_nvenc) {
-        ss << L" -preset p1 -tune ull -rc constqp -qp " << qp << L" -g " << gop;
+        int cq = 32 - (int)((quality < 0 ? 0 : (quality > 100 ? 100 : quality)) / 100.0 * 15);
+        ss << L" -preset p5 -tune hq -rc vbr -cq " << cq << L" -b:v 0 -spatial_aq 1 -aq-strength 8 -g " << gop;
     } else if (is_qsv) {
         // This used to pass "-qp N".
         int w = enc_w > 0 ? enc_w : 1920;
