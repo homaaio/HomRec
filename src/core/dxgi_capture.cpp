@@ -217,10 +217,20 @@ struct DxCapCtx {
         DxBox box;
         const auto *mv = reinterpret_cast<const DXGI_OUTDUPL_MOVE_RECT *>(meta.data());
         for (UINT i = 0; i < move_bytes / sizeof(DXGI_OUTDUPL_MOVE_RECT); ++i) {
-            /* Only the destination changed; where the pixels came FROM is
-             * either untouched or reported again as a dirty rect. */
+            /* Both ends of the move changed. The destination got the pixels,
+             * but the area they were copied FROM was overwritten too, and
+             * Windows does NOT report that source area again as a dirty rect
+             * (it is covered by the move metadata). Using the destination
+             * alone leaves the vacated position in the cached picture - a
+             * stale or black band behind a dragged window, and a ghost copy
+             * of the pointer along its drag path (the pointer pixels Windows
+             * bakes into a title bar while a window is being moved). */
             const RECT &d = mv[i].DestinationRect;
             box.add((int)d.left, (int)d.top, (int)d.right, (int)d.bottom);
+            const int mw = (int)d.right - (int)d.left;
+            const int mh = (int)d.bottom - (int)d.top;
+            const POINT &s = mv[i].SourcePoint;
+            box.add((int)s.x, (int)s.y, (int)s.x + mw, (int)s.y + mh);
         }
         const auto *dr = reinterpret_cast<const RECT *>(meta.data() + move_bytes);
         for (UINT i = 0; i < dirty_bytes / sizeof(RECT); ++i)
@@ -562,7 +572,7 @@ HR_EXPORT void hr_dx_set_mt_protect(int enabled) {
 /* -------------------------------------------------------------------------
  * hr_dx_create
  * ---------------------------------------------------------------------- */
-HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
+static void *dx_create_on(int adapter_idx, int output_idx) {
 #ifdef _WIN32
     DxCapCtx *ctx = nullptr;
     try { ctx = new DxCapCtx(); } catch (...) { return nullptr; }
@@ -629,6 +639,39 @@ HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
 #else
     return nullptr;
 #endif
+}
+
+HR_EXPORT void *hr_dx_create(int adapter_idx, int output_idx) {
+    void *ctx = dx_create_on(adapter_idx, output_idx);
+#ifdef _WIN32
+    // On a PC with two GPUs Windows can list a monitor under an adapter that does not drive it (e.g. an
+    // NVIDIA card next to an Intel iGPU that has the monitor attached); DuplicateOutput then fails with
+    // DXGI_ERROR_UNSUPPORTED.
+    if (!ctx && g_last_dx_error == static_cast<HRESULT>(DXGI_ERROR_UNSUPPORTED)) {
+        const HRESULT first_err = g_last_dx_error;
+        ComPtr<IDXGIFactory1> factory;
+        ComPtr<IDXGIAdapter1> adapter;
+        ComPtr<IDXGIOutput> output;
+        DXGI_OUTPUT_DESC want{};
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(factory.GetAddressOf()))) &&
+            SUCCEEDED(factory->EnumAdapters1((UINT)adapter_idx, &adapter)) &&
+            SUCCEEDED(adapter->EnumOutputs((UINT)output_idx, &output)) &&
+            SUCCEEDED(output->GetDesc(&want))) {
+            for (UINT ai = 0; factory->EnumAdapters1(ai, &adapter) != DXGI_ERROR_NOT_FOUND; ++ai) {
+                if ((int)ai == adapter_idx) continue;
+                for (UINT oi = 0; adapter->EnumOutputs(oi, &output) != DXGI_ERROR_NOT_FOUND; ++oi) {
+                    DXGI_OUTPUT_DESC d{};
+                    if (FAILED(output->GetDesc(&d))) continue;
+                    if (d.DesktopCoordinates.left != want.DesktopCoordinates.left ||
+                        d.DesktopCoordinates.top  != want.DesktopCoordinates.top) continue;
+                    if ((ctx = dx_create_on((int)ai, (int)oi)) != nullptr) return ctx;
+                }
+            }
+        }
+        g_last_dx_error = first_err;
+    }
+#endif
+    return ctx;
 }
 
 HR_EXPORT unsigned long hr_dx_last_error(void) {
