@@ -61,6 +61,8 @@ extern "C" {
     int   hr_dx_output_desc(int adapter_idx, int output_idx, int *out_x, int *out_y,
                              int *out_w, int *out_h, char *name_buf, int name_buf_len);
     unsigned long hr_dx_last_error(void);
+    int   hr_dx_adapter_count(void);
+    int   hr_dx_output_count(int adapter_idx);
     void  hr_composite_cursor(uint8_t *bgra, int width, int height, int origin_x, int origin_y);
     void  hr_composite_cursor_nv12(uint8_t *nv12, int width, int height, int origin_x, int origin_y,
                                     float scale_x, float scale_y);
@@ -2143,6 +2145,22 @@ HR_EXPORT void* hr_pl_create(int w, int h, int fps,
         HrLog::Error(std::string("Pipeline create failed: dx_create() returned null, HRESULT ") + hres_buf +
                      " (DXGI desktop duplication init failed -- common causes: running over RDP/a virtual "
                      "display, a just-changed display mode, or insufficient permissions)");
+        // Which adapters/outputs DXGI lists - tells a hybrid-GPU/virtual-display case from a plain refusal.
+        {
+            std::string lay;
+            const int na = hr_dx_adapter_count();
+            for (int ai = 0; ai < na; ++ai) {
+                const int no = hr_dx_output_count(ai);
+                lay += " adapter" + std::to_string(ai) + "(outputs=" + std::to_string(no) + ")";
+                for (int oi = 0; oi < no; ++oi) {
+                    int ox = 0, oy = 0, ow = 0, oh = 0; char nm[64] = {};
+                    if (hr_dx_output_desc(ai, oi, &ox, &oy, &ow, &oh, nm, sizeof(nm)))
+                        lay += " [" + std::string(nm) + " " + std::to_string(ow) + "x" + std::to_string(oh) +
+                               "@" + std::to_string(ox) + "," + std::to_string(oy) + "]";
+                }
+            }
+            HrLog::Error("DXGI layout (requested output " + std::to_string(output_idx) + "):" + lay);
+        }
         delete pl; return nullptr;
     }
     // Matches dx_create(0, output_idx) above - needed so

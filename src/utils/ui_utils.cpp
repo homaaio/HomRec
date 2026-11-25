@@ -584,8 +584,13 @@ HR_EXPORT float hr_file_size_mb(const char *path) {
 HR_EXPORT int hr_make_output_dir(const char *path) {
     if (!path || !path[0]) return 0;
 #ifdef _WIN32
-    /* SHCreateDirectoryExA handles nested paths */
-    int rc = SHCreateDirectoryExW(nullptr, _hr_wide(path).c_str(), nullptr);
+    // SHCreateDirectoryExW handles nested paths but rejects relative ones (ERROR_BAD_PATHNAME),
+    // and the default output folder is the relative "recordings" - resolve it first.
+    std::wstring wp = _hr_wide(path);
+    wchar_t full[MAX_PATH * 4];
+    DWORD n = GetFullPathNameW(wp.c_str(), (DWORD)(sizeof(full) / sizeof(full[0])), full, nullptr);
+    if (n > 0 && n < sizeof(full) / sizeof(full[0])) wp.assign(full, n);
+    int rc = SHCreateDirectoryExW(nullptr, wp.c_str(), nullptr);
     return (rc == ERROR_SUCCESS || rc == ERROR_ALREADY_EXISTS) ? 1 : 0;
 #else
     /* Recursive mkdir */
