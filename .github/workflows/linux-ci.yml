@@ -1,4 +1,4 @@
-name: Linux (raw port)
+name: Linux
 
 # Builds the Linux target (homrec) and runs the platform-independent unit tests on Ubuntu.
 # Runs only for the Linux port: pushes to linux-* branches, pull requests that touch the Linux /
@@ -12,7 +12,10 @@ on:
   pull_request:
     paths:
       - "src/platform/**"
-      - "src/core/encoder_helpers.c"
+      - "src/core/**"
+      - "src/ui/**"
+      - "src/utils/**"
+      - "src/commands/**"
       - "cmake/**"
       - "CMakeLists.txt"
       - "scripts/linux/**"
