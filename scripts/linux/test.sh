@@ -23,10 +23,12 @@ cd "$ROOT"
 "$CC" -O2 -Wall "${SAN[@]}" -c src/core/encoder_helpers.c -o "$OUT/encoder_helpers.o"
 
 fail=0
-for t in wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry idle_detect; do
+for t in wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry idle_detect process_linux x11_record; do
     extra=()
     [ "$t" = "encoder_helpers" ] && extra=("$OUT/encoder_helpers.o")
     [ "$t" = "settings_registry" ] && extra=(src/core/settings_registry.cpp)
+    [ "$t" = "process_linux" ] && extra=(src/platform/linux/process_linux.cpp)
+    [ "$t" = "x11_record" ] && extra=(src/platform/linux/x11/x11_record.cpp src/platform/linux/paths_linux.cpp src/platform/linux/process_linux.cpp)
     echo "=== test_$t"
     "$CXX" -std=c++17 -O1 -Wall -Wextra "${SAN[@]}" \
         -Isrc -Isrc/core -Isrc/utils -Iscripts/tests \

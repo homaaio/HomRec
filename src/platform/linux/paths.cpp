@@ -1,5 +1,6 @@
 // paths_linux.cpp - XDG-style locations (see ../paths.h for the table and the portable-mode rule).
 #include "../paths.h"
+#include "../process_backend.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -124,6 +125,27 @@ std::string FindFfmpeg() {
         start = end + 1;
     }
     return std::string();
+}
+
+std::string FfmpegVersion(const std::string &ffmpeg_path) {
+    if (ffmpeg_path.empty()) return std::string();
+    auto p = CreateChildProcess();
+    SpawnSpec spec;
+    spec.exe = ffmpeg_path;
+    spec.args = {"-hide_banner", "-version"};
+    spec.pipe_stdout = true;
+    if (!p->Start(spec, nullptr)) return std::string();
+    std::string line;
+    char buf[256];
+    long n;
+    while (line.find('\n') == std::string::npos && line.size() < 1024 &&
+           (n = p->ReadStdout(buf, sizeof(buf))) > 0)
+        line.append(buf, (size_t)n);
+    p->Kill();   // only the first line is needed
+    line = line.substr(0, line.find('\n'));
+    const size_t c = line.find(" Copyright");
+    if (c != std::string::npos) line.resize(c);
+    return line;
 }
 
 }  // namespace platform

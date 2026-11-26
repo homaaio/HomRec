@@ -34,5 +34,8 @@ bool EnsureDir(const std::string &path);
 // Looks for ffmpeg: $HOMREC_FFMPEG, then <exe dir>/ffmpeg, then $PATH. "" when not found.
 std::string FindFfmpeg();
 
+// First line of `ffmpeg -version` without the copyright part, e.g. "ffmpeg version 6.1.1". "" when it cannot be run.
+std::string FfmpegVersion(const std::string &ffmpeg_path);
+
 }  // namespace platform
 }  // namespace hr
