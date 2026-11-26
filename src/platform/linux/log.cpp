@@ -5,6 +5,7 @@
 // folder with homrec.log / pc.log / plugins.log / wgc.log, each capped in size. The folder is
 // platform::LogDir() (~/.local/state/homrec/logs, or <exe dir>/logs in portable mode).
 #include "../paths.h"
+#include "../platform.h"
 #include "../../utils/log.h"
 #include "../../utils/log_paths.h"
 #include "../../utils/pc_log.h"
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 // ui_utils.cpp - same layout as HrSysStats there (see also pc_analytics_dialog.cpp).
@@ -267,12 +269,37 @@ void Write(const char *level, const std::string &message, bool mirror) {
     if (mirror || lv == "WARN" || lv == "ERROR") HrLog::Write(level, message);
 }
 
+// PRETTY_NAME from /etc/os-release ("Ubuntu 24.04.1 LTS"), "unknown" when the file is not there.
+static std::string OsPrettyName() {
+    std::ifstream f("/etc/os-release");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.compare(0, 12, "PRETTY_NAME=") != 0) continue;
+        std::string v = line.substr(12);
+        if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'') && v.back() == v.front()) v = v.substr(1, v.size() - 2);
+        return v;
+    }
+    return "unknown";
+}
+
 void WriteSessionHeaderOnce() {
     static std::once_flag once;
     std::call_once(once, []() {
         if (!g_enabled.load()) return;
         AppendLine("INFO", std::string("HomRec ") + HR_APP_VERSION + " on Linux, session: " +
                            (std::getenv("XDG_SESSION_TYPE") ? std::getenv("XDG_SESSION_TYPE") : "unknown"));
+        struct utsname un;
+        const bool have_un = uname(&un) == 0;
+        AppendLine("INFO", "OS: " + OsPrettyName() + ", kernel " + (have_un ? un.release : "?") +
+                           ", arch " + (have_un ? un.machine : "?"));
+        const hr::platform::SessionInfo si = hr::platform::DetectSession();
+        AppendLine("INFO", std::string("Display: ") + hr::platform::DisplayServerName(si.display_server) +
+                           (si.xwayland_available ? " (+XWayland)" : "") + ", desktop: " +
+                           (si.desktop.empty() ? "unknown" : si.desktop) + ", sound: " +
+                           hr::platform::AudioServerName(si.audio_server));
+        const std::string ff = hr::platform::FindFfmpeg();
+        const std::string fv = hr::platform::FfmpegVersion(ff);
+        AppendLine("INFO", "ffmpeg: " + (ff.empty() ? std::string("not found") : ff + " (" + (fv.empty() ? "version unknown" : fv) + ")"));
     });
 }
 
