@@ -1,4 +1,4 @@
-// recording_controller_linux.h - RecordingController on Linux: the "not available yet" placeholder.
+// recording_controller.h - RecordingController on Linux: the "not available yet" placeholder.
 //
 // The Windows RecordingController (ui/recording_controller.h) drives DXGI / WASAPI / ffmpeg. On
 // Linux the recording backend comes later (plan-linux.md, phases 2-4), so the GUI gets

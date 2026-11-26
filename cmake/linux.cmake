@@ -29,7 +29,7 @@ endif()
 
 set(HR_PLATFORM_SOURCES
     src/platform/linux/session_detect.cpp
-    src/platform/linux/paths_linux.cpp
+    src/platform/linux/paths.cpp
     src/platform/linux/backends.cpp
     # phase 2: src/platform/linux/x11/x11_capture.cpp  src/platform/linux/x11/x11_windows.cpp ...
     # phase 3: src/platform/linux/wayland/portal_capture.cpp ...
@@ -99,8 +99,8 @@ if(HR_GUI)
             src/core/settings.cpp
             src/core/display_info.cpp
             # Linux versions of the engine helpers the windows above call
-            src/platform/linux/log_linux.cpp
-            src/platform/linux/mic_linux.cpp
+            src/platform/linux/log.cpp
+            src/platform/linux/mic.cpp
         )
         add_executable(hr ${HR_GUI_SOURCES})
         target_include_directories(hr PRIVATE src src/ui src/core src/utils)

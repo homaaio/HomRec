@@ -14,7 +14,7 @@
 #include "../theme.h"
 #include "../language.h"
 #include "../themed_widgets.h"
-#include "recording_controller_linux.h"
+#include "recording_controller.h"
 
 class MainFrame : public wxFrame {
 public:
@@ -91,7 +91,7 @@ private:
     AppState state_;
     ThemeColors theme_;
     LanguageTable lang_;
-    RecordingController rec_;          // placeholder, see recording_controller_linux.h
+    RecordingController rec_;          // placeholder, see recording_controller.h
 
     // layout
     wxAuiManager aui_;

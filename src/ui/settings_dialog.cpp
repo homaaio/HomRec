@@ -5,7 +5,7 @@
 #ifdef _WIN32
 #include "recording_controller.h"
 #else
-#include "linux/recording_controller_linux.h"
+#include "linux/recording_controller.h"
 #endif
 #include "../core/mic_enum.h"
 #include "../utils/system_integration.h"

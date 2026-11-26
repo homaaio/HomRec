@@ -1,4 +1,4 @@
-// mic_linux.cpp - HrEnumerateMics() (core/mic_enum.h) for Linux: the capture devices of the sound
+// mic.cpp - HrEnumerateMics() (core/mic_enum.h) for Linux: the capture devices of the sound
 // server, asked through `pactl` (PulseAudio, and PipeWire through pipewire-pulse, answer the same).
 // This is only for the Settings > Audio picker; the real capture backend is a later phase.
 #include "../../core/mic_enum.h"
