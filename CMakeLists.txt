@@ -5,11 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Anything that is not Windows (i.e. Linux) is built by cmake/LinuxPort.cmake and stops here:
+# Anything that is not Windows (i.e. Linux) is built by cmake/linux.cmake and stops here:
 # the rest of this file is the Windows build (hr.exe / homrec.exe) and needs windres, wxMSW, the
-# Windows SDK import libraries ... none of which exist elsewhere. See docs/LINUX_PORT_PLAN.md.
+# Windows SDK import libraries ... none of which exist elsewhere. See plan-linux.md.
 if(NOT WIN32)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/LinuxPort.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/linux.cmake)
     return()
 endif()
 

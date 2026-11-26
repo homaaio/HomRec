@@ -1,4 +1,4 @@
-// about.cpp - Help > About, plus the two tiny helpers every Linux dialog shares (ThemeWindow, ShowNotNow).
+// about.cpp - Help > About, plus the two tiny helpers every Linux dialog shares (ThemeWindow, ShowUnavailable).
 #include "dialogs.h"
 #include "../themed_widgets.h"
 #include "../version.h"
@@ -28,8 +28,8 @@ void ThemeWindow(wxWindow *w, const ThemeColors &theme) {
     }
 }
 
-void ShowNotNow(wxWindow *parent, const wxString &what) {
-    wxMessageBox(what + " is not available on Linux yet (not now).", "HomRec",
+void ShowUnavailable(wxWindow *parent, const wxString &what) {
+    wxMessageBox(what + " is not available on Linux yet.", "HomRec",
                  wxOK | wxICON_INFORMATION, parent);
 }
 
@@ -74,7 +74,7 @@ public:
         root->Add(envLbl, 0, wxALL | wxALIGN_CENTRE_HORIZONTAL, 16);
 
         auto *note = new wxStaticText(this, wxID_ANY,
-            "Recording, overlays and the audio mixer are not available on Linux yet (not now).");
+            "Recording, overlays and the audio mixer are not available on Linux yet.");
         note->SetForegroundColour(dim);
         root->Add(note, 0, wxLEFT | wxRIGHT | wxALIGN_CENTRE_HORIZONTAL, 16);
 

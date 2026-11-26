@@ -1,6 +1,6 @@
 # src/platform/linux/wayland/
 
-Still empty on purpose (phase 3 of `docs/LINUX_PORT_PLAN.md`; implements `src/platform/capture_backend.h`).
+Still empty on purpose (phase 3 of `plan-linux.md`; implements `src/platform/capture_backend.h`).
 See `../x11/README.md` for the full explanation of why
 Linux capture code is organized by display server (X11 vs Wayland)
 instead of by distro (Arch vs Debian).

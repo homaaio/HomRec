@@ -1,4 +1,4 @@
-// main_frame.cpp - the Linux (wxGTK) main window. See main_frame.h for what is real and what is "not now".
+// main_frame.cpp - the Linux (wxGTK) main window. See main_frame.h for what is real and what is "not available yet".
 #include "main_frame.h"
 #include "dialogs.h"
 #include "../hrc_config.h"
@@ -81,7 +81,7 @@ wxString FullscreenMenuText(const wxString &label, const std::string &keys) {
     return label + "\t" + wk;
 }
 
-// Where the live picture will be. For now: the "not now" note in the middle.
+// Where the live picture will be. For now: the "not available yet" note in the middle.
 class PreviewBox : public wxPanel {
 public:
     explicit PreviewBox(wxWindow *parent) : wxPanel(parent) {
@@ -443,7 +443,7 @@ void MainFrame::ApplyThemeColours() {
     if (preview_box_) {
         preview_box_->SetBackgroundColour(previewBg);
         static_cast<PreviewBox *>(preview_box_)->SetText(
-            "Live preview\nnot now", textSecondary);
+            "Live preview\nnot available yet", textSecondary);
     }
     if (audio_panel_) audio_panel_->SetBackgroundColour(surface);
     if (overlays_panel_) overlays_panel_->SetBackgroundColour(surface);
@@ -487,9 +487,9 @@ void MainFrame::ApplyLanguageText() {
     if (section_time_lbl_) section_time_lbl_->SetLabel(U(lang_.Get("time")));
     if (section_stats_lbl_) section_stats_lbl_->SetLabel(U(lang_.Get("stats")));
     if (preview_title_lbl_) preview_title_lbl_->SetLabel(U("\xE2\x97\x8F ") + U(lang_.Get("live_preview")));
-    if (preview_note_lbl_) preview_note_lbl_->SetLabel("not now");
-    if (audio_lbl_) audio_lbl_->SetLabel(U(lang_.Get("audio_mixer")) + "\n\nnot now - comes with the audio backend");
-    if (overlays_lbl_) overlays_lbl_->SetLabel(U(lang_.Get("layers_panel")) + "\n\nnot now - comes with overlays");
+    if (preview_note_lbl_) preview_note_lbl_->SetLabel("not available yet");
+    if (audio_lbl_) audio_lbl_->SetLabel(U(lang_.Get("audio_mixer")) + "\n\nnot available yet - comes with the audio backend");
+    if (overlays_lbl_) overlays_lbl_->SetLabel(U(lang_.Get("layers_panel")) + "\n\nnot available yet - comes with overlays");
     if (made_by_lbl_) made_by_lbl_->SetLabel(U(lang_.Get("made_by")));
     SetStatusState(U(lang_.Get("ready")), theme_.text_secondary);
     UpdateStatsText();
@@ -692,8 +692,8 @@ void MainFrame::ResetDockLayout() {
 // actions
 // ===========================================================================
 
-void MainFrame::OnStartClicked(wxCommandEvent &) { ShowNotNow(this, "Recording"); }
-void MainFrame::OnPauseClicked(wxCommandEvent &) { ShowNotNow(this, "Recording"); }
+void MainFrame::OnStartClicked(wxCommandEvent &) { ShowUnavailable(this, "Recording"); }
+void MainFrame::OnPauseClicked(wxCommandEvent &) { ShowUnavailable(this, "Recording"); }
 
 void MainFrame::OpenFolder(const std::string &path, const wxString &what) {
     hr::platform::EnsureDir(path);
@@ -761,7 +761,7 @@ void MainFrame::OnMenu(wxCommandEvent &evt) {
         case ID_FILE_OPEN_CONFIG:     OpenFolder(hr::platform::ConfigDir(), "config folder"); break;
         case ID_FILE_EXPORT_HRC:      ExportSettings(); break;
         case ID_FILE_IMPORT_HRC:      ImportSettings(); break;
-        case ID_FILE_IMPORT_HRP:      ShowNotNow(this, "Plugins (.hrp)"); break;
+        case ID_FILE_IMPORT_HRP:      ShowUnavailable(this, "Plugins (.hrp)"); break;
         case ID_FILE_SET_PRESET:
             if (ShowPresetDialog(this, state_, theme_, lang_)) {
                 AfterSettingsChanged();
@@ -806,7 +806,7 @@ void MainFrame::OnMenu(wxCommandEvent &evt) {
             if (ShowSettingsDialog(this, state_, theme_, lang_, &rec_)) AfterSettingsChanged();
             break;
 
-        case ID_HELP_CHECK_UPDATES: ShowNotNow(this, "Update check"); break;
+        case ID_HELP_CHECK_UPDATES: ShowUnavailable(this, "Update check"); break;
         case ID_HELP_CONSOLE: ShowConsoleWindow(this, state_, theme_); break;
         case ID_HELP_WELCOME: ShowWelcomeDialog(this, state_, theme_); UpdateStatsText(); break;
         case ID_HELP_ABOUT:   ShowAboutDialog(this, theme_); break;

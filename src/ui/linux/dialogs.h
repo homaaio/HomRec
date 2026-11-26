@@ -11,9 +11,9 @@
 // Gives a window and everything inside it the theme's colours (ColorButton and friends keep their own).
 void ThemeWindow(wxWindow *w, const ThemeColors &theme);
 
-// "<what> is not available on Linux yet (not now)." - the placeholder for recording, overlays,
+// "<what> is not available on Linux yet." - the placeholder for recording, overlays,
 // the audio mixer, window capture and everything else that needs a backend that is not there yet.
-void ShowNotNow(wxWindow *parent, const wxString &what);
+void ShowUnavailable(wxWindow *parent, const wxString &what);
 
 void ShowAboutDialog(wxWindow *parent, const ThemeColors &theme);
 

@@ -191,7 +191,7 @@ private:
 
     void Status() {
         Print("HomRec " HR_APP_VERSION " on Linux");
-        Print("recording : not available yet (not now)");
+        Print("recording : not available yet");
         Print(std::string("theme     : ") + state_.current_theme + ", language: " + state_.current_language);
         Print("output    : " + state_.output_folder);
     }

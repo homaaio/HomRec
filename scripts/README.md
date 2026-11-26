@@ -2,7 +2,7 @@
 
 - `tests/` - platform-independent doctest suites (pixel converters, audio mixer, replay ring, WAV, overlay canvas). Build recipes are in each file's header.
 - `tests/bench.cpp` - CPU hot-spot timings (converters, overlay scaling and blend, preview thumbnail, crop). On Windows build it with CMake (`-DHOMREC_BUILD_TESTS=ON`, then `cmake --build build --target bench`) and run `build/bench.exe > run.txt`; on Linux `linux/bench.sh`. Compare with `tools/bench_compare.py`.
-- `linux/` - Linux helpers for the raw port (`linux-raw` branch, see `docs/LINUX_PORT_PLAN.md`):
+- `linux/` - Linux helpers for the Linux port (`linux-raw` branch, see `plan-linux.md`):
   - `install-deps-debian.sh` - toolchain + ffmpeg (`--future` adds the X11 / PipeWire / wx dev packages)
   - `test.sh` - builds and runs all unit tests with g++ and sanitizers, no CMake needed
   - `build.sh` - CMake build of `homrec` into `build-linux/` (`--test` also runs ctest)

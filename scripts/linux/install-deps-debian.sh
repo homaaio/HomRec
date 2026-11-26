@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/linux/install-deps-debian.sh - installs what building HomRec on Debian / Ubuntu needs.
 # Other distros: the package names differ, the list of THINGS needed is the same (see
-# docs/LINUX_PORT_PLAN.md, "Dependencies"). Packaging per distro lives in scripts/packaging/ later.
+# plan-linux.md, "Dependencies"). Packaging per distro lives in scripts/packaging/ later.
 #
 #   scripts/linux/install-deps-debian.sh            # what the current phase needs
 #   scripts/linux/install-deps-debian.sh --future   # + libraries the planned backends will use

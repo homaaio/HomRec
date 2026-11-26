@@ -126,7 +126,7 @@ public:
                 "and changelog are one click away below - and you can always re-open this wizard "
                 "later from Help > Show Welcome Screen.\n\n"
                 "Note: on Linux the window and its settings are ready, but recording, overlays and "
-                "the audio mixer are not available yet (not now).");
+                "the audio mixer are not available yet.");
             body->Wrap(500);
             s->Add(body, 0, wxBOTTOM, 14);
             auto *links = new wxBoxSizer(wxHORIZONTAL);

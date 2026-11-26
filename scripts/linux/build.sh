@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/linux/build.sh - configures and builds the Linux targets (hr GUI, homrec CLI, unit tests)
-# into ./build-linux with CMake. Root CMakeLists.txt hands over to cmake/LinuxPort.cmake on
+# into ./build-linux with CMake. Root CMakeLists.txt hands over to cmake/linux.cmake on
 # anything that is not Windows, so the Windows build files are not involved.
 #
 #   scripts/linux/build.sh                 # Release

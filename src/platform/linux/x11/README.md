@@ -1,9 +1,9 @@
 # src/platform/linux/x11/
 
 Still empty on purpose — the X11 capture backend is phase 2 of
-[`docs/LINUX_PORT_PLAN.md`](../../../../docs/LINUX_PORT_PLAN.md). The interface it will implement
+[`plan-linux.md`](../../../../plan-linux.md). The interface it will implement
 already exists: `src/platform/capture_backend.h` (`IScreenCapture`) and `window_backend.h`
-(`IWindowService`); the temporary "not implemented" answers live in `../backend_stubs.cpp`.
+(`IWindowService`); the temporary "not implemented" answers live in `../backends.cpp`.
 
 **Why "x11", not "arch"/"deb"/a distro name:** screen capture on Linux is
 split by *display server*, not by distribution. An Arch user and a Debian

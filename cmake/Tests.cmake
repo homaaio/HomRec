@@ -1,5 +1,5 @@
 # cmake/Tests.cmake - the platform-independent unit tests (scripts/tests) and the bench target.
-# Included by the Windows build (CMakeLists.txt, -DHOMREC_BUILD_TESTS=ON) and by cmake/LinuxPort.cmake.
+# Included by the Windows build (CMakeLists.txt, -DHOMREC_BUILD_TESTS=ON) and by cmake/linux.cmake.
 #
 #   cmake --build build                      builds the tests
 #   ctest --test-dir build --output-on-failure

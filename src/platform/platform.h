@@ -4,7 +4,7 @@
 // audio_backend.h, window_backend.h, hotkey_backend.h, process_backend.h, paths.h) describe WHAT
 // the engine needs from the operating system; src/platform/<os>/ provides HOW. Nothing in the
 // existing Windows code includes these headers yet - they are the target the Windows code will be
-// migrated onto step by step (see docs/LINUX_PORT_PLAN.md).
+// migrated onto step by step (see plan-linux.md).
 #pragma once
 
 #include <string>

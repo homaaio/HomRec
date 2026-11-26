@@ -10,4 +10,4 @@ The seam between HomRec's engine and the operating system.
 - There is no `windows/` folder yet on purpose: the existing Windows code stays in `src/core/` until
   the capture seam (phase 5 of the plan) moves it behind these interfaces.
 
-Plan, status and the Win32 -> Linux mapping: [`docs/LINUX_PORT_PLAN.md`](../../docs/LINUX_PORT_PLAN.md).
+Plan, status and the Win32 -> Linux mapping: [`plan-linux.md`](../../plan-linux.md).

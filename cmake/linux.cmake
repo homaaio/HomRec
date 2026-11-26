@@ -1,4 +1,4 @@
-# cmake/LinuxPort.cmake - the non-Windows (Linux) half of the build.
+# cmake/linux.cmake - the non-Windows (Linux) half of the build.
 #
 # The root CMakeLists.txt includes this file and stops when it is not building for Windows, so the
 # Windows target list (hr / homrec) is never touched by anything in here.
@@ -7,13 +7,13 @@
 #   hr_platform     static library: src/platform/linux/* (session detection, XDG paths, backend stubs)
 #   hr_core         static library: the Windows-era engine files that already compile on Linux
 #                   (.hrc read/write, settings table, app logic, input overlay, ls command ...)
-#   homrec          the raw Linux CLI (doctor / paths / start)
+#   homrec          the Linux CLI (doctor / paths / start)
 #   hr              the GUI (wxGTK): main window, Settings and the windows that hang off it. Recording,
-#                   preview, audio mixer and overlays are "not now" placeholders until their backends land.
+#                   preview, audio mixer and overlays are "not available yet" placeholders until their backends land.
 #                   Needs libwxgtk3.2-dev; skipped with a message when wxWidgets is not found.
 #   test_*          the platform-independent doctest suites from scripts/tests/ (run with `ctest`)
 #
-# What it will build later is listed in docs/LINUX_PORT_PLAN.md - new backends are added to
+# What it will build later is listed in plan-linux.md - new backends are added to
 # HR_PLATFORM_SOURCES below (and their library to hr_platform's link line), nothing else moves.
 
 option(HOMREC_BUILD_TESTS "Build the platform-independent unit tests" ON)
@@ -30,7 +30,7 @@ endif()
 set(HR_PLATFORM_SOURCES
     src/platform/linux/session_detect.cpp
     src/platform/linux/paths_linux.cpp
-    src/platform/linux/backend_stubs.cpp
+    src/platform/linux/backends.cpp
     # phase 2: src/platform/linux/x11/x11_capture.cpp  src/platform/linux/x11/x11_windows.cpp ...
     # phase 3: src/platform/linux/wayland/portal_capture.cpp ...
 )
@@ -47,7 +47,7 @@ target_include_directories(hr_platform PUBLIC src src/platform)
 target_compile_options(hr_platform PRIVATE -Wall -Wextra ${HR_OPT_LINUX})
 
 # Files from the original (Windows) tree that need no change to build here. Move more in as they
-# get fixed - see "Moved to Linux" in docs/LINUX_PORT_PLAN.md.
+# get fixed - see "Moved to Linux" in plan-linux.md.
 set(HR_CORE_SOURCES
     src/core/profile_io.cpp
     src/core/settings_registry.cpp
@@ -88,7 +88,7 @@ if(HR_GUI)
             src/ui/linux/pc_info.cpp
             src/ui/linux/log_view.cpp
             src/ui/linux/console.cpp
-            src/ui/linux/stubs.cpp
+            src/ui/linux/engine_shim.cpp
             # shared with Windows (ifdef'd where the systems differ)
             src/ui/settings_dialog.cpp
             src/ui/preset_dialog.cpp

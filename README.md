@@ -46,7 +46,7 @@ HomRec targets a specific problem: general-purpose screen recorders (OBS, Bandic
 
 The application is 100% native C/C++: UI (wxWidgets), capture pipeline, audio, plugin host (Lua 5.4), and console all compile into `hr.exe`. At runtime it needs FFmpeg for encoding and the runtime `.dll` files that ship beside it (wxWidgets and the MinGW runtime); the installer and the portable archive include both. Note that this refers to the *application* - a small number of Python scripts exist under `tools/` for maintainer use (build packaging, environment checking, language file conversion) and are not part of `hr.exe` or required to run it.
 
-HomRec is currently **Windows-only**: the capture engine uses DXGI/D3D11/Win32. Linux (X11 and Wayland) is in early preparation on the `linux-raw` branch: there is no usable Linux recorder yet, only the groundwork (platform interfaces, a `homrec doctor` command, CI) and the window: `scripts/linux/build.sh` builds `build-linux/hr` (wxGTK) with the main window, Settings and the windows that hang off it - recording, preview, audio mixer and overlays show "not now" placeholders - see [`docs/LINUX_PORT_PLAN.md`](docs/LINUX_PORT_PLAN.md).
+HomRec is currently **Windows-only**: the capture engine uses DXGI/D3D11/Win32. Linux (X11 and Wayland), there is no usable Linux recorder yet, only the groundwork (platform interfaces, a `homrec doctor` command, CI) and the window: `scripts/linux/build.sh` builds `build-linux/hr` (wxGTK) with the main window, Settings and the windows that hang off it - recording, preview, audio mixer and overlays show "not available yet" placeholders - see [`plan-linux.md`](plan-linux.md).
 
 ## Features
 
@@ -291,7 +291,7 @@ installer/     Inno Setup script and notes
 cfg/           example console startup scripts
 docs/          project website and command reference
 scripts/tests/ unit tests
-scripts/linux/ Linux build / test helpers (raw port)
+scripts/linux/ Linux build / test helpers
 cmake/         CMake include for the Linux build
 icons/         app, tray, overlay and mixer icons
 ```

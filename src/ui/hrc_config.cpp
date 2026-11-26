@@ -14,7 +14,7 @@
 #include "../platform/paths.h"
 #include <cstdio>
 #include <sys/stat.h>
-// Linux: there are no window / region layers yet (see ui/linux/stubs.cpp).
+// Linux: there are no window / region layers yet (see ui/linux/engine_shim.cpp).
 void HrMigrateCaptureSourceToLayers(AppState &state);
 #endif
 #include <fstream>

@@ -1,4 +1,4 @@
-// main.cpp - `homrec`, the entry point of the raw Linux build.
+// main.cpp - `homrec`, the entry point of the Linux build.
 //
 // Right now it only knows how to look at the machine (`doctor`) and to say honestly that recording
 // is not there yet. It exists so that (a) the Linux build system, CI and packaging have a real
@@ -22,7 +22,7 @@ namespace {
 
 void PrintUsage() {
     std::puts(
-        "homrec " HR_APP_VERSION " (raw Linux build - work in progress)\n"
+        "homrec " HR_APP_VERSION " (Linux build - work in progress)\n"
         "\n"
         "Usage:\n"
         "  homrec --version     Show the HomRec version\n"
@@ -31,7 +31,7 @@ void PrintUsage() {
         "  homrec start         Record the screen (not implemented yet)\n"
         "  homrec help          This text\n"
         "\n"
-        "Plan and status: docs/LINUX_PORT_PLAN.md");
+        "Plan and status: plan-linux.md");
 }
 
 const char *YesNo(bool b) { return b ? "yes" : "NO"; }

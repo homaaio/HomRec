@@ -9,7 +9,7 @@ without reading the HomRec source.
 > `homrec.*` functions (see [permissions](#permissions)); it is the plugin's own manifest, so it is not a sandbox
 > against a hostile plugin.
 
-Plugins work in the Windows build only. In the Linux build **File > Import Plugin** shows a "not now" message, and
+Plugins work in the Windows build only. In the Linux build **File > Import Plugin** shows a "not available yet" message, and
 that build is not linked against Lua.
 
 ## Install a plugin

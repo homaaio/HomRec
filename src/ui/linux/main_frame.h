@@ -2,7 +2,7 @@
 //
 // Same layout as the Windows window (ui/main_frame.h): Controls, Preview, Audio Mixer and Layers
 // panes in a wxAUI dock, menu bar, status bar. What needs a backend that is not there yet shows a
-// "not now" placeholder: recording (Start / Pause), the live preview, the audio mixer, the layers /
+// "not available yet" placeholder: recording (Start / Pause), the live preview, the audio mixer, the layers /
 // overlays panel, global hotkeys, the tray icon, plugins and update checks. Settings, presets,
 // import / export, the console, the log, PC analytics, About and Welcome all work.
 #pragma once
@@ -14,7 +14,7 @@
 #include "../theme.h"
 #include "../language.h"
 #include "../themed_widgets.h"
-#include "rec_stub.h"
+#include "recording_controller_linux.h"
 
 class MainFrame : public wxFrame {
 public:
@@ -91,7 +91,7 @@ private:
     AppState state_;
     ThemeColors theme_;
     LanguageTable lang_;
-    RecordingController rec_;          // placeholder, see rec_stub.h
+    RecordingController rec_;          // placeholder, see recording_controller_linux.h
 
     // layout
     wxAuiManager aui_;
