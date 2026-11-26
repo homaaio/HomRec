@@ -25,6 +25,7 @@ Hom/plugins/* export-ignore
 *.h text eol=lf
 *.py text eol=lf
 *.txt text eol=lf
+*.sh text eol=lf
 *.md text eol=lf
 
 # Binary files
