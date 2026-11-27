@@ -12,7 +12,7 @@ SUDO=""
 
 # Phase 0-1 + GUI: toolchain + ffmpeg (HomRec drives the ffmpeg binary, it does not link libav*),
 # wxGTK for the window, pactl (pulseaudio-utils) for the microphone list, xdg-utils for "open folder".
-PKGS=(build-essential cmake pkg-config ffmpeg zlib1g-dev libwxgtk3.2-dev pulseaudio-utils xdg-utils)
+PKGS=(build-essential cmake pkg-config ffmpeg zlib1g-dev libwxgtk3.2-dev pulseaudio-utils xdg-utils libx11-dev)
 
 if [ "${1:-}" = "--future" ]; then
     PKGS+=(

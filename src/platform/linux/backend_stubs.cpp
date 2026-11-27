@@ -9,7 +9,9 @@
 #include "../window_backend.h"
 #include "../hotkey_backend.h"
 #include "../process_backend.h"
+#include "x11/x11_hotkeys.h"
 #include "x11/x11_record.h"
+#include "x11/x11_windows.h"
 
 namespace hr {
 namespace platform {
@@ -96,22 +98,25 @@ std::unique_ptr<IWindowService> CreateWindowService(DisplayServer ds, std::strin
                                 "window capture has to go through the ScreenCast portal picker";
         return nullptr;
     }
-    Why(why_not, "X11 window enumeration (EWMH)");
+    if (ds == DisplayServer::X11) return CreateX11WindowService(why_not);
+    if (why_not) *why_not = "no display server found ($DISPLAY / $WAYLAND_DISPLAY are not set)";
     return nullptr;
 }
 
 // ---- hotkeys ---------------------------------------------------------------------------------
 
 bool HotkeysAvailable(DisplayServer ds, std::string *why_not) {
+    if (ds == DisplayServer::X11) return X11HotkeysAvailable(why_not);
     if (ds == DisplayServer::Wayland) {
         Why(why_not, "global hotkeys via the GlobalShortcuts portal");
-    } else {
-        Why(why_not, "global hotkeys via XGrabKey");
+    } else if (why_not) {
+        *why_not = "no display server found ($DISPLAY / $WAYLAND_DISPLAY are not set)";
     }
     return false;
 }
 
 std::unique_ptr<IHotkeyService> CreateHotkeyService(DisplayServer ds, std::string *why_not) {
+    if (ds == DisplayServer::X11) return CreateX11HotkeyService(why_not);
     HotkeysAvailable(ds, why_not);
     return nullptr;
 }
