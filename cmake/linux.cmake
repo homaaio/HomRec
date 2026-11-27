@@ -30,8 +30,11 @@ endif()
 set(HR_PLATFORM_SOURCES
     src/platform/linux/session_detect.cpp
     src/platform/linux/paths.cpp
-    src/platform/linux/backends.cpp
-    # phase 2: src/platform/linux/x11/x11_capture.cpp  src/platform/linux/x11/x11_windows.cpp ...
+    src/platform/linux/backend_stubs.cpp
+    src/platform/linux/process.cpp
+    src/platform/linux/x11/x11_record.cpp
+    src/platform/linux/x11/x11_windows.cpp
+    src/platform/linux/x11/x11_hotkeys.cpp
     # phase 3: src/platform/linux/wayland/portal_capture.cpp ...
 )
 
@@ -44,6 +47,9 @@ check_ipo_supported(RESULT HR_IPO_OK OUTPUT HR_IPO_MSG LANGUAGES C CXX)
 
 add_library(hr_platform STATIC ${HR_PLATFORM_SOURCES})
 target_include_directories(hr_platform PUBLIC src src/platform)
+find_package(X11 REQUIRED)       # x11_windows.cpp, x11_hotkeys.cpp (libX11)
+find_package(Threads REQUIRED)   # x11_hotkeys.cpp, process.cpp
+target_link_libraries(hr_platform PUBLIC X11::X11 Threads::Threads)
 target_compile_options(hr_platform PRIVATE -Wall -Wextra ${HR_OPT_LINUX})
 
 # Files from the original (Windows) tree that need no change to build here. Move more in as they
@@ -88,7 +94,7 @@ if(HR_GUI)
             src/ui/linux/pc_info.cpp
             src/ui/linux/log_view.cpp
             src/ui/linux/console.cpp
-            src/ui/linux/engine_shim.cpp
+            src/ui/linux/stubs.cpp
             # shared with Windows (ifdef'd where the systems differ)
             src/ui/settings_dialog.cpp
             src/ui/preset_dialog.cpp

@@ -23,16 +23,18 @@ cd "$ROOT"
 "$CC" -O2 -Wall "${SAN[@]}" -c src/core/encoder_helpers.c -o "$OUT/encoder_helpers.o"
 
 fail=0
-for t in wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry idle_detect process_linux x11_record; do
+for t in wav_util audio_mixer overlay_canvas replay_ring pic_pool encoder_helpers settings_registry idle_detect process_linux x11_record x11_services; do
     extra=()
+    libs=()
     [ "$t" = "encoder_helpers" ] && extra=("$OUT/encoder_helpers.o")
     [ "$t" = "settings_registry" ] && extra=(src/core/settings_registry.cpp)
-    [ "$t" = "process_linux" ] && extra=(src/platform/linux/process_linux.cpp)
-    [ "$t" = "x11_record" ] && extra=(src/platform/linux/x11/x11_record.cpp src/platform/linux/paths_linux.cpp src/platform/linux/process_linux.cpp)
+    [ "$t" = "x11_services" ] && extra=(src/platform/linux/x11/x11_windows.cpp src/platform/linux/x11/x11_hotkeys.cpp src/platform/linux/process.cpp) && libs=(-lX11 -ldl -pthread)
+    [ "$t" = "process_linux" ] && extra=(src/platform/linux/process.cpp)
+    [ "$t" = "x11_record" ] && extra=(src/platform/linux/x11/x11_record.cpp src/platform/linux/paths.cpp src/platform/linux/process.cpp)
     echo "=== test_$t"
     "$CXX" -std=c++17 -O1 -Wall -Wextra "${SAN[@]}" \
         -Isrc -Isrc/core -Isrc/utils -Iscripts/tests \
-        "scripts/tests/test_$t.cpp" "${extra[@]}" -o "$OUT/test_$t"
+        "scripts/tests/test_$t.cpp" "${extra[@]}" "${libs[@]}" -o "$OUT/test_$t"
     if ! "$OUT/test_$t"; then fail=1; echo "!!! test_$t FAILED"; fi
 done
 
