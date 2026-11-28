@@ -1,9 +1,10 @@
 # src/platform/linux/x11/
 
-Still empty on purpose — the X11 capture backend is phase 2 of
-[`plan-linux.md`](../../../../plan-linux.md). The interface it will implement
-already exists: `src/platform/capture_backend.h` (`IScreenCapture`) and `window_backend.h`
-(`IWindowService`); the temporary "not implemented" answers live in `../backends.cpp`.
+What is here: `x11_record` (recording through ffmpeg `x11grab`), `x11_windows` (EWMH window list,
+`IWindowService`) and `x11_hotkeys` (XGrabKey, `IHotkeyService`) - phase 2 of
+[`plan-linux.md`](../../../../plan-linux.md). Not here yet: the monitor list and a frame-by-frame
+`IScreenCapture` (`capture_backend.h`). The factories that pick these files live in
+`../backend_stubs.cpp`.
 
 **Why "x11", not "arch"/"deb"/a distro name:** screen capture on Linux is
 split by *display server*, not by distribution. An Arch user and a Debian
