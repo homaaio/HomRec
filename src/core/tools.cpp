@@ -277,7 +277,8 @@ HR_EXPORT int hr_build_codec_args_ex(const wchar_t* codec,
 
     if (is_nvenc) {
         int cq = 32 - (int)((quality < 0 ? 0 : (quality > 100 ? 100 : quality)) / 100.0 * 15);
-        ss << L" -preset p5 -tune hq -rc vbr -cq " << cq << L" -b:v 0 -spatial_aq 1 -aq-strength 8 -g " << gop;
+        // -bf 0: with B-frames ffmpeg's resident memory was ~130 MB higher (1080p60 test: 326 vs 198 MB).
+        ss << L" -preset p5 -tune hq -rc vbr -cq " << cq << L" -b:v 0 -spatial_aq 1 -aq-strength 8 -bf 0 -g " << gop;
     } else if (is_qsv) {
         // This used to pass "-qp N".
         int w = enc_w > 0 ? enc_w : 1920;
